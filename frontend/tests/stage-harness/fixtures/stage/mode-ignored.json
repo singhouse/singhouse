@@ -1,0 +1,36 @@
+{
+  "duration": 12,
+  "tracks": {
+    "lead": { "caption": "Lead voice", "color": "#ffcc00" },
+    "echo": { "caption": "Echo voice", "color": "#66ddff" }
+  },
+  "mode": "lead",
+  "availableModes": [
+    { "id": "lead", "label": "Lead voice" },
+    { "id": "echo", "label": "Echo voice" }
+  ],
+  "pages": [
+    {
+      "id": "p1",
+      "trackId": "echo",
+      "activeColor": "#66ddff",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 1.0,
+      "fadeInDuration": 1.0,
+      "fadeOutStart": 8.0,
+      "fadeOutDuration": 1.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 220,
+          "width": 560,
+          "height": 48,
+          "words": [
+            [ { "start": 3.0, "end": 4.0, "text": "Pew" }, { "start": 4.0, "end": 5.0, "text": "ter" } ],
+            [ { "start": 5.5, "end": 6.5, "text": "foxes" } ]
+          ]
+        }
+      ]
+    }
+  ]
+}

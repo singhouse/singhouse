@@ -1,0 +1,57 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+:root {
+  /* Primary accent */
+  --c-primary: #e23e57;
+  --c-primary-hover: #f05a70;
+  --c-primary-dim: rgba(226, 62, 87, 0.15);
+  --c-primary-border: rgba(226, 62, 87, 0.3);
+  --c-primary-bg: rgba(226, 62, 87, 0.08);
+
+  /* Accent */
+  --c-accent: #f7e7c8;
+
+  /* Brand skin — the single skin anchor: BrandMark and BrandLogo read these,
+     so a re-skin happens here. Values are the final logo palette (2026-08:
+     bar-sign plate + microphone). The inline var() fallbacks in those two
+     components and the standalone favicon.svg are manual-sync copies. */
+  --brand-cherry: #E23E57;
+  --brand-cream: #F7E7C8;
+  --brand-ink: #141821;
+
+  /* Semantic */
+  --c-success: #f2cf7a;
+  --c-success-bg: rgba(242, 207, 122, 0.15);
+  --c-success-border: rgba(242, 207, 122, 0.3);
+
+  --c-warning: #fbbf24;
+  --c-warning-bg: rgba(251, 191, 36, 0.15);
+  --c-warning-border: rgba(251, 191, 36, 0.3);
+
+  --c-error: #fb7f5c;
+  --c-error-bg: rgba(251, 127, 92, 0.15);
+  --c-error-border: rgba(251, 127, 92, 0.3);
+
+  --c-info: #60a5fa;
+  --c-info-bg: rgba(96, 165, 250, 0.15);
+  --c-info-border: rgba(96, 165, 250, 0.3);
+
+  /* Surfaces */
+  --bg-surface: rgba(20, 24, 33, 0.85);
+  --bg-glass: rgba(255, 255, 255, 0.04);
+  --bg-glass-hover: rgba(255, 255, 255, 0.07);
+  --bg-glass-active: rgba(255, 255, 255, 0.12);
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-light: rgba(255, 255, 255, 0.1);
+
+  /* Text */
+  --text-primary: rgba(250, 244, 232, 0.88);
+  --text-secondary: rgba(255, 255, 255, 0.5);
+  --text-muted: rgba(255, 255, 255, 0.3);
+
+  /* Radius */
+  --radius-sm: 0.35rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 1rem;
+}

@@ -1,0 +1,46 @@
+version: 2
+
+# Dependency updates are REVIEWED, never auto-merged.
+#
+# This repository pins a great many dependencies to exact versions on purpose:
+# people run real installs from this tree, and several pins encode findings that are
+# not obvious from the version number alone (for example, the explicit greenlet
+# pin in backend/pyproject.toml exists because SQLAlchemy's conditional
+# dependency marker does not fire on the interpreter the service runs). A bump
+# that looks routine can therefore be load-bearing.
+#
+# So: monthly rather than weekly, a low PR ceiling, and no auto-merge
+# configuration anywhere in this file. Read the changelog before merging.
+
+updates:
+  # The workflow files in .github/workflows/ pin actions to major-version tags;
+  # this keeps those tags moving forward deliberately rather than by drift.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  # lyricsync/ is intentionally absent: it is consumed from within this repo as
+  # an editable path install, and its own dependency floors are deliberately
+  # loose. Add it here only if it starts being released independently.
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    ignore:
+      # Consumed from inside this repository as an editable path install and
+      # never published to an index. Left un-ignored it is simply unresolvable,
+      # which shows up as a silently failing update job every month.
+      - dependency-name: lyricsync
+      # Pinned to the exact version present in the environments this project
+      # is deployed into, so that an editable reinstall stays dependency-neutral.
+      # The pin is the point; a bump PR here is noise by construction.
+      - dependency-name: greenlet

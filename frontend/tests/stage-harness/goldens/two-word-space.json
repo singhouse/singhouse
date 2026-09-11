@@ -1,0 +1,35 @@
+{
+  "fixture": "stage/two-word-space.json",
+  "viewport": { "width": 800, "height": 480 },
+  "stageTransform": { "scale": 1, "offsetX": 80, "offsetY": 0 },
+  "samples": [
+    {
+      "time": 19.0,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "none" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 21.0,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "boundary", "syllable": 1 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 21.4,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 2, "fraction": 0.5 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 22.5,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "full" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    }
+  ]
+}

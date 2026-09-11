@@ -1,0 +1,44 @@
+{
+  "fixture": "stage/basic-page-fades.json",
+  "viewport": { "width": 1280, "height": 960 },
+  "stageTransform": { "scale": 2, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 3.0, "pages": [], "countdowns": [] },
+    {
+      "time": 4.5,
+      "pages": [
+        {
+          "index": 0,
+          "opacity": 0.5,
+          "lines": [ { "index": 0, "reveal": { "kind": "none" }, "leadIn": null } ]
+        }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 8.0,
+      "pages": [
+        {
+          "index": 0,
+          "opacity": 1,
+          "lines": [
+            { "index": 0, "reveal": { "kind": "partial", "syllable": 3, "fraction": 0 }, "leadIn": null }
+          ]
+        }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 13.0,
+      "pages": [
+        {
+          "index": 0,
+          "opacity": 0.5,
+          "lines": [ { "index": 0, "reveal": { "kind": "full" }, "leadIn": null } ]
+        }
+      ],
+      "countdowns": []
+    },
+    { "time": 14.5, "pages": [], "countdowns": [] }
+  ]
+}

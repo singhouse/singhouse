@@ -1,0 +1,28 @@
+{
+  "duration": 30,
+  "tracks": {},
+  "pages": [
+    {
+      "id": "p1",
+      "activeColor": "#ff88aa",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 18.0,
+      "fadeInDuration": 0.5,
+      "fadeOutStart": 23.0,
+      "fadeOutDuration": 0.5,
+      "lines": [
+        {
+          "x": 40,
+          "y": 240,
+          "width": 560,
+          "height": 48,
+          "align": "center",
+          "words": [
+            [ { "start": 20.0, "end": 20.4, "text": "Sil" }, { "start": 20.4, "end": 20.8, "text": "ver" } ],
+            [ { "start": 21.2, "end": 21.6, "text": "lan" }, { "start": 21.6, "end": 22.0, "text": "terns" } ]
+          ]
+        }
+      ]
+    }
+  ]
+}

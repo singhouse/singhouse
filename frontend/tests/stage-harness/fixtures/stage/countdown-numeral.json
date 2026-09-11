@@ -1,0 +1,33 @@
+{
+  "duration": 20,
+  "tracks": {},
+  "pages": [],
+  "silences": [
+    {
+      "start": 2.0,
+      "end": 10.0,
+      "step": 1.0,
+      "count": 4,
+      "x": 120,
+      "y": 400,
+      "width": 400,
+      "height": 24,
+      "activeColor": "#ffffff",
+      "inactiveColor": "#555555",
+      "border": "#000000",
+      "borderSize": 2
+    },
+    {
+      "start": 14.0,
+      "end": 17.0,
+      "step": 2.0,
+      "count": 4,
+      "x": 120,
+      "y": 400,
+      "width": 400,
+      "height": 24,
+      "activeColor": "#ffffff",
+      "inactiveColor": "#555555"
+    }
+  ]
+}

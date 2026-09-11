@@ -1,0 +1,17 @@
+{
+  "name": "karaoke-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "test:smoke": "node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "playwright": "1.63.0"
+  }
+}

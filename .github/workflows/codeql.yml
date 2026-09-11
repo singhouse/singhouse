@@ -1,0 +1,81 @@
+name: CodeQL
+
+# ---------------------------------------------------------------------------
+# WHY THIS JOB IS GATED — do not delete this workflow as "dead code".
+#
+# Code scanning only works under two conditions, and the gate below waits for
+# both rather than failing loudly until they arrive:
+#
+#   1. It has to be running on github.com. The github/codeql-action/* actions
+#      and the CodeQL tooling behind them are GitHub-hosted, so on any other
+#      Actions implementation this file would be a permanent red build.
+#
+#   2. The repository has to be public, or carry a paid GitHub Advanced
+#      Security seat. On a private repository without one, the SARIF upload
+#      fails with a 403 every time.
+#
+# A skipped job reports SUCCESS, so nothing goes red in the meantime and there
+# is nothing to remember to re-enable — it starts working on its own once both
+# conditions hold.
+#
+# NOTE the gate fails CLOSED in one direction worth knowing about: an undefined
+# value compares equal to false in GitHub expressions, so if `repository` were
+# ever absent from the event payload the job would skip and report success
+# rather than run. `workflow_dispatch` is wired below precisely so the gate can
+# be proven on demand instead of inferred from a green tick.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly: CodeQL ships new queries continuously, so a scan matters even on
+    # a week with no commits.
+    - cron: '17 4 * * 1'
+  # Manual trigger: the only way to prove the gate actually runs, rather than
+  # silently skipping, without waiting on a push.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    if: github.server_url == 'https://github.com' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write   # required to upload the SARIF results
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript-typescript', 'python']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          # `languages`, plural — the init action has no `language` input, and
+          # an unrecognised one is ignored rather than rejected. That would
+          # leave init auto-detecting BOTH languages on each matrix leg while
+          # analyze tagged the results with only one, so the mismatch would be
+          # silent rather than fatal.
+          languages: ${{ matrix.language }}
+
+      # Both languages here are interpreted, so CodeQL's autobuild is a no-op
+      # that succeeds — there is no compilation step to model.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

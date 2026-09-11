@@ -1,0 +1,51 @@
+{
+  "name": "karaoke-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web player — Vue 3 + Vite",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/singhouse/singhouse.git",
+    "directory": "frontend"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "build:multi": "VITE_AUTH_MODE=multi vite build",
+    "deploy": "bash scripts/deploy.sh",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "lint": "eslint src",
+    "test": "npm run test:neutrality && npm run test:unit && npm run test:stage && npm run test:golden",
+    "test:neutrality": "bash ../tools/check_core_neutrality.sh ..",
+    "test:unit": "vitest run",
+    "test:stage": "node --test tests/stage/*.test.mjs",
+    "test:golden": "node tests/stage-harness/harness/run-harness.mjs --renderer src/stage/index.mjs",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "axios": "^1.6.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.3.8",
+    "vue-router": "^4.2.5",
+    "vuedraggable": "^4.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@vitejs/plugin-vue": "^4.5.0",
+    "@vue/test-utils": "^2.4.11",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^10.8.1",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^17.11.0",
+    "happy-dom": "^20.10.6",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.3.5",
+    "vite": "^5.0.2",
+    "vitest": "^4.1.10"
+  }
+}

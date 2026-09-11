@@ -1,0 +1,42 @@
+[build-system]
+# Floor is 77, not 68: the `license` / `license-files` pair below is PEP 639
+# syntax, understood only from setuptools 77 onward. The old floor was already
+# wrong for the metadata this file declares — an isolated PEP 517 build could
+# resolve setuptools 68 and reject it.
+requires = ["setuptools>=77", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lyricsync"
+version = "0.1.0"
+description = "Word-level lyrics transcription and alignment library"
+# Declared explicitly: this package is offered under MIT while the repository
+# it lives in is AGPL-3.0-only. Without the identifier, license scanners report
+# UNKNOWN and can infer the parent repository's license instead.
+license = "MIT"
+license-files = ["LICENSE"]
+# Upload guard, not metadata: PyPI refuses any distribution carrying this
+# classifier. Publishing lyricsync IS the eventual plan — which makes it the
+# most publish-prone package in the tree, and exactly why the accidental path
+# must fail until the deliberate release removes this line.
+classifiers = ["Private :: Do Not Upload"]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.1.0"]
+metaphone = ["metaphone>=0.6"]
+# Extra keeps its historical name; rapidfuzz (MIT) computes the identical
+# indel-similarity metric Levenshtein.ratio() did.
+levenshtein = ["rapidfuzz>=3.0"]
+all = ["lyricsync[whisper,metaphone,levenshtein]"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

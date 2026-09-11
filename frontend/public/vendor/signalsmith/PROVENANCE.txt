@@ -1,0 +1,22 @@
+Signalsmith Stretch — vendored WASM pitch/time-stretch module
+=============================================================
+
+File:     SignalsmithStretch.mjs
+Source:   https://github.com/Signalsmith-Audio/signalsmith-stretch
+Build:    official web release build (web/release/SignalsmithStretch.mjs),
+          byte-identical to upstream. Single-file: the WASM binary is embedded
+          as a base64 data-URI, so there is no separate .wasm to fetch and the
+          module self-registers its AudioWorklet via a Blob module URL.
+sha256:   97530b11d5bc01015af4cde40d6aa55ff10c40aa1294ca4c8c5762027d517a46
+License:  MIT (see LICENSE.txt) — Copyright (c) 2022 Geraint Luff /
+          Signalsmith Audio Ltd.
+
+Why it's here: replaces the previous vendored phaze phase-vocoder worklet
+(public/pitch-processor.js) for the core key-shift feature. phaze snapped
+shifted spectral peaks to the nearest FFT bin (~18 cents flat at +12);
+Signalsmith reproduces pitch exactly and has cleaner transients. Formant
+compensation is intentionally left off (its default) — it degraded real music
+in A/B testing. Local DSP only: no network, no catalog, nothing hosted.
+
+Loaded lazily via dynamic import() from useAudioEngine.js only on a secure
+context, so it never enters the main app bundle.

@@ -1,0 +1,37 @@
+{
+  "fixture": "stage/degenerate.json",
+  "viewport": { "width": 640, "height": 480 },
+  "stageTransform": { "scale": 1, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 2.5, "pages": [], "countdowns": [] },
+    {
+      "time": 3.0,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "none" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 5.0,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "boundary", "syllable": 0 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 8.5,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 1, "fraction": 0.5 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 9.5,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "full" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    { "time": 20.0, "pages": [], "countdowns": [] }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "fixture": "stage/empty-model.json",
+  "viewport": { "width": 1280, "height": 960 },
+  "stageTransform": { "scale": 2, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 0.0, "pages": [], "countdowns": [] },
+    { "time": 5.0, "pages": [], "countdowns": [] }
+  ]
+}

@@ -1,0 +1,20 @@
+DejaVu Sans Bold — vendored glyph font for the CD+G export rasteriser
+=====================================================================
+
+File:     DejaVuSans-Bold.ttf
+Source:   Arch Linux package ttf-dejavu 2.37+18+g9b5d1b2f-8
+          (upstream: https://dejavu-fonts.github.io/)
+Build:    unmodified copy of /usr/share/fonts/TTF/DejaVuSans-Bold.ttf,
+          byte-identical to the packaged file.
+sha256:   b5d64817b6331723b5e59eaaa6db90057cbed58e9733f65687f110638192359f
+License:  Bitstream Vera license with DejaVu additions (see the adjacent
+          LICENSE file, copied verbatim from the package) — permissive;
+          redistribution of unmodified copies with the copyright and license
+          notice is expressly permitted.
+
+Why it's here: exported CD+G graphics are rasterised server-side, so the
+renderer needs a font that ships with the package rather than whatever the
+host happens to have installed. DejaVu Sans Bold stays legible at the small
+pixel sizes a 300x216 screen allows and covers Latin, Cyrillic, and Greek
+with wide punctuation coverage, so most lyric text renders without
+substitution boxes.

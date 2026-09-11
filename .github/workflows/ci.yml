@@ -1,0 +1,251 @@
+name: CI
+
+# These workflows run on GitHub-hosted runners. Every job runs `npm ci` and
+# `pip install -e`, which execute code from the head of a pull request, so
+# never attach a persistent self-hosted runner to this repository.
+
+# Branch-filtered on purpose. An unfiltered `push:` alongside `pull_request:`
+# runs the whole suite TWICE for every push to a branch with an open PR — once
+# for the branch ref, once for the merge ref. Changes land through pull
+# requests, so the pull_request trigger already covers branch work.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Supersede in-flight PR runs — an outdated iteration has nothing useful left
+# to say. NOT on the integration branch: there every push is a distinct commit
+# that needs its own result, and cancelling would leave merged commits with no
+# CI verdict at all.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The brand/vendor/private-infra gate. This is what makes the project's
+  # bright lines structural rather than a matter of reviewer attention, so it
+  # is a hard failure and must stay one.
+  neutrality:
+    name: Neutrality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test neutrality exemptions
+        run: python3 tools/test_core_neutrality.py
+
+      # The gate fails closed when its root is not a git repository, and it
+      # enumerates via `git ls-files` — so it needs the real checkout, but no
+      # history, no venv, no node_modules and no network.
+      - name: Run the core neutrality gate
+        run: bash tools/check_core_neutrality.sh .
+
+      # License-header gate: every in-scope tracked source file must carry
+      # its area's SPDX identifier. Same enumeration discipline as the gate
+      # above — tracked files only, no dependencies, no network.
+      - name: Run the SPDX header gate
+        run: bash tools/check_spdx_headers.sh .
+
+  # Guards a defect class that is invisible in normal use: a rule in
+  # .gitignore that matches a file which is nevertheless tracked. Git keeps
+  # serving the tracked file, but every ignore-respecting tool downstream
+  # (packaging, archive export, editors, some linters) silently drops it.
+  gitignore-hygiene:
+    name: .gitignore does not shadow tracked files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert no tracked file is matched by an ignore rule
+        run: |
+          # `set +e` around the capture is REQUIRED, not stylistic. The default
+          # shell for a `run:` block is `bash -e -o pipefail`, and errexit is
+          # already on before the first line of this script executes — a
+          # `set -uo pipefail` here would NOT turn it off. Under errexit the
+          # assignment below aborts the whole step the moment the pipeline
+          # exits non-zero, which is the HEALTHY case (nothing matched), so the
+          # guard would fail on every clean tree.
+          set +e
+          # --no-index is load-bearing: without it `git check-ignore` refuses
+          # to report on tracked paths at all, exits 1 with no output, and this
+          # guard would pass forever without ever testing anything.
+          #
+          # -v makes each hit name the ignore file, line number and pattern
+          # that produced it. That matters because --no-index consults
+          # .git/info/exclude and core.excludesFile as well as .gitignore, so
+          # reporting a hit as ".gitignore's fault" can send someone looking
+          # for a rule that is not there.
+          #
+          # Exit codes: 0 = matched something, 1 = matched nothing (the healthy
+          # case), anything else = a real failure. Branch on the code rather
+          # than discarding it: a blanket `|| true` would turn an unreadable
+          # ignore file or a git too old for --no-index into a silent pass,
+          # which is the one outcome a guard like this must never produce.
+          shadowed=$(git ls-files -z | git check-ignore -v --no-index --stdin -z | tr '\0' '\n')
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::git check-ignore failed (exit $rc) — this guard could not run."
+            exit 1
+          fi
+          if [ -n "$shadowed" ]; then
+            echo "::error::Ignore rules shadow TRACKED files. Git still serves them, but every ignore-respecting tool downstream (packaging, archive export, some linters) drops them silently."
+            printf '%s\n' "$shadowed"
+            echo
+            echo "Each hit above names its source file, line and pattern. Fix the rule there —"
+            echo "prefer a directory-scoped rule over a filename glob."
+            exit 1
+          fi
+          echo "OK: no tracked file is shadowed by an ignore rule."
+
+  backend:
+    name: Backend + lyricsync (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the declared requires-python floor; 3.14 is the newest
+        # interpreter this project is known to run on. Both must stay green —
+        # testing only one lets the declared floor quietly become a fiction.
+        python-version: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            lyricsync/pyproject.toml
+
+      # Order matters. backend depends on lyricsync[...] >=0.1,<0.2, which is
+      # NOT published to PyPI — installing backend first makes pip go looking
+      # for it on the index and fail.
+      #
+      # Both installs are editable on purpose. backend/tests/test_lyrics_optin.py
+      # walks up from the installed module to find the repo root, asserts a
+      # .git directory is there, and shells out to `git ls-files`. A
+      # non-editable wheel install puts the module in site-packages, the walk
+      # lands somewhere without a .git, and the test fails.
+      - name: Install lyricsync (editable, first)
+        run: python -m pip install -e "./lyricsync[whisper,metaphone,levenshtein]"
+
+      - name: Install backend (editable)
+        run: python -m pip install -e "./backend[dev]"
+
+      - name: Backend test suite
+        working-directory: backend
+        run: python -m pytest -q
+
+      - name: lyricsync test suite
+        working-directory: lyricsync
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      # Three separate steps rather than `npm test`, so a red build names the
+      # suite that broke without anyone opening the log.
+      #
+      # NOTE: the optional local fixtures directory is not part of the
+      # repository, so the tests that consume it skip themselves here by
+      # design. The reported test COUNT is therefore legitimately lower in CI
+      # than on a machine that has them — assert on the exit code, never on a
+      # count.
+      - name: Unit tests (vitest)
+        working-directory: frontend
+        run: npm run test:unit
+
+      - name: Stage tests (node --test)
+        working-directory: frontend
+        run: npm run test:stage
+
+      - name: Golden renderer harness
+        working-directory: frontend
+        run: npm run test:golden
+
+      # Plain `build` only. The other build script produces a different
+      # deployment variant, and `deploy` publishes to a running install —
+      # neither belongs in CI.
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # ---------------------------------------------------------------------
+  # ADVISORY. Every step here is `continue-on-error: true`, so this job can
+  # report findings without ever failing the build.
+  #
+  # Where the findings actually appear: ruff's `github` format emits inline
+  # annotations, but GitHub caps those at 10 per step, so against a backlog in
+  # the hundreds only the first few are visible on the diff. ESLint ships no
+  # GitHub-annotation formatter at all, so its findings are log-only. In both
+  # cases the job log is the real output — do not read a quiet diff as a clean
+  # tree.
+  #
+  # That is deliberate and temporary. Neither linter had ever run against this
+  # codebase before the config files landed, so both start with a substantial
+  # backlog of pre-existing violations; making them blocking on day one would
+  # mean either a permanently red CI or a huge unreviewed auto-fix commit
+  # across a codebase people are running in production.
+  #
+  # The intent is to burn the backlog down and then DELETE the
+  # `continue-on-error` lines, making lint a real gate. Do not add per-rule
+  # suppressions to get there faster.
+  # ---------------------------------------------------------------------
+  lint:
+    name: Lint (advisory, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Pinned: an unpinned linter turns an upstream release into a surprise
+      # diff in an unrelated PR. Bump it deliberately.
+      - name: Install ruff
+        run: python -m pip install ruff==0.14.5
+
+      - name: ruff (advisory)
+        continue-on-error: true
+        run: ruff check --output-format=github .
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: eslint (advisory)
+        continue-on-error: true
+        working-directory: frontend
+        run: npm run lint

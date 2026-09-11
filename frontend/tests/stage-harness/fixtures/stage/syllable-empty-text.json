@@ -1,0 +1,35 @@
+{
+  "duration": 10,
+  "tracks": {},
+  "pages": [
+    {
+      "id": "p1",
+      "activeColor": "#aaffcc",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 0.0,
+      "fadeInDuration": 0.0,
+      "fadeOutStart": 8.0,
+      "fadeOutDuration": 1.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 220,
+          "width": 560,
+          "height": 48,
+          "words": [
+            [
+              { "start": 2.0, "end": 2.5, "text": "Bra" },
+              { "start": 2.5, "end": 3.0, "text": "" },
+              { "start": 3.0, "end": 3.5, "text": "zen" }
+            ],
+            [
+              { "start": 4.0, "end": 4.4, "text": "co" },
+              { "start": 4.4, "end": 4.8, "text": " " },
+              { "start": 4.8, "end": 5.2, "text": "mets" }
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

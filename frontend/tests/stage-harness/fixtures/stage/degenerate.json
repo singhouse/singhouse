@@ -1,0 +1,30 @@
+{
+  "duration": 25,
+  "tracks": {},
+  "pages": [
+    {
+      "id": "p1",
+      "activeColor": "#ffcc00",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 3.0,
+      "fadeInDuration": 0.0,
+      "fadeOutStart": 20.0,
+      "fadeOutDuration": 0.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 220,
+          "width": 560,
+          "height": 48,
+          "words": [
+            [ { "start": 5.0, "end": 5.0, "text": "Tin" } ],
+            [ ],
+            [ { "start": null, "end": 6.0, "text": "ghost" } ],
+            [ { "start": 6.0, "end": 7.0 } ],
+            [ { "start": 8.0, "end": 9.0, "text": "bells" } ]
+          ]
+        }
+      ]
+    }
+  ]
+}

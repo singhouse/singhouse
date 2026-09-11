@@ -1,0 +1,33 @@
+# Ruff configuration — ADVISORY ONLY.
+#
+# Ruff has never run against this codebase, so an unknown number of existing
+# violations are in the tree. CI runs `ruff check` in a job that is explicitly
+# non-blocking (`continue-on-error: true`): the findings are visible as
+# annotations, but they cannot fail a build today. Once the backlog is burned
+# down, drop the `continue-on-error` in .github/workflows/ci.yml and this
+# becomes a real gate. Do not tighten the rule selection below before then —
+# the point of the current selection is that it is small enough to finish.
+
+target-version = "py312"   # the declared requires-python floor, deliberately
+                           # not whatever newer interpreter a given install runs
+line-length = 100
+
+exclude = [
+    ".venv",
+    ".venv-*",
+    "node_modules",
+    # Alembic writes these; they are generated revision scripts, not
+    # hand-maintained source, and reformatting them would obscure the diff
+    # between a revision as generated and a revision as edited.
+    "backend/src/karaoke_backend/migrations/versions",
+]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort (import ordering)
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]

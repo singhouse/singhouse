@@ -1,0 +1,49 @@
+{
+  "duration": 30,
+  "tracks": {},
+  "pages": [
+    {
+      "id": "pA",
+      "activeColor": "#ffcc00",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 2.0,
+      "fadeInDuration": 1.0,
+      "fadeOutStart": 12.0,
+      "fadeOutDuration": 2.0,
+      "singStart": 1.0,
+      "singEnd": 6.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 180,
+          "width": 560,
+          "height": 48,
+          "words": [
+            [ { "start": 4.0, "end": 5.0, "text": "Vel" }, { "start": 5.0, "end": 6.0, "text": "vet" } ],
+            [ { "start": 7.0, "end": 8.0, "text": "gla" }, { "start": 8.0, "end": 10.0, "text": "ciers" } ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pB",
+      "activeColor": "#66ddff",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 20.0,
+      "fadeInDuration": 0.5,
+      "fadeOutStart": 24.0,
+      "fadeOutDuration": 0.5,
+      "singStart": 15.0,
+      "singEnd": 28.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 300,
+          "width": 560,
+          "height": 48,
+          "words": [ [ { "start": 21.0, "end": 22.0, "text": "hum" } ] ]
+        }
+      ]
+    }
+  ]
+}

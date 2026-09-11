@@ -1,0 +1,26 @@
+{
+  "fixture": "stage/countdown-bar.json",
+  "viewport": { "width": 1280, "height": 960 },
+  "stageTransform": { "scale": 2, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 1.9, "pages": [], "countdowns": [] },
+    {
+      "time": 2.5,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 0.5, "fill": 0.0625, "segments": 4 } ]
+    },
+    {
+      "time": 6.0,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.5, "segments": 4 } ]
+    },
+    {
+      "time": 9.5,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 0.5, "fill": 0.9375, "segments": 4 } ]
+    },
+    { "time": 10.0, "pages": [], "countdowns": [] },
+    { "time": 12.0, "pages": [], "countdowns": [] },
+    { "time": 15.0, "pages": [], "countdowns": [] }
+  ]
+}

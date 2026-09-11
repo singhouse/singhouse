@@ -1,0 +1,131 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.venv-*/
+# setuptools wheel-build staging: `uv build` / `python -m build` leave a full
+# copy of the package under build/ — an artifact, never source. (dist/ is
+# already ignored below with the Vite output.)
+build/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Node / Vite
+node_modules/
+.vite/
+dist/
+# Named deploy assemblies (`npm run deploy`); the 3 newest are kept on disk
+frontend/deploy/
+
+# Built frontend (deploy artifact, rebuilt from frontend/)
+backend/static/
+# Record of which assembly is published into backend/static/. `npm run deploy`
+# writes it BESIDE the served tree, never inside it, so it is not on the wire.
+# Describes one machine's last deploy — an artifact, not source.
+backend/deploy-manifest.json
+
+# Databases
+*.db
+*.db-journal
+# WAL-mode sidecars. These rules predated WAL and left -wal/-shm untracked but
+# NOT ignored, so any `git add -A` in this tree staged the database's write-
+# ahead log — real show and user data — as a new file. Caught 2026-08-12 doing
+# exactly that. The sidecars hold committed rows the .db file does not yet.
+*.db-wal
+*.db-shm
+*.db.bak*
+# Pre-migration snapshots (karaoke.db.pre-*, ...). These are
+# live user data — they belong in the backup dir, never in a commit.
+*.db.pre-*
+
+# Runtime data
+uploads/
+stems/
+
+# Audio
+*.wav
+*.flac
+*.mp3
+*.m4a
+
+# Model weights / checkpoints
+backend/ckpt/
+
+# Environment
+.env
+
+# Persisted session-signing secret (auto-created by the backend; never commit)
+.session_secret
+.plex_token
+
+# Secrets — Modal API token (live credential, never commit)
+set_modal_api_key.sh
+
+# TLS certificates (self-signed, regenerated via backend/scripts/gen-cert.sh)
+backend/certs/
+backend/certs/*.pem
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Local-only scratch / experimentation surfaces
+backend/test_ui/
+backend/api/test.py
+.playwright-cli/
+
+# Local-only catalog provider plugins. The CatalogProvider abstraction
+# under backend/api/catalog.py is committed; specific provider
+# implementations you install yourself stay local.
+# Drop a *.py module into backend/api/providers/local/ and it
+# self-registers on startup.
+backend/api/providers/local/
+# Post-move packaged path for the same local providers (the old line above
+# is kept for checkouts that still have files
+# at the old path).
+backend/src/karaoke_backend/api/providers/local/
+
+# Local-only tests for the above providers. Directory-scoped on purpose: a
+# filename glob here once shadowed a tracked test file.
+backend/tests/local/
+
+# Benchmark fixtures (large, regenerable from lyricsync/scripts/eval.py)
+lyrics.xml
+*_word_data.json
+
+# Editor test fixtures exported from your local library DB — personal
+# lyrics; regenerate with backend/scripts/export-lyrics-fixtures.py.
+# Corpus tests and the editor lab picker skip cleanly when absent.
+frontend/fixtures/
+
+# LLM lyric-correction eval fixtures (personal library data — never commit; they are
+# regenerated locally from your own library)
+backend/fixtures/
+
+# stars/ research outputs + the upstream STARS repo it depends on
+stars/_runs/
+stars/STARS/
+
+# libretto local runtime state (sessions/profiles live outside git)
+.libretto/
+
+# DB snapshot kept beside the database during a migration —
+# real user data, never commit (9.7MB sqlite)
+backend/karaoke.db.*-snapshot-*
+
+# clean-room renderer input package staging (provenance lives in the
+# maintainers' records; the shipped core is tracked under frontend/src/stage/)
+/clean-room/
+
+# Local dev-server scratch (DB copy, logs) — never committed
+.devrun/
+
+# A premium tree may be present here: a separate repository, checked out at
+# this path and not tracked by this one. No trailing slash, so the rule holds
+# whatever form the entry takes.
+/premium

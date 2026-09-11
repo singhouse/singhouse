@@ -1,0 +1,44 @@
+{
+  "metadata": { "format_version": 2 },
+  "lines": [
+    [
+      {
+        "word": "Maple",
+        "start": 10.0,
+        "end": 10.8,
+        "syl": [
+          { "text": "Ma", "start": 10.0, "end": 10.4 },
+          { "text": "ple", "start": 10.4, "end": 10.8 }
+        ]
+      },
+      {
+        "word": "engines",
+        "start": 11.0,
+        "end": 11.9,
+        "syl": [
+          { "text": "en", "start": 11.0, "end": 11.4 },
+          { "text": "gines", "start": 11.4, "end": 11.9 }
+        ]
+      }
+    ],
+    [
+      {
+        "word": "hum",
+        "start": 13.0,
+        "end": 13.5,
+        "syl": [ { "text": "hum", "start": 13.0, "end": 13.5 } ]
+      }
+    ]
+  ],
+  "pages": [
+    {
+      "line_idx": [0, 1],
+      "fade_in_start": 8.0,
+      "fade_in_dur": 0.4,
+      "fade_out_start": 14.0,
+      "fade_out_dur": 0.4
+    }
+  ],
+  "count_in": { "start": 2.0, "end": 9.0, "step": 1.0, "count": 4 },
+  "lead_ins": [ { "line_idx": 0, "start": 8.0 } ]
+}

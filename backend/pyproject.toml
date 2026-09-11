@@ -1,0 +1,101 @@
+[build-system]
+# Floor is 77, not 68: PEP 639 metadata — `license` as a bare SPDX expression,
+# and `license-files` — is only understood from setuptools 77 onward. An
+# isolated PEP 517 build may resolve any setuptools satisfying this floor, so
+# a lower one could pull a backend that rejects the `license` line below.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karaoke-backend"        # NEUTRAL by design; one-time rename in the public packaging operation
+# The version number lives in ONE place: karaoke_backend.__version__ (see
+# [tool.setuptools.dynamic] below). It used to be hand-duplicated here, and
+# the two copies were one forgotten edit away from an installed wheel that
+# reports one version while every outbound User-Agent advertises another —
+# the wrong half being the one a third party sees.
+dynamic = ["version"]
+# Declared explicitly (PEP 639 SPDX form): without it a wheel built from this
+# directory publishes no license assertion at all.
+#
+# `license-files` is declared rather than left to default, and LICENSE is a
+# real copy rather than a symlink, because the AGPL requires that a copy of the
+# license travel WITH the work: a wheel whose metadata names AGPL-3.0-only and
+# which carries no license text is naming terms it does not hand over. The
+# field cannot reference a path outside this directory, so the file has to live
+# here. Under setuptools >= 77 an omitted key would silently glob LICEN[CS]E*
+# anyway — being explicit means the behaviour does not change with the tooling.
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+# Upload guard, not metadata: PyPI refuses any distribution carrying this
+# classifier, which is the pip-side equivalent of npm's "private": true. The
+# package name is unclaimed on PyPI as of this writing, so an accidental
+# `twine upload` would publish this source under a name nobody here controls
+# — or collide with whoever claims it later. Remove only as part
+# of a deliberate, named release decision.
+classifiers = ["Private :: Do Not Upload"]
+requires-python = ">=3.12"      # CI proves this floor on 3.12 and 3.14
+dependencies = [
+  "fastapi==0.115.5", "uvicorn[standard]==0.32.1", "itsdangerous==2.2.0",
+  "python-multipart==0.0.12", "bcrypt==4.2.1", "email-validator==2.2.0",
+  "sqlalchemy==2.0.36", "aiosqlite==0.20.0", "httpx==0.28.0",
+  "numpy>=1.24.0",
+  "alembic==1.14.0",
+  # greenlet is required at runtime by SQLAlchemy's async engine, but
+  # SQLAlchemy 2.0.36's conditional greenlet dependency marker does not fire
+  # on Python 3.14, so it must be declared explicitly. Pinned to the exact
+  # version already present in existing installs so an editable
+  # `pip install --no-deps` upgrade stays dependency-neutral (pip check clean).
+  "greenlet==3.3.2",
+  # Read at package import to load backend/.env (karaoke_backend/__init__.py).
+  # Declared explicitly rather than leaned on: it is already present in every
+  # environment as an undeclared transitive of uvicorn[standard], so importing
+  # it without declaring it would work today and break the day uvicorn drops
+  # the extra — with the failure landing on configuration loading, which is
+  # exactly the thing that must not fail quietly. Pinned to the version already
+  # in existing installs, same reasoning as greenlet above.
+  "python-dotenv==1.2.2",
+  "lyricsync[whisper,metaphone,levenshtein]>=0.1,<0.2",
+]
+
+[project.urls]
+# An ADDRESS, not a brand literal: this is where the source lives, for anyone,
+# and it does not vary with a rebrand. The neutrality gate exempts the
+# URL by content rather than exempting this whole file, so everything else here
+# stays graded — including the retired codenames.
+Homepage = "https://github.com/singhouse/singhouse"
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.3", "pytest-asyncio==0.24.0", "Pillow>=10.0"]
+modal = ["modal>=0.66"]
+# Text rasterisation for CD+G export. Optional: without it the export routes
+# answer 501 and everything else runs unchanged.
+export = ["Pillow>=10.0"]
+
+[project.scripts]
+kb-seed-lyrics-reference = "karaoke_backend.ops.seed_lyrics_reference:main"
+kb-db = "karaoke_backend.cli:main"
+
+# Resolved by static AST parse of the assignment, not by importing the
+# package — which matters because importing karaoke_backend loads .env as a
+# side effect, and a metadata build must not do that. This holds only while
+# the assignment stays a single plain string literal: anything computed makes
+# setuptools silently fall back to importing the package, which breaks
+# isolated builds (runtime deps absent) and runs the .env load everywhere
+# else. A guard test asserts the literal shape.
+[tool.setuptools.dynamic]
+version = {attr = "karaoke_backend.__version__"}
+
+[tool.setuptools.package-data]
+# Alembic needs its template + revision scripts inside the wheel; the export
+# rasteriser needs its vendored font (plus license/provenance) beside it.
+karaoke_backend = ["migrations/*.mako", "migrations/*.py", "migrations/versions/*.py", "export/fonts/*"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["karaoke_backend.api.providers.local*"]   # belt-and-braces vs an older checkout's stale
+                                                     # autoloader-written local/__init__.py
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Deliberately NO asyncio_mode: tests carry explicit @pytest.mark.asyncio under
+# pytest-asyncio 0.24's strict default — adding config would change behavior.

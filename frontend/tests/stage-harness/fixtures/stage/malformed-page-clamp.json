@@ -1,0 +1,42 @@
+{
+  "duration": 18,
+  "tracks": {},
+  "pages": [
+    {
+      "id": "pA",
+      "activeColor": "#ffcc00",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 5.0,
+      "fadeInDuration": 2.0,
+      "fadeOutStart": 3.0,
+      "fadeOutDuration": 4.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 160,
+          "width": 560,
+          "height": 48,
+          "words": [ [ { "start": 6.0, "end": 7.0, "text": "Marble" } ] ]
+        }
+      ]
+    },
+    {
+      "id": "pB",
+      "activeColor": "#66ddff",
+      "inactiveColor": "#ffffff",
+      "fadeInStart": 12.0,
+      "fadeInDuration": 0.0,
+      "fadeOutStart": 10.0,
+      "fadeOutDuration": 3.0,
+      "lines": [
+        {
+          "x": 40,
+          "y": 320,
+          "width": 560,
+          "height": 48,
+          "words": [ [ { "start": 12.25, "end": 13.25, "text": "quilts" } ] ]
+        }
+      ]
+    }
+  ]
+}

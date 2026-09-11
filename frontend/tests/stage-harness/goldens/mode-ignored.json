@@ -1,0 +1,44 @@
+{
+  "fixture": "stage/mode-ignored.json",
+  "viewport": { "width": 640, "height": 480 },
+  "stageTransform": { "scale": 1, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 0.5, "pages": [], "countdowns": [] },
+    {
+      "time": 1.5,
+      "pages": [
+        { "index": 0, "opacity": 0.5, "lines": [ { "index": 0, "reveal": { "kind": "none" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 3.5,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 0, "fraction": 0.5 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 5.25,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "boundary", "syllable": 1 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 6.0,
+      "pages": [
+        { "index": 0, "opacity": 1, "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 2, "fraction": 0.5 }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 8.5,
+      "pages": [
+        { "index": 0, "opacity": 0.5, "lines": [ { "index": 0, "reveal": { "kind": "full" }, "leadIn": null } ] }
+      ],
+      "countdowns": []
+    },
+    { "time": 9.5, "pages": [], "countdowns": [] }
+  ]
+}

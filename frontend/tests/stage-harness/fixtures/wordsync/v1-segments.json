@@ -1,0 +1,24 @@
+{
+  "segments": [
+    {
+      "words": [
+        { "word": "Gravel", "start": 20.0, "end": 20.4 },
+        { "word": "moons", "start": 20.5, "end": 20.9 },
+        { "word": "", "start": 20.9, "end": 20.9 },
+        { "word": "tumble", "start": 21.0, "end": 21.4 },
+        { "word": "past", "start": 21.5, "end": 21.9 },
+        { "word": "the", "start": 22.0, "end": 22.2 },
+        { "word": "lighthouse", "start": 22.3, "end": 22.9 },
+        { "word": "gate", "start": 23.0, "end": 23.4 }
+      ]
+    },
+    {
+      "words": [
+        { "word": "ember", "start": 27.0, "end": 27.4 },
+        { "word": "trains", "start": 27.5, "end": 27.9 },
+        { "word": "whistle", "start": 28.0, "end": 28.4 },
+        { "word": "home", "start": 28.5, "end": 29.0 }
+      ]
+    }
+  ]
+}

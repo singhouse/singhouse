@@ -1,0 +1,60 @@
+{
+  "fixture": "stage/countdown-numeral.json",
+  "viewport": { "width": 1280, "height": 960 },
+  "stageTransform": { "scale": 2, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 1.5, "pages": [], "countdowns": [] },
+    {
+      "time": 5.9,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.4875, "segments": 4, "numeral": null } ]
+    },
+    {
+      "time": 6.0,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.5, "segments": 4, "numeral": 4 } ]
+    },
+    {
+      "time": 6.5,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.5625, "segments": 4, "numeral": 4 } ]
+    },
+    {
+      "time": 8.0,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.75, "segments": 4, "numeral": 2 } ]
+    },
+    {
+      "time": 9.0,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 1, "fill": 0.875, "segments": 4, "numeral": 1 } ]
+    },
+    {
+      "time": 9.5,
+      "pages": [],
+      "countdowns": [ { "index": 0, "opacity": 0.5, "fill": 0.9375, "segments": 4, "numeral": 1 } ]
+    },
+    { "time": 10.0, "pages": [], "countdowns": [] },
+    {
+      "time": 14.0,
+      "pages": [],
+      "countdowns": [ { "index": 1, "opacity": 0, "fill": 0, "segments": 4, "numeral": 2 } ]
+    },
+    {
+      "time": 14.5,
+      "pages": [],
+      "countdowns": [ { "index": 1, "opacity": 0.25, "fill": 0.16666666666666666, "segments": 4, "numeral": 2 } ]
+    },
+    {
+      "time": 15.0,
+      "pages": [],
+      "countdowns": [ { "index": 1, "opacity": 0.5, "fill": 0.3333333333333333, "segments": 4, "numeral": 1 } ]
+    },
+    {
+      "time": 16.0,
+      "pages": [],
+      "countdowns": [ { "index": 1, "opacity": 0.5, "fill": 0.6666666666666666, "segments": 4, "numeral": 1 } ]
+    },
+    { "time": 17.0, "pages": [], "countdowns": [] }
+  ]
+}

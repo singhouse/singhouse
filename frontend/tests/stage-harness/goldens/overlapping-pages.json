@@ -1,0 +1,41 @@
+{
+  "fixture": "stage/overlapping-pages.json",
+  "viewport": { "width": 1280, "height": 960 },
+  "stageTransform": { "scale": 2, "offsetX": 0, "offsetY": 0 },
+  "samples": [
+    { "time": 1.5, "pages": [], "countdowns": [] },
+    {
+      "time": 8.5,
+      "pages": [
+        {
+          "index": 0,
+          "opacity": 1,
+          "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 0, "fraction": 0.9 }, "leadIn": null } ]
+        },
+        {
+          "index": 1,
+          "opacity": 0.5,
+          "lines": [ { "index": 0, "reveal": { "kind": "none" }, "leadIn": null } ]
+        }
+      ],
+      "countdowns": []
+    },
+    {
+      "time": 10.5,
+      "pages": [
+        {
+          "index": 0,
+          "opacity": 0.5,
+          "lines": [ { "index": 0, "reveal": { "kind": "full" }, "leadIn": null } ]
+        },
+        {
+          "index": 1,
+          "opacity": 1,
+          "lines": [ { "index": 0, "reveal": { "kind": "partial", "syllable": 0, "fraction": 0.1 }, "leadIn": null } ]
+        }
+      ],
+      "countdowns": []
+    },
+    { "time": 17.0, "pages": [], "countdowns": [] }
+  ]
+}

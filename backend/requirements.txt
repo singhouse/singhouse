@@ -1,0 +1,52 @@
+# Karaoke backend — Python dependencies
+#
+# SOURCE OF TRUTH: pyproject.toml. The backend is now an installable package
+# (`karaoke-backend`); new environments should `pip install -e '.[dev]'`
+# instead of using this file. This requirements.txt is retained as a FROZEN
+# MIRROR of the pins so older installs (which install from it)
+# stay byte-for-byte reproducible.
+#
+# Note: pyproject additionally pins `greenlet==3.3.2` explicitly — SQLAlchemy
+# 2.0.36's conditional greenlet marker does not fire on Python 3.14, so the
+# async engine needs it declared. It is present transitively in the live venv;
+# the packaged metadata makes it explicit.
+#
+# Install (legacy/live-tree path): pip install -r requirements.txt
+
+# --- Web framework ---
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+itsdangerous==2.2.0      # backs starlette.middleware.sessions (signed cookies)
+
+# --- File uploads ---
+python-multipart==0.0.12
+
+# --- Auth ---
+bcrypt==4.2.1
+email-validator==2.2.0   # backs pydantic.EmailStr
+
+# --- Database ---
+sqlalchemy==2.0.36
+aiosqlite==0.20.0        # async SQLite driver
+alembic==1.14.0          # schema migrations; sync engine, own version table
+
+# --- HTTP ---
+httpx==0.28.0            # async HTTP client for lyrics worker + tests
+
+# --- Modal (GPU stem separation) ---
+# Install separately if you have Modal credentials:
+#   pip install modal
+# modal==0.66.0
+
+# --- ASR (lyrics transcription) ---
+faster-whisper>=1.1.0    # CTranslate2-based Whisper (faster, lower memory)
+numpy>=1.24.0
+
+# --- Lyrics alignment ---
+metaphone>=0.6           # Double Metaphone phonetic matching
+rapidfuzz>=3.0           # C-optimized indel/Levenshtein similarity
+
+# --- Dev / testing ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+# httpx already listed above — used as async test client for FastAPI
