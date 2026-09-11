@@ -80,8 +80,9 @@ defineProps({ output: { type: Object, required: true } })
 .audio-output { position: relative; font-size: 0.8rem; flex-shrink: 0; }
 .audio-output summary { cursor: pointer; }
 .audio-output__panel {
-  position: absolute; bottom: 100%; right: 0; z-index: 50;
-  width: 280px; padding: 1rem; border-radius: 0.5rem;
+  position: absolute; top: calc(100% + 0.5rem); right: 0.5rem; z-index: 50;
+  width: min(280px, calc(100vw - 2rem)); padding: 1rem; border-radius: 0.5rem;
+  max-height: min(24rem, calc(100dvh - 4rem)); overflow-y: auto;
   background: #171b26; color: white; border: 1px solid #555;
 }
 select { display: block; width: 100%; color: white; background: #171b26; margin-top: 0.5rem; }

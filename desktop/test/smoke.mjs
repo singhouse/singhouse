@@ -18,6 +18,11 @@ try {
   await host.getByText('Audio output', { exact: true }).click()
   await host.getByText('Output applied.', { exact: true }).waitFor()
   const selection = host.locator('.audio-output select')
+  const panel = await host.locator('.audio-output__panel').boundingBox()
+  const viewport = await host.evaluate(() => ({ width: innerWidth, height: innerHeight }))
+  assert.ok(panel && panel.x >= 0 && panel.y >= 0 && panel.x + panel.width <= viewport.width && panel.y + panel.height <= viewport.height, 'output panel must be entirely inside the viewport')
+  await selection.click({ trial: true })
+  await host.getByRole('button', { name: 'Refresh devices', exact: true }).click()
   const outputIds = await selection.locator('option').evaluateAll(options => options.map(option => option.value))
   if (outputIds.length > 1) {
     await selection.selectOption(outputIds[1])
@@ -25,6 +30,7 @@ try {
     await selection.selectOption('')
     await host.getByText('Output applied.', { exact: true }).waitFor()
   }
+  await host.getByText('Audio output', { exact: true }).click()
   const popupOpened = application.waitForEvent('window')
   await host.locator('button.popout-btn').click()
   const projector = await popupOpened
