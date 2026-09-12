@@ -117,7 +117,7 @@ def test_deployed_fixture_core_boot_preserves_existing_and_adds_queue(tmp_path):
 
     # Every pre-existing object is preserved byte-for-byte — adoption never
     # rewrites — with two sanctioned exceptions: c0005 appends the durable
-    # queue's columns to `jobs`, and c0007 appends `video_filename` to `songs`.
+    # queue's columns to `jobs`, while c0007/c0008 append song artifact pointers.
     # Both are additive ADD COLUMNs, which SQLite records by appending to the
     # stored CREATE TABLE text; neither is the table rebuild this test exists
     # to catch. Those two tables are checked as strict EXTENSIONS instead:
@@ -145,6 +145,7 @@ def test_deployed_fixture_core_boot_preserves_existing_and_adds_queue(tmp_path):
     )
     assert "kind VARCHAR(32)" in jobs_after, "c0005 did not add its columns"
     assert "video_filename VARCHAR(512)" in songs_after, "c0007 did not add its column"
+    assert "active_stem_generation VARCHAR(64)" in songs_after, "c0008 did not add its column"
 
     # The ONLY additions permitted: the version table (stamp), the net-new
     # queue_entries table + its indexes (c0002), the three owner_id indexes

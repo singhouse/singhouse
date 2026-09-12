@@ -3,14 +3,19 @@
 
 import asyncio
 import importlib.util
+import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import ctypes
+import errno
+import stat
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import wave
 
 spec = importlib.util.spec_from_file_location("desktop_backend", Path(__file__).with_name("backend.py"))
@@ -19,6 +24,133 @@ spec.loader.exec_module(backend)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_windows_durable_replace_uses_write_through_and_metadata_flush(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel)
+        kernel.MoveFileExW.assert_called_once_with(str(source), str(destination), 0x9)
+        self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
+        self.assertEqual(kernel.CloseHandle.call_count, 2)
+
+    def test_windows_durable_replace_falls_back_to_volume_or_refuses_before_rename(self):
+        invalid = ctypes.c_void_p(-1).value
+        kernel = types.SimpleNamespace(CreateFileW=Mock(side_effect=lambda name, *args: 20 if name.startswith("\\\\.\\") else invalid),
+                                       FlushFileBuffers=Mock(return_value=True), CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        backend.windows_durable_replace(source, destination, [source.parent], kernel)
+        self.assertTrue(any(call.args[0] == "\\\\.\\C:" for call in kernel.CreateFileW.call_args_list))
+        kernel.MoveFileExW.assert_called_once()
+        kernel.MoveFileExW.reset_mock()
+        kernel.CreateFileW.side_effect = None
+        kernel.CreateFileW.return_value = invalid
+        with self.assertRaisesRegex(RuntimeError, "denied both"):
+            backend.windows_durable_replace(source, destination, [source.parent], kernel)
+        kernel.MoveFileExW.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_durable_replace_refuses_unsyncable_directory_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination = root / "pending", root / "active"
+            source.write_bytes(b"new")
+            destination.write_bytes(b"known-good")
+            original_sync = os.fsync
+            def sync(descriptor):
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError(errno.ENOTSUP, "directory metadata sync unavailable")
+                return original_sync(descriptor)
+            with patch.object(backend.os, "fsync", side_effect=sync):
+                with self.assertRaises(OSError):
+                    backend.durable_replace(source, destination)
+            self.assertEqual(destination.read_bytes(), b"known-good")
+            self.assertEqual(source.read_bytes(), b"new")
+
+    def test_processing_selection_is_verified_and_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            manifest = {"schema": 1, "kind": "processing", **identity,
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["whisper"], "capabilities": ["transcription"],
+                        "probe": {"schema": 1, "type": "python-imports-v1", "modules": ["faster_whisper"]},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True}]}
+            raw = json.dumps(manifest, separators=(",", ":")).encode()
+            pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+            (pack / "python/bin").mkdir(parents=True)
+            (pack / "manifest.json").write_bytes(raw)
+            (pack / "python/bin/python3").write_bytes(b"fixture")
+            (pack / "python/bin/python3").chmod(0o755)
+            missing_probe = backend.processing_environment(root / "backend", identity, pack, None)
+            self.assertEqual(missing_probe["KARAOKE_PROCESSING_PYTHON"], "")
+            probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
+                     "pythonSha256": manifest["files"][0]["sha256"], "probePassed": True,
+                     "accelerator": "cpu", "components": {"faster_whisper": "1.2.3"},
+                     "verifiedCapabilities": [], "capabilitiesReady": False}
+            env = backend.processing_environment(root / "backend", identity, pack, None, probe)
+            self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+            self.assertEqual(env["KARAOKE_PROCESSING_ACCELERATOR"], "")
+            self.assertEqual(env["KARAOKE_AUDIO_SEPARATOR_DEVICE"], "")
+            self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+            attested = json.loads(env["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertTrue(attested["probePassed"])
+            self.assertEqual(attested["runtimeManifestId"], pack.name)
+            self.assertEqual(attested["pythonSha256"], probe["pythonSha256"])
+            self.assertEqual(attested["verifiedCapabilities"], [])
+            self.assertFalse(attested["capabilitiesReady"])
+            managed_spec = importlib.util.spec_from_file_location(
+                "managed_processing",
+                Path(__file__).parents[1] / "backend/src/karaoke_backend/workers/managed_processing.py",
+            )
+            managed_processing = importlib.util.module_from_spec(managed_spec)
+            managed_spec.loader.exec_module(managed_processing)
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(managed_processing.validated_attestation(), attested)
+            for bad_probe in ({**probe, "pythonPath": "/wrong/python"},
+                              {**probe, "components": {}},
+                              {**probe, "accelerator": "cuda"},
+                              {**probe, "unexpected": True}):
+                rejected = backend.processing_environment(root / "backend", identity, pack, None, bad_probe)
+                self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
+                self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["probePassed"])
+            (pack / "unlisted.pth").write_text("unexpected")
+            with self.assertRaisesRegex(RuntimeError, "inventory"):
+                backend.processing_environment(root / "backend", identity, pack, None, probe)
+            (pack / "unlisted.pth").unlink()
+
+            revision = "a" * 40
+            model_file = {"path": "huggingface/model.bin", "size": 5,
+                          "sha256": hashlib.sha256(b"model").hexdigest(), "executable": False,
+                          "revision": revision, "url": f"https://huggingface.co/fixture/resolve/{revision}/model.bin"}
+            model_manifest = {"schema": 1, "kind": "models", "models": ["whisper"], "files": [model_file]}
+            model_raw = json.dumps(model_manifest, separators=(",", ":")).encode()
+            model_pack = root / "model-cache/packs" / hashlib.sha256(model_raw).hexdigest()
+            (model_pack / "huggingface").mkdir(parents=True)
+            (model_pack / "manifest.json").write_bytes(model_raw)
+            (model_pack / "huggingface/model.bin").write_bytes(b"model")
+            policy = {"schema": 1, "allowedHosts": ["huggingface.co"],
+                      "models": [{"id": "whisper", "files": [model_file]}]}
+            ready = json.loads(backend.processing_environment(root / "backend", identity, pack, model_pack, probe, policy)["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertFalse(ready["capabilitiesReady"])
+            self.assertEqual(set(ready), {"runtimeManifestId", "pythonPath", "pythonSha256",
+                                         "probePassed", "accelerator", "components",
+                                         "verifiedCapabilities", "capabilitiesReady"})
+            with self.assertRaisesRegex(RuntimeError, "not defined"):
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe)
+            wrong_policy = json.loads(json.dumps(policy))
+            wrong_policy["models"][0]["files"][0]["size"] = 6
+            with self.assertRaisesRegex(RuntimeError, "immutable application policy"):
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe, wrong_policy)
+            (pack / "python/bin/python3").write_bytes(b"changed")
+            with self.assertRaisesRegex(RuntimeError, "verification"):
+                backend.processing_environment(root / "backend", identity, pack, None)
+
+    def test_missing_processing_preserves_playback_environment(self):
+        env = backend.processing_environment(Path("/app/backend"), {}, None, None)
+        self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+        self.assertNotIn("KARAOKE_DESKTOP_PROCESSING_JSON", env)
+
     @unittest.skipIf(os.name == "nt", "POSIX session ownership; Windows needs native job-object validation")
     def test_owned_tree_kill_closes_descendant_pipe(self):
         script = """

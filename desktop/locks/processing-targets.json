@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "status": "Build inputs only; no artifacts or hardware qualification asserted",
+  "inputLockKind": "processing-input",
+  "variants": [
+    {"platform": "linux", "arch": "x64", "accelerator": "cpu"},
+    {"platform": "linux", "arch": "x64", "accelerator": "cuda"},
+    {"platform": "linux", "arch": "arm64", "accelerator": "cpu"},
+    {"platform": "darwin", "arch": "arm64", "accelerator": "metal"},
+    {"platform": "darwin", "arch": "arm64", "accelerator": "cpu"},
+    {"platform": "win32", "arch": "x64", "accelerator": "cpu"},
+    {"platform": "win32", "arch": "x64", "accelerator": "cuda"}
+  ]
+}

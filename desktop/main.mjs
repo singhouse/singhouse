@@ -7,6 +7,7 @@ import { isAbsolute, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
+import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
@@ -19,6 +20,10 @@ const ownsInstance = !packaged || app.requestSingleInstanceLock()
 const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userData')) : createRuntime()) : null
 if (!packaged) app.setPath('userData', runtime.electron)
 let expectedIdentity
+let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus
+let processingProbe
+let installation
+let processingOperation
 if (!ownsInstance) app.quit()
 app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.restore(); host.show(); host.focus() } })
 let backend, host, projector, quitting = false, shutdownComplete = false
@@ -30,6 +35,9 @@ function launchBackend() {
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
+  if (activeProcessing) args.push('--processing', activeProcessing.directory)
+  if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
+  if (activeModels) args.push('--models', activeModels.directory)
   if (!packaged && process.argv.includes('--demo')) args.push('--demo')
   backend = spawn(python, args, { cwd: packaged ? nativeDir : desktopDir, env: childEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: packaged && process.platform !== 'win32' })
   if (packaged && process.platform !== 'win32') watchOwnedGroup(backend)
@@ -124,11 +132,69 @@ function installMenu() {
       } },
       { label: 'Close projector', click: () => projector?.close() },
     ] },
+    ...(packaged ? [{ label: 'Processing', submenu: [
+      { label: 'Processing readiness', click: async () => {
+        try {
+          const status = processingStatus ? await processingStatus() : { playback: { ready: true } }
+          const labels = { playback: 'Playback', transcription: 'Transcription', separation: 'Stem separation', modal: 'User-owned Modal' }
+          const detail = Object.entries(labels).map(([key, label]) => {
+            const value = status[key]
+            return `${label}: ${value?.ready ? 'Ready' : 'Not ready'}${value?.reason ? ` — ${value.reason}` : ''}`
+          }).join('\n\n')
+          await dialog.showMessageBox(host, { type: 'info', title: 'Processing readiness',
+            message: processingError || 'Processing capabilities', detail })
+        } catch (error) { dialog.showErrorBox('Processing readiness', error.message) }
+      } },
+      { label: 'Install processing runtime or model cache…', click: () => {
+        if (!processingOperation) processingOperation = installProcessing().finally(() => { processingOperation = null })
+      } },
+      { label: 'Cancel installation', click: () => installation?.abort() },
+    ] }] : []),
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'quit' }] },
   ]))
 }
 
+async function installProcessing() {
+  if (installation) return
+  const choice = await dialog.showOpenDialog(host, { title: 'Select a processing or upstream model manifest', properties: ['openFile'], filters: [{ name: 'Manifest', extensions: ['json'] }] })
+  if (choice.canceled || !choice.filePaths.length) return
+  try {
+    const manifest = JSON.parse(readFileSync(choice.filePaths[0], 'utf8'))
+    const manager = manifest.kind === 'models' ? modelCache : processingManager
+    manager.validate(manifest)
+    const bytes = manifest.files.reduce((sum, file) => sum + file.size, 0)
+    const consent = await dialog.showMessageBox(host, { type: 'warning', buttons: ['Cancel', 'Install'], defaultId: 0, cancelId: 0,
+      message: manifest.kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?',
+      detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Runtime packs contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
+    if (consent.response !== 1 || quitting) return
+    installation = new AbortController()
+    await manager.install(manifest, { signal: installation.signal })
+    if (!quitting) await dialog.showMessageBox(host, { message: 'Installation verified. Reopen the app to use it.' })
+  } catch (error) {
+    if (!quitting) dialog.showErrorBox('Installation did not complete', error.message)
+  } finally { installation = null; host?.setProgressBar(-1) }
+}
+
 async function start() {
+  if (packaged) {
+    expectedIdentity = validateManifest(JSON.parse(readFileSync(resolve(nativeDir, 'manifest.json'), 'utf8')), app.getVersion(), process.platform, process.arch)
+    const progress = ({ received, total }) => host?.setProgressBar(total ? received / total : 0)
+    const lockPython = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
+    const durabilityHelper = resolve(nativeDir, 'backend.py')
+    const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
+    if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
+    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, trustedLocks: processingPolicy.lockSha256 })
+    modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
+    try {
+      activeProcessing = await processingManager.active()
+      if (activeProcessing) {
+        const probeResult = await processingManager.probe(activeProcessing)
+        processingProbe = processingAttestation(activeProcessing, probeResult)
+      }
+    } catch (error) { activeProcessing = null; processingProbe = null; processingError = error.message }
+    try { activeModels = await modelCache.active() }
+    catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
+  }
   const launch = await launchBackend()
   const ses = session.fromPartition(`desktop-${randomUUID()}`, { cache: false })
   await ses.setProxy({ mode: 'direct' })
@@ -155,6 +221,7 @@ async function start() {
   await fetchJSON('/api/auth/gate', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: launch.origin }, body: JSON.stringify({ password: launch.password }) })
   launch.password = ''
   const me = await fetchJSON('/api/auth/me')
+  processingStatus = () => fetchJSON('/api/features/processing')
   if (me.id !== 1 || me.gate_enabled !== true) throw new Error('Private backend gate is not enabled')
   host = new BrowserWindow({ title: brand, width: 1440, height: 960, show: false,
     webPreferences: { session: ses, preload: resolve(desktopDir, 'preload.cjs'),
@@ -182,10 +249,11 @@ app.on('before-quit', event => {
   event.preventDefault()
   if (quitting) return
   quitting = true
+  installation?.abort()
   blocker.stop()
   projector?.destroy()
   host?.destroy()
-  void stopRuntime(backend, runtime).catch(() => {
+  void Promise.all([stopRuntime(backend, runtime), processingOperation]).catch(() => {
     console.error('Could not complete desktop backend shutdown.')
   }).finally(() => { shutdownComplete = true; app.quit() })
 })

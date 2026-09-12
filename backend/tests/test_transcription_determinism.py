@@ -16,8 +16,10 @@ travels from the constructor to the wire (subprocess argv / Modal call args).
 from __future__ import annotations
 
 import inspect
+import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -101,13 +103,15 @@ def _heart_subprocess_argv(*, allow_temperature_fallback: bool, tmp_path: Path):
 
     captured: dict = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"segments": [], "language": "en", "full_text": ""}', stderr=""
-        )
+    class FakePopen:
+        returncode = 0
+        pid = 12345
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+        def communicate(self, timeout=None):
+            return ('{"segments": [], "language": "en", "full_text": ""}', "")
 
-    with patch.object(heart_mod.subprocess, "run", side_effect=fake_run):
+    with patch.object(heart_mod.subprocess, "Popen", FakePopen):
         transcriber.transcribe(str(tmp_path / "audio.wav"))
     return captured["cmd"]
 
@@ -118,6 +122,92 @@ def test_the_local_heart_subprocess_only_gets_the_flag_when_it_was_asked_for(tmp
 
     on = _heart_subprocess_argv(allow_temperature_fallback=True, tmp_path=tmp_path)
     assert "--temperature-fallback" in on
+
+
+def test_heart_cancellation_reaps_the_child(tmp_path: Path):
+    import threading
+    from lyricsync.transcription import heart as heart_mod
+
+    python_path = tmp_path / "python"; python_path.write_text("")
+    script_path = tmp_path / "script.py"; script_path.write_text("")
+    cancelled = threading.Event(); cancelled.set()
+    events = []
+    class Child:
+        returncode = None
+        pid = 12345
+        def __init__(self, *a, **k): pass
+        def communicate(self, timeout=None):
+            if not events:
+                events.append("polled")
+                raise subprocess.TimeoutExpired("heart", timeout)
+            self.returncode = -15
+            return ("", "")
+        def terminate(self): events.append("terminated")
+        def kill(self): events.append("killed")
+    transcriber = heart_mod.HeartTranscriber(
+        python_path, script_path, use_vad=False, cancel_event=cancelled
+    )
+    with patch.object(heart_mod.subprocess, "Popen", Child), pytest.raises(RuntimeError, match="cancelled"):
+        transcriber.transcribe(str(tmp_path / "audio.wav"))
+    assert events == ["polled", "killed"]
+
+def test_heart_posix_cancellation_reaps_grandchild(tmp_path: Path):
+    if os.name != "posix": pytest.skip("POSIX process-group contract")
+    import threading, time
+    from lyricsync.transcription import heart as heart_mod
+    script = tmp_path / "heart.py"; pid_file = tmp_path / "grandchild.pid"
+    script.write_text("import subprocess,time,sys\np=subprocess.Popen(['sleep','30'])\nopen(sys.argv[1]+'.pid','w').write(str(p.pid))\ntime.sleep(30)\n")
+    audio = tmp_path / "audio"; audio.write_bytes(b"")
+    cancelled = threading.Event(); threading.Timer(.2, cancelled.set).start()
+    t = heart_mod.HeartTranscriber(sys.executable, script, use_vad=False, cancel_event=cancelled)
+    with pytest.raises(RuntimeError, match="cancelled"): t.transcribe(str(audio))
+    pid = int(Path(str(audio) + ".pid").read_text())
+    status = Path(f"/proc/{pid}/status")
+    assert not status.exists() or "State:\tZ" in status.read_text()
+
+def test_heart_windows_uses_process_group_and_taskkill_argv(monkeypatch, tmp_path: Path):
+    from lyricsync.transcription import heart as heart_mod
+    python = tmp_path / "python"; python.write_text("")
+    script = tmp_path / "script"; script.write_text("")
+    cancelled = threading.Event(); cancelled.set(); calls = []
+    transcriber = heart_mod.HeartTranscriber(python, script, use_vad=False, cancel_event=cancelled)
+    class Child:
+        pid=77; returncode=None
+        def __init__(self,*a,**kw): calls.append(("spawn", kw.get("creationflags")))
+        def communicate(self,timeout=None):
+            if len(calls)==1: raise subprocess.TimeoutExpired("heart", timeout)
+            self.returncode=-1; return "", ""
+        def kill(self): calls.append(("kill",))
+    monkeypatch.setattr(heart_mod.os, "name", "nt")
+    monkeypatch.setattr(heart_mod.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(heart_mod.subprocess, "Popen", Child)
+    monkeypatch.setattr(heart_mod.subprocess, "run", lambda argv, **kw: calls.append(("taskkill", argv)))
+    with pytest.raises(RuntimeError, match="cancelled"):
+        transcriber.transcribe("audio")
+    assert calls[0] == ("spawn", 512)
+    assert ("taskkill", ["taskkill", "/PID", "77", "/T", "/F"]) in calls
+
+def test_heart_windows_timeout_uses_bounded_taskkill_tree_cleanup(monkeypatch, tmp_path: Path):
+    from lyricsync.transcription import heart as heart_mod
+    python = tmp_path / "python"; python.write_text("")
+    script = tmp_path / "script"; script.write_text("")
+    transcriber = heart_mod.HeartTranscriber(python, script, timeout=0, use_vad=False)
+    calls = []
+    class Child:
+        pid=88; returncode=None
+        def __init__(self,*a,**kw): pass
+        def communicate(self,timeout=None):
+            calls.append(("communicate", timeout))
+            if len(calls) == 1: raise subprocess.TimeoutExpired("heart", timeout)
+            return "", ""
+        def kill(self): calls.append(("kill",))
+    monkeypatch.setattr(heart_mod.os, "name", "nt")
+    monkeypatch.setattr(heart_mod.subprocess, "Popen", Child)
+    monkeypatch.setattr(heart_mod.subprocess, "run", lambda argv, **kw: calls.append(("taskkill", argv, kw["timeout"])))
+    with pytest.raises(subprocess.TimeoutExpired):
+        transcriber.transcribe("audio")
+    assert ("taskkill", ["taskkill", "/PID", "88", "/T", "/F"], 5) in calls
+    assert ("communicate", 5) in calls
 
 
 def test_the_modal_container_is_told_which_temperature_policy_to_use(tmp_path: Path):
@@ -203,9 +293,10 @@ def test_the_faster_whisper_constructor_actually_takes_the_option():
 # ---------------------------------------------------------------------------
 
 
-def test_the_worker_forwards_the_option_to_the_built_in_transcriber():
+def test_the_worker_forwards_the_option_to_the_built_in_transcriber(monkeypatch):
     """``_make_transcriber`` is where the option meets the dispatch chain."""
     from karaoke_backend.workers import word_sync_worker
+    monkeypatch.setattr(word_sync_worker, "_attested_accelerator", lambda *_: "cpu")
 
     default = word_sync_worker._make_transcriber("heart", use_vad=True)
     assert default.allow_temperature_fallback is False
@@ -241,6 +332,20 @@ def test_the_whisper_branch_of_the_dispatch_chain_forwards_it_too():
         {"model": "large-v3", "allow_temperature_fallback": False},
         {"model": "large-v3", "allow_temperature_fallback": True},
     ]
+
+
+def test_managed_faster_whisper_gets_explicit_device_and_compute(monkeypatch):
+    from karaoke_backend.workers import word_sync_worker
+    seen = {}
+    monkeypatch.setattr(word_sync_worker, "_attested_accelerator", lambda *_: "cuda")
+    monkeypatch.setattr(word_sync_worker, "FasterWhisperTranscriber",
+                        lambda **kwargs: seen.update(kwargs) or object())
+    word_sync_worker._make_transcriber("large-v3", use_vad=True)
+    assert seen["device"] == "cuda"
+    assert seen["compute_type"] == "float16"
+    monkeypatch.setattr(word_sync_worker, "_attested_accelerator", lambda *_: "mps")
+    with pytest.raises(RuntimeError, match="does not support"):
+        word_sync_worker._make_transcriber("large-v3", use_vad=True)
 
 
 def test_a_transcriber_plugin_is_never_handed_the_option():

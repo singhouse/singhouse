@@ -50,6 +50,35 @@ def is_enabled() -> bool:
     return True
 
 
+def readiness() -> dict[str, object]:
+    """Describe user-owned Modal configuration without substituting for it."""
+    configured = _ENABLED
+    sdk_available = False
+    if configured:
+        try:
+            import modal  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            sdk_available = True
+    token_configured = bool(
+        os.getenv("MODAL_TOKEN_ID", "").strip()
+        and os.getenv("MODAL_TOKEN_SECRET", "").strip()
+    )
+    home_raw = os.getenv("HOME", "").strip()
+    config_file = Path(home_raw).expanduser() / ".modal.toml" if home_raw else None
+    credentials_configured = token_configured or bool(
+        config_file is not None and config_file.is_file()
+    )
+    return {
+        "configured": configured,
+        "ready": configured and sdk_available and credentials_configured and bool(APP_NAME),
+        "sdk_available": sdk_available,
+        "credentials_configured": credentials_configured,
+        "app": APP_NAME,
+    }
+
+
 def _lookup(fn_name: str):
     """Resolve a deployed Modal function handle by app + function name."""
     import modal
@@ -90,18 +119,9 @@ def modal_separate(
     # deployment understands, and a pick against a stale deployment degrades to
     # the baked-in model with a loud warning instead of failing the job.
     extra = {"karaoke_model": karaoke_model} if karaoke_model else {}
-    try:
-        result = fn.remote(audio_bytes, audio_path.name, demucs_model, **extra)
-    except TypeError:
-        if not extra:
-            raise
-        logger.warning(
-            "Deployed Modal app %s does not accept karaoke_model — falling back "
-            "to its baked-in Pass-2 model. Re-run `modal deploy` to pick up %s.",
-            APP_NAME,
-            karaoke_model,
-        )
-        result = fn.remote(audio_bytes, audio_path.name, demucs_model)
+    # A configured model is part of the requested result.  A stale deployment
+    # must fail loudly rather than silently run its baked-in substitute.
+    result = fn.remote(audio_bytes, audio_path.name, demucs_model, **extra)
 
     if not result.get("ok"):
         raise RuntimeError(f"Modal separation error: {result.get('error')}")

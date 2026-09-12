@@ -8,6 +8,7 @@ import asyncio
 from contextlib import contextmanager, redirect_stdout
 import importlib.metadata
 import importlib.util
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import signal
 import shutil
 import socket
 import struct
+import stat
 import sys
 import tempfile
 import threading
@@ -77,6 +79,106 @@ def kill_owned_tree():
     if os.name == "nt":
         os._exit(1)  # Kernel closes the held job and terminates descendants.
     os.killpg(os.getpid(), signal.SIGKILL)
+
+
+def windows_durable_replace(source, destination, directories, kernel=None):
+    """Write-through replacement plus an OS metadata-flush handle.
+
+    Directory flushing is not available on every Windows filesystem. A volume
+    flush is a stricter fallback and can be denied to an ordinary account; in
+    that case fail before replacement rather than report durable activation.
+    """
+    import ctypes
+    from ctypes import wintypes
+    if kernel is None:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    kernel.FlushFileBuffers.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    kernel.MoveFileExW.restype = wintypes.BOOL
+    handles = []
+
+    def acquire(path, flags):
+        handle = kernel.CreateFileW(str(path), 0xC0000000, 7, None, 3, flags, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            return None
+        if not kernel.FlushFileBuffers(handle):
+            kernel.CloseHandle(handle)
+            return None
+        return handle
+
+    try:
+        for directory in directories:
+            handle = acquire(directory, 0x02200000)  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+            if handle is None:
+                for held in handles:
+                    kernel.CloseHandle(held)
+                handles.clear()
+                drives = {source.drive, destination.drive}
+                if any(not re.fullmatch(r"[A-Za-z]:", drive) for drive in drives):
+                    raise RuntimeError("Native metadata flush is unavailable for this Windows volume")
+                for drive in drives:
+                    volume = acquire("\\\\.\\" + drive, 0)
+                    if volume is None:
+                        raise RuntimeError("Windows denied both directory and volume metadata flush; activation was not performed")
+                    handles.append(volume)
+                break
+            handles.append(handle)
+        if source != destination and not kernel.MoveFileExW(str(source), str(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
+            raise RuntimeError("Windows write-through runtime replacement failed")
+        if any(not kernel.FlushFileBuffers(handle) for handle in handles):
+            raise RuntimeError("Windows could not confirm durable runtime metadata")
+    finally:
+        for handle in handles:
+            kernel.CloseHandle(handle)
+
+
+def durable_replace(source: Path, destination: Path):
+    """Commit a local file/tree only if its bytes and directory entries flush."""
+    if not source.is_absolute() or not destination.is_absolute() or source.is_symlink() or destination.is_symlink():
+        raise RuntimeError("Durable replacement requires absolute non-symlink paths")
+    directories = set()
+    paths = list(source.rglob("*")) if source.is_dir() else []
+    paths.append(source)
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeError("Cannot commit a runtime containing symbolic links")
+        if path.is_dir():
+            directories.add(path)
+        elif path.is_file():
+            descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise RuntimeError("Runtime payload contains a non-regular file")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            raise RuntimeError("Cannot commit a non-regular runtime payload")
+    # Include ancestors: a newly created store itself must survive a restart.
+    directories.update(source.parents)
+    directories.update(destination.parents)
+    ordered = sorted(directories, key=lambda path: len(path.parts), reverse=True)
+    if os.name == "nt":
+        windows_durable_replace(source, destination, ordered)
+    else:
+        handles = []
+        try:
+            for directory in ordered:
+                descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+                handles.append(descriptor)
+                os.fsync(descriptor)  # Unsupported metadata sync fails before rename.
+            os.replace(source, destination)
+            for descriptor in handles:
+                os.fsync(descriptor)
+        finally:
+            for descriptor in handles:
+                os.close(descriptor)
+    return {"schema": 1, "durable": True}
 
 
 def validate_root(root: Path) -> Path:
@@ -179,6 +281,130 @@ def persistent_environment(runtime: Path, origin: str, password: str, native: Pa
         raise RuntimeError("Invalid desktop settings; existing data has been preserved")
     env["SESSION_SECRET"] = config["sessionSecret"]
     env["PATH"] = str(native / "ffmpeg/bin")
+    return env
+
+
+def processing_environment(runtime: Path, identity: dict, processing: Path | None,
+                           models: Path | None, probe: dict | None = None,
+                           model_policy: dict | None = None) -> dict[str, str]:
+    """Recheck selected immutable files before giving workers executable paths."""
+    env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
+           "KARAOKE_PROCESSING_ACCELERATOR": "",
+           "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
+           "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+           "TORCH_HOME": str(runtime / "cache/torch"),
+           "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
+
+    def verify(directory: Path, store: str, kind: str):
+        expected_parent = runtime.parent / store / "packs"
+        if directory.parent != expected_parent or not re.fullmatch(r"[a-f0-9]{64}", directory.name):
+            raise RuntimeError("Invalid managed processing path")
+        for ancestor in (expected_parent.parent, expected_parent, directory):
+            if ancestor.is_symlink():
+                raise RuntimeError("Managed processing directories must not be symbolic links")
+        descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise RuntimeError("Managed processing manifest must be a regular file")
+            raw = stream.read()
+        if hashlib.sha256(raw).hexdigest() != directory.name:
+            raise RuntimeError("Managed processing manifest was modified")
+        manifest = json.loads(raw)
+        if manifest.get("schema") != 1 or manifest.get("kind") != kind:
+            raise RuntimeError("Invalid managed processing manifest")
+        allowed = {"manifest.json"}
+        for record in manifest["files"]:
+            if (not isinstance(record.get("path"), str)
+                    or any(not re.fullmatch(r"[A-Za-z0-9._+-]+", part) or part.endswith(".")
+                           for part in record["path"].split("/"))):
+                raise RuntimeError("Invalid managed processing file path")
+            relative = Path(record["path"])
+            if relative.is_absolute() or any(part in {"..", "."} for part in relative.parts):
+                raise RuntimeError("Invalid managed processing file path")
+            path = directory / relative
+            name = relative.as_posix()
+            if name in allowed:
+                raise RuntimeError("Duplicate managed processing file path")
+            allowed.add(name)
+            if any(parent.is_symlink() for parent in (path, *path.parents) if parent != directory.parent):
+                raise RuntimeError("Managed processing files must not be symbolic links")
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size != record["size"] or hashlib.file_digest(stream, "sha256").hexdigest() != record["sha256"]:
+                    raise RuntimeError("Managed processing file verification failed")
+        actual = set()
+        for path in directory.rglob("*"):
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise RuntimeError("Unexpected managed processing file type")
+            if path.is_file():
+                actual.add(path.relative_to(directory).as_posix())
+        if actual != allowed:
+            raise RuntimeError("Managed processing file inventory does not match its manifest")
+        if not isinstance(manifest.get("models"), list) or len(set(manifest["models"])) != len(manifest["models"]):
+            raise RuntimeError("Invalid or duplicate managed model IDs")
+        return manifest
+
+    model_manifest = verify(models, "model-cache", "models") if models else None
+    if model_manifest:
+        from urllib.parse import urlparse
+        if model_policy is None:
+            model_policy = json.loads(Path(__file__).with_name("models.json").read_text())
+        if model_policy.get("schema") != 1 or not model_manifest["models"]:
+            raise RuntimeError("Invalid application model policy")
+        expected_files = {}
+        for model_id in model_manifest["models"]:
+            entries = [entry for entry in model_policy["models"] if entry["id"] == model_id]
+            if len(entries) != 1 or not entries[0].get("files"):
+                raise RuntimeError("Model set is not defined by the application policy")
+            for record in entries[0]["files"]:
+                if record["path"] in expected_files:
+                    raise RuntimeError("Overlapping model policy inventories")
+                expected_files[record["path"]] = record
+        if len(expected_files) != len(model_manifest["files"]):
+            raise RuntimeError("Model inventory does not match application policy")
+        for record in model_manifest["files"]:
+            locked = expected_files.get(record["path"])
+            url = urlparse(record["url"])
+            if not locked or any(record.get(key) != locked.get(key) for key in ("path", "revision", "sha256", "size", "url", "executable")):
+                raise RuntimeError("Model file differs from immutable application policy")
+            if (record["executable"] is not False or url.scheme != "https" or url.username or url.password
+                    or url.fragment or url.hostname not in model_policy["allowedHosts"]
+                    or not re.fullmatch(r"[a-f0-9]{40,64}", record["revision"])
+                    or record["revision"] not in url.path.split("/")):
+                raise RuntimeError("Invalid upstream model policy source")
+        env.update({"HF_HOME": str(models / "huggingface"),
+                    "TORCH_HOME": str(models / "torch"),
+                    "KARAOKE_MODEL_DIR": str(models / "audio-separator")})
+    if processing:
+        manifest = verify(processing, "processing", "processing")
+        for key in ("appVersion", "backendVersion", "lyricsyncVersion", "platform", "arch"):
+            if manifest.get(key) != identity[key]:
+                raise RuntimeError("Processing runtime is incompatible with this app")
+        python_record = next((record for record in manifest["files"]
+                              if record["path"] == manifest.get("python") and record["executable"]), None)
+        if python_record is None:
+            raise RuntimeError("Processing runtime has no managed Python executable")
+        python_path = str(processing / python_record["path"])
+        fixed_probe = {"runtimeManifestId": processing.name, "pythonPath": python_path,
+                       "pythonSha256": python_record["sha256"], "probePassed": True,
+                       "accelerator": manifest["accelerator"], "verifiedCapabilities": [],
+                       "capabilitiesReady": False}
+        expected_component_keys = set(manifest.get("probe", {}).get("modules", []))
+        probe_passed = (isinstance(probe, dict) and set(probe) == {*fixed_probe, "components"}
+                        and all(probe[key] == value for key, value in fixed_probe.items())
+                        and isinstance(probe["components"], dict)
+                        and set(probe["components"]) == expected_component_keys
+                        and all(isinstance(value, str) and value for value in probe["components"].values()))
+        capabilities_ready = probe_passed and probe["capabilitiesReady"] is True
+        env["KARAOKE_PROCESSING_PYTHON"] = python_path if capabilities_ready else ""
+        env["KARAOKE_DEMUCS_PYTHON"] = env["KARAOKE_PROCESSING_PYTHON"]
+        env["KARAOKE_PROCESSING_ACCELERATOR"] = manifest["accelerator"] if capabilities_ready else ""
+        env["KARAOKE_AUDIO_SEPARATOR_DEVICE"] = ({"cpu": "cpu", "cuda": "cuda", "metal": "mps"}[manifest["accelerator"]]
+                                                   if capabilities_ready else "")
+        attestation = (probe if probe_passed else
+                       {**fixed_probe, "components": {}, "probePassed": False})
+        env["KARAOKE_DESKTOP_PROCESSING_JSON"] = json.dumps(attestation)
     return env
 
 
@@ -338,7 +564,8 @@ def runtime_directory(supplied: Path | None = None):
         shutil.rmtree(supplied, ignore_errors=False)
 
 
-def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None) -> None:
+def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
+        processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None) -> None:
     tree_job = own_process_tree() if native else None
     parent_closed = watch_parent(sys.stdin.fileno(), enforce_timeout=True) if native else None
     identity = validate_native(native) if native else None
@@ -364,6 +591,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
             password, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
             environment = persistent_environment(runtime, origin, password, native) if native else isolated_environment(runtime, origin, password)
+            if native:
+                environment.update(processing_environment(runtime, identity, processing, models, processing_probe))
             os.environ.clear()
             os.environ.update(environment)
             if not native:
@@ -416,11 +645,19 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--root", type=Path)
     modes.add_argument("--native", type=Path, help="Bundled native resource directory")
+    modes.add_argument("--durable-replace", nargs=2, type=Path, metavar=("SOURCE", "DESTINATION"),
+                       help="Fixed desktop runtime durability helper")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--runtime", type=Path, help="Empty private directory created by the parent")
+    parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
+    parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
+    parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
     args = parser.parse_args()
     try:
-        run(args.root, args.demo, args.runtime, args.native)
+        if args.durable_replace:
+            print(json.dumps(durable_replace(*args.durable_replace)), flush=True)
+        else:
+            run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

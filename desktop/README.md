@@ -88,6 +88,113 @@ Each payload includes `manifest.json`, `files.json`, `provenance.json`, and
 `notices/` to identify its runtime, file hashes, upstream inputs, installed
 packages, and licenses. Preserve these with the artifact.
 
+## Optional processing packs and offline models
+
+The packaged application's Processing menu reports playback, transcription,
+separation, and user-owned Modal readiness separately. Choose “Install processing
+runtime or model cache…” to select an explicit local JSON manifest. Runtime
+manifests authorize executable code: obtain them from a source you trust and
+review the displayed size before installation. No production download catalog,
+publication service, or signing trust root is configured by this prototype.
+
+Processing uses a separate relocatable Python environment. CPU, CUDA, and Metal
+are separate pack variants; platform, architecture, and application package
+versions must match. `locks/processing-targets.json` lists build inputs, not
+qualified hardware. A declared CUDA or Metal variant alone does not demonstrate
+that its drivers or hardware work. Installing a pack never changes the small
+playback environment or installs packages into it.
+
+After hash verification, the application runs the fixed `python-imports-v1`
+self-test using the selected interpreter before activation and again on startup.
+It checks Python/application versions, imports the modules required by declared
+capabilities, and checks that the selected accelerator is available. Failure,
+invalid output, or timeout prevents activation; a failed startup check leaves
+playback available and reports the processing problem. This is an operability
+check, not model-load, model-quality, or physical hardware qualification. Imports
+alone therefore never mark a processing capability ready. This release ships no
+tiny, application-owned inference fixtures, so its trusted processing lock list
+is intentionally empty and processing remains unavailable. A later release must
+ship both an approved input-lock hash and bounded offline inference fixtures for
+Heart and both separation passes before it may advertise those capabilities.
+
+The pack assembler consumes an already-built target environment and a complete
+input lock. The lock identifies application/Python versions, target, accelerator,
+managed Python path, capabilities, each model's capability, required model IDs,
+source commit, upstream package artifact hashes, licenses, retained notice paths,
+and every payload file's path, size,
+SHA-256, and executable flag. Unlisted files, modified inputs, and symlinks fail
+assembly. Target-specific dependency resolution and hardware qualification must
+be performed before using a resulting pack; no production processing inputs or
+weights are included in this repository.
+
+```sh
+python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
+  --lock /path/to/processing-input-lock.json --output /path/to/new-pack
+```
+
+The output includes `manifest.json`, `input-lock.json`, and content-addressed
+`blobs/`. By default its URLs refer to those local blobs; `--base-url` may declare
+an explicit HTTPS blob directory for a separately managed distribution. The
+assembler does not upload anything. Each package must name its retained license
+or notice files; the manifest embeds and hash-binds the complete input lock and
+rejects missing notice files. File hashes establish correspondence
+with a selected manifest; they do not establish publisher identity.
+Installation additionally requires the input-lock hash to appear in the
+application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+
+Installation checks free disk space, takes an exclusive lock, resumes partial
+files where supported, checks every size and hash, and synchronizes payload files
+and directory metadata through a fixed helper in the bundled playback Python.
+POSIX requires directory `fsync`; Windows uses `MoveFileExW` with
+`MOVEFILE_WRITE_THROUGH`, `FlushFileBuffers`, and a volume-flush fallback when
+directory handles cannot flush metadata. If the OS or account denies both
+metadata-flush routes, installation fails without claiming activation; the app
+does not request elevation. Both staging-to-pack moves and inactive pointer-slot
+replacement use this native durability path. Two checksummed pointer slots keep
+the previous verified selection recoverable if an interrupted commit loses new
+directory entries. This engineering contract does not establish physical Windows
+or filesystem qualification. Cancellation, checksum failures, and interrupted
+transfers preserve the previous selection. Changes take effect on restart, so
+running jobs keep the environment they started with. Old verified packs remain
+in application data under `processing/packs/`; they are not removed automatically.
+To select a retained version, install its original manifest again. Installation
+locks are held by the operating system through the bundled playback interpreter;
+process death releases them automatically, and retry preserves partial transfers.
+The persistent lock file records the owner PID, parent PID, start timestamp, and
+Linux process-start/boot evidence where available. Its existence alone does not
+mean an installation is running. Never delete or replace a lock file to bypass a
+running owner: the next attempt acquires the same inode only after its prior
+kernel lock has been released.
+
+Runtime file access uses no-follow descriptors where the platform supports them,
+with descriptor-based type, size, hash, write, and mode checks. This rejects
+symbolic-link files and avoids redirecting writes when a leaf path is replaced.
+The installation store remains inside the user's local trust boundary: Node does
+not provide a portable directory-descriptor-relative `openat` traversal, so the
+app does not claim protection from a malicious process running as the same user
+that concurrently replaces ancestor directories or installed binaries.
+
+Models are installed only after explicit selection of a `kind: "models"`
+manifest. `models.json` defines the upstream allowlist and offline cache contract.
+Only model IDs and complete immutable inventories defined by the shipped policy
+are accepted. The current policy is empty and therefore enables no production
+model selections; a user-created manifest cannot declare a model ready. Fixture
+tests supply an explicit synthetic model policy. Each non-executable model file
+must exactly match its policy's upstream revision, HTTPS URL,
+size and SHA-256; mutable branch URLs and Singhouse-hosted copies are rejected.
+The manifest's `models` array identifies the unique policy-defined model sets it contains.
+Paths begin with `huggingface/`, `torch/`, or `audio-separator/` and must reproduce
+the consuming library's complete offline cache layout, including configuration
+and tokenizer files. A weights file alone is not a complete model cache.
+Cache installation uses the same verification and activation procedure as packs.
+
+The desktop sets offline flags, directs workers to the verified cache, and never
+falls back to a paid service. A new machine has playback available while local
+processing reports missing runtime or models. Provision and test the desired
+model set before going offline. No Heart-specific model selection or download UX
+is included. User-owned Modal requires separate explicit operator configuration;
+the stock desktop does not inherit credentials or enable it automatically.
+
 ## Automated checks
 
 ```sh

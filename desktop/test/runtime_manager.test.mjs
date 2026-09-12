@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL, fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
+
+// Production passes its absolute bundled interpreter; fixtures use the test OS.
+const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
+const durabilityHelper = fileURLToPath(new URL('../backend.py', import.meta.url))
+const testTrustedLocks = new Set()
+class RuntimeManager extends NativeRuntimeManager {
+  constructor(root, identity, options) { super(root, identity, { lockPython, durabilityHelper, trustedLocks: testTrustedLocks, ...options }) }
+}
+class ModelCache extends NativeModelCache {
+  constructor(root, policy, options) { super(root, policy, { lockPython, durabilityHelper, ...options }) }
+}
+
+const sha = value => createHash('sha256').update(value).digest('hex')
+const identity = { appVersion: '0.1.0', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0', platform: 'linux', arch: 'x64' }
+
+function bindProvenance(manifest) {
+  const inputLock = { schema: 1, kind: 'processing-input', ...Object.fromEntries(
+    ['appVersion', 'backendVersion', 'lyricsyncVersion', 'pythonVersion', 'platform', 'arch', 'accelerator', 'python', 'capabilities', 'models', 'modelCapabilities']
+      .map(key => [key, structuredClone(manifest[key])])), sourceCommit: 'a'.repeat(40),
+  packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/fixture.whl', sha256: 'c'.repeat(64), notices: ['NOTICE.fixture'] }],
+  files: manifest.files.map(({ url, ...record }) => structuredClone(record)) }
+  manifest.provenance = { sourceCommit: inputLock.sourceCommit, lockSha256: sha(JSON.stringify(inputLock)),
+    inputLock: JSON.stringify(inputLock), packages: structuredClone(inputLock.packages), qualification: 'UNTESTED' }
+  testTrustedLocks.add(manifest.provenance.lockSha256)
+  return manifest
+}
+
+test('runtime manager copy stays neutral because installation dialogs surface its error messages', async () => {
+  const source = await readFile(new URL('../runtime_manager.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /\bdownload\w*/i)
+})
+
+async function fixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'processing-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const source = join(root, 'python')
+  await writeFile(source, 'fixture python')
+  const notice = join(root, 'NOTICE.fixture')
+  await writeFile(notice, 'MIT notice')
+  const manifest = bindProvenance({ schema: 1, kind: 'processing', ...identity, pythonVersion: '3.12.14', accelerator: 'cpu', python: 'python/bin/python3',
+    probe: { schema: 1, type: 'python-imports-v1', modules: ['audio_separator.separator', 'demucs.separate', 'faster_whisper', 'karaoke_backend.workers.heart_transcriptor', 'lyricsync.transcription.heart'] },
+    capabilities: ['transcription', 'separation'], models: ['whisper'], modelCapabilities: { whisper: 'transcription' },
+    files: [{ path: 'python/bin/python3', url: pathToFileURL(source).href, size: 14, sha256: sha('fixture python'), executable: true },
+      { path: 'NOTICE.fixture', url: pathToFileURL(notice).href, size: 10, sha256: sha('MIT notice'), executable: false }] })
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  // Byte-transfer fixtures use inert executable bytes; process/protocol behavior
+  // is tested separately with an actual child below.
+  manager.probe = async () => {}
+  return { root, source, manifest, manager }
+}
+
+test('installs, verifies and persists selection across restart; retains prior runtime', async t => {
+  const { root, source, manifest, manager } = await fixture(t)
+  const first = await manager.install(manifest)
+  assert.equal((await manager.active()).id, first.id)
+  await writeFile(source, 'second python!')
+  const updated = structuredClone(manifest)
+  updated.files[0].sha256 = sha('second python!')
+  bindProvenance(updated)
+  const second = await manager.install(updated)
+  assert.notEqual(first.id, second.id)
+  assert.deepEqual((await readdir(join(root, 'processing/packs'))).sort(), [first.id, second.id].sort())
+  assert.equal((await new RuntimeManager(join(root, 'processing'), identity).active()).id, second.id)
+  await writeFile(join(second.directory, second.manifest.python), 'tampered')
+  assert.equal((await manager.active()).id, first.id)
+})
+
+test('bad checksum and low disk leave the previous active pack unchanged', async t => {
+  const { root, manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  const corrupt = structuredClone(manifest)
+  corrupt.files[0].sha256 = '0'.repeat(64)
+  bindProvenance(corrupt)
+  await assert.rejects(manager.install(corrupt), /checksum/)
+  assert.equal((await manager.active()).id, installed.id)
+  const full = new RuntimeManager(join(root, 'processing'), identity, { diskFree: async () => 1 })
+  await assert.rejects(full.install(manifest), /disk space/)
+  assert.equal((await manager.active()).id, installed.id)
+})
+
+test('rejects incompatible packs, traversal, remote file shares and duplicate paths', async t => {
+  const { manifest } = await fixture(t)
+  for (const mutate of [m => m.arch = 'arm64', m => m.files[0].path = '../escape', m => m.files[0].url = 'http://example.org/python',
+    m => m.files[0].url = 'file://server/share/python', m => m.files.push(m.files[0]), m => m.files[0].path = 'manifest.json']) {
+    const changed = structuredClone(manifest); mutate(changed)
+    assert.throws(() => validateProcessingManifest(changed, identity, [...testTrustedLocks]))
+  }
+})
+
+test('rejects missing, malformed, or detached executable provenance and incomplete probes', async t => {
+  const { manifest } = await fixture(t)
+  const mutations = [
+    m => { delete m.provenance.inputLock },
+    m => { m.provenance.inputLock = '{' },
+    m => { m.provenance.lockSha256 = '0'.repeat(64) },
+    m => { m.provenance.packages[0].notices = [] },
+    m => { m.probe.modules = ['faster_whisper'] },
+    m => { m.modelCapabilities = {} },
+  ]
+  for (const mutate of mutations) {
+    const changed = structuredClone(manifest)
+    mutate(changed)
+    assert.throws(() => validateProcessingManifest(changed, identity, [...testTrustedLocks]))
+  }
+})
+
+test('main-to-backend attestation helper emits one exact fail-closed schema', async t => {
+  const { manifest } = await fixture(t)
+  const active = { id: 'd'.repeat(64), directory: '/runtime/pack', manifest }
+  const components = Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0']))
+  const attestation = processingAttestation(active, { schema: 1, accelerator: 'cpu', components,
+    verifiedCapabilities: [], capabilitiesReady: false })
+  assert.deepEqual(Object.keys(attestation).sort(), ['accelerator', 'capabilitiesReady', 'components', 'probePassed', 'pythonPath', 'pythonSha256', 'runtimeManifestId', 'verifiedCapabilities'].sort())
+  assert.equal(attestation.capabilitiesReady, false)
+  assert.throws(() => processingAttestation(active, { schema: 1, accelerator: 'cuda', components }))
+})
+
+test('exclusive lock blocks concurrent installation and cancellation keeps partial bytes for retry', async t => {
+  const { root, manifest } = await fixture(t)
+  const remote = structuredClone(manifest)
+  remote.files[0].url = 'https://example.org/python'
+  const controller = new AbortController()
+  let calls = 0
+  const fetchImpl = async (_url, options) => {
+    calls++
+    if (calls === 1) return { status: 200, body: (async function* () {
+      yield Buffer.from('fixture ')
+      controller.abort()
+      throw new Error('interrupted')
+    })() }
+    assert.deepEqual(options.headers, { Range: 'bytes=8-' })
+    return { status: 206, headers: new Headers({ 'content-range': 'bytes 8-13/14' }), body: (async function* () { yield Buffer.from('python') })() }
+  }
+  const manager = new RuntimeManager(join(root, 'processing'), identity, { fetchImpl })
+  manager.probe = async () => {}
+  await mkdir(manager.root)
+  const liveLock = await acquireInstallLock(join(manager.root, 'install.lock'), lockPython)
+  await assert.rejects(manager.install(remote), /lock/)
+  await liveLock.release()
+  await assert.rejects(manager.install(remote, { signal: controller.signal }))
+  assert.equal(await manager.active(), null)
+  await manager.install(remote)
+  assert.equal(calls, 2)
+})
+
+test('kernel locks recover crashed owners without unlinking the inode or discarding partials', async t => {
+  const { root, manifest, manager } = await fixture(t)
+  await mkdir(manager.root)
+  const partial = join(manager.root, 'retained.partial')
+  await writeFile(partial, 'resume-me')
+  const path = join(manager.root, 'install.lock')
+  const previous = await acquireInstallLock(path, lockPython)
+  const inode = (await stat(path)).ino
+  const metadata = JSON.parse(await readFile(path, 'utf8'))
+  assert.equal(metadata.parentPid, process.pid)
+  assert.match(metadata.startedAtNs, /^[0-9]+$/)
+  if (process.platform === 'linux') {
+    assert.match(metadata.startTicks, /^[0-9]+$/)
+    assert.ok(metadata.bootId)
+  }
+  const lost = new Promise(resolveLost => previous.signal.addEventListener('abort', resolveLost, { once: true }))
+  process.kill(metadata.pid, 'SIGKILL')
+  await lost
+  await assert.rejects(previous.release(), /unexpectedly/)
+  const racing = await Promise.allSettled([
+    acquireInstallLock(path, lockPython), acquireInstallLock(path, lockPython),
+  ])
+  assert.equal(racing.filter(result => result.status === 'fulfilled').length, 1)
+  await racing.find(result => result.status === 'fulfilled').value.release()
+  await manager.install(manifest)
+  assert.equal((await stat(path)).ino, inode)
+  assert.equal(await readFile(partial, 'utf8'), 'resume-me')
+  assert.notEqual(JSON.parse(await readFile(path, 'utf8')).nonce, metadata.nonce)
+  assert.ok(await manager.active())
+})
+
+test('server ignoring Range restarts transfer without duplicating bytes', async t => {
+  const { root, manifest } = await fixture(t)
+  manifest.files[0].url = 'https://example.org/python'
+  const partial = join(root, 'partial')
+  await writeFile(partial, 'fixture ')
+  const manager = new RuntimeManager(join(root, 'processing'), identity, { fetchImpl: async () => new Response('fixture python') })
+  await manager.transfer(manifest.files[0], partial)
+  assert.equal(await readFile(partial, 'utf8'), 'fixture python')
+})
+
+test('model cache accepts immutable upstream inputs only and verifies offline after restart', async t => {
+  const { root } = await fixture(t)
+  const revision = 'a'.repeat(40)
+  const manifest = { schema: 1, kind: 'models', models: ['whisper'], files: [{ path: 'huggingface/hub/model.bin',
+    url: `https://huggingface.co/upstream/model/resolve/${revision}/model.bin`, revision,
+    sha256: sha('model'), size: 5, executable: false }] }
+  const policy = { schema: 1, allowedHosts: ['huggingface.co'], models: [{ id: 'whisper', files: structuredClone(manifest.files) }] }
+  const cache = new ModelCache(join(root, 'models'), policy, { fetchImpl: async () => new Response('model') })
+  await cache.install(manifest)
+  assert.deepEqual((await new ModelCache(join(root, 'models'), policy).active()).manifest.models, ['whisper'])
+  for (const mutate of [m => m.files[0].url = 'https://mirror.example/model', m => m.files[0].revision = 'main',
+    m => m.files[0].executable = true, m => m.files[0].path = '../model', m => m.models.push('whisper'),
+    m => m.files[0].sha256 = sha('other'), m => m.files[0].size = 1, m => m.models = ['arbitrary']]) {
+    const bad = structuredClone(manifest); mutate(bad)
+    assert.throws(() => validateModelManifest(bad, policy))
+  }
+  assert.throws(() => validateModelManifest(manifest, { ...policy, models: [] }), /not defined/)
+  const extra = structuredClone(manifest)
+  extra.files.push({ ...manifest.files[0], path: 'huggingface/extra' })
+  assert.throws(() => validateModelManifest(extra, policy), /inventory/)
+})
+
+test('native helper durably commits when Node directory sync is unavailable, retaining the prior slot on interruption', async t => {
+  const { root, manifest, source } = await fixture(t)
+  let stopAt
+  const manager = new RuntimeManager(join(root, 'processing'), identity, {
+    directorySync: async () => false,
+    activationHook: async stage => { if (stage === stopAt) throw new Error('simulated crash') },
+  })
+  manager.probe = async () => {}
+  const first = await manager.install(manifest)
+  await writeFile(source, 'second python!')
+  const second = structuredClone(manifest)
+  second.files[0].sha256 = sha('second python!')
+  bindProvenance(second)
+  for (const stage of ['pack-durable', 'pointer-open']) {
+    stopAt = stage
+    await assert.rejects(manager.install(second), /simulated crash/)
+    assert.equal((await new RuntimeManager(manager.root, identity).active()).id, first.id)
+  }
+  stopAt = undefined
+  const installed = await manager.install(second)
+  assert.equal((await manager.active()).id, installed.id)
+  // A power-loss-like torn newest slot must retain the previous pointer.
+  const newest = (await manager.readPointers())[0]
+  await writeFile(join(manager.root, `active.${newest.slot}.json`), '{"schema":2')
+  assert.equal((await new RuntimeManager(manager.root, identity).active()).id, first.id)
+  stopAt = 'pointer-durable'
+  await assert.rejects(manager.install(second), /simulated crash/)
+  assert.equal((await new RuntimeManager(manager.root, identity).active()).id, installed.id)
+})
+
+test('loss of unsynced new pack and pointer entries cannot discard the previous activation', async t => {
+  const { root, manifest, source, manager } = await fixture(t)
+  const first = await manager.install(manifest)
+  await writeFile(source, 'second python!')
+  const second = structuredClone(manifest)
+  second.files[0].sha256 = sha('second python!')
+  bindProvenance(second)
+  const nativeReplace = manager.durableReplace.bind(manager)
+  for (const failAt of ['pack', 'pointer']) {
+    let unsyncedEntry
+    manager.durableReplace = async (from, to) => {
+      const pointer = to.endsWith('.json')
+      if (pointer === (failAt === 'pointer')) {
+        await rename(from, to)
+        unsyncedEntry = to
+        throw new Error('metadata flush failed after rename')
+      }
+      return nativeReplace(from, to)
+    }
+    await assert.rejects(manager.install(second), /metadata flush failed/)
+    assert.ok(unsyncedEntry)
+    // Simulate power loss dropping the entry whose metadata never reached disk.
+    await rm(unsyncedEntry, { recursive: failAt === 'pack', force: true })
+    assert.equal((await new RuntimeManager(manager.root, identity).active()).id, first.id)
+  }
+  manager.durableReplace = nativeReplace
+  const committed = await manager.install(second)
+  assert.equal((await new RuntimeManager(manager.root, identity).active()).id, committed.id)
+})
+
+test('no-follow descriptors reject partial symlinks and path swaps without writing the target', { skip: process.platform === 'win32' }, async t => {
+  const { root, manifest } = await fixture(t)
+  const partial = join(root, 'download.partial'), victim = join(root, 'victim')
+  await writeFile(victim, 'private contents')
+  await symlink(victim, partial)
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  await assert.rejects(manager.transfer(manifest.files[0], partial))
+  assert.equal(await readFile(victim, 'utf8'), 'private contents')
+  await rm(partial)
+  manifest.files[0].url = 'https://example.org/python'
+  manager.fetch = async () => {
+    await rename(partial, join(root, 'owned-descriptor'))
+    await symlink(victim, partial)
+    return new Response('fixture python')
+  }
+  await assert.rejects(manager.transfer(manifest.files[0], partial), /path changed/)
+  assert.equal(await readFile(victim, 'utf8'), 'private contents')
+  assert.equal(await readFile(join(root, 'owned-descriptor'), 'utf8'), 'fixture python')
+})
+
+test('fixed self-test runs before activation and on offline restart; failure and timeout retain active pointer', { skip: process.platform === 'win32' }, async t => {
+  const { root, source, manifest } = await fixture(t)
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  const protocol = { schema: 1, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
+    lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
+    capabilities: manifest.capabilities, hardwareAvailable: true,
+    components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])) }
+  const script = `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(protocol)}'\n`
+  await writeFile(source, script)
+  manifest.files[0].size = Buffer.byteLength(script)
+  manifest.files[0].sha256 = sha(script)
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  const restarted = new RuntimeManager(join(root, 'processing'), identity, { fetchImpl: () => { throw new Error('offline') } })
+  assert.equal((await restarted.probe(await restarted.active())).schema, 1)
+  for (const badScript of ['#!/bin/sh\nprintf invalid\n', '#!/bin/sh\nexec sleep 5\n']) {
+    await writeFile(source, badScript)
+    const bad = structuredClone(manifest)
+    bad.files[0].size = Buffer.byteLength(badScript)
+    bad.files[0].sha256 = sha(badScript)
+    bindProvenance(bad)
+    await assert.rejects(manager.install(bad, { probeTimeout: 50 }))
+    assert.equal((await manager.active()).id, installed.id)
+  }
+})

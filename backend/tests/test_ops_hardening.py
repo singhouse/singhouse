@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import types
+import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -37,6 +38,14 @@ from karaoke_backend.jobs.queue import (
 )
 from karaoke_backend.models.song import Job, JobKind, Song
 from karaoke_backend.workers import modal_worker
+
+def test_expiry_update_rechecks_lease_after_candidate_selection():
+    """A heartbeat between SELECT and UPDATE must make the CAS miss."""
+    source = inspect.getsource(job_queue.requeue_expired)
+    # Both terminalize and requeue statements repeat these predicates; the
+    # initial candidate SELECT alone is not sufficient against a heartbeat.
+    assert source.count("Job.lease_expires_at < now") >= 3
+    assert source.count(".returning(Job.id)") == 2
 
 
 def test_sync_migration_engine_sets_file_sqlite_pragmas(tmp_path: Path):
@@ -389,11 +398,15 @@ async def test_expired_lease_fails_a_job_that_used_up_its_attempts(
     stale = datetime.now(timezone.utc) - timedelta(seconds=30)
     exhausted_id = "exhausted"
     async with AsyncSessionLocal() as db:
+        song = Song(artist="A", title="B", filename="x.wav", status="processing", owner_id=1)
+        db.add(song)
+        await db.flush()
+        song_id = song.id
         db.add_all(
             [
                 Job(
                     id=exhausted_id, kind=JobKind.INGEST.value, status="running",
-                    attempts=2, claimed_by="dead-worker", lease_expires_at=stale,
+                    song_id=song_id, attempts=2, claimed_by="dead-worker", lease_expires_at=stale,
                 ),
                 Job(
                     id="one-left", kind=JobKind.INGEST.value, status="running",
@@ -421,12 +434,14 @@ async def test_expired_lease_fails_a_job_that_used_up_its_attempts(
             assert exhausted.phase == "failed"
             assert exhausted.message == job_queue.LEASE_EXPIRED_MESSAGE
             assert exhausted.error_message == job_queue.LEASE_EXPIRED_MESSAGE
+            failed_song = await db.get(Song, song_id)
+            assert failed_song.status == "failed"
+            assert failed_song.error_message == job_queue.LEASE_EXPIRED_MESSAGE
             assert (await db.get(Job, "one-left")).status == "queued"
 
         # Retained as the only input a retry could ever replay phase 1 from.
-        # (The song row is not flipped to `failed` on this path, so the retry
-        # route cannot reach it yet — that is the song's defect, not the
-        # file's, and the file must be there when it is fixed.)
+        # The attached song is failed in the same transaction, making retry
+        # reachable while its only recoverable input remains present.
         assert upload.is_file(), "the only recoverable input must survive"
     finally:
         upload.unlink(missing_ok=True)
@@ -557,7 +572,7 @@ async def test_lifespan_sweeps_after_schema_and_starts_the_worker_after_plugins(
 
 
 @pytest.mark.asyncio
-async def test_mix_and_finalize_runs_probe_transcode_and_mix_off_loop_thread(
+async def test_mix_and_finalize_uses_owned_async_children(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -574,17 +589,16 @@ async def test_mix_and_finalize_runs_probe_transcode_and_mix_off_loop_thread(
     for path in (drums, bass, other):
         path.write_bytes(b"part")
 
-    event_loop_thread = threading.get_ident()
-    calls: list[tuple[str, int]] = []
+    calls: list[str] = []
 
-    def fake_run(cmd, **_kwargs):
-        calls.append((cmd[0], threading.get_ident()))
+    async def fake_run(cmd, **_kwargs):
+        calls.append(cmd[0])
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="flt\n", stderr="")
         Path(cmd[-1]).write_bytes(b"ffmpeg output")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(modal_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(modal_worker, "_run_subprocess", fake_run)
     progress_calls: list[tuple[str, int, str]] = []
 
     async def progress(status: str, pct: int, message: str) -> None:
@@ -598,9 +612,8 @@ async def test_mix_and_finalize_runs_probe_transcode_and_mix_off_loop_thread(
         progress,
     )
 
-    assert [name for name, _thread in calls].count("ffprobe") == 2
-    assert [name for name, _thread in calls].count("ffmpeg") == 4
-    assert all(thread != event_loop_thread for _name, thread in calls)
+    assert calls.count("ffprobe") == 2
+    assert calls.count("ffmpeg") == 4
     assert progress_calls == [
         ("mixing", 75, "Mixing instrumental track..."),
         ("mixing", 85, "Instrumental ready"),

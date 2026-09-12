@@ -25,12 +25,14 @@ import inspect
 import logging
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from typing import Callable, Awaitable, Optional
 
 from karaoke_backend import plugins
 from karaoke_backend.workers import karaoke_models, modal_offload
+from karaoke_backend.workers.managed_processing import InvalidAttestation, accelerator_device
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,10 @@ SEPARATOR_ENV = "KARAOKE_SEPARATOR"
 # resolving it spawns /usr/bin/pythonX.Y with no venv site-packages — and points
 # .parent at /usr/bin, breaking the pass-2 audio-separator lookup as well.
 DEMUCS_PYTHON = Path(
-    os.path.abspath(os.getenv("KARAOKE_DEMUCS_PYTHON", ".venv-demucs/bin/python"))
+    os.path.abspath(
+        os.getenv("KARAOKE_PROCESSING_PYTHON")
+        or os.getenv("KARAOKE_DEMUCS_PYTHON", ".venv-demucs/bin/python")
+    )
 )
 
 # Pass 1: Demucs model for vocal/instrumental separation
@@ -67,12 +72,30 @@ KARAOKE_MODEL = os.getenv(
 # lead + silent backing), so a bad cache silently produces empty backing stems.
 KARAOKE_MODEL_DIR = os.getenv(
     "AUDIO_SEPARATOR_MODEL_DIR",
-    str(Path("ckpt/audio-separator-models").resolve()),
+    os.getenv("KARAOKE_MODEL_DIR", str(Path("ckpt/audio-separator-models").resolve())),
 )
 
 
 class StemSeparationError(Exception):
     """Raised when stem separation fails."""
+
+def configured_accelerator() -> str:
+    """Use a verified desktop device, preserving the legacy CUDA default."""
+    try:
+        return accelerator_device(capability="separation") or "cuda"
+    except InvalidAttestation as exc:
+        raise StemSeparationError(str(exc)) from exc
+
+
+def configured_pass2_device() -> str | None:
+    """Return audio-separator's managed device, or None in legacy mode."""
+    if not os.getenv("KARAOKE_DESKTOP_PROCESSING_JSON", "").strip():
+        return None
+    device = configured_accelerator()
+    declared = os.getenv("KARAOKE_AUDIO_SEPARATOR_DEVICE", "").strip()
+    if declared != device or declared not in {"cpu", "cuda", "mps"}:
+        raise StemSeparationError("Audio-separator device does not match attestation")
+    return declared
 
 
 def _find_demucs_output(out_dir: Path, model_name: str, audio_stem: str) -> Optional[Path]:
@@ -89,13 +112,76 @@ def _find_demucs_output(out_dir: Path, model_name: str, audio_stem: str) -> Opti
     return None
 
 
-def _run_subprocess(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
-    """Run a subprocess and raise on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+async def _run_subprocess(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
+    """Run one job-owned child and reap it before returning or unwinding.
+
+    ``subprocess.run`` in an executor outlives cancellation of the awaiting
+    coroutine.  That allowed a timed-out job to release the worker's sole
+    capacity slot while Demucs/ffmpeg was still consuming it.  Keep the child
+    handle in the task which owns the job and always wait after terminating.
+    """
+    spawn_options = (
+        {"start_new_session": True}
+        if os.name == "posix"
+        else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    )
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **spawn_options,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        try:
+            if process.returncode is None and os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.returncode is None:
+                # taskkill receives an argv vector (no shell) and /T terminates
+                # descendants before the direct child is awaited below.
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/PID", str(process.pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=5)
+                if process.returncode is None:
+                    process.kill()
+        except (OSError, ProcessLookupError, asyncio.TimeoutError):
+            logger.debug("Child tree exited during termination", exc_info=True)
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.error("Child %s did not exit after forced termination", process.pid)
+        raise
+    result = subprocess.CompletedProcess(
+        cmd,
+        process.returncode,
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+    )
     if result.returncode != 0:
         raise StemSeparationError(
             f"Command failed (exit {result.returncode}):\n{result.stderr[-1000:]}"
         )
+    return result
+
+
+async def _await_subprocess(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Compatibility seam for tests and third-party patches of the old helper."""
+    result = _run_subprocess(cmd, timeout=timeout)
+    if inspect.isawaitable(result):
+        result = await result
     return result
 
 
@@ -195,10 +281,12 @@ async def run_pass2(
         "--output_dir", str(out_dir),
         "--output_format", "WAV",
     ]
+    pass2_device = configured_pass2_device()
+    if pass2_device is not None:
+        karaoke_cmd.extend(["--device", pass2_device])
     logger.info("Running karaoke separation (%s): %s", pass2_model, " ".join(karaoke_cmd))
 
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: _run_subprocess(karaoke_cmd, timeout=600))
+    await _await_subprocess(karaoke_cmd, timeout=600)
     await progress("processing", 70, "Lead/backing split complete")
 
     lead: Optional[Path] = None
@@ -289,7 +377,6 @@ async def separate_stems(
         )
 
     stems_dir.mkdir(parents=True, exist_ok=True)
-    loop = asyncio.get_event_loop()
 
     # ---------------------------------------------------------------
     # Pass 1: Demucs — vocals vs. instrumental
@@ -303,7 +390,7 @@ async def separate_stems(
     demucs_cmd = [
         str(DEMUCS_PYTHON), "-m", "demucs.separate",
         "-n", model,
-        "--device", "cuda",
+        "--device", configured_accelerator(),
         "--float32",
         "-o", str(demucs_out),
         str(audio_path),
@@ -312,8 +399,8 @@ async def separate_stems(
     await _progress("processing", 10, "Demucs running on GPU...")
 
     try:
-        await loop.run_in_executor(None, lambda: _run_subprocess(demucs_cmd))
-    except subprocess.TimeoutExpired:
+        await _await_subprocess(demucs_cmd, timeout=900)
+    except asyncio.TimeoutError:
         raise StemSeparationError("Demucs timed out after 15 minutes")
 
     await _progress("processing", 45, "Pass 1 complete")
@@ -384,12 +471,22 @@ async def _modal_separate_and_mix(
     model = DEFAULT_DEMUCS_MODEL
     await progress("processing", 5, f"Separating on Modal GPU ({modal_offload.APP_NAME})...")
     loop = asyncio.get_event_loop()
-    raw = await loop.run_in_executor(
+    future = loop.run_in_executor(
         None,
         lambda: modal_offload.modal_separate(
             audio_path, stems_dir, demucs_model=model, karaoke_model=karaoke_model
         ),
     )
+    try:
+        raw = await asyncio.shield(future)
+    except asyncio.CancelledError:
+        # The Modal client call has no cooperative cancellation handle. Keep
+        # the sole processing slot until the remote invocation has returned.
+        try:
+            await asyncio.shield(future)
+        except Exception:
+            pass
+        raise
     await progress("processing", 70, "Modal separation complete (lead/backing ready)")
     result = await _mix_and_finalize(
         stems_dir, raw["drums"], raw["bass"], raw["other"], progress
@@ -398,7 +495,7 @@ async def _modal_separate_and_mix(
     return result
 
 
-def _ensure_s16(path: Path) -> None:
+async def _ensure_s16(path: Path) -> None:
     """Re-encode a stem to 16-bit PCM in place if it isn't already.
 
     audio-separator inherits its input's bit depth, so the MPS path can return
@@ -409,21 +506,23 @@ def _ensure_s16(path: Path) -> None:
     if not path.exists():
         return
     try:
-        probe = subprocess.run(
+        probe = await _await_subprocess(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=sample_fmt", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=30,
+             "-show_entries", "stream=sample_fmt", "-of", "csv=p=0", str(path)], 30
         )
         if probe.stdout.strip() == "s16":
             return
     except Exception:
         pass  # probe failed → fall through and transcode defensively
     tmp = path.with_suffix(".s16.wav")
-    res = subprocess.run(
+    try:
+        res = await _await_subprocess(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-         "-acodec", "pcm_s16le", str(tmp)],
-        capture_output=True, text=True, timeout=300,
-    )
+         "-acodec", "pcm_s16le", str(tmp)], 300)
+    except StemSeparationError as exc:
+        logger.warning("Could not normalize %s to 16-bit: %s", path, exc)
+        tmp.unlink(missing_ok=True)
+        return
     if res.returncode == 0 and tmp.exists():
         tmp.replace(path)
     else:
@@ -456,13 +555,12 @@ async def mix_karaoke(
             "-acodec", "pcm_s16le",
             str(karaoke_path),
         ]
-        mix_result = await asyncio.to_thread(
-            subprocess.run,
-            karaoke_mix_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        try:
+            mix_result = await _await_subprocess(karaoke_mix_cmd, timeout=120)
+        except StemSeparationError as exc:
+            logger.warning("Karaoke mix failed: %s", exc)
+            shutil.copy2(instrumental_path, karaoke_path)
+            return False
         if mix_result.returncode == 0:
             return True
         logger.warning("Karaoke mix failed: %s", mix_result.stderr[:500])
@@ -483,8 +581,10 @@ async def _mix_and_finalize(
     """Mix the instrumental (drums+bass+other) and karaoke (instrumental+backing)
     tracks with ffmpeg. Shared by the local and Modal separation paths."""
     # Guarantee browser-playable vocal stems (audio-separator may emit 32-bit).
-    await asyncio.to_thread(_ensure_s16, stems_dir / "lead_vocals.wav")
-    await asyncio.to_thread(_ensure_s16, stems_dir / "backing_vocals.wav")
+    for stem in (stems_dir / "lead_vocals.wav", stems_dir / "backing_vocals.wav"):
+        normalized = _ensure_s16(stem)
+        if inspect.isawaitable(normalized):
+            await normalized
 
     # ---------------------------------------------------------------
     # Mix instrumental (drums + bass + other)
@@ -505,14 +605,12 @@ async def _mix_and_finalize(
             "-acodec", "pcm_s16le",
             str(instrumental_path),
         ]
-        mix_result = await asyncio.to_thread(
-            subprocess.run,
-            mix_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if mix_result.returncode != 0:
+        try:
+            mix_result = await _await_subprocess(mix_cmd, timeout=120)
+        except StemSeparationError as exc:
+            logger.warning("Instrumental mix failed: %s", exc)
+            mix_result = None
+        if mix_result is not None and mix_result.returncode != 0:
             logger.warning("Instrumental mix failed: %s", mix_result.stderr[:500])
     elif len(parts) == 1:
         shutil.copy2(parts[0], instrumental_path)

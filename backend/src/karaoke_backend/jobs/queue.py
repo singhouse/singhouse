@@ -307,13 +307,15 @@ async def requeue_expired(worker_id: str) -> int:
         # The UPDATE predicates repeat the SELECT's: between the two, another
         # worker may have finished or reclaimed the row.
         if exhausted:
-            await db.execute(
+            failed_ids = list((await db.execute(
                 update(Job)
                 .where(
                     Job.id.in_(exhausted),
                     Job.claimed_by.is_not(None),
                     Job.claimed_by != worker_id,
                     Job.status.notin_(TERMINAL_STATUSES),
+                    Job.lease_expires_at.is_not(None),
+                    Job.lease_expires_at < now,
                 )
                 .values(
                     status=JobStatus.FAILED.value,
@@ -323,25 +325,42 @@ async def requeue_expired(worker_id: str) -> int:
                     claimed_by=None,
                     lease_expires_at=None,
                     finished_at=now,
+                ).returning(Job.id)
+            )).scalars().all())
+            # A terminal ingest-like job and an attached Song must tell the
+            # same story.  Keeping the upload makes the failure recoverable;
+            # marking the Song failed makes that retry path reachable.
+            await db.execute(
+                update(Song)
+                .where(
+                    Song.id.in_(
+                        select(Job.song_id).where(
+                            Job.id.in_(failed_ids), Job.song_id.is_not(None)
+                        )
+                    ),
+                    Song.status.in_(("processing", "uploading")),
                 )
+                .values(status="failed", error_message=LEASE_EXPIRED_MESSAGE)
             )
         if retryable:
-            await db.execute(
+            requeued_ids = list((await db.execute(
                 update(Job)
                 .where(
                     Job.id.in_(retryable),
                     Job.claimed_by.is_not(None),
                     Job.claimed_by != worker_id,
                     Job.status.notin_(TERMINAL_STATUSES),
+                    Job.lease_expires_at.is_not(None),
+                    Job.lease_expires_at < now,
                 )
                 .values(
                     status=JobStatus.QUEUED.value,
                     phase=JobPhase.QUEUED.value,
                     claimed_by=None,
                     lease_expires_at=None,
-                )
-            )
-            requeued = len(retryable)
+                ).returning(Job.id)
+            )).scalars().all())
+            requeued = len(requeued_ids)
         await db.commit()
 
     if exhausted:
@@ -361,7 +380,8 @@ async def requeue_expired(worker_id: str) -> int:
         # separate defect; the song row, not the file, is what blocks it). The
         # uploads a song still owns are released when the song is deleted;
         # `sweep_legacy` still reaps the pre-queue rows (kind IS NULL) that no
-        # payload can ever replay.
+        # payload can ever replay. The attached song is failed in the same
+        # transaction above, so the retry route can replay the retained input.
     if requeued:
         logger.info("Requeued %d job(s) with an expired lease", requeued)
     return requeued

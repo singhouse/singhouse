@@ -7,6 +7,9 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
+import time
+import signal
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +17,29 @@ from lyricsync._config import VadConfig
 from lyricsync._types import TimedWord, TranscriptionResult, TranscriptionSegment
 
 logger = logging.getLogger(__name__)
+
+def _terminate_tree_and_reap(proc, original_error: BaseException) -> None:
+    """Best-effort bounded tree cleanup, then re-raise the original failure."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try: proc.kill()
+        except OSError: pass
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        try: proc.kill()
+        except OSError: pass
+        try: proc.communicate(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.error("HeartTranscriptor child did not reap after forced termination")
+    except OSError:
+        pass
+    raise original_error
 
 
 class HeartTranscriber:
@@ -36,6 +62,8 @@ class HeartTranscriber:
         use_vad: bool = True,
         vad_config: VadConfig | None = None,
         allow_temperature_fallback: bool = False,
+        cancel_event: threading.Event | None = None,
+        accelerator: str | None = None,
     ):
         self.python_path = Path(python_path)
         self.timeout = timeout
@@ -44,6 +72,8 @@ class HeartTranscriber:
         # Off by default so a transcription is reproducible (greedy 0.0 decode);
         # callers that want the 0.0/0.1/0.2/0.4 rescue ladder opt in explicitly.
         self.allow_temperature_fallback = allow_temperature_fallback
+        self.cancel_event = cancel_event
+        self.accelerator = accelerator
 
         if script_path is not None:
             self.script_path = Path(script_path)
@@ -70,6 +100,8 @@ class HeartTranscriber:
             cmd.extend(["--language", language])
         if self.allow_temperature_fallback:
             cmd.append("--temperature-fallback")
+        if self.accelerator:
+            cmd.extend(["--device", self.accelerator])
 
         vad_tmp: Optional[str] = None
         if self.use_vad:
@@ -93,12 +125,20 @@ class HeartTranscriber:
         logger.info("Running HeartTranscriptor: %s", " ".join(cmd))
 
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
+            options = ({"start_new_session": True} if os.name == "posix" else
+                       {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
+            proc_handle = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    stdout, stderr = proc_handle.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        _terminate_tree_and_reap(proc_handle, RuntimeError("HeartTranscriptor cancelled"))
+                    if time.monotonic() >= deadline:
+                        _terminate_tree_and_reap(proc_handle, subprocess.TimeoutExpired(cmd, self.timeout))
+            proc = subprocess.CompletedProcess(cmd, proc_handle.returncode, stdout, stderr)
         finally:
             if vad_tmp:
                 try:

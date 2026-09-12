@@ -6,7 +6,7 @@ Runs in a separate Python environment (requires torch + transformers).
 Called as a subprocess from lyricsync.transcription.heart.HeartTranscriber.
 
 Usage:
-    python _heart_script.py <audio_path> [--language en] [--model-path /path/to/checkpoint]
+    python _heart_script.py <audio_path> --device cpu [--language en] [--model-path /path/to/checkpoint]
 
 Outputs JSON to stdout:
     {"segments": [...], "language": "en"}
@@ -41,6 +41,7 @@ def main():
     parser.add_argument("audio_path", help="Path to audio file (WAV)")
     parser.add_argument("--language", default="en", help="Language code")
     parser.add_argument("--model-path", default=None, help="Path to checkpoint dir (required)")
+    parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=None)
     parser.add_argument(
         "--temperature-fallback",
         action="store_true",
@@ -63,8 +64,15 @@ def main():
 
     sys.stderr.write(f"Loading HeartTranscriptor from {ckpt_dir}...\n")
 
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("Attested CUDA accelerator is unavailable")
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("Attested Metal accelerator is unavailable")
+    dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
+
     model = WhisperForConditionalGeneration.from_pretrained(
-        ckpt_dir, torch_dtype=torch.float16, low_cpu_mem_usage=True
+        ckpt_dir, torch_dtype=dtype, low_cpu_mem_usage=True
     )
     processor = WhisperProcessor.from_pretrained(ckpt_dir)
 
@@ -73,8 +81,8 @@ def main():
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        torch_dtype=torch.float16,
+        device=device,
+        torch_dtype=dtype,
         chunk_length_s=30,
         batch_size=1,
     )

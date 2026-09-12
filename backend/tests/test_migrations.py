@@ -109,7 +109,7 @@ def test_adopt_deployed_db(tmp_path):
 
     bootstrap.ensure_schema(_url(db_path))
 
-    assert _revision(db_path) == "c0007"
+    assert _revision(db_path) == "c0008"
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -356,7 +356,7 @@ def test_queue_entries_already_present_is_not_fatal(tmp_path):
 
     bootstrap.ensure_schema(_url(db_path))
 
-    assert _revision(db_path) == "c0007"
+    assert _revision(db_path) == "c0008"
     conn = sqlite3.connect(str(db_path))
     try:
         assert conn.execute("SELECT singer_name FROM queue_entries").fetchone()[0] == "Ada"
@@ -440,7 +440,7 @@ def test_auto_migrate_disabled_refuses_and_mutates_nothing(tmp_path, monkeypatch
 
     # …but an explicitly confirmed CLI upgrade still works (force=True).
     bootstrap.ensure_schema(_url(db_path), force=True)
-    assert _revision(db_path) == "c0007"
+    assert _revision(db_path) == "c0008"
 
 
 def _schema_snapshot(db_path: Path) -> list:
@@ -494,7 +494,7 @@ def test_cli_stamp_baseline_refuses_a_managed_database(tmp_path, monkeypatch, ca
 
     assert cli.main(["stamp-baseline", "--yes"]) == 1
     assert "already managed" in capsys.readouterr().err
-    assert _revision(db_path) == "c0007", "revision must be untouched"
+    assert _revision(db_path) == "c0008", "revision must be untouched"
 
 
 def test_repair_restores_the_historical_songs_columns(tmp_path):
@@ -526,7 +526,7 @@ def test_repair_restores_the_historical_songs_columns(tmp_path):
         conn.close()
 
     bootstrap.ensure_schema(_url(db_path))
-    assert _revision(db_path) == "c0007"
+    assert _revision(db_path) == "c0008"
 
 
 def test_double_run_idempotent(tmp_path):

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from karaoke_backend.api.auth import get_current_user, get_host_id, require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
-from karaoke_backend import stem_layout
+from karaoke_backend import stem_layout, stem_storage
 from karaoke_backend.jobs import queue
 from karaoke_backend.models.song import Job, JobKind, LyricsSet, Song, SongStatus
 from karaoke_backend.workers import karaoke_models, modal_worker
@@ -202,9 +202,7 @@ _RETRY_NOUN = {
 
 
 def _song_stems_dir(song: Song) -> Optional[Path]:
-    if song.stems_path:
-        return Path(song.stems_path)
-    return STEMS_DIR / str(song.id)
+    return stem_storage.active_stems_dir(song, STEMS_DIR)
 
 
 # Container extension → the media type a browser needs to play it inline.
@@ -647,8 +645,10 @@ async def delete_song(
         raise HTTPException(status_code=404, detail=f"Song {song_id} not found")
 
     # Remove stems from disk
-    stems_dir = _song_stems_dir(song)
-    if stems_dir and stems_dir.exists():
+    # Delete the owned root, not merely the selected generation. This removes
+    # legacy files, every superseded generation, and unpublished retry debris.
+    stems_dir = Path(song.stems_path) if song.stems_path else STEMS_DIR / str(song.id)
+    if stems_dir.exists():
         try:
             shutil.rmtree(stems_dir)
             logger.info("Deleted stems for song %d at %s", song_id, stems_dir)
@@ -914,6 +914,8 @@ async def resplit_stems(
         message=f"Re-splitting lead/backing vocals ({body.karaoke_model})",
         payload={
             "stems_dir": str(stems_dir),
+            "stems_root": str(Path(song.stems_path) if song.stems_path else STEMS_DIR / str(song.id)),
+            "expected_generation": song.active_stem_generation,
             "karaoke_model": body.karaoke_model,
         },
     )

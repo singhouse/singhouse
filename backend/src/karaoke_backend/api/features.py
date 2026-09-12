@@ -17,6 +17,9 @@ deployment posture, and only host surfaces consume this.
 
 from __future__ import annotations
 
+import shutil
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
@@ -29,6 +32,8 @@ from karaoke_backend.workers.lyrics_worker import (
     BUILTIN_LYRICS_PROVIDER,
     lrclib_enabled,
 )
+from karaoke_backend.workers import modal_offload, modal_worker, word_sync_worker
+from karaoke_backend.workers.managed_processing import InvalidAttestation, validated_attestation
 
 router = APIRouter(prefix="/api/features", tags=["features"])
 
@@ -74,6 +79,82 @@ class FeaturesResponse(BaseModel):
         )
     )
     plex_lyrics: PlexLyricsFeature
+    processing: dict[str, Any] = Field(
+        description=(
+            "Honest runtime readiness for playback and optional processing. "
+            "The desktop manifest is reported, never used to invent a fallback."
+        )
+    )
+
+
+def _desktop_processing_manifest() -> dict[str, Any]:
+    try:
+        value = validated_attestation()
+    except InvalidAttestation:
+        return {"configured": True, "valid": False}
+    if value is None:
+        return {}
+    return {"configured": True, "valid": True, **value}
+
+
+def _processing_readiness() -> dict[str, Any]:
+    playback_tools = {name: shutil.which(name) is not None for name in ("ffmpeg", "ffprobe")}
+    local_python = False
+    manifest = _desktop_processing_manifest()
+    capabilities = (set(manifest.get("verifiedCapabilities", ()))
+                    if manifest.get("valid") else set())
+    if manifest.get("valid"):
+        local_python = True
+    local_separation = (
+        local_python and manifest.get("capabilitiesReady") is True
+        and "separation" in capabilities
+    )
+    local_transcription = (
+        local_python and manifest.get("capabilitiesReady") is True
+        and "transcription" in capabilities
+    )
+    modal_detail = modal_offload.readiness()
+    # Configuration discovery is local-only; readiness would require a remote
+    # call, which this endpoint must never make or spend money on.
+    modal_ready = False
+    runtime = None
+    if local_python:
+        runtime = {"id": manifest["runtimeManifestId"], "accelerator": manifest["accelerator"]}
+
+    def fact(ready: bool, unavailable: str) -> dict[str, Any]:
+        return {"ready": True} if ready else {"ready": False, "reason": unavailable}
+
+    return {
+        "playback": fact(
+            all(playback_tools.values()),
+            "ffmpeg and ffprobe are required for playback preparation",
+        ),
+        "transcription": fact(
+            local_transcription or modal_ready,
+            "no verified local transcription models or ready user-owned Modal",
+        ),
+        "separation": fact(
+            local_separation or modal_ready,
+            "no verified local separation models or ready user-owned Modal",
+        ),
+        "modal": fact(
+            modal_ready,
+            "user-owned Modal is configured but remotely unverified"
+            if modal_detail["configured"] else "user-owned Modal is not configured",
+        ),
+        "runtime": runtime,
+    }
+
+
+@router.get(
+    "/processing",
+    response_model=dict[str, Any],
+    summary="Native processing readiness",
+)
+async def get_processing_features(
+    _user: Identity = Depends(require_user),
+) -> dict[str, Any]:
+    return _processing_readiness()
 
 
 @router.get("", response_model=FeaturesResponse, summary="Operator-gated capabilities")
@@ -97,4 +178,5 @@ async def get_features(
             enabled=plex_lyrics_enabled(),
             env=PLEX_LYRICS_ENV,
         ),
+        processing=_processing_readiness(),
     )

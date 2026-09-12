@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "kind": "upstream-model-policy",
+  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. The empty policy intentionally enables no production models. No model weights are shipped or mirrored by Singhouse.",
+  "allowedHosts": ["huggingface.co", "download.pytorch.org", "dl.fbaipublicfiles.com", "github.com"],
+  "cacheLayout": "model-cache/packs/<manifest-sha256>/{huggingface,torch,audio-separator}/<file-path>",
+  "offlineDefault": true,
+  "models": []
+}

@@ -25,6 +25,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
@@ -34,6 +35,7 @@ from lyricsync.transcription import FasterWhisperTranscriber, HeartTranscriber
 
 from karaoke_backend import plugins
 from karaoke_backend.workers import modal_offload, transcription_cache
+from karaoke_backend.workers.managed_processing import accelerator_device
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +44,18 @@ TRANSCRIBER_MODELS = {"heart"}
 ALL_MODELS = WHISPER_MODELS | TRANSCRIBER_MODELS
 DEFAULT_MODEL = "heart"
 
+def _attested_accelerator(model: str = DEFAULT_MODEL) -> str | None:
+    return accelerator_device(capability="transcription")
+
 # Default is cwd-relative (cwd=backend/ is invariant: systemd WorkingDirectory
 # and dev docs). HEART_SCRIPT is file-adjacent and correctly moves with the code.
 # abspath, NOT resolve(): bin/python is a symlink to the system interpreter, so
 # resolving it spawns /usr/bin/pythonX.Y with no venv site-packages.
 DEMUCS_PYTHON = Path(
-    os.path.abspath(os.getenv("KARAOKE_DEMUCS_PYTHON", ".venv-demucs/bin/python"))
+    os.path.abspath(
+        os.getenv("KARAOKE_PROCESSING_PYTHON")
+        or os.getenv("KARAOKE_DEMUCS_PYTHON", ".venv-demucs/bin/python")
+    )
 )
 HEART_SCRIPT = Path(__file__).resolve().parent / "heart_transcriptor.py"
 
@@ -102,7 +110,8 @@ def _plugin_transcriber(whisper_model: str, *, use_vad: bool):
 
 
 def _make_transcriber(
-    whisper_model: str, *, use_vad: bool, allow_temperature_fallback: bool = False
+    whisper_model: str, *, use_vad: bool, allow_temperature_fallback: bool = False,
+    cancel_event: threading.Event | None = None,
 ):
     """Build the transcriber for ``whisper_model``.
 
@@ -137,10 +146,19 @@ def _make_transcriber(
             script_path=HEART_SCRIPT,
             use_vad=use_vad,
             allow_temperature_fallback=allow_temperature_fallback,
+            cancel_event=cancel_event,
+            accelerator=_attested_accelerator(whisper_model),
         )
+    accelerator = _attested_accelerator(whisper_model)
+    if accelerator == "mps":
+        raise RuntimeError("Managed Metal does not support faster-whisper")
+    device_options = ({"device": accelerator,
+                       "compute_type": "float16" if accelerator == "cuda" else "int8"}
+                      if accelerator else {})
     return FasterWhisperTranscriber(
         model=whisper_model,
         allow_temperature_fallback=allow_temperature_fallback,
+        **device_options,
     )
 
 
@@ -198,6 +216,7 @@ def _make_pipeline(
     config: Optional[PipelineConfig] = None,
     correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> SyncPipeline:
     """Build a configured SyncPipeline.
 
@@ -209,6 +228,7 @@ def _make_pipeline(
         whisper_model,
         use_vad=use_vad,
         allow_temperature_fallback=allow_temperature_fallback,
+        cancel_event=cancel_event,
     )
     cfg = _with_env_correction(config or PipelineConfig())
     return SyncPipeline(
@@ -327,6 +347,7 @@ def _run_blocking(
     allow_temperature_fallback: bool = False,
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
+    cancel_event: threading.Event | None = None,
 ) -> Optional[dict]:
     """Cache-aware transcribe-then-align (synchronous core).
 
@@ -363,6 +384,7 @@ def _run_blocking(
         whisper_model, use_vad=use_vad, config=pipeline_config,
         correction_progress_fn=correction_progress_fn,
         allow_temperature_fallback=allow_temperature_fallback,
+        cancel_event=cancel_event,
     )
 
     if cached is not None:
@@ -476,7 +498,8 @@ async def generate_word_sync(
     cfg = pipeline_config or PipelineConfig()
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
+    cancel_event = threading.Event()
+    future = loop.run_in_executor(
         None,
         partial(
             _run_blocking,
@@ -494,8 +517,22 @@ async def generate_word_sync(
             allow_temperature_fallback=allow_temperature_fallback,
             force_transcribe=force_transcribe,
             cache_write_guard=cache_write_guard,
+            cancel_event=cancel_event,
         ),
     )
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        try:
+            # Capacity belongs to the work, not merely its asyncio wrapper.
+            # Plugins, Modal clients, and in-process transcribers have no
+            # universal cancellation protocol, so a noncooperative backend
+            # deliberately delays shutdown rather than allowing overlap.
+            await asyncio.shield(future)
+        except Exception:
+            pass
+        raise
 
 
 def _realign_blocking(

@@ -9,6 +9,8 @@ run drain it explicitly — see ``test_lyrics_sets_realign.py``.
 """
 
 import io
+from pathlib import Path
+import os
 
 import pytest
 from httpx import AsyncClient
@@ -80,8 +82,12 @@ async def test_songs_crud_flow(client: AsyncClient):
     assert patch_resp.json()["lyrics_synced"] is True
 
     # 5. Delete
+    root = Path(os.environ["STEMS_DIR"]) / str(song_id)
+    (root / ".generations" / "old").mkdir(parents=True, exist_ok=True)
+    (root / ".generations" / "old" / "stem.wav").write_bytes(b"old")
     del_resp = await client.delete(f"/api/songs/{song_id}")
     assert del_resp.status_code == 200
+    assert not root.exists()
 
     # 6. Confirm gone
     gone_resp = await client.get(f"/api/songs/{song_id}")

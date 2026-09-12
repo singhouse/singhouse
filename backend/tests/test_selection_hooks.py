@@ -159,6 +159,7 @@ def test_make_transcriber_builtin_never_consults_plugins(monkeypatch) -> None:
     monkeypatch.setattr(
         word_sync_worker, "HeartTranscriber", lambda **k: sentinel, raising=False
     )
+    monkeypatch.setattr(word_sync_worker, "_attested_accelerator", lambda *_: "cpu")
     got = word_sync_worker._make_transcriber("heart", use_vad=False)
     assert got is sentinel
     assert called["n"] == 0  # plugin seam never touched for a built-in name

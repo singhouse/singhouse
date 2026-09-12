@@ -18,6 +18,8 @@ def test_public_workers_import_and_dispatch_without_private_modules(tmp_path):
     shutil.rmtree(package / "workers" / "remote_runtime", ignore_errors=True)
     env = dict(os.environ, PYTHONPATH=str(tmp_path), KARAOKE_REMOTE_HOST="invalid.example",
                KARAOKE_MODAL="0", KARAOKE_SEPARATOR="")
+    env.pop("KARAOKE_PROCESSING_ACCELERATOR", None)
+    env.pop("KARAOKE_DESKTOP_PROCESSING_JSON", None)
     script = r'''
 import asyncio
 from pathlib import Path

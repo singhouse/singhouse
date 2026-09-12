@@ -130,6 +130,9 @@ class Song(Base):
         nullable=False,
     )
     stems_path: Optional[str] = Column(String(512), nullable=True)  # local dir with stem files
+    # Basename under ``stems_path/.generations`` selected transactionally.
+    # NULL preserves the legacy flat layout without a backfill.
+    active_stem_generation: Optional[str] = Column(String(64), nullable=True)
     # Basename — never a path — of a karaoke video retained inside this song's
     # stems directory (e.g. "video.mp4"). Set only by the video-import job,
     # which keeps the operator's own file as the song's display content and
