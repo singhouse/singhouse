@@ -38,7 +38,7 @@ chain is never refactored):
     ``{name: str, models: frozenset[str], priority: int,
        is_enabled() -> bool, create(model, *, use_vad) -> lyricsync Transcriber}``.
     Documented built-in priorities encode today's verified chain in
-    ``word_sync_worker`` (modal -> remote -> heart-local -> faster-whisper),
+    ``word_sync_worker`` (modal -> heart-local -> faster-whisper),
     see :data:`BUILTIN_TRANSCRIBER_PRIORITIES`. Plugins may only **add** model
     names; built-in names win collisions (a warning is logged), and the
     built-in dispatch chain is never reordered by a plugin.
@@ -122,11 +122,10 @@ ALL_GROUPS: Tuple[str, ...] = (
 )
 
 #: Documented built-in transcriber priorities — today's verified chain in
-#: ``word_sync_worker`` (modal -> remote -> heart-local -> faster-whisper).
+#: ``word_sync_worker`` (modal -> heart-local -> faster-whisper).
 #: Plugins may only ADD model names; these built-ins win collisions.
 BUILTIN_TRANSCRIBER_PRIORITIES: dict[str, int] = {
     "modal": 90,
-    "remote": 80,
     "heart": 50,
     "faster-whisper": 10,
 }

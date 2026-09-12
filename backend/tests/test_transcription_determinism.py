@@ -6,9 +6,9 @@ temperatures whenever the logprob/compression checks reject the previous
 attempt. That is exactly what makes two runs of the same audio disagree, so it
 is off by default and re-armed only by the manual re-transcribe action.
 
-There are four execution backends and they must agree, or "deterministic"
+There are three execution backends and they must agree, or "deterministic"
 becomes a property of which machine happened to pick the job up: the local
-subprocess, the Mac/MPS runner, the Modal container, and faster-whisper. These
+subprocess, the Modal container, and faster-whisper. These
 tests pin the temperature each of them decodes with, and pin that the flag
 travels from the constructor to the wire (subprocess argv / Modal call args).
 """
@@ -27,7 +27,7 @@ LADDER = (0.0, 0.1, 0.2, 0.4)
 
 
 # ---------------------------------------------------------------------------
-# The three standalone Heart scripts
+# The standalone Heart scripts
 # ---------------------------------------------------------------------------
 
 
@@ -36,16 +36,14 @@ def _script_modules():
     from lyricsync.transcription import _heart_script
 
     from karaoke_backend.workers import heart_transcriptor
-    from karaoke_backend.workers.remote_runtime import mac_heart_transcriptor
 
     return {
         "local": heart_transcriptor,
-        "mac": mac_heart_transcriptor,
         "lyricsync-bundled": _heart_script,
     }
 
 
-@pytest.mark.parametrize("name", ["local", "mac", "lyricsync-bundled"])
+@pytest.mark.parametrize("name", ["local", "lyricsync-bundled"])
 def test_a_heart_decode_is_greedy_unless_the_ladder_is_asked_for(name: str):
     module = _script_modules()[name]
 
@@ -64,7 +62,7 @@ def test_a_heart_decode_is_greedy_unless_the_ladder_is_asked_for(name: str):
     }
 
 
-@pytest.mark.parametrize("name", ["local", "mac", "lyricsync-bundled"])
+@pytest.mark.parametrize("name", ["local", "lyricsync-bundled"])
 def test_every_heart_runner_accepts_the_temperature_fallback_flag(name: str):
     """The helper is only reachable if argparse actually declares the flag.
 
@@ -120,34 +118,6 @@ def test_the_local_heart_subprocess_only_gets_the_flag_when_it_was_asked_for(tmp
 
     on = _heart_subprocess_argv(allow_temperature_fallback=True, tmp_path=tmp_path)
     assert "--temperature-fallback" in on
-
-
-def test_the_remote_mps_runner_is_invoked_with_the_same_flag(tmp_path: Path):
-    """The SSH path builds argv by hand — it is its own chance to drop the flag."""
-    from karaoke_backend.workers import remote
-
-    audio = tmp_path / "lead_vocals.wav"
-    audio.write_bytes(b"audio")
-
-    captured: dict = {}
-
-    def fake_ssh(cmd, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"segments": [], "language": "en", "full_text": ""}', stderr=""
-        )
-
-    for want, expected in ((False, False), (True, True)):
-        transcriber = remote.RemoteHeartTranscriber(
-            use_vad=False, allow_temperature_fallback=want
-        )
-        with patch.object(remote, "_mkjob", return_value="dir/work/abc"), patch.object(
-            remote, "_push"
-        ), patch.object(remote, "_rmjob"), patch.object(
-            remote, "_ssh", side_effect=fake_ssh
-        ):
-            transcriber.transcribe(str(audio))
-        assert ("--temperature-fallback" in captured["cmd"]) is expected
 
 
 def test_the_modal_container_is_told_which_temperature_policy_to_use(tmp_path: Path):

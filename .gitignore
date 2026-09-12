@@ -129,3 +129,11 @@ backend/karaoke.db.*-snapshot-*
 # this path and not tracked by this one. No trailing slash, so the rule holds
 # whatever form the entry takes.
 /premium
+
+# Native installer build products
+/desktop/native/
+/desktop/artifacts/
+/desktop/.build-cache/
+!/desktop/build/
+!/desktop/build/**
+/desktop/build/__pycache__/

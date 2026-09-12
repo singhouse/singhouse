@@ -9,8 +9,7 @@ mixing, key shift, and a popout projector display.
 1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG
 2. **Two-pass stem separation** — Demucs (`mdx_extra`) splits vocals vs.
    instrumental, then mel_band_roformer splits lead vs. backing vocals.
-   Runs locally on your GPU (CPU fallback), or on your own remote worker
-   or your own Modal deployment
+   Runs locally on your GPU (CPU fallback), or on your own Modal deployment
 3. **Synced lyrics** — paste your own reference lyrics, or enable the
    optional lrclib.net lookup (opt-in, off by default)
 4. **Word-level highlighting** — ML transcription aligned to your
@@ -47,7 +46,7 @@ queue, and a projector window for the second screen.
   and your timings are written to your own disk. This project operates no
   servers and receives none of it — there is nothing to opt out of, because
   there is nothing to send. Separation and transcription run locally by
-  default; if you point them at your own remote GPU or your own Modal
+  default; if you point them at your own Modal
   account, that is **your** deployment, under your account, and we are not in
   the path.
 - **It is one machine running one show.** There is no guest-phone surface and

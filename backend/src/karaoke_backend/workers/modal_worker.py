@@ -30,14 +30,14 @@ from pathlib import Path
 from typing import Callable, Awaitable, Optional
 
 from karaoke_backend import plugins
-from karaoke_backend.workers import karaoke_models, modal_offload, remote
+from karaoke_backend.workers import karaoke_models, modal_offload
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, int, str], Awaitable[None]]
 
 # Additive plugin hook: names a separator plugin to use INSTEAD of the built-in
-# modal/remote/local dispatch. Unset by default → built-in dispatch untouched.
+# modal/local dispatch. Unset by default → built-in dispatch untouched.
 SEPARATOR_ENV = "KARAOKE_SEPARATOR"
 
 # Path to demucs/audio-separator venv python. Default is cwd-relative
@@ -103,7 +103,7 @@ def _plugin_separator():
     """Return the separator plugin named by ``KARAOKE_SEPARATOR``, else ``None``.
 
     Read at call time. With ``KARAOKE_SEPARATOR`` unset (the default) this
-    returns ``None`` immediately, so the built-in modal/remote/local dispatch
+    returns ``None`` immediately, so the built-in modal/local dispatch
     in :func:`separate_stems` is byte-for-byte unchanged (additive plugin hook).
     A named-but-missing or disabled plugin logs a warning and falls back to the
     built-in dispatch — the env can never silently disable separation.
@@ -280,13 +280,6 @@ async def separate_stems(
             audio_path, stems_dir, job_id, _progress, pass2_model
         )
 
-    if remote.is_enabled():
-        # Local GPU is dead — offload both passes to the remote MPS worker,
-        # then mix locally (this box has ffmpeg).
-        return await _remote_separate_and_mix(
-            audio_path, stems_dir, job_id, _progress, pass2_model
-        )
-
     if not DEMUCS_PYTHON.exists():
         raise StemSeparationError(
             f"Demucs venv not found at {DEMUCS_PYTHON}. "
@@ -384,9 +377,8 @@ async def _modal_separate_and_mix(
 ) -> dict[str, Path]:
     """Offload both separation passes to a Modal GPU container, mix locally.
 
-    ``modal_offload.modal_separate`` has the same contract as
-    ``remote.remote_separate`` (writes lead/backing into ``stems_dir``, stages
-    drums/bass/other under ``stems_dir/_remote_raw``), so the same local
+    ``modal_offload.modal_separate`` writes lead/backing into ``stems_dir``
+    and stages drums/bass/other under ``stems_dir/_remote_raw``. The local
     ``_mix_and_finalize`` runs afterward.
     """
     model = DEFAULT_DEMUCS_MODEL
@@ -399,36 +391,6 @@ async def _modal_separate_and_mix(
         ),
     )
     await progress("processing", 70, "Modal separation complete (lead/backing ready)")
-    result = await _mix_and_finalize(
-        stems_dir, raw["drums"], raw["bass"], raw["other"], progress
-    )
-    shutil.rmtree(stems_dir / "_remote_raw", ignore_errors=True)
-    return result
-
-
-async def _remote_separate_and_mix(
-    audio_path: Path,
-    stems_dir: Path,
-    job_id: str,
-    progress: ProgressCallback,
-    karaoke_model: str,
-) -> dict[str, Path]:
-    """Offload both separation passes to the remote MPS worker, mix locally.
-
-    ``remote.remote_separate`` writes ``lead_vocals.wav`` / ``backing_vocals.wav``
-    into ``stems_dir`` and stages drums/bass/other under ``stems_dir/_remote_raw``;
-    we then run the same ffmpeg mixes used by the local path.
-    """
-    model = DEFAULT_DEMUCS_MODEL
-    await progress("processing", 5, f"Separating on remote MPS worker ({remote.REMOTE_HOST})...")
-    loop = asyncio.get_event_loop()
-    raw = await loop.run_in_executor(
-        None,
-        lambda: remote.remote_separate(
-            audio_path, stems_dir, demucs_model=model, karaoke_model=karaoke_model
-        ),
-    )
-    await progress("processing", 70, "Remote separation complete (lead/backing ready)")
     result = await _mix_and_finalize(
         stems_dir, raw["drums"], raw["bass"], raw["other"], progress
     )
@@ -519,7 +481,7 @@ async def _mix_and_finalize(
     progress: ProgressCallback,
 ) -> dict[str, Path]:
     """Mix the instrumental (drums+bass+other) and karaoke (instrumental+backing)
-    tracks with ffmpeg. Shared by the local and remote separation paths."""
+    tracks with ffmpeg. Shared by the local and Modal separation paths."""
     # Guarantee browser-playable vocal stems (audio-separator may emit 32-bit).
     await asyncio.to_thread(_ensure_s16, stems_dir / "lead_vocals.wav")
     await asyncio.to_thread(_ensure_s16, stems_dir / "backing_vocals.wav")

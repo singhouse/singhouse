@@ -1,30 +1,46 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker } from 'electron'
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, CSP } from './policy.mjs'
-import { projectorBlocker, createRuntime, stopRuntime } from './lifecycle.mjs'
+import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
+import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
-const runtime = createRuntime()
-app.setPath('userData', runtime.electron)
+const packaged = app.isPackaged
+const nativeDir = resolve(process.resourcesPath, 'native')
+const { BRAND_NAME: brand } = await import(pathToFileURL(packaged
+  ? resolve(nativeDir, 'brand.mjs') : resolve(root, 'frontend/src/brand.js')).href)
+app.setName(brand)
+const ownsInstance = !packaged || app.requestSingleInstanceLock()
+const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userData')) : createRuntime()) : null
+if (!packaged) app.setPath('userData', runtime.electron)
+let expectedIdentity
+if (!ownsInstance) app.quit()
+app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.restore(); host.show(); host.focus() } })
 let backend, host, projector, quitting = false, shutdownComplete = false
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
-let brand = 'Karaoke'
 
 function launchBackend() {
-  const python = process.env.KARAOKE_DESKTOP_PYTHON
+  if (packaged) expectedIdentity = validateManifest(JSON.parse(readFileSync(resolve(nativeDir, 'manifest.json'), 'utf8')), app.getVersion(), process.platform, process.arch)
+  const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
-  const args = ['-I', '-B', resolve(desktopDir, 'backend.py'), '--root', root, '--runtime', runtime.backend]
-  if (process.argv.includes('--demo')) args.push('--demo')
-  backend = spawn(python, args, { cwd: desktopDir, env: childEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
+  if (!packaged && process.argv.includes('--demo')) args.push('--demo')
+  backend = spawn(python, args, { cwd: packaged ? nativeDir : desktopDir, env: childEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: packaged && process.platform !== 'win32' })
+  if (packaged && process.platform !== 'win32') watchOwnedGroup(backend)
   // stdout is a private one-line credential channel. Never forward it to logs.
   backend.stderr.on('data', data => process.stderr.write(data))
-  backend.once('exit', () => { if (!quitting) app.quit() })
+  backend.once('exit', (code, signal) => {
+    if (!quitting && host) {
+      dialog.showErrorBox(`${brand} backend stopped`, `The backend exited (${signal || code}). Your library is preserved. Quit and reopen ${brand} to recover.`)
+      app.quit()
+    }
+  })
   return new Promise((resolveHandshake, reject) => {
     let buffer = ''
     const timer = setTimeout(() => finish(new Error('Backend launch timed out')), 60000)
@@ -43,7 +59,7 @@ function launchBackend() {
       if (buffer.length > 4096) return finish(new Error('Invalid backend launch handshake'))
       const end = buffer.indexOf('\n')
       if (end < 0) return
-      try { finish(null, parseLaunch(buffer.slice(0, end))) }
+      try { finish(null, parseLaunch(buffer.slice(0, end), expectedIdentity)) }
       catch { finish(new Error('Invalid backend launch handshake')) }
       buffer = ''
     }
@@ -113,9 +129,6 @@ function installMenu() {
 }
 
 async function start() {
-  const branding = await import(pathToFileURL(resolve(root, 'frontend/src/brand.js')).href)
-  brand = branding.BRAND_NAME
-  app.setName(brand)
   const launch = await launchBackend()
   const ses = session.fromPartition(`desktop-${randomUUID()}`, { cache: false })
   await ses.setProxy({ mode: 'direct' })
@@ -129,7 +142,7 @@ async function start() {
   for (let attempt = 0; attempt < 40; attempt++) {
     try {
       const identity = await fetchJSON('/desktop-ready')
-      if (identity.nonce !== launch.nonce) throw new Error('Backend identity mismatch')
+      if (identity.nonce !== launch.nonce || (packaged && !sameIdentity(identity.identity, expectedIdentity))) throw new Error('Backend identity mismatch')
       ready = true
       break
     } catch (error) {
@@ -165,7 +178,7 @@ async function start() {
 }
 
 app.on('before-quit', event => {
-  if (shutdownComplete) return
+  if (shutdownComplete || !ownsInstance) return
   event.preventDefault()
   if (quitting) return
   quitting = true
@@ -173,15 +186,18 @@ app.on('before-quit', event => {
   projector?.destroy()
   host?.destroy()
   void stopRuntime(backend, runtime).catch(() => {
-    console.error('Could not remove the private desktop runtime directory.')
+    console.error('Could not complete desktop backend shutdown.')
   }).finally(() => { shutdownComplete = true; app.quit() })
 })
 app.on('window-all-closed', () => app.quit())
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => app.quit())
 process.on('exit', () => {
-  if (backend && backend.exitCode === null && backend.signalCode === null) backend.kill('SIGKILL')
+  if (backend?.pid && backend.exitCode === null && backend.signalCode === null) {
+    try { forceChild(backend) }
+    catch (error) { if (error.code !== 'ESRCH') console.error('Could not stop the owned backend process.') }
+  }
 })
-app.whenReady().then(start).catch(error => {
+if (ownsInstance) app.whenReady().then(start).catch(error => {
   dialog.showErrorBox(`${brand} could not start`, error.message)
   app.quit()
 })

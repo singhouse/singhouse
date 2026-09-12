@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """
 Modal GPU app: karaoke stem separation (demucs + mel_band_roformer) + Heart
-transcription, running on a CUDA container instead of the local box / Mac MPS.
+transcription, running on a CUDA container in your own Modal account.
 
-This is the cloud counterpart of ``workers/remote_runtime/{mac_separate,
-mac_heart_transcriptor}.py`` (which target Apple-Silicon MPS over SSH). Same
-two-pass separation, same Heart per-VAD-segment transcription, same output
-shapes — only the transport (Modal RPC + bytes) and the device (CUDA) differ.
+The two-pass separation and Heart per-VAD-segment transcription return
+results for local mixing and alignment through Modal RPC.
 The dispatcher-side client is ``workers/modal_offload.py``.
 
 Deploy from your own Modal account (one-time, re-run after editing this file):
@@ -106,7 +104,7 @@ image = (
 
 
 # --------------------------------------------------------------------------- #
-# Separation helpers (mirror workers/remote_runtime/mac_separate.py)
+# Separation helpers
 # --------------------------------------------------------------------------- #
 def _run_demucs(audio_path, model_name: str, device: str, scratch):
     """Pass 1 via demucs's Python API with soundfile I/O (no torchcodec).
@@ -267,7 +265,7 @@ def separate_remote(
 
 
 # --------------------------------------------------------------------------- #
-# Transcription (mirror workers/remote_runtime/mac_heart_transcriptor.py)
+# Transcription
 # --------------------------------------------------------------------------- #
 @app.function(image=image, gpu=GPU, timeout=1800)
 def transcribe_remote(

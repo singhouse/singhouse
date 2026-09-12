@@ -94,7 +94,7 @@ singhouse/
 │   │   │   ├── transcribe.py          # re-transcribe / realign handlers
 │   │   │   ├── catalog_import.py      # provider-driven import handler
 │   │   │   └── registry.py            # kind → handler dispatch
-│   │   ├── workers/                   # modal_worker (separation dispatch), remote,
+│   │   ├── workers/                   # modal_worker (separation dispatch),
 │   │   │   │                          #   lyrics_worker, word_sync_worker,
 │   │   │   └── …                      #   transcription cache, LLM paging
 │   │   ├── models/                    # song.py, queue.py, history.py, settings.py
@@ -436,8 +436,7 @@ to the concurrency limit; handlers are dispatched by `Job.kind` through
 **Separation dispatch** (`workers/modal_worker.py`): in order —
 a separator **plugin** if `KARAOKE_SEPARATOR` names an installed, enabled
 one; your own **Modal deployment** if `KARAOKE_MODAL=1` (both passes on a
-GPU container you run, mixed locally); your own **remote worker** if
-`KARAOKE_REMOTE_HOST` is set; otherwise the **local** two-pass pipeline via
+GPU container you run, mixed locally); otherwise the **local** two-pass pipeline via
 the dedicated `.venv-demucs` interpreter (`KARAOKE_DEMUCS_PYTHON`). Mixing
 (`instrumental` = drums+bass+other; `karaoke` = instrumental+backing) is
 ffmpeg `amix` in every path.
@@ -489,7 +488,6 @@ plugin is logged and skipped, never fatal.
 | `KARAOKE_JOB_LEASE_SECONDS` | `180` | Job lease length |
 | `KARAOKE_SEPARATOR` | unset | Name of an installed separator plugin |
 | `KARAOKE_MODAL` / `KARAOKE_MODAL_APP` | off / `karaoke-gpu` | Offload separation to your own Modal deployment |
-| `KARAOKE_REMOTE_HOST` / `KARAOKE_REMOTE_DIR` / `KARAOKE_REMOTE_PYTHON` | unset | Offload separation to your own remote worker over SSH |
 | `KARAOKE_DEMUCS_PYTHON` | `.venv-demucs/bin/python` | Interpreter of the local separation venv |
 | `DEMUCS_MODEL` / `KARAOKE_MODEL` / `KARAOKE_MODEL_DIR` | `mdx_extra` / roformer ckpt / — | Separation model selection |
 | `KARAOKE_HEART_CKPT` | `<cwd>/ckpt/HeartTranscriptor-oss` (not provided) | Fine-tuned transcriber checkpoint dir — supply your own to use this backend |
@@ -754,8 +752,8 @@ durable queue re-claims them after lease expiry and resumes by phase.
   `SESSION_SECRET`) keeps sessions valid across restarts
 - **Disk**: stems are several audio files per song — budget accordingly;
   keep an eye on `uploads/` and `stems/`
-- **GPU**: local separation wants a CUDA GPU; alternatives are your own
-  remote worker (`KARAOKE_REMOTE_HOST`) or your own Modal deployment
+- **GPU**: local separation wants a CUDA GPU; an alternative is your own
+  Modal deployment
   (`KARAOKE_MODAL=1`, requires the `modal` extra + your credentials)
 - **Backups**: the SQLite database runs in WAL mode — snapshot it with
   `sqlite3 karaoke.db ".backup <dest>"`, not a bare file copy

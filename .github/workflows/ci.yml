@@ -127,6 +127,14 @@ jobs:
             backend/pyproject.toml
             lyricsync/pyproject.toml
 
+      # Re-split coverage rebuilds vocals with the real FFmpeg executable.
+      # Install the runner architecture's package in every Python matrix job.
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version
+
       # Order matters. backend depends on lyricsync[...] >=0.1,<0.2, which is
       # NOT published to PyPI — installing backend first makes pip go looking
       # for it on the index and fail.

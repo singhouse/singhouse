@@ -33,7 +33,7 @@ from lyricsync import PipelineConfig, SyncPipeline
 from lyricsync.transcription import FasterWhisperTranscriber, HeartTranscriber
 
 from karaoke_backend import plugins
-from karaoke_backend.workers import modal_offload, remote, transcription_cache
+from karaoke_backend.workers import modal_offload, transcription_cache
 
 logger = logging.getLogger(__name__)
 
@@ -123,12 +123,6 @@ def _make_transcriber(
         if modal_offload.is_enabled():
             # Run the Heart model on a Modal GPU container.
             return modal_offload.ModalHeartTranscriber(
-                use_vad=use_vad,
-                allow_temperature_fallback=allow_temperature_fallback,
-            )
-        if remote.is_enabled():
-            # Local GPU is dead — run the Heart model on the remote MPS worker.
-            return remote.RemoteHeartTranscriber(
                 use_vad=use_vad,
                 allow_temperature_fallback=allow_temperature_fallback,
             )

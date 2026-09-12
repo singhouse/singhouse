@@ -19,6 +19,81 @@ spec.loader.exec_module(backend)
 
 
 class IsolationTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX session ownership; Windows needs native job-object validation")
+    def test_owned_tree_kill_closes_descendant_pipe(self):
+        script = """
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("launcher", sys.argv[1])
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+launcher.own_process_tree()
+# Descendant inherits stdout. communicate cannot finish while it survives.
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+print("spawned", flush=True)
+launcher.kill_owned_tree()
+"""
+        process = subprocess.Popen([sys.executable, "-I", "-B", "-c", script,
+            str(Path(__file__).with_name("backend.py"))], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, err = process.communicate(timeout=5)
+            self.assertEqual(out, b"spawned\n")
+            self.assertEqual(process.returncode, -9)
+        finally:
+            if process.poll() is None:
+                import signal
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+    def test_persistent_settings_survive_relaunch_without_inheriting_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            with backend.persistent_directory(runtime):
+                first = backend.persistent_environment(runtime, "http://127.0.0.1:1234", "gate-one", Path("/native"))
+                (runtime / "desktop.db").write_text("keep-library")
+            with backend.persistent_directory(runtime):
+                second = backend.persistent_environment(runtime, "http://127.0.0.1:5678", "gate-two", Path("/native"))
+                self.assertEqual((runtime / "desktop.db").read_text(), "keep-library")
+            self.assertEqual(first["SESSION_SECRET"], second["SESSION_SECRET"])
+            self.assertNotEqual(first["KARAOKE_GATE_PASSWORD"], second["KARAOKE_GATE_PASSWORD"])
+            self.assertNotIn("HOME", second)
+            self.assertNotIn("USERPROFILE", second)
+            self.assertEqual(second["PATH"], "/native/ffmpeg/bin")
+
+    def test_owner_lock_rejects_second_process_and_recovers_after_crash(self):
+        script = """
+import importlib.util, pathlib, sys, time
+spec = importlib.util.spec_from_file_location("launcher", sys.argv[1])
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+with launcher.persistent_directory(pathlib.Path(sys.argv[2])):
+    print("locked", flush=True)
+    time.sleep(30)
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            process = subprocess.Popen([sys.executable, "-I", "-B", "-c", script,
+                str(Path(__file__).with_name("backend.py")), str(runtime)], stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "locked")
+                with self.assertRaisesRegex(RuntimeError, "already open"):
+                    with backend.persistent_directory(runtime):
+                        self.fail("Second owner accepted")
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+                process.stdout.close()
+            with backend.persistent_directory(runtime):
+                self.assertTrue((runtime / "owner.lock").exists())
+
+    def test_invalid_persistent_settings_are_preserved_and_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            settings = runtime / "settings.json"
+            settings.write_text('{"schema":1,"sessionSecret":"short"}')
+            with self.assertRaisesRegex(RuntimeError, "Invalid desktop settings"):
+                backend.persistent_environment(runtime, "http://127.0.0.1:1234", "gate", Path("/native"))
+            self.assertIn("short", settings.read_text())
+
     def test_demo_has_player_segments_and_consistent_stage_lines(self):
         payload = backend.demo_word_sync()
         # The player accepts initial timed lyrics only when segments exists;

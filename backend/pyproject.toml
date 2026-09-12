@@ -54,7 +54,7 @@ dependencies = [
   # exactly the thing that must not fail quietly. Pinned to the version already
   # in existing installs, same reasoning as greenlet above.
   "python-dotenv==1.2.2",
-  "lyricsync[whisper,metaphone,levenshtein]>=0.1,<0.2",
+  "lyricsync[metaphone,levenshtein]>=0.1,<0.2",
 ]
 
 [project.urls]
@@ -65,6 +65,10 @@ dependencies = [
 Homepage = "https://github.com/singhouse/singhouse"
 
 [project.optional-dependencies]
+# Prepared-media playback and library management do not require an ASR runtime.
+# Keep the alternate Whisper transcriber explicitly installable for environments
+# that run it; Heart's separate processing environment remains unchanged.
+whisper = ["lyricsync[whisper]>=0.1,<0.2"]
 dev = ["pytest==8.3.3", "pytest-asyncio==0.24.0", "Pillow>=10.0"]
 modal = ["modal>=0.66"]
 # Text rasterisation for CD+G export. Optional: without it the export routes

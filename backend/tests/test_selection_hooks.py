@@ -156,8 +156,6 @@ def test_make_transcriber_builtin_never_consults_plugins(monkeypatch) -> None:
     sentinel = object()
     import karaoke_backend.workers.modal_offload as mo
     monkeypatch.setattr(mo, "is_enabled", lambda: False)
-    import karaoke_backend.workers.remote as rmt
-    monkeypatch.setattr(rmt, "is_enabled", lambda: False)
     monkeypatch.setattr(
         word_sync_worker, "HeartTranscriber", lambda **k: sentinel, raising=False
     )
