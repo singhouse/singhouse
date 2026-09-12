@@ -1,9 +1,104 @@
 {
   "schema": 1,
   "kind": "upstream-model-policy",
-  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. The empty policy intentionally enables no production models. No model weights are shipped or mirrored by Singhouse.",
+  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. No model weights are shipped or mirrored by Singhouse.",
   "allowedHosts": ["huggingface.co", "download.pytorch.org", "dl.fbaipublicfiles.com", "github.com"],
   "cacheLayout": "model-cache/packs/<manifest-sha256>/{huggingface,torch,audio-separator}/<file-path>",
   "offlineDefault": true,
-  "models": []
+  "models": [
+    {
+      "id": "heart-transcriptor",
+      "directory": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+      "files": [
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/added_tokens.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9715fd2243b6f06a5858b5e32950d2853f73dd5bc201aafcf76f5082a2d8acd1",
+          "size": 34604,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/added_tokens.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "1cf4e023d6cc6801eebc0c2009c7daf6ade83932bb96a19611c496549a17f323",
+          "size": 1328,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/generation_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "4b7ebbbe7a99573c12749a53e5d119e56a4110d6c44c4336ce33d1fd405ca846",
+          "size": 3727,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/generation_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/merges.txt",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6",
+          "size": 493869,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/merges.txt",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/model.safetensors",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9e09145b687c26330da96ad2d7ca1fe542d46247700a43a3156b924a6b6e6a07",
+          "size": 3055544304,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/model.safetensors",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/normalizer.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+          "size": 52666,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/normalizer.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/preprocessor_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9b5cd03a36fbb8a627c64d98a5b5b126ead95a77720723944487311f0110b666",
+          "size": 184990,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/preprocessor_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/special_tokens_map.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "e67ae3a0aaa99abcd9f187138e12db1f65c16a14761c50ef10eef2c174a7a691",
+          "size": 2194,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/special_tokens_map.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566",
+          "size": 2480466,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "2a4c4281cf9f51ac6ccc406fdc711a087afe6530f671fa7b80953edc498275ce",
+          "size": 282683,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/vocab.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "8f680bba319e01a653d2e8a5dbc17a9157179e0576e6ce74ce0c06356c6e24f9",
+          "size": 835550,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/vocab.json",
+          "executable": false
+        }
+      ]
+    }
+  ]
 }

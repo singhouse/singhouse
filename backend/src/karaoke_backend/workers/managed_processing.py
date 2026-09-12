@@ -17,6 +17,57 @@ class InvalidAttestation(RuntimeError):
     pass
 
 
+def heart_model_status() -> dict[str, Any] | None:
+    """Report the desktop's selected local checkpoint, without exposing paths.
+
+    This is model availability only; it never grants runtime capabilities.
+    The desktop verifies the immutable inventory before providing these values.
+    """
+    raw = os.getenv("KARAOKE_HEART_MODEL_STATUS_JSON")
+    if raw is None and not os.getenv("KARAOKE_DESKTOP_PROCESSING_JSON"):
+        return None
+    missing = {"installed": False, "modelId": "heart", "revision": None}
+    try:
+        value = json.loads(raw or "{}")
+        if (not isinstance(value, dict)
+                or set(value) != {"installed", "modelId", "revision"}
+                or type(value["installed"]) is not bool
+                or not isinstance(value["modelId"], str)
+                or not isinstance(value["revision"], str)):
+            return missing
+        checkpoint = os.getenv("KARAOKE_HEART_CKPT", "")
+        return {**value, "installed": bool(value["installed"] and checkpoint
+                                           and Path(checkpoint).is_dir())}
+    except (ValueError, OSError):
+        return missing
+
+
+def require_heart_model(model: str = "heart") -> None:
+    """Refuse managed local Heart jobs before queueing or external lookups."""
+    if model != "heart":
+        return
+    from karaoke_backend.workers import modal_offload
+    if modal_offload.is_enabled():
+        return
+    status = heart_model_status()
+    if status is not None and not status["installed"]:
+        from fastapi import HTTPException
+        raise HTTPException(409, detail={
+            "code": "heart_model_missing",
+            "message": "Set up the Heart transcription model in the desktop app, then reopen and retry.",
+        })
+    if status is not None:
+        try:
+            if accelerator_device(capability="transcription") is None:
+                raise InvalidAttestation("No verified processing runtime")
+        except InvalidAttestation:
+            from fastapi import HTTPException
+            raise HTTPException(409, detail={
+                "code": "heart_runtime_unavailable",
+                "message": "Heart model is installed, but no qualified local transcription runtime is ready.",
+            }) from None
+
+
 def validated_attestation() -> dict[str, Any] | None:
     """Return a verified managed-desktop attestation, or None in legacy mode."""
     raw = os.getenv("KARAOKE_DESKTOP_PROCESSING_JSON", "").strip()

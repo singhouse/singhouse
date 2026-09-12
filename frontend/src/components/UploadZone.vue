@@ -112,7 +112,7 @@
           <p class="pending-filename">{{ pending.file.name }}</p>
         </div>
         <div class="pending-actions">
-          <button class="btn-upload" @click="submitPending(pending)" title="Upload">
+          <button class="btn-upload" :disabled="pending.submitting" @click="submitPending(pending)" title="Upload">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -236,6 +236,7 @@
 import { ref, computed } from 'vue'
 import { useSongsStore } from '@/stores/songs'
 import { isRoutableUpload, routeUpload, validateUpload } from '@/utils/uploadRouting'
+import { prepareHeart } from '@/composables/useHeartSetup'
 import Badge from '@/components/ui/Badge.vue'
 import { KARAOKE_MODELS, DEFAULT_KARAOKE_MODEL } from '@/utils/karaokeModels'
 
@@ -363,7 +364,8 @@ function processFiles(files) {
   }
 }
 
-function submitPending(pending) {
+async function submitPending(pending) {
+  if (pending.submitting || !pendingFiles.value.includes(pending)) return
   // A karaoke video already carries its lyrics; the transcription options
   // below belong to the audio path only and are not sent for one.
   if (pending.isVideo) {
@@ -371,18 +373,27 @@ function submitPending(pending) {
     removePending(pending.id)
     return
   }
-  const opts = {}
+  pending.submitting = true
+  try {
+    await prepareHeart()
+    if (!pendingFiles.value.includes(pending)) return
+    const opts = {}
   // Only a non-default pick is sent: the server owns what "default" means, and
   // it is configurable there (KARAOKE_MODEL), so echoing our own idea of it
   // would quietly override an operator's setting.
-  if (optKaraokeModel.value !== DEFAULT_KARAOKE_MODEL) {
-    opts.karaokeModel = optKaraokeModel.value
+    if (optKaraokeModel.value !== DEFAULT_KARAOKE_MODEL) {
+      opts.karaokeModel = optKaraokeModel.value
+    }
+    if (optLlmCorrection.value) opts.llmCorrection = true
+    if (optLlmPaging.value) opts.llmPaging = true
+    if (optLyrics.value.trim()) opts.plainLyrics = optLyrics.value.trim()
+    store.uploadSong(pending.file, pending.artist, pending.title, opts)
+    removePending(pending.id)
+  } catch (error) {
+    validationError.value = error.message
+  } finally {
+    pending.submitting = false
   }
-  if (optLlmCorrection.value) opts.llmCorrection = true
-  if (optLlmPaging.value) opts.llmPaging = true
-  if (optLyrics.value.trim()) opts.plainLyrics = optLyrics.value.trim()
-  store.uploadSong(pending.file, pending.artist, pending.title, opts)
-  removePending(pending.id)
 }
 
 function removePending(id) {

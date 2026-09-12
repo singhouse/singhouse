@@ -16,7 +16,7 @@ export default {
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'models.json', 'processing-locks.json'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'heart_setup.mjs', 'models.json', 'processing-locks.json'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] },
     { from: resolve(desktop, 'models.json'), to: 'native/models.json' }],
   asar: true,

@@ -150,6 +150,38 @@ class IsolationTests(unittest.TestCase):
         env = backend.processing_environment(Path("/app/backend"), {}, None, None)
         self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
         self.assertNotIn("KARAOKE_DESKTOP_PROCESSING_JSON", env)
+        self.assertFalse(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"])["installed"])
+
+    def test_heart_checkpoint_survives_application_replacement_and_is_verified_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            revision = "a" * 40
+            directory = f"huggingface/heart/{revision}"
+            files = [{"path": f"{directory}/{name}", "size": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(), "executable": False,
+                      "revision": revision,
+                      "url": f"https://huggingface.co/fixture/resolve/{revision}/{name}"}
+                     for name, data in [("config.json", b"{}"), ("model.safetensors", b"fixture")]]
+            policy = {"schema": 1, "allowedHosts": ["huggingface.co"],
+                      "models": [{"id": "heart-transcriptor", "files": files}]}
+            manifest = {"schema": 1, "kind": "models", "models": ["heart-transcriptor"], "files": files}
+            raw = json.dumps(manifest).encode()
+            pack = root / "model-cache/packs" / hashlib.sha256(raw).hexdigest()
+            (pack / directory).mkdir(parents=True)
+            (pack / "manifest.json").write_bytes(raw)
+            (pack / directory / "config.json").write_bytes(b"{}")
+            (pack / directory / "model.safetensors").write_bytes(b"fixture")
+            for app_version in ("1", "2"):
+                env = backend.processing_environment(root / "backend", {"appVersion": app_version}, None, pack, model_policy=policy)
+                self.assertEqual(env["KARAOKE_HEART_CKPT"], str(pack / directory))
+                self.assertEqual(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"]),
+                                 {"installed": True, "modelId": "heart-transcriptor", "revision": revision})
+                self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+                self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
+                self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+            (pack / directory / "model.safetensors").write_bytes(b"corrupt")
+            with self.assertRaisesRegex(RuntimeError, "verification failed"):
+                backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy)
 
     @unittest.skipIf(os.name == "nt", "POSIX session ownership; Windows needs native job-object validation")
     def test_owned_tree_kill_closes_descendant_pipe(self):

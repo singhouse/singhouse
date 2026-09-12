@@ -174,12 +174,20 @@ not provide a portable directory-descriptor-relative `openat` traversal, so the
 app does not claim protection from a malicious process running as the same user
 that concurrently replaces ancestor directories or installed binaries.
 
-Models are installed only after explicit selection of a `kind: "models"`
-manifest. `models.json` defines the upstream allowlist and offline cache contract.
+The first explicit Heart transcription or audio-upload action opens Heart setup.
+You can also open Processing → Set up Heart transcription. The dialog shows the
+exact size and upstream source before you choose to retrieve files or select an
+existing complete Heart model folder. Cancel keeps the operation unsubmitted.
+Progress appears in the application taskbar/dock; Processing → Cancel installation
+interrupts setup, and retry resumes verified partial transfers. Insufficient disk
+space, interrupted transfers and checksum failures preserve the prior cache.
+After installation, reopen the application and retry the original action.
+Prepared playback remains available while setting up models.
+
+`models.json` defines the upstream allowlist and offline cache contract.
 Only model IDs and complete immutable inventories defined by the shipped policy
-are accepted. The current policy is empty and therefore enables no production
-model selections; a user-created manifest cannot declare a model ready. Fixture
-tests supply an explicit synthetic model policy. Each non-executable model file
+are accepted. The policy includes the pinned Heart inventory below;
+a user-created manifest cannot declare another model ready. Each non-executable model file
 must exactly match its policy's upstream revision, HTTPS URL,
 size and SHA-256; mutable branch URLs and Singhouse-hosted copies are rejected.
 The manifest's `models` array identifies the unique policy-defined model sets it contains.
@@ -191,8 +199,18 @@ Cache installation uses the same verification and activation procedure as packs.
 The desktop sets offline flags, directs workers to the verified cache, and never
 falls back to a paid service. A new machine has playback available while local
 processing reports missing runtime or models. Provision and test the desired
-model set before going offline. No Heart-specific model selection or download UX
-is included. User-owned Modal requires separate explicit operator configuration;
+model set before going offline. Model readiness and runtime readiness are separate:
+this release's processing trust list remains empty pending runtime qualification,
+so installing Heart alone does not enable local transcription. A complete cache
+survives application replacement in persistent application data. To move an
+installation offline, select a folder containing all pinned Heart files; files
+are checked against the same inventory with no network fallback. If the active
+cache contains additional model sets, provide their full manifest-relative folder
+layout as well so those selections are preserved.
+
+Heart remains the default. The explicitly selected faster-whisper alternative
+requires its own compatible runtime and model cache; it is never selected as a
+silent fallback. User-owned Modal requires separate explicit operator configuration;
 the stock desktop does not inherit credentials or enable it automatically.
 
 ## Automated checks
@@ -263,3 +281,27 @@ external-display removal, host minimize/restore, workspace switching, and
 shutdown. Virtual-display tests cannot establish audibility, hardware routing,
 monitor behavior, or OS workspace behavior. Those checks remain separate from
 automated smoke results.
+
+## Heart model source and inventory
+
+The `heart-transcriptor` policy entry pins the upstream
+[HeartMuLa/HeartTranscriptor-oss repository](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/tree/918f88917c17489c1f8dbae0165cd1019c4d5cd3)
+at revision `918f88917c17489c1f8dbae0165cd1019c4d5cd3`. Its eleven runtime
+files total 3,059,916,381 bytes (about 3.06 GB): one safetensors checkpoint,
+model and generation configuration, audio preprocessing configuration, and
+the complete tokenizer vocabulary, merges, normalization and token metadata.
+The application downloads these files directly from upstream; the installer
+contains the inventory, not model weights.
+
+Within a verified model pack, the directory
+`huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3` is a local
+`from_pretrained` directory. It is not a Hugging Face Hub cache snapshot and
+must be passed explicitly to both the processor and model when loading offline.
+
+To reproduce the policy entry, run `python3 desktop/build/inventory_heart.py`.
+This reads the pinned upstream API metadata and small configuration/tokenizer
+files, verifies those files against their Git blob identities, and computes
+their SHA-256 hashes. The weight hash and byte count come from upstream LFS
+metadata; the inventory command never downloads the checkpoint. Review its
+output against `desktop/models.json` before updating the policy. The exact
+file hashes and sizes are checked again during installation.

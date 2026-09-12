@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
-import { mkdir, open, rename, rm, lstat, statfs, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
@@ -11,6 +11,13 @@ import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const hashPattern = /^[a-f0-9]{64}$/
 const token = /^[A-Za-z0-9._+-]{1,128}$/
+const offlineSources = Symbol('verified offline model sources')
+// Explicit upstream endpoints; do not permit arbitrary subdomains or ports.
+// Hugging Face Hub's documented proxy/firewall endpoints (HTTPS port 443).
+const modelTransferHosts = new Set(['huggingface.co', 'cdn-lfs.huggingface.co',
+  'cdn-lfs.hf.co', 'cdn-lfs-us-1.hf.co', 'cdn-lfs-eu-1.hf.co',
+  'cas-bridge.xethub.hf.co', 'cas-server.xethub.hf.co', 'cas-server.xethub-eu.hf.co',
+  'transfer.xethub.hf.co', 'transfer.xethub-eu.hf.co', 'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co'])
 const safePath = value => typeof value === 'string' && value.length < 512
   && value.split('/').every(part => /^[A-Za-z0-9._+-]+$/.test(part) && !part.endsWith('.')
     && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
@@ -172,9 +179,9 @@ async function checkedFile(path, flags) {
   } catch (error) { await file.close(); throw error }
 }
 
-async function fileHash(file) {
+async function fileHash(file, signal) {
   const hash = createHash('sha256')
-  for await (const chunk of file.createReadStream({ start: 0, autoClose: false })) hash.update(chunk)
+  for await (const chunk of file.createReadStream({ start: 0, autoClose: false, signal })) hash.update(chunk)
   return hash.digest('hex')
 }
 
@@ -316,7 +323,9 @@ export class RuntimeManager {
     })
   }
 
-  async transfer(record, partial, signal) {
+  async fetchSource(url, options) { return this.fetch(url, { ...options, redirect: 'error' }) }
+
+  async transfer(record, partial, signal, offlineSource) {
     // Keep one no-follow descriptor from fstat through write/hash/chmod. A
     // concurrently replaced directory entry cannot redirect these file writes.
     const target = await checkedFile(partial, constants.O_CREAT | constants.O_RDWR)
@@ -328,11 +337,13 @@ export class RuntimeManager {
       signal?.throwIfAborted()
       let source
       const url = new URL(record.url)
-      if (url.protocol === 'file:') {
+      if (offlineSource) {
+        source = offlineSource.createReadStream({ start: offset, autoClose: false, signal })
+      } else if (url.protocol === 'file:') {
         localSource = await checkedFile(fileURLToPath(url), constants.O_RDONLY)
         source = localSource.createReadStream({ start: offset, autoClose: false, signal })
       } else {
-        const response = await this.fetch(url, { redirect: 'error', signal,
+        const response = await this.fetchSource(url, { signal,
           headers: offset ? { Range: `bytes=${offset}-` } : {} })
         if (response.status === 200) { offset = 0; await target.truncate(0) }
         else if (response.status !== 206 || !offset
@@ -368,7 +379,7 @@ export class RuntimeManager {
     } finally { await localSource?.close(); await target.close() }
   }
 
-  async install(manifest, { signal, probeTimeout } = {}) {
+  async install(manifest, { signal, probeTimeout, [offlineSources]: sources } = {}) {
     this.validate(manifest)
     // Copy before awaiting so caller mutation cannot alter checked inputs.
     manifest = JSON.parse(JSON.stringify(manifest))
@@ -394,7 +405,7 @@ export class RuntimeManager {
         let ancestor = staging
         for (const part of record.path.split('/').slice(0, -1)) { ancestor = join(ancestor, part); await plainDirectory(ancestor) }
         if (!await matches(destination, record)) {
-          await this.transfer(record, destination + '.partial', signal)
+          await this.transfer(record, destination + '.partial', signal, sources?.get(record.path))
           signal.throwIfAborted()
           await rename(destination + '.partial', destination)
         }
@@ -418,8 +429,34 @@ export class RuntimeManager {
       let existing = false
       try { await lstat(destination); existing = true }
       catch (error) { if (error.code !== 'ENOENT') throw error }
-      if (existing) { await this.verify(id); await this.durableReplace(destination, destination) }
-      else await this.durableReplace(staging, destination)
+      if (existing) {
+        let damaged = false
+        try { await this.verify(id) }
+        catch (error) {
+          if (manifest.kind !== 'models' || (error.code && error.code !== 'ENOENT')) throw error
+          // Repair only ordinary model trees. Unsafe links or special files
+          // still require operator attention; never move or overwrite them.
+          const info = await lstat(destination)
+          if (!info.isDirectory() || info.isSymbolicLink()) throw error
+          await inventory(destination)
+          damaged = true
+        }
+        if (damaged) {
+          const allowed = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
+          const present = await inventory(staging)
+          if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Repair inventory does not match its manifest')
+          const quarantine = join(this.root, 'quarantine')
+          await plainDirectory(quarantine)
+          const retained = await mkdtemp(join(quarantine, `${id}-`))
+          signal.throwIfAborted()
+          // Keep damaged evidence and the previous pointer slots intact. If
+          // interrupted here, a retry can finish from the verified staging tree.
+          await this.durableReplace(destination, join(retained, 'pack'))
+          await this.activationHook('model-quarantined')
+          signal.throwIfAborted()
+          await this.durableReplace(staging, destination)
+        } else await this.durableReplace(destination, destination)
+      } else await this.durableReplace(staging, destination)
       await this.verify(id)
       if (manifest.kind === 'processing') await this.probe({ id }, { timeout: probeTimeout, signal })
       signal?.throwIfAborted()
@@ -565,4 +602,93 @@ export function validateModelManifest(value, policy) {
 export class ModelCache extends RuntimeManager {
   constructor(root, policy, options) { super(root, {}, options); this.policy = policy }
   validate(manifest) { return validateModelManifest(manifest, this.policy) }
+
+  async selectionForRepair() {
+    // This is inventory evidence for repair, never readiness or runnable bytes.
+    const pointers = await this.readPointers()
+    for (const { id } of pointers) {
+      // A repair interrupted after quarantine retains the trusted manifest in
+      // staging, even though the pointer's original pack path is now absent.
+      for (const area of ['packs', 'staging']) {
+        try {
+          const directory = join(this.root, area, id)
+          for (const path of [this.root, join(this.root, area), directory]) {
+            const info = await lstat(path)
+            if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid model repair directory')
+          }
+          const raw = await checkedRead(join(directory, 'manifest.json'))
+          if (digest(raw) !== id) throw new Error('Model repair manifest was modified')
+          const manifest = this.validate(JSON.parse(raw))
+          return { id, directory, manifest }
+        } catch { /* Only an intact policy-bound manifest can preserve a selection. */ }
+      }
+    }
+    return null
+  }
+
+  async fetchSource(url, options) {
+    // Other approved model origins retain the runtime's strict redirect policy.
+    if (url.hostname !== 'huggingface.co') return super.fetchSource(url, options)
+    for (let hops = 0; ; hops++) {
+      if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port
+          || !modelTransferHosts.has(url.hostname)) throw new Error('Model source redirect is not approved')
+      options.signal?.throwIfAborted()
+      const response = await this.fetch(url, { ...options, redirect: 'manual', credentials: 'omit' })
+      if (![301, 302, 303, 307, 308].includes(response.status)) return response
+      await response.body?.cancel()
+      const location = response.headers.get('location')
+      if (!location || hops >= 5) throw new Error('Model source redirect is missing or exceeds the limit')
+      url = new URL(location, url)
+    }
+  }
+
+  async installFromDirectory(manifest, directory, { prefix, ...options } = {}) {
+    this.validate(manifest)
+    manifest = structuredClone(manifest)
+    if (typeof directory !== 'string' || !isAbsolute(directory) || (prefix !== '' && !safePath(prefix))
+        || (prefix !== '' && manifest.files.some(file => !file.path.startsWith(prefix + '/')))) {
+      throw new Error('Offline model directory requires an absolute path and matching model prefix')
+    }
+    directory = resolve(directory)
+    const selected = await lstat(directory)
+    if (!selected.isDirectory() || selected.isSymbolicLink()) throw new Error('Offline model directory must not contain symbolic links')
+    // Canonicalize OS-owned aliases above the selected directory (e.g. macOS
+    // /var), while rejecting links at or inside the selected model directory.
+    directory = await realpath(directory)
+    const canonical = await lstat(directory)
+    if (!canonical.isDirectory() || canonical.isSymbolicLink() || selected.ino !== canonical.ino || selected.dev !== canonical.dev) {
+      throw new Error('Offline model directory changed while opening it')
+    }
+    const sources = new Map()
+    try {
+      for (const record of manifest.files) {
+        options.signal?.throwIfAborted()
+        const relative = prefix === '' ? record.path : record.path.slice(prefix.length + 1)
+        // Snapshot every ancestor, including the chosen directory's ancestors.
+        // Hold checked file descriptors through activation so path replacement
+        // cannot switch the source after validation.
+        const ancestors = []
+        let path = dirname(join(directory, relative))
+        for (;;) {
+          const info = await lstat(path)
+          if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Offline model directory must not contain symbolic links')
+          ancestors.push({ path, info })
+          if (dirname(path) === path) break
+          path = dirname(path)
+        }
+        const source = await checkedFile(join(directory, relative), constants.O_RDONLY)
+        sources.set(record.path, source)
+        for (const ancestor of ancestors) {
+          const info = await lstat(ancestor.path)
+          if (!info.isDirectory() || info.isSymbolicLink() || info.ino !== ancestor.info.ino || info.dev !== ancestor.info.dev) {
+            throw new Error('Offline model directory changed while opening it')
+          }
+        }
+        if ((await source.stat()).size !== record.size || await fileHash(source, options.signal) !== record.sha256) {
+          throw new Error('Offline model source checksum or size mismatch')
+        }
+      }
+      return await super.install(manifest, { ...options, [offlineSources]: sources })
+    } finally { await Promise.all([...sources.values()].map(source => source.close())) }
+  }
 }

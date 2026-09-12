@@ -33,7 +33,7 @@ from karaoke_backend.workers.lyrics_worker import (
     lrclib_enabled,
 )
 from karaoke_backend.workers import modal_offload, modal_worker, word_sync_worker
-from karaoke_backend.workers.managed_processing import InvalidAttestation, validated_attestation
+from karaoke_backend.workers.managed_processing import InvalidAttestation, validated_attestation, heart_model_status
 
 router = APIRouter(prefix="/api/features", tags=["features"])
 
@@ -125,6 +125,7 @@ def _processing_readiness() -> dict[str, Any]:
         return {"ready": True} if ready else {"ready": False, "reason": unavailable}
 
     return {
+        "heart_model": heart_model_status(),
         "playback": fact(
             all(playback_tools.values()),
             "ffmpeg and ffprobe are required for playback preparation",
@@ -137,11 +138,11 @@ def _processing_readiness() -> dict[str, Any]:
             local_separation or modal_ready,
             "no verified local separation models or ready user-owned Modal",
         ),
-        "modal": fact(
+        "modal": {**fact(
             modal_ready,
             "user-owned Modal is configured but remotely unverified"
             if modal_detail["configured"] else "user-owned Modal is not configured",
-        ),
+        ), "configured": modal_detail["configured"], "selected": modal_offload.is_enabled()},
         "runtime": runtime,
     }
 

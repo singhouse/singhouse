@@ -291,6 +291,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
     env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
+           "KARAOKE_HEART_CKPT": "",
+           "KARAOKE_HEART_MODEL_STATUS_JSON": json.dumps({"installed": False, "modelId": "heart-transcriptor", "revision": None}),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
            "TORCH_HOME": str(runtime / "cache/torch"),
            "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
@@ -376,6 +378,16 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         env.update({"HF_HOME": str(models / "huggingface"),
                     "TORCH_HOME": str(models / "torch"),
                     "KARAOKE_MODEL_DIR": str(models / "audio-separator")})
+        if "heart-transcriptor" in model_manifest["models"]:
+            entry = next(entry for entry in model_policy["models"] if entry["id"] == "heart-transcriptor")
+            directories = {str(Path(record["path"]).parent) for record in entry["files"]}
+            revisions = {record["revision"] for record in entry["files"]}
+            if len(directories) != 1 or len(revisions) != 1:
+                raise RuntimeError("Heart model inventory must describe one complete checkpoint")
+            env["KARAOKE_HEART_CKPT"] = str(models / directories.pop())
+            env["KARAOKE_HEART_MODEL_STATUS_JSON"] = json.dumps({
+                "installed": True, "modelId": "heart-transcriptor", "revision": revisions.pop(),
+            })
     if processing:
         manifest = verify(processing, "processing", "processing")
         for key in ("appVersion", "backendVersion", "lyricsyncVersion", "platform", "arch"):

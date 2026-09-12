@@ -96,6 +96,7 @@ async function mountModal() {
 }
 
 beforeEach(() => {
+  delete window.karaokeDesktop
   setActivePinia(createPinia())
   for (const fn of [
     getSettings, setSettings, test_, listLibraries, listTracks, importTracks,
@@ -113,6 +114,31 @@ beforeEach(() => {
 })
 
 describe('PlexImportModal', () => {
+  it('preserves selection and queues nothing after model setup requires reopening', async () => {
+    window.karaokeDesktop = { isDesktop: true,
+      prepareHeart: vi.fn().mockResolvedValue({ installed: true, restartRequired: true }) }
+    await mountModal()
+    await wrapper.findAll('.plex-track__check')[1].setValue(true)
+    await wrapper.find('.plex-btn--primary').trigger('click')
+    await flushPromises()
+    expect(importTracks).not.toHaveBeenCalled()
+    expect(wrapper.findAll('.plex-track__check')[1].element.checked).toBe(true)
+    expect(wrapper.text()).toContain('Reopen the app')
+  })
+
+  it('does not import after the dialog closes while setup is pending', async () => {
+    let complete
+    window.karaokeDesktop = { isDesktop: true,
+      prepareHeart: vi.fn(() => new Promise(resolve => { complete = resolve })) }
+    await mountModal()
+    await wrapper.findAll('.plex-track__check')[1].setValue(true)
+    await wrapper.find('.plex-btn--primary').trigger('click')
+    wrapper.unmount()
+    complete({ installed: true, restartRequired: false })
+    await flushPromises()
+    expect(importTracks).not.toHaveBeenCalled()
+  })
+
   it('renders the libraries and tracks the API returns', async () => {
     await mountModal()
     const options = wrapper.findAll('option').map(o => o.text())

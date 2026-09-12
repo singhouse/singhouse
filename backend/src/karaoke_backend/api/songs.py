@@ -1090,6 +1090,9 @@ async def retry_ingest(
     # upload name adopts nothing — so it takes the same default-ingest path as
     # no row at all, and the upload check below tells the operator so.
     kind = last_job.kind if options_recovered else JobKind.INGEST.value
+    if kind != JobKind.VIDEO_IMPORT.value:
+        from karaoke_backend.workers.managed_processing import require_heart_model
+        require_heart_model()
     stems_dir = INGEST_STEMS_DIR / str(song_id)
 
     if kind == JobKind.PLEX_IMPORT.value:

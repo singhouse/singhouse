@@ -116,12 +116,14 @@ client.interceptors.response.use(
     }
 
     const message =
+      error.response?.data?.detail?.message ||
       error.response?.data?.detail ||
       error.response?.data?.message ||
       error.message ||
       'An unexpected error occurred'
     const err = new Error(message)
     err.status = status
+    err.code = error.response?.data?.detail?.code
     return Promise.reject(err)
   }
 )

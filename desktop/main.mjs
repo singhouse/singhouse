@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker } from 'electron'
+import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain } from 'electron'
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { HeartSetup, authorizedHeartCaller } from './heart_setup.mjs'
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
@@ -24,6 +25,7 @@ let processingManager, modelCache, activeProcessing, activeModels, processingErr
 let processingProbe
 let installation
 let processingOperation
+let heartSetup
 if (!ownsInstance) app.quit()
 app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.restore(); host.show(); host.focus() } })
 let backend, host, projector, quitting = false, shutdownComplete = false
@@ -148,14 +150,15 @@ function installMenu() {
       { label: 'Install processing runtime or model cache…', click: () => {
         if (!processingOperation) processingOperation = installProcessing().finally(() => { processingOperation = null })
       } },
-      { label: 'Cancel installation', click: () => installation?.abort() },
+      { label: 'Set up Heart transcription…', click: () => { if (!processingOperation) void heartSetup?.prepare() } },
+      { label: 'Cancel installation', click: () => { installation?.abort(); heartSetup?.cancel() } },
     ] }] : []),
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'quit' }] },
   ]))
 }
 
 async function installProcessing() {
-  if (installation) return
+  if (installation || heartSetup?.operation) return
   const choice = await dialog.showOpenDialog(host, { title: 'Select a processing or upstream model manifest', properties: ['openFile'], filters: [{ name: 'Manifest', extensions: ['json'] }] })
   if (choice.canceled || !choice.filePaths.length) return
   try {
@@ -228,6 +231,36 @@ async function start() {
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false, webviewTag: false, spellcheck: false } })
   secureContents(host.webContents, launch.origin, true)
+  if (packaged) heartSetup = new HeartSetup({
+    cache: modelCache, policy: modelCache.policy, loadedModels: activeModels,
+    cancelled: () => quitting,
+    progressDone: () => host?.setProgressBar(-1),
+    runtimeReady: async () => (await processingStatus()).transcription?.ready === true,
+    consent: async ({ bytes, sources, revision, runtimeReady, repair }) => {
+      const result = await dialog.showMessageBox(host, {
+        type: 'question', title: 'Set up Heart transcription',
+        message: repair ? 'Repair damaged Heart model files?' : 'Install Heart model files for local transcription?',
+        detail: `${bytes.toLocaleString()} bytes (${(bytes / 1024 ** 3).toFixed(2)} GiB), from ${sources.join(', ')}.\nRevision: ${revision}\n\nFiles stay on this computer and can be used offline after setup. Reopening the application is required.\n\n${runtimeReady ? '' : 'A qualified local processing runtime is not currently ready. Installing model files alone does not enable transcription.\n\n'}Choose an existing Heart model folder for offline installation, or retrieve the pinned files from upstream.`,
+        buttons: ['Cancel', 'Retrieve from upstream', 'Use existing folder'], defaultId: 0, cancelId: 0,
+      })
+      return ['cancel', 'upstream', 'directory'][result.response]
+    },
+    chooseDirectory: async () => {
+      const result = await dialog.showOpenDialog(host, { title: 'Select the complete Heart model folder', properties: ['openDirectory'] })
+      return result.canceled ? null : result.filePaths[0]
+    },
+    notify: (message, failed = false) => dialog.showMessageBox(host, {
+      type: failed ? 'error' : 'info', title: 'Heart transcription setup', message,
+    }),
+  })
+  ipcMain.handle('heart:prepare', async event => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting) throw new Error('Heart setup is only available in the host window')
+    // Development mode retains its explicitly configured backend environment.
+    if (!packaged) return { installed: true, restartRequired: false }
+    if ((await processingStatus()).modal?.selected === true) return { installed: true, restartRequired: false }
+    if (processingOperation) return { installed: false, restartRequired: false, reason: 'Another installation is running. Retry when it finishes.' }
+    return heartSetup.prepare()
+  })
   host.webContents.on('did-create-window', child => {
     projector = child
     popupReserved = false
@@ -250,10 +283,11 @@ app.on('before-quit', event => {
   if (quitting) return
   quitting = true
   installation?.abort()
+  heartSetup?.cancel()
   blocker.stop()
   projector?.destroy()
   host?.destroy()
-  void Promise.all([stopRuntime(backend, runtime), processingOperation]).catch(() => {
+  void Promise.all([stopRuntime(backend, runtime), processingOperation, heartSetup?.operation]).catch(() => {
     console.error('Could not complete desktop backend shutdown.')
   }).finally(() => { shutdownComplete = true; app.quit() })
 })

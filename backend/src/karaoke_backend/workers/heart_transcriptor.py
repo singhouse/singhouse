@@ -94,9 +94,9 @@ def main():
     sys.stderr.write(f"Loading HeartTranscriptor from {ckpt_dir} on {device} ({dtype})...\n")
 
     model = WhisperForConditionalGeneration.from_pretrained(
-        ckpt_dir, torch_dtype=dtype, low_cpu_mem_usage=True
+        ckpt_dir, torch_dtype=dtype, low_cpu_mem_usage=True, local_files_only=True
     )
-    processor = WhisperProcessor.from_pretrained(ckpt_dir)
+    processor = WhisperProcessor.from_pretrained(ckpt_dir, local_files_only=True)
 
     pipe = pipeline(
         "automatic-speech-recognition",
