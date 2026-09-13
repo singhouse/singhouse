@@ -79,6 +79,21 @@ class ProcessingBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'duplicate'):
             builder.validate_requirements(lock, 'linux-x64', 'cpu')
 
+    def test_vendored_metadata_does_not_replace_wheel_identity_or_lose_notices(self):
+        wheel = self.root / 'fixture-1-py3-none-any.whl'
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr('fixture-1.dist-info/METADATA', 'Name: fixture\nVersion: 1\n')
+            archive.writestr('fixture-1.dist-info/licenses/LICENSE', 'Fixture license')
+            archive.writestr('fixture/_vendor/nested-2.dist-info/METADATA', 'Name: nested\nVersion: 2\n')
+            archive.writestr('fixture/_vendor/nested-2.dist-info/LICENSE', 'Vendored license')
+        self.assertEqual(builder.wheel_metadata(wheel)['Name'], 'fixture')
+        notices = builder.retain_notices(wheel, {'name': 'fixture'}, self.root, self.root)
+        self.assertEqual({(self.root / p).read_text() for p in notices}, {'Fixture license', 'Vendored license'})
+        with zipfile.ZipFile(wheel, 'a') as archive:
+            archive.writestr('another-2.dist-info/METADATA', 'Name: another\nVersion: 2\n')
+        with self.assertRaisesRegex(ValueError, 'fixture-1-py3-none-any.whl.*found 2'):
+            builder.wheel_metadata(wheel)
+
 
 if __name__ == '__main__':
     unittest.main()

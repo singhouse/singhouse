@@ -73,9 +73,12 @@ def inventory(root):
 
 def wheel_metadata(artifact):
     with zipfile.ZipFile(artifact) as wheel:
-        names = [n for n in wheel.namelist() if n.endswith('.dist-info/METADATA')]
+        # Vendored dependencies can carry their own nested dist-info trees
+        # (setuptools does). Only the wheel's top-level metadata identifies
+        # the installed distribution; nested licenses are retained separately.
+        names = [n for n in wheel.namelist() if n.count('/') == 1 and n.endswith('.dist-info/METADATA')]
         if len(names) != 1:
-            raise ValueError('Wheel must contain exactly one package metadata record')
+            raise ValueError(f'Wheel {artifact.name} must contain exactly one top-level package metadata record; found {len(names)}')
         return BytesParser().parsebytes(wheel.read(names[0]))
 
 
