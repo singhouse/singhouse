@@ -91,6 +91,9 @@ def normalize_installer_metadata(destination, records):
     for directory in destination.glob('*.dist-info'):
         info = BytesParser().parsebytes((directory / 'METADATA').read_bytes())
         record = sources[normalized(info['Name'])]
+        # uv's installation timestamp is cache bookkeeping, not runtime data.
+        # Removing it also removes its RECORD row below, making rebuilds stable.
+        (directory / 'uv_cache.json').unlink(missing_ok=True)
         direct = directory / 'direct_url.json'
         direct.write_text(json.dumps({'url': record['url'], 'archive_info': {
             'hashes': {'sha256': record['sha256']}}}, sort_keys=True) + '\n')
@@ -208,6 +211,20 @@ def validate_native_toolchain(path):
         path = Path(record['path'])
         if not path.is_absolute() or digest(path) != record.get('sha256'):
             raise ValueError('Native toolchain supporting input digest mismatch')
+    if lock['host'].startswith('darwin-'):
+        sdk = lock.get('sdk', {})
+        root = Path(sdk.get('path', ''))
+        if (not root.is_absolute() or not root.is_dir()
+                or not re.fullmatch(r'\d+\.\d+', sdk.get('deploymentTarget', ''))
+                or {Path(record['path']).name for record in sdk.get('settings', [])}
+                != {'SDKSettings.json', 'SDKSettings.plist'}):
+            raise ValueError('Mac native builds require locked SDK settings and deployment target')
+        for record in sdk['settings']:
+            settings = Path(record['path'])
+            if settings.parent != root or digest(settings) != record.get('sha256'):
+                raise ValueError('Mac SDK settings identity mismatch')
+        if json.loads((root / 'SDKSettings.json').read_text()).get('Version') != sdk.get('version'):
+            raise ValueError('Mac SDK version differs from its lock')
     return lock
 
 
@@ -253,6 +270,13 @@ def build_wheel(source, destination, host_python, env, toolchain=None):
                          AS=shlex.quote(toolchain['tools']['as']['path']), CFLAGS=shlex.join(['-O2', '-g0', *mappings]),
                          CXXFLAGS=shlex.join(['-O2', '-g0', *mappings]), LDFLAGS='',
                          LDSHARED=shlex.join([cc, *(['-bundle', '-undefined', 'dynamic_lookup'] if toolchain['host'] == 'darwin-arm64' else ['-shared'])]))
+        if toolchain['host'].startswith('darwin-'):
+            sdk = toolchain['sdk']
+            sdk_flags = shlex.join(['-isysroot', sdk['path']])
+            build_env.update(SDKROOT=sdk['path'], MACOSX_DEPLOYMENT_TARGET=sdk['deploymentTarget'],
+                             CFLAGS=build_env['CFLAGS'] + ' ' + sdk_flags,
+                             CXXFLAGS=build_env['CXXFLAGS'] + ' ' + sdk_flags,
+                             LDFLAGS=sdk_flags)
     run('uv', 'build', '--wheel', '--no-build-isolation', '--no-sources', '--offline',
         '--python', host_python, '--out-dir', destination, source, env=build_env)
     wheels = list(destination.glob('*.whl'))

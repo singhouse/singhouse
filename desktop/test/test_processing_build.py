@@ -62,13 +62,16 @@ class ProcessingBuildTests(unittest.TestCase):
             archive.extractall(site)
         dist = site / 'fixture-1.dist-info'
         (dist / 'direct_url.json').write_text('{"url":"file:///tmp/private-source"}')
-        (dist / 'RECORD').write_text('fixture-1.dist-info/direct_url.json,,\nfixture-1.dist-info/RECORD,,\n')
+        (dist / 'uv_cache.json').write_text('{"timestamp":{"secs_since_epoch":123}}')
+        (dist / 'RECORD').write_text('fixture-1.dist-info/direct_url.json,,\nfixture-1.dist-info/uv_cache.json,,\nfixture-1.dist-info/RECORD,,\n')
         builder.normalize_installer_metadata(site, [(wheel, record)])
         direct = json.loads((dist / 'direct_url.json').read_text())
         self.assertEqual(direct['url'], record['url'])
         self.assertEqual(direct['archive_info']['hashes']['sha256'], builder.digest(wheel))
         self.assertNotIn('/tmp/', (dist / 'RECORD').read_text())
         self.assertIn('sha256=', (dist / 'RECORD').read_text())
+        self.assertFalse((dist / 'uv_cache.json').exists())
+        self.assertNotIn('uv_cache.json', (dist / 'RECORD').read_text())
 
     def test_missing_notices_and_unlocked_artifacts_fail(self):
         wheel = self.root / 'empty.whl'
@@ -172,6 +175,49 @@ class ProcessingBuildTests(unittest.TestCase):
         flags = shlex.split(seen['CFLAGS'])
         self.assertIn(f'-ffile-prefix-map={source.resolve()}=/build/source', flags)
         self.assertIn(f'-fdebug-prefix-map={python.parents[2]}=/build/toolchain', flags)
+
+    def test_mac_native_flags_bind_sdk_and_deployment_target(self):
+        source = self.root / 'source'
+        source.mkdir()
+        destination = self.root / 'wheel'
+        python = self.root / 'python/bin/python3'
+        toolchain = {'host': 'darwin-arm64', 'tools': {
+            name: {'path': '/compiler tools/' + name} for name in ('cc', 'cxx', 'ld', 'as')},
+            'sdk': {'path': '/SDK path/MacOSX.sdk', 'deploymentTarget': '14.0'}}
+        seen = {}
+        def fake_build(*args, env):
+            seen.update(env)
+            (destination / 'fixture-1-cp312-cp312-macosx_14_0_arm64.whl').touch()
+        with patch.object(builder, 'run', side_effect=fake_build):
+            builder.build_wheel(source, destination, python, {}, toolchain)
+        self.assertEqual(seen['SDKROOT'], '/SDK path/MacOSX.sdk')
+        self.assertEqual(seen['MACOSX_DEPLOYMENT_TARGET'], '14.0')
+        self.assertEqual(shlex.split(seen['LDFLAGS']), ['-isysroot', '/SDK path/MacOSX.sdk'])
+        self.assertEqual(shlex.split(seen['CFLAGS'])[-2:], ['-isysroot', '/SDK path/MacOSX.sdk'])
+        self.assertEqual(shlex.split(seen['LDSHARED'])[-3:], ['-bundle', '-undefined', 'dynamic_lookup'])
+
+    def test_mac_sdk_settings_are_required_and_verified(self):
+        compiler = self.root / 'compiler'
+        compiler.write_bytes(b'compiler fixture')
+        record = {'path': str(compiler), 'sha256': builder.digest(compiler), 'version': 'clang fixture\n'}
+        sdk = self.root / 'sdk'
+        sdk.mkdir()
+        (sdk / 'SDKSettings.json').write_text('{"Version":"26.2"}')
+        (sdk / 'SDKSettings.plist').write_bytes(b'plist fixture')
+        lock = {'schema': 1, 'kind': 'processing-native-toolchain', 'host': 'darwin-arm64',
+                'tools': {name: dict(record) for name in ('cc', 'cxx', 'ld', 'as')}}
+        path = self.root / 'toolchain.json'
+        with patch.object(builder, 'host_target', return_value='darwin-arm64'), patch.object(builder.subprocess, 'check_output', return_value='clang fixture\n'):
+            path.write_text(json.dumps(lock))
+            with self.assertRaisesRegex(ValueError, 'require locked SDK'):
+                builder.validate_native_toolchain(path)
+            lock['sdk'] = {'path': str(sdk), 'version': '26.2', 'deploymentTarget': '14.0',
+                           'settings': [{'path': str(p), 'sha256': builder.digest(p)} for p in sorted(sdk.iterdir())]}
+            path.write_text(json.dumps(lock))
+            self.assertEqual(builder.validate_native_toolchain(path), lock)
+            (sdk / 'SDKSettings.json').write_text('{"Version":"27.0"}')
+            with self.assertRaisesRegex(ValueError, 'SDK settings identity mismatch'):
+                builder.validate_native_toolchain(path)
 
 
 if __name__ == '__main__':

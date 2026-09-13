@@ -35,5 +35,22 @@
         "-v"
       ]
     }
+  },
+  "sdk": {
+    "path": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    "version": "26.2",
+    "buildVersion": "25C58",
+    "deploymentTarget": "14.0",
+    "identityScope": "SDK settings identity only; not a complete SDK content hash or hermetic toolchain assertion",
+    "settings": [
+      {
+        "path": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json",
+        "sha256": "95882a9cea02396e76f3e406a5728269b2a1a11bcd241430a84c9e63d09a6cd3"
+      },
+      {
+        "path": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.plist",
+        "sha256": "03cb7d21a91023f6dff9ea019a3710061e2eb570bdb260faf4daa74151abf15d"
+      }
+    ]
   }
 }
