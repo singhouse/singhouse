@@ -636,3 +636,110 @@ async def test_ingest_still_guesses_that_pair(tmp_path: Path):
             tmp_path / "vocals.wav", out_dir, "UVR_MDXNET_KARA_2.onnx", progress
         )
     assert lead is not None and backing is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+async def test_demucs_launch_uses_managed_adapter_only_for_desktop(monkeypatch, tmp_path, local_separation, managed):
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", "fixture" if managed else "")
+    monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: False)
+    monkeypatch.setattr(modal_worker, "configured_accelerator", lambda: "cpu")
+    monkeypatch.setattr(modal_worker, "require_selected_models", lambda *args: None)
+    seen = []
+    async def capture(cmd, timeout):
+        seen.extend(cmd)
+        raise RuntimeError("captured dispatch")
+    monkeypatch.setattr(modal_worker, "_await_subprocess", capture)
+    with pytest.raises(RuntimeError, match="captured dispatch"):
+        await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "output", "fixture")
+    prefix = ([str(local_separation), "-I", "-B", "-m", "karaoke_backend.workers.managed_demucs"]
+              if managed else [str(local_separation), "-m", "demucs.separate"])
+    assert seen[:len(prefix)] == prefix
+    assert "--float32" in seen
+    assert seen[seen.index("--device") + 1] == "cpu"
+
+
+@pytest.fixture
+def managed_ingest(monkeypatch, local_separation):
+    import hashlib
+    local_separation.chmod(0o700)
+    monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: False)
+    monkeypatch.setenv("KARAOKE_PROCESSING_PYTHON", str(local_separation))
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
+    monkeypatch.setenv("KARAOKE_AUDIO_SEPARATOR_DEVICE", "cpu")
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", json.dumps({
+        "runtimeManifestId": "a" * 64, "pythonPath": str(local_separation),
+        "pythonSha256": hashlib.sha256(local_separation.read_bytes()).hexdigest(),
+        "probePassed": True, "accelerator": "cpu", "components": {"demucs": "4.0.1"},
+        "verifiedCapabilities": ["separation"], "capabilitiesReady": True}))
+    monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", json.dumps({
+        "schema": 1, "runtimeManifestId": "a" * 64, "modelManifestId": "b" * 64,
+        "requiredModels": {"transcription": [], "separation": ["demucs-mdx-extra", "karaoke-roformer"]},
+        "verifiedModelIds": ["demucs-mdx-extra", "karaoke-roformer"]}))
+    return local_separation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["mdxnet_kara2", "unknown-queued-model"])
+async def test_managed_ingest_preflights_both_models_before_demucs(monkeypatch, tmp_path, managed_ingest, choice):
+    launch = AsyncMock()
+    monkeypatch.setattr(modal_worker, "_await_subprocess", launch)
+    with pytest.raises(modal_worker.StemSeparationError, match="model set"):
+        await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "stems", "job", karaoke_model=choice)
+    launch.assert_not_called()
+    assert not (tmp_path / "stems").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+@pytest.mark.parametrize("failure", ["error", "missing-lead", "missing-backing", "missing-both"])
+async def test_managed_ingest_refuses_pass2_degradation_but_legacy_preserves_fallback(
+    monkeypatch, tmp_path, managed_ingest, managed, failure
+):
+    if not managed:
+        monkeypatch.delenv("KARAOKE_DESKTOP_PROCESSING_JSON")
+    stems = tmp_path / "stems"
+    async def demucs(cmd, timeout):
+        output = Path(cmd[cmd.index("-o") + 1]) / "mdx_extra" / "input"
+        output.mkdir(parents=True)
+        for name in ("vocals", "drums", "bass", "other"):
+            (output / (name + ".wav")).write_bytes(name.encode())
+    monkeypatch.setattr(modal_worker, "_await_subprocess", demucs)
+    lead, backing = tmp_path / "lead.wav", tmp_path / "backing.wav"
+    lead.write_bytes(b"lead"); backing.write_bytes(b"backing")
+    split = AsyncMock(side_effect=modal_worker.StemSeparationError("separator failed")) if failure == "error" else AsyncMock(
+        return_value=(None if failure in {"missing-lead", "missing-both"} else lead,
+                      None if failure in {"missing-backing", "missing-both"} else backing))
+    monkeypatch.setattr(modal_worker, "run_pass2", split)
+    silence = lambda output, source: output.write_bytes(b"silence")
+    monkeypatch.setattr(modal_worker, "_create_silent_wav", silence)
+    finalize = AsyncMock(return_value={"lead_vocals": stems / "lead_vocals.wav"})
+    monkeypatch.setattr(modal_worker, "_mix_and_finalize", finalize)
+    if managed:
+        with pytest.raises(modal_worker.StemSeparationError, match="separator failed|did not produce"):
+            await modal_worker.separate_stems(tmp_path / "input.wav", stems, "job")
+        finalize.assert_not_called()
+        assert not (stems / "lead_vocals.wav").exists()
+        assert not (stems / "backing_vocals.wav").exists()
+    else:
+        await modal_worker.separate_stems(tmp_path / "input.wav", stems, "job")
+        finalize.assert_awaited_once()
+        assert (stems / "lead_vocals.wav").is_file()
+        assert (stems / "backing_vocals.wav").is_file()
+    assert split.call_args.kwargs["allow_alphabetical_fallback"] is (not managed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["drums", "bass", "other"])
+async def test_managed_ingest_requires_all_demucs_stems(monkeypatch, tmp_path, managed_ingest, missing):
+    async def demucs(cmd, timeout):
+        output = Path(cmd[cmd.index("-o") + 1]) / "mdx_extra" / "input"
+        output.mkdir(parents=True)
+        for name in {"vocals", "drums", "bass", "other"} - {missing}:
+            (output / (name + ".wav")).write_bytes(name.encode())
+    monkeypatch.setattr(modal_worker, "_await_subprocess", demucs)
+    split = AsyncMock()
+    monkeypatch.setattr(modal_worker, "run_pass2", split)
+    with pytest.raises(modal_worker.StemSeparationError, match="complete stem set"):
+        await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "stems", "job")
+    split.assert_not_called()

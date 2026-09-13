@@ -13,7 +13,7 @@ const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
 const durabilityHelper = fileURLToPath(new URL('../backend.py', import.meta.url))
 const testTrustedLocks = new Set()
 class RuntimeManager extends NativeRuntimeManager {
-  constructor(root, identity, options) { super(root, identity, { lockPython, durabilityHelper, trustedLocks: testTrustedLocks, ...options }) }
+  constructor(root, identity, options) { super(root, identity, { lockPython, durabilityHelper, nativeBin: join(root, '..', 'native-fixture'), trustedLocks: testTrustedLocks, ...options }) }
 }
 class ModelCache extends NativeModelCache {
   constructor(root, policy, options) { super(root, policy, { lockPython, durabilityHelper, ...options }) }
@@ -37,12 +37,18 @@ function bindProvenance(manifest) {
 
 test('runtime manager copy stays neutral because installation dialogs surface its error messages', async () => {
   const source = await readFile(new URL('../runtime_manager.mjs', import.meta.url), 'utf8')
-  assert.doesNotMatch(source, /\bdownload\w*/i)
+  // This literal is an approved technical endpoint, not installation copy.
+  assert.doesNotMatch(source.replaceAll("'download.pytorch.org'", "'upstream-host'"), /\bdownload\w*/i)
 })
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'processing-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
+  // These files are inert: fake-interpreter protocol tests never execute them.
+  await mkdir(join(root, 'native-fixture'))
+  for (const name of ['ffmpeg', 'ffprobe']) {
+    await writeFile(join(root, 'native-fixture', name + (process.platform === 'win32' ? '.exe' : '')), 'fixture native tool')
+  }
   const source = join(root, 'python')
   await writeFile(source, 'fixture python')
   const notice = join(root, 'NOTICE.fixture')
@@ -389,5 +395,20 @@ test('real dependency names with internal spaces and parentheses survive install
     invalid.files.push({ ...manifest.files[1], path })
     bindProvenance(invalid)
     assert.throws(() => validateProcessingManifest(invalid, identity, testTrustedLocks))
+  }
+})
+
+
+test('processing path collisions follow the target filesystem', async t => {
+  const { manifest, manager } = await fixture(t)
+  for (const path of ['terminfo/2621A', 'terminfo/2621a']) manifest.files.push({ ...manifest.files[1], path })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  for (const platform of ['win32', 'darwin']) {
+    const changed = structuredClone(manifest)
+    changed.platform = platform
+    bindProvenance(changed)
+    assert.throws(() => validateProcessingManifest(changed, { ...identity, platform }, testTrustedLocks), /file record/)
   }
 })

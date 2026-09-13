@@ -42,12 +42,18 @@ def heart_model_status() -> dict[str, Any] | None:
         return missing
 
 
-def require_heart_model(model: str = "heart") -> None:
-    """Refuse managed local Heart jobs before queueing or external lookups."""
-    if model != "heart":
-        return
+def require_transcription_model(model: str = "heart") -> None:
+    """Refuse unavailable managed models before queueing or external lookups."""
     from karaoke_backend.workers import modal_offload
     if modal_offload.is_enabled():
+        return
+    if model != "heart":
+        if heart_model_status() is not None:
+            from fastapi import HTTPException
+            raise HTTPException(409, detail={
+                "code": "transcription_model_unavailable",
+                "message": "The selected transcription model is not installed for this managed runtime.",
+            })
         return
     status = heart_model_status()
     if status is not None and not status["installed"]:
@@ -66,6 +72,11 @@ def require_heart_model(model: str = "heart") -> None:
                 "code": "heart_runtime_unavailable",
                 "message": "Heart model is installed, but no qualified local transcription runtime is ready.",
             }) from None
+
+
+def require_heart_model(model: str = "heart") -> None:
+    """Compatibility name for existing admission callers."""
+    require_transcription_model(model)
 
 
 def validated_attestation() -> dict[str, Any] | None:
@@ -109,6 +120,63 @@ def validated_attestation() -> dict[str, Any] | None:
     return value
 
 
+MODEL_CAPABILITIES = {"heart-transcriptor": "transcription", "demucs-mdx-extra": "separation", "karaoke-roformer": "separation"}
+DEFAULT_MODEL_SETS = {"transcription": {"heart-transcriptor"}, "separation": {"demucs-mdx-extra", "karaoke-roformer"}}
+
+
+def validated_model_sets(runtime: dict[str, Any]) -> dict[str, Any]:
+    """Validate the desktop's separate verified checkpoint inventory evidence."""
+    try:
+        value = json.loads(os.environ.get("KARAOKE_DESKTOP_MODEL_SETS_JSON", ""))
+    except (TypeError, ValueError) as exc:
+        raise InvalidAttestation("Managed model inventory is unavailable") from exc
+    if (not isinstance(value, dict) or set(value) != {"schema", "runtimeManifestId", "modelManifestId", "requiredModels", "verifiedModelIds"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or value["runtimeManifestId"] != runtime["runtimeManifestId"]
+            or not isinstance(value["requiredModels"], dict)
+            or set(value["requiredModels"]) != set(DEFAULT_MODEL_SETS)
+            or not isinstance(value["verifiedModelIds"], list)
+            or any(type(model) is not str or model not in MODEL_CAPABILITIES for model in value["verifiedModelIds"])
+            or len(set(value["verifiedModelIds"])) != len(value["verifiedModelIds"])):
+        raise InvalidAttestation("Invalid managed model inventory schema")
+    model_manifest = value["modelManifestId"]
+    if ((model_manifest is None and value["verifiedModelIds"])
+            or (model_manifest is not None and (not isinstance(model_manifest, str) or len(model_manifest) != 64
+                or any(char not in "0123456789abcdef" for char in model_manifest)))):
+        raise InvalidAttestation("Invalid managed model manifest identity")
+    for capability, models in value["requiredModels"].items():
+        if (not isinstance(models, list) or any(type(model) is not str or MODEL_CAPABILITIES.get(model) != capability for model in models)
+                or len(set(models)) != len(models)
+                or (models and capability not in runtime["verifiedCapabilities"])):
+            raise InvalidAttestation("Invalid managed model requirements")
+    return value
+
+
+def model_set_ready(capability: str, runtime: dict[str, Any]) -> bool:
+    try:
+        value = validated_model_sets(runtime)
+        required = set(value["requiredModels"][capability])
+        return (DEFAULT_MODEL_SETS[capability] <= required
+                and required <= set(value["verifiedModelIds"]))
+    except (InvalidAttestation, KeyError):
+        return False
+
+
+def require_selected_models(capability: str, selected: list[str]) -> None:
+    runtime = validated_attestation()
+    if runtime is None:
+        if heart_model_status() is not None:
+            raise InvalidAttestation("Managed processing runtime is unavailable")
+        return
+    if (capability not in DEFAULT_MODEL_SETS or not selected
+            or any(MODEL_CAPABILITIES.get(model) != capability for model in selected)
+            or not model_set_ready(capability, runtime)):
+        raise InvalidAttestation("The selected local processing model set is not installed")
+    inventory = validated_model_sets(runtime)
+    if not set(selected) <= set(inventory["requiredModels"][capability]) & set(inventory["verifiedModelIds"]):
+        raise InvalidAttestation("The selected local processing model set is not installed")
+
+
 def accelerator_device(*, capability: str | None = None) -> str | None:
     value = validated_attestation()
     if value is None:
@@ -117,6 +185,8 @@ def accelerator_device(*, capability: str | None = None) -> str | None:
         raise InvalidAttestation("Managed processing capabilities are not ready")
     if capability and capability not in value["verifiedCapabilities"]:
         raise InvalidAttestation(f"Managed runtime lacks {capability} capability")
+    if capability and not model_set_ready(capability, value):
+        raise InvalidAttestation("The selected local processing model set is not installed")
     declared = os.getenv("KARAOKE_PROCESSING_ACCELERATOR", "").strip()
     if declared != value["accelerator"]:
         raise InvalidAttestation("Managed accelerator does not match attestation")

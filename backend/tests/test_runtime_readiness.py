@@ -24,6 +24,19 @@ def _attestation(python, **changes):
     return json.dumps(value)
 
 
+def _model_sets(**changes):
+    value = {"schema": 1, "runtimeManifestId": "pack-1", "modelManifestId": "b" * 64,
+             "requiredModels": {"transcription": ["heart-transcriptor"], "separation": ["demucs-mdx-extra", "karaoke-roformer"]},
+             "verifiedModelIds": ["heart-transcriptor", "demucs-mdx-extra", "karaoke-roformer"]}
+    value.update(changes)
+    return json.dumps(value)
+
+
+@pytest.fixture(autouse=True)
+def verified_model_inventory(monkeypatch):
+    monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", _model_sets())
+
+
 def test_processing_manifest_is_reported_only_when_verified(monkeypatch, tmp_path):
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
@@ -33,7 +46,7 @@ def test_processing_manifest_is_reported_only_when_verified(monkeypatch, tmp_pat
     monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
     monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python))
     result = features._processing_readiness()
-    assert result["runtime"] == {"id": "pack-1", "accelerator": "cpu"}
+    assert result["runtime"] == {"id": "pack-1", "accelerator": "cpu", "capabilities": ["separation", "transcription"]}
     assert result["transcription"]["ready"] is True
     assert result["separation"]["ready"] is True
 
@@ -54,6 +67,8 @@ def test_workers_use_only_the_explicit_attested_accelerator(
     assert modal_worker.configured_accelerator() == device
     assert modal_worker.configured_pass2_device() == device
     assert word_sync_worker._attested_accelerator() == device
+    with pytest.raises(RuntimeError, match="model set"):
+        word_sync_worker._attested_accelerator("tiny")
 
 
 def test_worker_accelerator_mismatch_fails_closed(monkeypatch, tmp_path):
@@ -111,7 +126,7 @@ def test_validated_runtime_can_be_installed_before_capabilities_are_ready(monkey
         python, capabilitiesReady=False, verifiedCapabilities=[]
     ))
     result = features._processing_readiness()
-    assert result["runtime"] == {"id": "pack-1", "accelerator": "cpu"}
+    assert result["runtime"] == {"id": "pack-1", "accelerator": "cpu", "capabilities": []}
     assert result["transcription"]["ready"] is False
     assert result["separation"]["ready"] is False
     with pytest.raises(RuntimeError, match="not ready"):
@@ -123,6 +138,9 @@ def test_heart_only_attestation_does_not_claim_separation(monkeypatch, tmp_path)
     monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
     monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON",
                        _attestation(python, verifiedCapabilities=["transcription"]))
+    monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", _model_sets(
+        requiredModels={"transcription": ["heart-transcriptor"], "separation": []},
+        verifiedModelIds=["heart-transcriptor"]))
     result = features._processing_readiness()
     assert result["transcription"]["ready"] is True
     assert result["separation"]["ready"] is False
@@ -230,3 +248,53 @@ async def test_modal_cancellation_holds_capacity_until_executor_finishes(monkeyp
     pending.set_exception(RuntimeError("remote stopped"))
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, .5)
+
+
+@pytest.mark.parametrize("inventory", [None, "bad", _model_sets(runtimeManifestId="wrong"),
+    _model_sets(schema=True), _model_sets(modelManifestId=None), _model_sets(unexpected=True),
+    _model_sets(verifiedModelIds=["heart-transcriptor", "heart-transcriptor"]),
+    _model_sets(requiredModels={"transcription": [], "separation": []})])
+def test_missing_or_malformed_model_evidence_does_not_hide_runtime_or_enable_workflows(monkeypatch, tmp_path, inventory):
+    python = tmp_path / "python"; python.write_bytes(b"runtime"); python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_PROCESSING_PYTHON", str(python))
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python))
+    if inventory is None:
+        monkeypatch.delenv("KARAOKE_DESKTOP_MODEL_SETS_JSON")
+    else:
+        monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", inventory)
+    result = features._processing_readiness()
+    assert result["runtime"]["capabilities"] == ["separation", "transcription"]
+    assert result["transcription"]["ready"] is False
+    assert result["separation"]["ready"] is False
+    with pytest.raises(modal_worker.StemSeparationError, match="model set"):
+        modal_worker.configured_accelerator()
+
+
+def test_partial_model_cache_enables_only_its_complete_workflow(monkeypatch, tmp_path):
+    python = tmp_path / "python"; python.write_bytes(b"runtime"); python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python))
+    monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", _model_sets(verifiedModelIds=["heart-transcriptor", "demucs-mdx-extra"]))
+    result = features._processing_readiness()
+    assert result["transcription"]["ready"] is True
+    assert result["separation"]["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_managed_default_cache_does_not_admit_selected_alternate(monkeypatch, tmp_path):
+    python = tmp_path / "python"; python.write_bytes(b"runtime"); python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python))
+    monkeypatch.setenv("KARAOKE_PROCESSING_PYTHON", str(python))
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
+    monkeypatch.setenv("KARAOKE_AUDIO_SEPARATOR_DEVICE", "cpu")
+    monkeypatch.setattr(modal_worker, "DEMUCS_PYTHON", python)
+    subprocess = AsyncMock()
+    monkeypatch.setattr(modal_worker, "_await_subprocess", subprocess)
+    with pytest.raises(modal_worker.StemSeparationError, match="model set"):
+        await modal_worker.run_pass2(tmp_path / "vocals.wav", tmp_path / "out", "UVR_MDXNET_KARA_2.onnx", AsyncMock())
+    monkeypatch.setattr(modal_worker, "DEFAULT_DEMUCS_MODEL", "htdemucs")
+    monkeypatch.setattr(modal_worker, "_plugin_separator", lambda: None)
+    monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: False)
+    with pytest.raises(modal_worker.StemSeparationError, match="model set"):
+        await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "out", "job")
+    subprocess.assert_not_called()

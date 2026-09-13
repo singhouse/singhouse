@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import importlib.util
+import hashlib
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,6 +16,32 @@ def wheel(filename):
 
 
 class ProcessingLockTests(unittest.TestCase):
+    def test_streamed_cache_verifies_size_and_hash_and_reuses_complete_bytes(self):
+        content = b'x' * (1024 * 1024 + 7)
+        record = {'url': 'https://example.org/locked.whl', 'size': len(content),
+                  'sha256': hashlib.sha256(content).hexdigest()}
+        requested = []
+        class Response(io.BytesIO):
+            def read(self, size=-1):
+                requested.append(size)
+                return super().read(size)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            output = MODULE.cached_artifact(record, cache, opener=lambda *a, **kw: Response(content))
+            self.assertEqual(output.read_bytes(), content)
+            self.assertLessEqual(max(requested), 1024 * 1024)
+            self.assertEqual(MODULE.cached_artifact(record, cache, opener=lambda *a, **kw: self.fail('network on verified cache')), output)
+
+    def test_stream_overflow_truncation_and_wrong_hash_never_activate(self):
+        record = {'url': 'https://example.org/locked.whl', 'size': 3,
+                  'sha256': hashlib.sha256(b'abc').hexdigest()}
+        for data in [b'abcd', b'ab', b'xyz']:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as directory:
+                cache = Path(directory)
+                with self.assertRaisesRegex(ValueError, 'locked size|size/hash'):
+                    MODULE.cached_artifact(record, cache, opener=lambda *a, **kw: io.BytesIO(data))
+                self.assertEqual(list(cache.iterdir()), [])
+
     def test_other_targets_select_native_wheels_without_host_tag_leakage(self):
         filenames = {
             'linux-arm64': 'sample-1.0-cp312-cp312-manylinux_2_28_aarch64.whl',
@@ -63,7 +91,7 @@ wheels = [{url="https://example.org/linux_only-1-py3-none-any.whl",hashes={sha25
             path.write_text(text)
             output = MODULE.generate(path, metadata=lambda _: {'license': 'MIT'})
             self.assertEqual([p['name'] for p in output['packages']], ['linux-only'])
-            self.assertEqual(output['capabilities'], ['transcription'])
+            self.assertEqual(output['capabilities'], ['transcription', 'separation'])
             self.assertEqual(output, MODULE.generate(path, metadata=lambda _: {'license': 'MIT'}))
             with self.assertRaisesRegex(ValueError, 'target/accelerator'):
                 MODULE.generate(path, target='linux-x64', accelerator='metal')

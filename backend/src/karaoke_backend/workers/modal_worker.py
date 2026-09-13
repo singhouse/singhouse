@@ -32,7 +32,7 @@ from typing import Callable, Awaitable, Optional
 
 from karaoke_backend import plugins
 from karaoke_backend.workers import karaoke_models, modal_offload
-from karaoke_backend.workers.managed_processing import InvalidAttestation, accelerator_device
+from karaoke_backend.workers.managed_processing import InvalidAttestation, accelerator_device, require_selected_models
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +274,12 @@ async def run_pass2(
     # audio-separator outputs: <filename>_(Vocals).wav and <filename>_(Instrumental).wav
     # For karaoke models: "Vocals" = lead vocals, "Instrumental" = backing vocals
     pass2_device = configured_pass2_device()
+    if pass2_device is not None:
+        try:
+            require_selected_models("separation", ["karaoke-roformer"] if pass2_model ==
+                                    "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt" else [])
+        except InvalidAttestation as exc:
+            raise StemSeparationError(str(exc)) from exc
     # Managed packs relocate the selected interpreter and omit console-script
     # shebangs that point back at the build machine. Invoke the fixed package
     # entry point in that interpreter; isolation excludes cwd/user-site imports.
@@ -383,19 +389,31 @@ async def separate_stems(
             f"uv pip install demucs torch torchaudio torchcodec 'audio-separator[cpu]'"
         )
 
+    model = DEFAULT_DEMUCS_MODEL
+    managed = bool(os.getenv("KARAOKE_DESKTOP_PROCESSING_JSON", "").strip())
+    if managed:
+        # Validate the entire selected workflow before spending work on Pass 1.
+        selected = (["demucs-mdx-extra", "karaoke-roformer"]
+                    if model == "mdx_extra" and karaoke_models.is_valid(karaoke_model)
+                    and pass2_model == "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt" else [])
+        try:
+            require_selected_models("separation", selected)
+        except InvalidAttestation as exc:
+            raise StemSeparationError(str(exc)) from exc
     stems_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------------------------------------------------------------
     # Pass 1: Demucs — vocals vs. instrumental
     # ---------------------------------------------------------------
-    model = DEFAULT_DEMUCS_MODEL
     await _progress("processing", 5, f"Pass 1: Demucs ({model}) — separating vocals...")
 
     demucs_out = stems_dir / "_demucs_out"
     demucs_out.mkdir(parents=True, exist_ok=True)
 
+    demucs_entrypoint = ([str(DEMUCS_PYTHON), "-I", "-B", "-m", "karaoke_backend.workers.managed_demucs"]
+                        if managed else [str(DEMUCS_PYTHON), "-m", "demucs.separate"])
     demucs_cmd = [
-        str(DEMUCS_PYTHON), "-m", "demucs.separate",
+        *demucs_entrypoint,
         "-n", model,
         "--device", configured_accelerator(),
         "--float32",
@@ -425,6 +443,8 @@ async def separate_stems(
 
     if not vocals_src.exists():
         raise StemSeparationError(f"Vocals stem not found in {demucs_dir}")
+    if managed and not all(path.is_file() for path in (vocals_src, drums_src, bass_src, other_src)):
+        raise StemSeparationError("Managed Demucs did not produce its complete stem set")
 
     # ---------------------------------------------------------------
     # Pass 2: Karaoke model — lead vs. backing vocals
@@ -435,15 +455,21 @@ async def separate_stems(
 
     try:
         lead_out, backing_out = await run_pass2(
-            vocals_src, karaoke_out, pass2_model, _progress
+            vocals_src, karaoke_out, pass2_model, _progress,
+            allow_alphabetical_fallback=not managed,
         )
     except StemSeparationError as e:
+        if managed:
+            raise
         # Pass 2 failure is non-fatal — fall back to using full vocals as lead
         logger.warning("Karaoke model failed, using full vocals as lead: %s", e)
         shutil.copy2(vocals_src, stems_dir / "lead_vocals.wav")
         _create_silent_wav(stems_dir / "backing_vocals.wav", vocals_src)
         await _progress("processing", 70, "Karaoke split failed, using full vocals")
     else:
+        if managed and (lead_out is None or backing_out is None
+                        or not lead_out.is_file() or not backing_out.is_file()):
+            raise StemSeparationError("Managed karaoke separation did not produce lead and backing stems")
         if lead_out is not None:
             shutil.copy2(lead_out, stems_dir / "lead_vocals.wav")
         else:

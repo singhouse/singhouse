@@ -1,14 +1,19 @@
 {
   "accelerator": "cuda",
   "capabilities": [
-    "transcription"
+    "transcription",
+    "separation"
   ],
   "kind": "processing-requirements",
   "modelCapabilities": {
-    "heart-transcriptor": "transcription"
+    "demucs-mdx-extra": "separation",
+    "heart-transcriptor": "transcription",
+    "karaoke-roformer": "separation"
   },
   "models": [
-    "heart-transcriptor"
+    "heart-transcriptor",
+    "demucs-mdx-extra",
+    "karaoke-roformer"
   ],
   "packages": [
     {

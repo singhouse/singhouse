@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shlex
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -140,6 +141,37 @@ class ProcessingBuildTests(unittest.TestCase):
             compiler.write_bytes(b'changed compiler fixture')
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):
                 builder.validate_native_toolchain(path)
+
+    def test_linux_case_distinct_paths_remain_distinct(self):
+        (self.root / '2621A').write_bytes(b'upper terminal definition')
+        (self.root / '2621a').write_bytes(b'lower terminal definition')
+        files = builder.inventory(self.root, 'linux-x64')
+        self.assertEqual([record['path'] for record in files], ['2621A', '2621a'])
+        self.assertNotEqual(files[0]['sha256'], files[1]['sha256'])
+        for target in ('win32-x64', 'darwin-arm64'):
+            with self.assertRaisesRegex(ValueError, 'duplicate'):
+                builder.inventory(self.root, target)
+
+    def test_native_compiler_flags_preserve_paths_with_spaces(self):
+        source = self.root / 'source files'
+        source.mkdir()
+        destination = self.root / 'wheel output'
+        python = self.root / 'tool chain/python/bin/python3'
+        toolchain = {'host': 'linux-x64', 'tools': {
+            name: {'path': '/compiler tools/' + name} for name in ('cc', 'cxx', 'ld', 'as')}}
+        seen = {}
+
+        def fake_build(*args, env):
+            seen.update(env)
+            (destination / 'fixture-1-cp312-cp312-linux_x86_64.whl').touch()
+
+        with patch.object(builder, 'run', side_effect=fake_build):
+            builder.build_wheel(source, destination, python, {}, toolchain)
+        self.assertEqual(shlex.split(seen['CC']), ['/compiler tools/cc'])
+        self.assertEqual(shlex.split(seen['LDSHARED']), ['/compiler tools/cc', '-shared'])
+        flags = shlex.split(seen['CFLAGS'])
+        self.assertIn(f'-ffile-prefix-map={source.resolve()}=/build/source', flags)
+        self.assertIn(f'-fdebug-prefix-map={python.parents[2]}=/build/toolchain', flags)
 
 
 if __name__ == '__main__':

@@ -104,18 +104,15 @@ qualified hardware. A declared CUDA or Metal variant alone does not demonstrate
 that its drivers or hardware work. Installing a pack never changes the small
 playback environment or installs packages into it.
 
-After hash verification, the application runs the fixed `python-imports-v1`
-self-test using the selected interpreter before activation and again on startup.
-It checks Python/application versions, imports the modules required by declared
-capabilities, and checks that the selected accelerator is available. Failure,
-invalid output, or timeout prevents activation; a failed startup check leaves
-playback available and reports the processing problem. This is an operability
-check, not model-load, model-quality, or physical hardware qualification. Imports
-alone therefore never mark a processing capability ready. This release ships no
-tiny, application-owned inference fixtures, so its trusted processing lock list
-is intentionally empty and processing remains unavailable. A later release must
-ship both an approved input-lock hash and bounded offline inference fixtures for
-Heart and both separation passes before it may advertise those capabilities.
+After hash verification, the application runs its fixed `python-functional-v1`
+self-test through the selected interpreter before activation and on startup.
+It checks exact Python/application versions, native audio operations, selected
+device execution, and small synthetic architecture operations. The process has
+a 30-second bound and cannot retrieve models. Failure, invalid output, or timeout
+prevents activation; a failed startup check leaves playback available. Legacy
+`python-imports-v1` packs remain import evidence only and never grant a runnable
+capability. Functional runtime readiness is separate from installed model sets,
+model quality, and physical platform qualification.
 
 The pack assembler consumes an already-built target environment and a complete
 input lock. The lock identifies application/Python versions, target, accelerator,
@@ -123,9 +120,29 @@ managed Python path, capabilities, each model's capability, required model IDs,
 source commit, upstream package artifact hashes, licenses, retained notice paths,
 and every payload file's path, size,
 SHA-256, and executable flag. Unlisted files, modified inputs, and symlinks fail
-assembly. Target-specific dependency resolution and hardware qualification must
-be performed before using a resulting pack; no production processing inputs or
-weights are included in this repository.
+assembly. Linux preserves case-distinct names; Windows and macOS reject names
+that collide without case sensitivity. Model weights are never part of a runtime.
+
+`build_processing.py` constructs this input from the exact artifact recipes in
+`desktop/locks/processing-*.json`, the pinned standalone Python archive, and
+application wheels built from a clean source commit. Source distributions use
+the locked build dependencies. Native extensions additionally require a verified
+compiler identity; source/debug paths are normalized. This supports reconstruction
+with the recorded toolchain; the native compiler lock is not a hermetic container
+or a claim that every host toolchain produces identical bytes.
+
+```sh
+python3 desktop/build/build_processing.py \
+  --requirements desktop/locks/processing-linux-x64-cpu.json \
+  --build-requirements desktop/locks/processing-build.txt \
+  --native-toolchain desktop/locks/toolchain-linux-x64.json \
+  --target linux-x64 --accelerator cpu \
+  --cache /path/to/build-cache --output /path/to/new-processing-build
+```
+
+Build native source extensions on their target runner. Dependency locks for
+other targets describe build inputs, not successful hardware qualification.
+To package a separately constructed locked payload:
 
 ```sh
 python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
@@ -188,8 +205,10 @@ Prepared playback remains available while setting up models.
 Only model IDs and complete immutable inventories defined by the shipped policy
 are accepted. The policy includes the pinned Heart inventory below;
 a user-created manifest cannot declare another model ready. Each non-executable model file
-must exactly match its policy's upstream revision, HTTPS URL,
-size and SHA-256; mutable branch URLs and Singhouse-hosted copies are rejected.
+must exactly match its policy's upstream revision or content-digest identity,
+HTTPS URL, size and SHA-256. Legacy fixed release assets use the full file digest
+as their identity; changed upstream bytes fail verification. Singhouse does not
+host model copies.
 The manifest's `models` array identifies the unique policy-defined model sets it contains.
 Paths begin with `huggingface/`, `torch/`, or `audio-separator/` and must reproduce
 the consuming library's complete offline cache layout, including configuration
@@ -200,8 +219,8 @@ The desktop sets offline flags, directs workers to the verified cache, and never
 falls back to a paid service. A new machine has playback available while local
 processing reports missing runtime or models. Provision and test the desired
 model set before going offline. Model readiness and runtime readiness are separate:
-this release's processing trust list remains empty pending runtime qualification,
-so installing Heart alone does not enable local transcription. A complete cache
+installing Heart alone does not enable transcription without a compatible,
+trusted runtime that passes its functional checks. A complete cache
 survives application replacement in persistent application data. To move an
 installation offline, select a folder containing all pinned Heart files; files
 are checked against the same inventory with no network fallback. If the active
@@ -305,3 +324,18 @@ their SHA-256 hashes. The weight hash and byte count come from upstream LFS
 metadata; the inventory command never downloads the checkpoint. Review its
 output against `desktop/models.json` before updating the policy. The exact
 file hashes and sizes are checked again during installation.
+
+## Default separation model inventory
+
+The default two-pass local workflow requires `demucs-mdx-extra` and
+`karaoke-roformer`. Its seven external files total 1,582,708,534 bytes: four
+Demucs checkpoints, the RoFormer checkpoint and YAML configuration, and its
+upstream model metadata. The remaining model catalog and Demucs bag definition
+are retained in their pinned runtime wheels. Installing the runtime alone does
+not mark this workflow ready; both verified model sets are required. Alternate
+separation or transcription models require their own explicit policy and cache.
+
+`desktop/build/inventory_separation.py` checks a supplied local model copy against
+the exact shipped inventory. Its optional upstream check verifies release asset
+identities and sizes plus pinned small metadata; it does not retrieve checkpoint
+bytes or establish remote weight equality by metadata alone.

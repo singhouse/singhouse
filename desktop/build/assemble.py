@@ -219,6 +219,10 @@ def main():
     shutil.copytree(ROOT / "frontend/dist", output / "static", ignore=shutil.ignore_patterns("*.map"))
     collect_notices(ROOT / "frontend", output)
     shutil.copyfile(DESKTOP / "backend.py", output / "backend.py")
+    # Backend admission reads these beside backend.py. Include them in the
+    # native inventory so direct native boot and installer boot use one policy.
+    for policy in ("models.json", "processing-locks.json"):
+        shutil.copyfile(DESKTOP / policy, output / policy)
     shutil.copyfile(ROOT / "frontend/src/brand.js", output / "brand.mjs")
     for source in DESKTOP.glob("runtime*.py"):
         shutil.copyfile(source, output / source.name)

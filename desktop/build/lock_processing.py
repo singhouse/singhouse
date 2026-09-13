@@ -10,12 +10,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import io
+from functools import partial
 import json
 from pathlib import Path
 import re
 import tomllib
 import tarfile
+import tempfile
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import urlopen
 import zipfile
@@ -71,10 +72,48 @@ def artifact(package, ranks):
     url, digest = selected['url'], selected.get('hashes', {}).get('sha256', '')
     if urlparse(url).scheme != 'https' or not re.fullmatch(r'[0-9a-f]{64}', digest):
         raise ValueError(f'Artifact needs HTTPS and exact SHA-256: {package["name"]}')
-    return {'url': url, 'sha256': digest}
+    size = selected.get('size')
+    if size is not None and (type(size) is not int or size <= 0):
+        raise ValueError('Artifact size must be a positive integer')
+    return {'url': url, 'sha256': digest, **({'size': size} if size is not None else {})}
 
 
-def license_metadata(package):
+def cached_artifact(package, cache, opener=urlopen):
+    """Stream no more than the locked size, then atomically cache verified bytes."""
+    size, expected = package.get('size'), package['sha256']
+    if type(size) is not int or size <= 0 or not re.fullmatch(r'[0-9a-f]{64}', expected):
+        raise ValueError('License artifact requires a locked size and SHA-256')
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / expected
+    if destination.is_file() and destination.stat().st_size == size:
+        with destination.open('rb') as existing:
+            if hashlib.file_digest(existing, 'sha256').hexdigest() == expected:
+                return destination
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f'.{expected}.', dir=cache, delete=False) as output:
+            temporary = Path(output.name)
+            digest, received = hashlib.sha256(), 0
+            with opener(package['url'], timeout=60) as response:
+                while True:
+                    chunk = response.read(min(1024 * 1024, size - received + 1))
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > size:
+                        raise ValueError('License artifact exceeds locked size')
+                    output.write(chunk)
+                    digest.update(chunk)
+            if received != size or digest.hexdigest() != expected:
+                raise ValueError('License artifact size/hash mismatch')
+        temporary.replace(destination)
+        return destination
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def license_metadata(package, cache=None):
     version = Version(package['version'])
     # PyTorch publishes accelerator-local wheels itself; PyPI carries the
     # corresponding public release's metadata, not a different artifact pin.
@@ -95,19 +134,21 @@ def license_metadata(package):
     if not isinstance(license_text, str) or not license_text.strip() or license_text.strip().upper() == 'UNKNOWN':
         # Some projects publish license files without populating the PyPI
         # metadata fields. Preserve their actual text, without guessing SPDX.
-        with urlopen(package['url'], timeout=60) as response:
-            artifact_bytes = response.read(16 * 1024 * 1024 + 1)
-        if len(artifact_bytes) > 16 * 1024 * 1024 or hashlib.sha256(artifact_bytes).hexdigest() != package['sha256']:
-            raise ValueError(f'License artifact exceeds bound or hash mismatch: {package["name"]}')
-        stream = io.BytesIO(artifact_bytes)
-        if zipfile.is_zipfile(stream):
-            with zipfile.ZipFile(stream) as archive:
-                notices = [(name, archive.read(name)) for name in sorted(archive.namelist())
-                           if re.match(r'(?i)^(license|licence|copying)([._-]|$)', Path(name).name) and not name.endswith('/')]
+        artifact_path = cached_artifact(package, cache or Path(tempfile.gettempdir()) / 'singhouse-processing-artifacts')
+        if zipfile.is_zipfile(artifact_path):
+            with zipfile.ZipFile(artifact_path) as archive:
+                members = [member for member in sorted(archive.infolist(), key=lambda member: member.filename)
+                           if re.match(r'(?i)^(license|licence|copying)([._-]|$)', Path(member.filename).name) and not member.is_dir()]
+                if sum(member.file_size for member in members) > 16 * 1024 * 1024:
+                    raise ValueError('Expanded license text exceeds bound')
+                notices = [(member.filename, archive.read(member)) for member in members]
         else:
-            with tarfile.open(fileobj=stream) as archive:
-                notices = [(member.name, archive.extractfile(member).read()) for member in sorted(archive.getmembers(), key=lambda member: member.name)
+            with tarfile.open(artifact_path) as archive:
+                members = [member for member in sorted(archive.getmembers(), key=lambda member: member.name)
                            if member.isfile() and re.match(r'(?i)^(license|licence|copying)([._-]|$)', Path(member.name).name)]
+                if sum(member.size for member in members) > 16 * 1024 * 1024:
+                    raise ValueError('Expanded license text exceeds bound')
+                notices = [(member.name, archive.extractfile(member).read()) for member in members]
         if not notices:
             raise ValueError(f'No declared license or license file: {package["name"]}=={package["version"]}')
         license_text = '\n\n'.join(f'{name}\n{text.decode("utf-8")}' for name, text in notices)
@@ -115,8 +156,8 @@ def license_metadata(package):
     return {'license': license_text.strip(), 'licenseSource': url}
 
 
-def generate(path, python_version='3.12.14', glibc_minor=39, metadata=license_metadata,
-             target='linux-x64', accelerator='cpu'):
+def generate(path, python_version='3.12.14', glibc_minor=39, metadata=None,
+             target='linux-x64', accelerator='cpu', cache=None, notices_from=None):
     raw = path.read_bytes()
     lock = tomllib.loads(raw.decode())
     if lock.get('lock-version') != '1.0':
@@ -147,16 +188,24 @@ def generate(path, python_version='3.12.14', glibc_minor=39, metadata=license_me
                 raise ValueError('Locked PyTorch wheel accelerator does not match requested pack')
         packages.append({'name': name, 'version': package['version'], **artifact(package, ranks)})
     with ThreadPoolExecutor(max_workers=8) as executor:
-        licenses = list(executor.map(metadata, packages))
+        licenses = list(executor.map(metadata or partial(license_metadata, cache=cache), packages))
     for package, license_info in zip(packages, licenses):
         package.update(license_info)
+    if notices_from:
+        previous = json.loads(notices_from.read_text())
+        notices = {(item['name'], item['version']): item['notices'] for item in previous['packages'] if item.get('notices')}
+        for package in packages:
+            if (package['name'], package['version']) in notices:
+                package['notices'] = notices[package['name'], package['version']]
     return {'schema': 1, 'kind': 'processing-requirements', 'target': target, 'accelerator': accelerator,
             'pythonVersion': python_version,
             **({'glibcMinimum': f'2.{glibc_minor}'} if target.startswith('linux-') else {}),
             **({'macosMinimum': '14.0'} if target == 'darwin-arm64' else {}),
             'resolutionSha256': hashlib.sha256(raw).hexdigest(),
-            'capabilities': ['transcription'], 'models': ['heart-transcriptor'],
-            'modelCapabilities': {'heart-transcriptor': 'transcription'}, 'packages': packages}
+            'capabilities': ['transcription', 'separation'],
+            'models': ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'],
+            'modelCapabilities': {'heart-transcriptor': 'transcription', 'demucs-mdx-extra': 'separation',
+                                  'karaoke-roformer': 'separation'}, 'packages': packages}
 
 
 def main():
@@ -167,9 +216,12 @@ def main():
     parser.add_argument('--glibc-minor', type=int, default=39)
     parser.add_argument('--target', choices=sorted(TARGETS), default='linux-x64')
     parser.add_argument('--accelerator', choices=['cpu', 'cuda', 'metal'], default='cpu')
+    parser.add_argument('--cache', type=Path, help='SHA-256 artifact cache shared with the pack builder')
+    parser.add_argument('--notices-from', type=Path, help='Copy already reviewed supplemental notices for identical package name/version')
     args = parser.parse_args()
     result = generate(args.pylock, args.python_version, args.glibc_minor,
-                      target=args.target, accelerator=args.accelerator)
+                      target=args.target, accelerator=args.accelerator, cache=args.cache,
+                      notices_from=args.notices_from)
     args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
     print(args.output)
 

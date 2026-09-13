@@ -203,6 +203,10 @@ class IsolationTests(unittest.TestCase):
             self.assertNotIn("checks", attestation)
             self.assertNotIn("probeSchema", attestation)
             self.assertFalse(json.loads(selected["KARAOKE_HEART_MODEL_STATUS_JSON"])["installed"])
+            model_sets = json.loads(selected["KARAOKE_DESKTOP_MODEL_SETS_JSON"])
+            self.assertEqual(model_sets, {"schema": 1, "runtimeManifestId": pack.name,
+                                         "modelManifestId": None, "verifiedModelIds": [],
+                                         "requiredModels": {"transcription": ["heart-transcriptor"], "separation": []}})
             for changes in ({"checks": {"deviceTensor": True, "nativeAudio": True}},
                             {"checks": {**probe["checks"], "transcription": 1}},
                             {"checks": {**probe["checks"], "transcription": False}},
@@ -219,6 +223,28 @@ class IsolationTests(unittest.TestCase):
             changed["probe"]["modules"] = ["faster_whisper"]
             with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
                 backend.processing_environment(root / "backend", identity, write_pack(changed), None, probe, trusted_locks=[lock_hash])
+
+    def test_processing_path_case_collisions_follow_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for platform in ("linux", "darwin", "win32"):
+                identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": platform, "arch": "x64"}
+                manifest = {"schema": 1, "kind": "processing", **identity, "models": [], "capabilities": [],
+                            "accelerator": "cpu", "python": "2621A",
+                            "probe": {"schema": 1, "type": "python-imports-v1", "modules": []},
+                            "files": [{"path": name, "size": 7, "executable": True,
+                                       "sha256": hashlib.sha256(b"fixture").hexdigest()} for name in ("2621A", "2621a")]}
+                raw = json.dumps(manifest, separators=(",", ":")).encode()
+                pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+                pack.mkdir(parents=True)
+                (pack / "manifest.json").write_bytes(raw)
+                for name in ("2621A", "2621a"):
+                    (pack / name).write_bytes(b"fixture")
+                if platform == "linux":
+                    backend.processing_environment(root / "backend", identity, pack, None)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+                        backend.processing_environment(root / "backend", identity, pack, None)
 
     def test_missing_processing_preserves_playback_environment(self):
         env = backend.processing_environment(Path("/app/backend"), {}, None, None)

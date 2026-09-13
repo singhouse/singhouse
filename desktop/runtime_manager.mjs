@@ -17,7 +17,9 @@ const offlineSources = Symbol('verified offline model sources')
 const modelTransferHosts = new Set(['huggingface.co', 'cdn-lfs.huggingface.co',
   'cdn-lfs.hf.co', 'cdn-lfs-us-1.hf.co', 'cdn-lfs-eu-1.hf.co',
   'cas-bridge.xethub.hf.co', 'cas-server.xethub.hf.co', 'cas-server.xethub-eu.hf.co',
-  'transfer.xethub.hf.co', 'transfer.xethub-eu.hf.co', 'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co'])
+  'transfer.xethub.hf.co', 'transfer.xethub-eu.hf.co', 'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co',
+  'github.com', 'raw.githubusercontent.com', 'release-assets.githubusercontent.com',
+  'dl.fbaipublicfiles.com', 'download.pytorch.org'])
 const safePath = value => typeof value === 'string' && value.length < 512
   && value.split('/').every(part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part
     && !['.', '..'].includes(part) && !part.endsWith('.')
@@ -162,9 +164,9 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
   const paths = new Set()
   for (const file of value.files) {
     if (!safePath(file.path) || file.path === 'manifest.json' || file.path.endsWith('.partial')
-        || paths.has(file.path.toLowerCase()) || !hashPattern.test(file.sha256)
+        || paths.has(value.platform === 'linux' ? file.path : file.path.toLowerCase()) || !hashPattern.test(file.sha256)
         || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.executable !== 'boolean') throw new Error('Invalid processing file record')
-    paths.add(file.path.toLowerCase())
+    paths.add(value.platform === 'linux' ? file.path : file.path.toLowerCase())
     const url = new URL(file.url)
     if (!['https:', 'file:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error('Inputs require local files or HTTPS')
     if (url.protocol === 'file:' && url.hostname && url.hostname !== 'localhost') throw new Error('Remote file shares are not supported')
@@ -248,7 +250,7 @@ async function syncTree(directory, directorySync) {
 
 export class RuntimeManager {
   constructor(root, identity, { fetchImpl = globalThis.fetch, diskFree, progress = () => {}, lockPython,
-    durabilityHelper, directorySync = syncDirectory, activationHook = async () => {}, trustedLocks = [] } = {}) {
+    durabilityHelper, nativeBin, directorySync = syncDirectory, activationHook = async () => {}, trustedLocks = [] } = {}) {
     if (!isAbsolute(root)) throw new Error('Runtime store must be absolute')
     this.root = resolve(root)
     this.identity = identity
@@ -257,6 +259,7 @@ export class RuntimeManager {
     this.progress = progress
     this.lockPython = lockPython
     this.durabilityHelper = durabilityHelper
+    this.nativeBin = nativeBin
     this.directorySync = directorySync
     this.activationHook = activationHook
     this.trustedLocks = trustedLocks
@@ -300,6 +303,17 @@ export class RuntimeManager {
       PYTORCH_ENABLE_MPS_FALLBACK: '0', NUMBA_CACHE_DIR: join(cache, 'numba'), HF_HOME: join(cache, 'huggingface'),
       TORCH_HOME: join(cache, 'torch'), XDG_CACHE_HOME: cache })
     const functional = manifest.probe.schema === 2
+    if (functional) {
+      if (!this.nativeBin || !isAbsolute(this.nativeBin) || !(await lstat(this.nativeBin)).isDirectory()) {
+        throw new Error('The bundled native audio tools are required for functional processing checks')
+      }
+      for (const name of ['ffmpeg', 'ffprobe']) {
+        if (!(await lstat(join(this.nativeBin, name + (process.platform === 'win32' ? '.exe' : '')))).isFile()) {
+          throw new Error('The bundled native audio tool is invalid')
+        }
+      }
+      env.PATH = this.nativeBin
+    }
     const source = functional ? await checkedRead(new URL('./processing_probe.py', import.meta.url)) : PROBE
     signal?.throwIfAborted()
     return new Promise((resolveProbe, reject) => {
@@ -612,15 +626,17 @@ export function validateModelManifest(value, policy) {
     if (!safePath(file.path) || !['huggingface', 'torch', 'audio-separator'].includes(file.path.split('/')[0])
         || file.path.endsWith('.partial') || paths.has(file.path.toLowerCase())
         || !hashPattern.test(file.sha256 || '') || !Number.isSafeInteger(file.size) || file.size < 0
-        || file.executable !== false || !/^[a-f0-9]{40,64}$/.test(file.revision || '')) throw new Error('Invalid model file record')
+        || file.executable !== false || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(file.revision || '')) throw new Error('Invalid model file record')
     paths.add(file.path.toLowerCase())
     const locked = expected.get(file.path)
     if (!locked || ['path', 'revision', 'sha256', 'size', 'url', 'executable'].some(key => file[key] !== locked[key])) {
       throw new Error('Model file differs from the immutable application policy')
     }
     const url = new URL(file.url)
-    if (url.protocol !== 'https:' || url.username || url.password || url.hash
-        || !policy.allowedHosts.includes(url.hostname) || !url.pathname.split('/').includes(file.revision)) {
+    const pinnedDigest = file.revision === file.sha256 && hashPattern.test(file.revision)
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port
+        || !policy.allowedHosts.includes(url.hostname)
+        || !(pinnedDigest || url.pathname.split('/').includes(file.revision))) {
       throw new Error('Models require an immutable revision at an approved upstream URL')
     }
   }
@@ -656,8 +672,8 @@ export class ModelCache extends RuntimeManager {
   }
 
   async fetchSource(url, options) {
-    // Other approved model origins retain the runtime's strict redirect policy.
-    if (url.hostname !== 'huggingface.co') return super.fetchSource(url, options)
+    // Policy validation binds the original URL and bytes; redirects may use
+    // only these explicit upstream delivery endpoints, never arbitrary hosts.
     for (let hops = 0; ; hops++) {
       if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port
           || !modelTransferHosts.has(url.hostname)) throw new Error('Model source redirect is not approved')

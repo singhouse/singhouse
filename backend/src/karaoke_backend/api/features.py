@@ -105,13 +105,14 @@ def _processing_readiness() -> dict[str, Any]:
                     if manifest.get("valid") else set())
     if manifest.get("valid"):
         local_python = True
+    from karaoke_backend.workers.managed_processing import model_set_ready
     local_separation = (
         local_python and manifest.get("capabilitiesReady") is True
-        and "separation" in capabilities
+        and "separation" in capabilities and model_set_ready("separation", manifest)
     )
     local_transcription = (
         local_python and manifest.get("capabilitiesReady") is True
-        and "transcription" in capabilities
+        and "transcription" in capabilities and model_set_ready("transcription", manifest)
     )
     modal_detail = modal_offload.readiness()
     # Configuration discovery is local-only; readiness would require a remote
@@ -119,7 +120,8 @@ def _processing_readiness() -> dict[str, Any]:
     modal_ready = False
     runtime = None
     if local_python:
-        runtime = {"id": manifest["runtimeManifestId"], "accelerator": manifest["accelerator"]}
+        runtime = {"id": manifest["runtimeManifestId"], "accelerator": manifest["accelerator"],
+                   "capabilities": sorted(capabilities) if manifest.get("capabilitiesReady") is True else []}
 
     def fact(ready: bool, unavailable: str) -> dict[str, Any]:
         return {"ready": True} if ready else {"ready": False, "reason": unavailable}

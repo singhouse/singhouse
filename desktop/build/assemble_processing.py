@@ -62,11 +62,12 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
     if not isinstance(files, list) or not files:
         raise ValueError("A complete hashed file inventory is required")
     names = set()
+    path_identity = (lambda name: name) if lock['platform'] == 'linux' else str.lower
     for record in files:
         name = record.get("path")
-        if not relative(name) or name.lower() in names or name == "manifest.json" or name.endswith(".partial"):
+        if not relative(name) or path_identity(name) in names or name == "manifest.json" or name.endswith(".partial"):
             raise ValueError("Invalid or duplicate input path")
-        names.add(name.lower())
+        names.add(path_identity(name))
         source = payload / name
         if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(payload):
             raise ValueError(f"Missing or unsafe input: {name}")
@@ -79,7 +80,7 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
         if path.is_symlink():
             raise ValueError("Processing inputs must not contain symbolic links")
         if path.is_file():
-            actual.add(path.relative_to(payload).as_posix().lower())
+            actual.add(path_identity(path.relative_to(payload).as_posix()))
     if actual != names:
         raise ValueError("Input lock must enumerate the entire payload")
     if not notice_paths <= {record["path"] for record in files}:

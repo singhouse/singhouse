@@ -11,15 +11,18 @@ const { BRAND_NAME } = await import(pathToFileURL(resolve(desktop, '../frontend/
 if (manifest.appVersion !== pkg.version || !existsSync(resolve(native, 'backend.py'))) {
   throw new Error('Assemble a matching native runtime before creating an installer')
 }
+for (const policy of ['models.json', 'processing-locks.json']) {
+  if (!readFileSync(resolve(native, policy)).equals(readFileSync(resolve(desktop, policy)))) {
+    throw new Error(`Reassemble the native runtime after changing ${policy}`)
+  }
+}
 export default {
   appId: 'org.karaoke.desktop',
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
   files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'models.json', 'processing-locks.json'],
-  extraResources: [{ from: native, to: 'native', filter: ['**/*'] },
-    { from: resolve(desktop, 'models.json'), to: 'native/models.json' },
-    { from: resolve(desktop, 'processing-locks.json'), to: 'native/processing-locks.json' }],
+  extraResources: [{ from: native, to: 'native', filter: ['**/*'] }],
   asar: true,
   npmRebuild: false,
   // Builds are private test artifacts; publication is a separate operation.

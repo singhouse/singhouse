@@ -35,7 +35,7 @@ from lyricsync.transcription import FasterWhisperTranscriber, HeartTranscriber
 
 from karaoke_backend import plugins
 from karaoke_backend.workers import modal_offload, transcription_cache
-from karaoke_backend.workers.managed_processing import accelerator_device
+from karaoke_backend.workers.managed_processing import accelerator_device, require_selected_models
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,9 @@ ALL_MODELS = WHISPER_MODELS | TRANSCRIBER_MODELS
 DEFAULT_MODEL = "heart"
 
 def _attested_accelerator(model: str = DEFAULT_MODEL) -> str | None:
-    return accelerator_device(capability="transcription")
+    device = accelerator_device(capability="transcription")
+    require_selected_models("transcription", ["heart-transcriptor"] if model == "heart" else [])
+    return device
 
 # Default is cwd-relative (cwd=backend/ is invariant: systemd WorkingDirectory
 # and dev docs). HEART_SCRIPT is file-adjacent and correctly moves with the code.

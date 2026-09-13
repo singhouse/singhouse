@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -55,7 +56,7 @@ def materialize_links(root):
             temporary.replace(link)
 
 
-def inventory(root):
+def inventory(root, target=None):
     result = []
     names = set()
     for path in sorted(root.rglob('*')):
@@ -64,9 +65,10 @@ def inventory(root):
         if not path.is_file():
             continue
         name = path.relative_to(root).as_posix()
-        if not relative(name) or name.lower() in names:
+        identity = name if (target or host_target()).startswith('linux-') else name.lower()
+        if not relative(name) or identity in names:
             raise ValueError(f'Unsafe or duplicate payload path: {name}')
-        names.add(name.lower())
+        names.add(identity)
         result.append(dict(path=name, size=path.stat().st_size, sha256=digest(path),
                            executable=bool(path.stat().st_mode & 0o111)))
     return result
@@ -193,7 +195,11 @@ def validate_native_toolchain(path):
         executable = Path(record['path'])
         if not executable.is_absolute() or digest(executable) != record.get('sha256'):
             raise ValueError(f'Native toolchain digest mismatch: {name}')
-        version = subprocess.check_output([str(executable), '--version'], text=True)
+        version_args = record.get('versionArgs', ['--version'])
+        if version_args not in (['--version'], ['-v']):
+            raise ValueError('Unsupported native tool version arguments')
+        version = subprocess.check_output([str(executable), *version_args], text=True,
+                                          stderr=subprocess.STDOUT)
         if version != record.get('version'):
             raise ValueError(f'Native toolchain version mismatch: {name}')
         if name in {'cc', 'cxx'} and not any(marker in version.lower() for marker in ('gcc', 'clang', 'g++')):
@@ -239,14 +245,14 @@ def build_wheel(source, destination, host_python, env, toolchain=None):
         source = roots[0]
     build_env = dict(env)
     if toolchain is not None:
-        mappings = ' '.join(f'{flag}={path}=/build/{name}' for path, name in
+        mappings = [f'{flag}={path}=/build/{name}' for path, name in
                             ((source.resolve(), 'source'), (host_python.parents[2], 'toolchain'))
-                            for flag in ('-ffile-prefix-map', '-fdebug-prefix-map'))
+                            for flag in ('-ffile-prefix-map', '-fdebug-prefix-map')]
         cc, cxx = (toolchain['tools'][name]['path'] for name in ('cc', 'cxx'))
-        build_env.update(CC=cc, CXX=cxx, LD=toolchain['tools']['ld']['path'],
-                         AS=toolchain['tools']['as']['path'], CFLAGS='-O2 -g0 ' + mappings,
-                         CXXFLAGS='-O2 -g0 ' + mappings, LDFLAGS='',
-                         LDSHARED=cc + ' -shared')
+        build_env.update(CC=shlex.quote(cc), CXX=shlex.quote(cxx), LD=shlex.quote(toolchain['tools']['ld']['path']),
+                         AS=shlex.quote(toolchain['tools']['as']['path']), CFLAGS=shlex.join(['-O2', '-g0', *mappings]),
+                         CXXFLAGS=shlex.join(['-O2', '-g0', *mappings]), LDFLAGS='',
+                         LDSHARED=shlex.join([cc, *(['-bundle', '-undefined', 'dynamic_lookup'] if toolchain['host'] == 'darwin-arm64' else ['-shared'])]))
     run('uv', 'build', '--wheel', '--no-build-isolation', '--no-sources', '--offline',
         '--python', host_python, '--out-dir', destination, source, env=build_env)
     wheels = list(destination.glob('*.whl'))
@@ -277,6 +283,8 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
     payload.mkdir()
     epoch = subprocess.check_output(['git', 'show', '-s', '--format=%ct', source['sourceCommit']], cwd=ROOT, text=True).strip()
     env = build_environment(cache, epoch)
+    if target == 'darwin-arm64':
+        env['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
     python_record = native['targets'][target]['python']
     with tarfile.open(fetch(python_record, cache), 'r:gz') as archive:
         archive.extractall(payload, filter='data')
@@ -389,7 +397,7 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
                       sourceCommit=source['sourceCommit'], packages=packages,
                       capabilities=lock['capabilities'], models=lock['models'], modelCapabilities=lock['modelCapabilities'],
                       probe=dict(schema=2, type='python-functional-v1', modules=sorted({m for c in lock['capabilities'] for m in MODULES[c]})),
-                      files=inventory(payload))
+                      files=inventory(payload, target))
     lock_path = output / 'processing-input.json'
     lock_path.write_text(json.dumps(input_lock, indent=2, sort_keys=True) + '\n')
     manifest = assemble(payload, lock_path, output / 'pack')

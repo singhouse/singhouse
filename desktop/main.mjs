@@ -186,7 +186,7 @@ async function start() {
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, trustedLocks: processingPolicy.lockSha256 })
+    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
     try {
       activeProcessing = await processingManager.active()
@@ -235,7 +235,7 @@ async function start() {
     cache: modelCache, policy: modelCache.policy, loadedModels: activeModels,
     cancelled: () => quitting,
     progressDone: () => host?.setProgressBar(-1),
-    runtimeReady: async () => (await processingStatus()).transcription?.ready === true,
+    runtimeReady: async () => (await processingStatus()).runtime?.capabilities?.includes('transcription') === true,
     consent: async ({ bytes, sources, revision, runtimeReady, repair }) => {
       const result = await dialog.showMessageBox(host, {
         type: 'question', title: 'Set up Heart transcription',

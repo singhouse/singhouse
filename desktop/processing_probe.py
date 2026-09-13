@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import sys
+import tempfile
 
 
 def deny_network(event, args):
@@ -118,7 +119,11 @@ def run(capabilities, accelerator, modules):
 
     if "separation" in capabilities:
         from demucs.demucs import Demucs
+        from demucs.separate import load_track
+        from karaoke_backend.workers.managed_demucs import save_float_wav
+        from pathlib import Path
         from audio_separator.separator import Separator
+        from audio_separator.separator.uvr_lib_v5.roformer.mel_band_roformer import MelBandRoformer
         import onnxruntime
         if not callable(Separator.separate):
             raise RuntimeError("Audio separator worker dependency route is unavailable")
@@ -128,18 +133,45 @@ def run(capabilities, accelerator, modules):
             output = model(torch.zeros((1, 2, 256), device=device))
         if tuple(output.shape) != (1, 2, 2, 256) or not torch.isfinite(output).all().item():
             raise RuntimeError("Synthetic separation forward pass failed")
-        provider = {"cpu": "CPUExecutionProvider", "cuda": "CUDAExecutionProvider", "metal": "CoreMLExecutionProvider"}[accelerator]
+        # The provisioned separation routes are Demucs and MelBandRoformer,
+        # both PyTorch models. Exercise the upstream Roformer selected-device
+        # route, including its explicit CPU spectral transforms on MPS. This
+        # does not attest complex STFT/ISTFT kernels running on MPS.
+        roformer = MelBandRoformer(dim=16, depth=1, stereo=True, num_bands=4,
+                                  dim_head=8, heads=2, time_transformer_depth=1,
+                                  freq_transformer_depth=1, attn_dropout=0., ff_dropout=0.,
+                                  flash_attn=False, stft_n_fft=64, stft_hop_length=16,
+                                  stft_win_length=64, match_input_audio_length=True).to(device).eval()
+        with torch.inference_mode():
+            output = roformer(torch.zeros((1, 2, 256), device=device))
+        if tuple(output.shape) != (1, 2, 256) or not torch.isfinite(output).all().item():
+            raise RuntimeError("Synthetic Roformer forward pass failed")
+        # ORT is an imported library dependency, not the execution engine for
+        # these checkpoint routes. This CPU smoke makes no accelerated ONNX
+        # claim. The managed adapter separately fails closed on a missing
+        # selected ONNX provider if an ONNX model is ever admitted.
+        provider = "CPUExecutionProvider"
         if provider not in onnxruntime.get_available_providers():
-            raise RuntimeError("Selected native separator provider is unavailable")
+            raise RuntimeError("Native ONNX library CPU provider is unavailable")
         options = onnxruntime.SessionOptions()
         options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
-        if accelerator != "cpu":
-            options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
         session = onnxruntime.InferenceSession(onnx_add_graph(), sess_options=options, providers=[provider])
         session.disable_fallback()
         if session.get_providers()[0] != provider or not np.array_equal(session.run(None, {"x": np.array([1., 2.], dtype=np.float32)})[0], [2., 4.]):
-            raise RuntimeError("Native separator execution failed")
+            raise RuntimeError("Native ONNX library CPU execution failed")
+        # Exercise the actual worker's file boundary too: a tiny tensor forward
+        # alone missed TorchAudio's optional TorchCodec requirement on save.
+        waveform = torch.from_numpy(np.stack([audio, audio * 0.5]))
+        with tempfile.TemporaryDirectory(prefix="separation-smoke-", dir=os.environ.get("XDG_CACHE_HOME")) as temporary:
+            output_path = Path(temporary) / "smoke.wav"
+            save_float_wav(waveform, output_path, 16000, as_float=True)
+            info = soundfile.info(output_path)
+            restored = load_track(output_path, 2, 16000)
+            if (info.subtype != "FLOAT" or info.samplerate != 16000 or info.channels != 2
+                    or tuple(restored.shape) != tuple(waveform.shape)
+                    or not torch.allclose(restored, waveform, atol=1e-6)):
+                raise RuntimeError("Managed separation file round trip failed")
         checks["separation"] = True
     return {"schema": 2, "pythonVersion": platform.python_version(),
             "backendVersion": importlib.metadata.version("karaoke-backend"),

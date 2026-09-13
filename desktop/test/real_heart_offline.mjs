@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 import { RuntimeManager, ModelCache, processingAttestation } from '../runtime_manager.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -15,15 +16,22 @@ if (!['install', 'restart'].includes(mode) || !stateArg || !manifestArg || !nati
 }
 const state = resolve(stateArg), native = resolve(nativeArg)
 const identity = JSON.parse(await readFile(join(native, 'manifest.json'), 'utf8'))
-const policy = JSON.parse(await readFile(join(desktop, 'models.json'), 'utf8'))
-const trust = JSON.parse(await readFile(join(desktop, 'processing-locks.json'), 'utf8'))
+const nativeBootstrap = await readFile(join(native, 'backend.py'))
+const nativeBootstrapSha256 = createHash('sha256').update(nativeBootstrap).digest('hex')
+const nativePolicy = await readFile(join(native, 'models.json'))
+const nativeTrust = await readFile(join(native, 'processing-locks.json'))
+assert.deepEqual(nativePolicy, await readFile(join(desktop, 'models.json')), 'Assembled model policy must match the intended application policy')
+assert.deepEqual(nativeTrust, await readFile(join(desktop, 'processing-locks.json')), 'Assembled runtime trust must match the intended application policy')
+const policy = JSON.parse(nativePolicy.toString('utf8'))
+const trust = JSON.parse(nativeTrust.toString('utf8'))
+const installationEvidence = mode === 'restart' ? JSON.parse(await readFile(join(state, 'install-evidence.json'), 'utf8')) : null
 const manifest = JSON.parse(await readFile(resolve(manifestArg), 'utf8'))
 assert.ok(trust.lockSha256.includes(manifest.provenance.lockSha256), 'Pack must be trusted by the actual application policy')
 const python = join(native, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
-const options = { lockPython: python, durabilityHelper: join(desktop, 'backend.py'),
+const options = { lockPython: python, durabilityHelper: join(native, 'backend.py'),
   fetchImpl: async () => { throw new Error('Offline acceptance must not use the network') } }
 await mkdir(state, { recursive: true })
-const manager = new RuntimeManager(join(state, 'processing'), identity, { ...options, trustedLocks: trust.lockSha256 })
+const manager = new RuntimeManager(join(state, 'processing'), identity, { ...options, nativeBin: join(native, 'ffmpeg/bin'), trustedLocks: trust.lockSha256 })
 const cache = new ModelCache(join(state, 'model-cache'), policy, options)
 const heart = policy.models.find(model => model.id === 'heart-transcriptor')
 if (mode === 'install') {
@@ -36,6 +44,13 @@ assert.ok(active && models)
 const requestedId = createHash('sha256').update(JSON.stringify(manifest)).digest('hex')
 assert.equal(active.id, requestedId, 'Active runtime must match the requested acceptance artifact')
 assert.equal(active.manifest.provenance.lockSha256, manifest.provenance.lockSha256)
+if (installationEvidence) {
+  assert.equal(installationEvidence.mode, 'install', 'Restart requires installation evidence')
+  assert.ok(installationEvidence.nativeIdentity && /^[a-f0-9]{64}$/.test(installationEvidence.nativeBootstrapSha256),
+    'Installation evidence must identify the assembled native bootstrap')
+  assert.equal(active.id, installationEvidence.runtimeId, 'Replacement must retain the installed processing runtime')
+  assert.equal(models.id, installationEvidence.modelManifestId, 'Replacement must retain the installed model cache')
+}
 const probe = await manager.probe(active, { timeout: 120000 })
 assert.equal(probe.capabilitiesReady, true)
 assert.ok(probe.verifiedCapabilities.includes('transcription'))
@@ -45,11 +60,14 @@ const attestation = processingAttestation(active, probe)
 // starting the real worker. An empty VAD selection loads the real checkpoint and
 // processor without repeating an operator's already completed regeneration.
 const bootstrap = `import importlib.util,json,os,pathlib,subprocess,sys,wave
-desktop,state,identity,processing,models,probe=sys.argv[1:]
-spec=importlib.util.spec_from_file_location('desktop_bootstrap',pathlib.Path(desktop)/'backend.py')
+native,state,identity,processing,models,probe=sys.argv[1:]
+native=pathlib.Path(native)
+spec=importlib.util.spec_from_file_location('desktop_bootstrap',native/'backend.py')
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+identity=json.loads(identity)
+assert module.validate_native(native)==identity, 'Assembled native identity failed validation'
 state=pathlib.Path(state)
-env=module.processing_environment(state/'backend',json.loads(identity),pathlib.Path(processing),pathlib.Path(models),json.loads(probe))
+env=module.processing_environment(state/'backend',identity,pathlib.Path(processing),pathlib.Path(models),json.loads(probe))
 assert env['KARAOKE_PROCESSING_PYTHON']
 checkpoint=pathlib.Path(env['KARAOKE_HEART_CKPT'])
 assert checkpoint.is_dir()
@@ -69,7 +87,7 @@ assert value['transcriber']=='heart' and value['segments']==[]
 print(json.dumps({'checkpointLoaded':True,'worker':'heart','regenerationRepeated':False,'modelRevision':json.loads(env['KARAOKE_HEART_MODEL_STATUS_JSON'])['revision']}))
 `
 const result = await new Promise((resolveRun, reject) => {
-  const child = spawn(python, ['-I', '-B', '-c', bootstrap, desktop, state, JSON.stringify(identity), active.directory, models.directory, JSON.stringify(attestation)],
+  const child = spawn(python, ['-I', '-B', '-c', bootstrap, native, state, JSON.stringify(identity), active.directory, models.directory, JSON.stringify(attestation)],
     { stdio: ['ignore', 'pipe', 'pipe'] })
   let output = '', error = ''
   child.stdout.on('data', chunk => { output += chunk })
@@ -81,6 +99,11 @@ const result = await new Promise((resolveRun, reject) => {
 assert.equal((await manager.active()).id, active.id)
 assert.equal((await cache.active()).id, models.id)
 const report = { mode, runtimeId: active.id, inputLockSha256: active.manifest.provenance.lockSha256,
-  modelManifestId: models.id, probe, ...result }
+  modelManifestId: models.id, nativeRuntimeId: identity.runtimeId, nativeIdentity: identity,
+  nativeBootstrapSha256,
+  ...(installationEvidence ? { installedNativeIdentity: installationEvidence.nativeIdentity,
+    installedNativeBootstrapSha256: installationEvidence.nativeBootstrapSha256,
+    nativeIdentityChanged: !isDeepStrictEqual(installationEvidence.nativeIdentity, identity) } : {}),
+  probe, ...result }
 await writeFile(join(state, `${mode}-evidence.json`), JSON.stringify(report, null, 2) + '\n')
 console.log(JSON.stringify(report, null, 2))

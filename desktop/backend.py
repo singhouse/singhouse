@@ -293,6 +293,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
            "KARAOKE_HEART_CKPT": "",
+           "KARAOKE_DESKTOP_MODEL_SETS_JSON": "",
            "KARAOKE_HEART_MODEL_STATUS_JSON": json.dumps({"installed": False, "modelId": "heart-transcriptor", "revision": None}),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
            "PYTORCH_ENABLE_MPS_FALLBACK": "0",
@@ -319,6 +320,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         if manifest.get("schema") != 1 or manifest.get("kind") != kind:
             raise RuntimeError("Invalid managed processing manifest")
         allowed = {"manifest.json"}
+        path_keys = {"manifest.json"}
+        case_sensitive = kind == "processing" and manifest.get("platform") == "linux"
         for record in manifest["files"]:
             if (not isinstance(record.get("path"), str)
                     or any(not re.fullmatch(r"[A-Za-z0-9._+() -]+", part) or part.strip() != part
@@ -331,8 +334,10 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                 raise RuntimeError("Invalid managed processing file path")
             path = directory / relative
             name = relative.as_posix()
-            if name in allowed:
+            path_key = name if case_sensitive else name.casefold()
+            if path_key in path_keys:
                 raise RuntimeError("Duplicate managed processing file path")
+            path_keys.add(path_key)
             allowed.add(name)
             if any(parent.is_symlink() for parent in (path, *path.parents) if parent != directory.parent):
                 raise RuntimeError("Managed processing files must not be symbolic links")
@@ -377,9 +382,10 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             if not locked or any(record.get(key) != locked.get(key) for key in ("path", "revision", "sha256", "size", "url", "executable")):
                 raise RuntimeError("Model file differs from immutable application policy")
             if (record["executable"] is not False or url.scheme != "https" or url.username or url.password
-                    or url.fragment or url.hostname not in model_policy["allowedHosts"]
-                    or not re.fullmatch(r"[a-f0-9]{40,64}", record["revision"])
-                    or record["revision"] not in url.path.split("/")):
+                    or url.fragment or url.port not in (None, 443) or url.hostname not in model_policy["allowedHosts"]
+                    or not re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", record["revision"])
+                    or not ((len(record["revision"]) == 64 and record["revision"] == record["sha256"])
+                            or record["revision"] in url.path.split("/"))):
                 raise RuntimeError("Invalid upstream model policy source")
         env.update({"HF_HOME": str(models / "huggingface"),
                     "TORCH_HOME": str(models / "torch"),
@@ -475,6 +481,15 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         # functional evidence is checked at the desktop admission boundary.
         env["KARAOKE_DESKTOP_PROCESSING_JSON"] = json.dumps(
             {key: value for key, value in attestation.items() if key not in {"probeSchema", "checks"}})
+        env["KARAOKE_DESKTOP_MODEL_SETS_JSON"] = json.dumps({
+            "schema": 1, "runtimeManifestId": processing.name,
+            "modelManifestId": models.name if model_manifest else None,
+            "requiredModels": {
+                capability: sorted(model for model in manifest["models"]
+                                   if manifest.get("modelCapabilities", {}).get(model) == capability) if functional else []
+                for capability in ("transcription", "separation")},
+            "verifiedModelIds": sorted(model_manifest["models"]) if model_manifest else [],
+        })
     return env
 
 
