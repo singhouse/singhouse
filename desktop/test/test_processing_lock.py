@@ -65,7 +65,6 @@ wheels = [{url="https://example.org/linux_only-1-py3-none-any.whl",hashes={sha25
             self.assertEqual([p['name'] for p in output['packages']], ['linux-only'])
             self.assertEqual(output['capabilities'], ['transcription'])
             self.assertEqual(output, MODULE.generate(path, metadata=lambda _: {'license': 'MIT'}))
-            self.assertEqual(MODULE.generate(path, target='win32-x64', metadata=lambda _: {'license': 'MIT'})['target'], 'win32-x64') if False else None
             with self.assertRaisesRegex(ValueError, 'target/accelerator'):
                 MODULE.generate(path, target='linux-x64', accelerator='metal')
 

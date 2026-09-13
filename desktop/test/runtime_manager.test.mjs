@@ -326,12 +326,18 @@ test('fixed self-test runs before activation and on offline restart; failure and
 test('functional protocol enables only declared capabilities and rejects missing evidence and detached probe locks', { skip: process.platform === 'win32' }, async t => {
   const { root, source, manifest } = await fixture(t)
   manifest.probe = { ...manifest.probe, schema: 2, type: 'python-functional-v1' }
+  const inheritedFallback = process.env.PYTORCH_ENABLE_MPS_FALLBACK
+  process.env.PYTORCH_ENABLE_MPS_FALLBACK = '1'
+  t.after(() => {
+    if (inheritedFallback === undefined) delete process.env.PYTORCH_ENABLE_MPS_FALLBACK
+    else process.env.PYTORCH_ENABLE_MPS_FALLBACK = inheritedFallback
+  })
   const protocol = { schema: 2, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
     lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
     capabilities: manifest.capabilities, hardwareAvailable: true,
     components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])),
     checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }
-  const scriptFor = value => `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(value)}'\n`
+  const scriptFor = value => `#!/bin/sh\n[ "$PYTORCH_ENABLE_MPS_FALLBACK" = 0 ] || exit 71\nprintf '%s\\n' '${JSON.stringify(value)}'\n`
   const replaceProtocol = async value => {
     const script = scriptFor(value)
     await writeFile(source, script)
@@ -357,15 +363,31 @@ test('functional protocol enables only declared capabilities and rejects missing
     assert.equal((await manager.active()).id, installed.id)
   }
   const detached = structuredClone(installed.manifest)
-  detached.probe.type = 'python-imports-v1'
-  detached.probe.schema = 1
-  // A v2 lock cannot be upgraded in the reverse direction and then re-upgraded
-  // without its exact declaration; v1 never yields readiness in any event.
+  // A trusted import-only lock cannot grant functional readiness merely by
+  // changing its manifest probe declaration.
   const oldLock = JSON.parse(detached.provenance.inputLock)
   delete oldLock.probe
   detached.provenance.inputLock = JSON.stringify(oldLock)
   detached.provenance.lockSha256 = sha(detached.provenance.inputLock)
   testTrustedLocks.add(detached.provenance.lockSha256)
-  detached.probe = structuredClone(installed.manifest.probe)
   assert.throws(() => validateProcessingManifest(detached, identity, testTrustedLocks), /bound/)
+})
+
+
+test('real dependency names with internal spaces and parentheses survive install and verification', async t => {
+  const { manifest, manager } = await fixture(t)
+  const paths = ['setuptools/script (dev).tmpl', 'setuptools/launcher manifest.xml',
+    'setuptools/_vendor/jaraco/text/Lorem ipsum.txt', 'scipy/io/tests/data/Transparent Busy.ani']
+  for (const path of paths) manifest.files.push({ ...manifest.files[1], path })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  for (const path of paths) assert.equal(await readFile(join(installed.directory, path), 'utf8'), 'MIT notice')
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  for (const path of ['../escape', './file', 'dir/../escape', 'dir/ file', 'dir/file ', 'dir/file.',
+    'dir/CON', 'dir/nul.txt', 'dir/LPT1.txt', 'dir/file;command', 'dir/file$(command)', 'dir/file\\name']) {
+    const invalid = structuredClone(manifest)
+    invalid.files.push({ ...manifest.files[1], path })
+    bindProvenance(invalid)
+    assert.throws(() => validateProcessingManifest(invalid, identity, testTrustedLocks))
+  }
 })

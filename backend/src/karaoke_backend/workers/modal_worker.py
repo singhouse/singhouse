@@ -273,15 +273,22 @@ async def run_pass2(
 
     # audio-separator outputs: <filename>_(Vocals).wav and <filename>_(Instrumental).wav
     # For karaoke models: "Vocals" = lead vocals, "Instrumental" = backing vocals
+    pass2_device = configured_pass2_device()
+    # Managed packs relocate the selected interpreter and omit console-script
+    # shebangs that point back at the build machine. Invoke the fixed package
+    # entry point in that interpreter; isolation excludes cwd/user-site imports.
+    entrypoint = ([str(DEMUCS_PYTHON), "-I", "-B", "-m",
+                   "karaoke_backend.workers.managed_audio_separator"]
+                  if pass2_device is not None else
+                  [str(DEMUCS_PYTHON.parent / "audio-separator")])
     karaoke_cmd = [
-        str(DEMUCS_PYTHON.parent / "audio-separator"),
+        *entrypoint,
         str(vocals_src),
         "--model_filename", pass2_model,
         "--model_file_dir", KARAOKE_MODEL_DIR,
         "--output_dir", str(out_dir),
         "--output_format", "WAV",
     ]
-    pass2_device = configured_pass2_device()
     if pass2_device is not None:
         karaoke_cmd.extend(["--device", pass2_device])
     logger.info("Running karaoke separation (%s): %s", pass2_model, " ".join(karaoke_cmd))

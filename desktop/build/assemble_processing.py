@@ -23,7 +23,10 @@ def digest(path):
 
 def relative(value):
     return isinstance(value, str) and len(value) < 512 and all(
-        re.fullmatch(r"[A-Za-z0-9._+-]+", part) and part not in {".", ".."}
+        re.fullmatch(r"[A-Za-z0-9._+() -]+", part)
+        and part == part.strip() and not part.endswith('.')
+        and part not in {".", ".."}
+        and not re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", part)
         for part in value.split("/"))
 
 

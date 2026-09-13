@@ -295,6 +295,9 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
            "KARAOKE_HEART_CKPT": "",
            "KARAOKE_HEART_MODEL_STATUS_JSON": json.dumps({"installed": False, "modelId": "heart-transcriptor", "revision": None}),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+           "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+           "NUMBA_CACHE_DIR": str(runtime / "cache/numba"),
+           "HF_HOME": str(runtime / "cache/huggingface"),
            "TORCH_HOME": str(runtime / "cache/torch"),
            "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
 
@@ -318,7 +321,9 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         allowed = {"manifest.json"}
         for record in manifest["files"]:
             if (not isinstance(record.get("path"), str)
-                    or any(not re.fullmatch(r"[A-Za-z0-9._+-]+", part) or part.endswith(".")
+                    or any(not re.fullmatch(r"[A-Za-z0-9._+() -]+", part) or part.strip() != part
+                           or part in {".", ".."} or part.endswith(".")
+                           or re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)
                            for part in record["path"].split("/"))):
                 raise RuntimeError("Invalid managed processing file path")
             relative = Path(record["path"])

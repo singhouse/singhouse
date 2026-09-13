@@ -19,7 +19,8 @@ const modelTransferHosts = new Set(['huggingface.co', 'cdn-lfs.huggingface.co',
   'cas-bridge.xethub.hf.co', 'cas-server.xethub.hf.co', 'cas-server.xethub-eu.hf.co',
   'transfer.xethub.hf.co', 'transfer.xethub-eu.hf.co', 'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co'])
 const safePath = value => typeof value === 'string' && value.length < 512
-  && value.split('/').every(part => /^[A-Za-z0-9._+-]+$/.test(part) && !part.endsWith('.')
+  && value.split('/').every(part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part
+    && !['.', '..'].includes(part) && !part.endsWith('.')
     && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
 
 // This is a fixed application-owned protocol, never a command from a manifest.
@@ -293,7 +294,11 @@ export class RuntimeManager {
     const manifest = active.manifest
     const env = Object.fromEntries(['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR']
       .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
-    Object.assign(env, { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1' })
+    const cache = join(this.root, 'probe-cache')
+    await plainDirectory(cache)
+    Object.assign(env, { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1',
+      PYTORCH_ENABLE_MPS_FALLBACK: '0', NUMBA_CACHE_DIR: join(cache, 'numba'), HF_HOME: join(cache, 'huggingface'),
+      TORCH_HOME: join(cache, 'torch'), XDG_CACHE_HOME: cache })
     const functional = manifest.probe.schema === 2
     const source = functional ? await checkedRead(new URL('./processing_probe.py', import.meta.url)) : PROBE
     signal?.throwIfAborted()

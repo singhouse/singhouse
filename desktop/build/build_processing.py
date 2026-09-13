@@ -182,19 +182,85 @@ def validate_requirements(lock, target, accelerator):
         raise ValueError('Unsupported capability inventory')
 
 
-def build_wheel(source, destination, host_python, env):
+def validate_native_toolchain(path):
+    if path is None:
+        return None
+    lock = json.loads(path.read_text())
+    if (lock.get('schema') != 1 or lock.get('kind') != 'processing-native-toolchain'
+            or lock.get('host') != host_target() or set(lock.get('tools', {})) != {'cc', 'cxx', 'ld', 'as'}):
+        raise ValueError('Native toolchain lock must identify this host and cc/cxx/ld/as')
+    for name, record in lock['tools'].items():
+        executable = Path(record['path'])
+        if not executable.is_absolute() or digest(executable) != record.get('sha256'):
+            raise ValueError(f'Native toolchain digest mismatch: {name}')
+        version = subprocess.check_output([str(executable), '--version'], text=True)
+        if version != record.get('version'):
+            raise ValueError(f'Native toolchain version mismatch: {name}')
+        if name in {'cc', 'cxx'} and not any(marker in version.lower() for marker in ('gcc', 'clang', 'g++')):
+            raise ValueError('Native source builds currently require GCC or Clang prefix-map support')
+    for record in lock.get('inputs', []):
+        path = Path(record['path'])
+        if not path.is_absolute() or digest(path) != record.get('sha256'):
+            raise ValueError('Native toolchain supporting input digest mismatch')
+    return lock
+
+
+def build_environment(cache, epoch):
+    # Do not inherit CC/CFLAGS/PYTHONPATH, compiler search overrides, or uv
+    # configuration from the invoking shell. Build inputs are explicit locks.
+    allowed = ('HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'SSL_CERT_FILE',
+               'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY')
+    env = {key: os.environ[key] for key in allowed if key in os.environ}
+    env.update(PATH=os.pathsep.join([str(Path(shutil.which('uv')).parent), os.defpath]),
+               UV_CACHE_DIR=str(cache / 'uv'), UV_PYTHON_DOWNLOADS='never', UV_NO_CONFIG='true',
+               SOURCE_DATE_EPOCH=str(epoch), PYTHONHASHSEED='0', PYTHONDONTWRITEBYTECODE='1',
+               LC_ALL='C', TZ='UTC')
+    return env
+
+
+def build_wheel(source, destination, host_python, env, toolchain=None):
     destination.mkdir()
+    if source.is_file():
+        unpacked = destination / 'source'
+        unpacked.mkdir()
+        if zipfile.is_zipfile(source):
+            with zipfile.ZipFile(source) as archive:
+                for member in archive.infolist():
+                    target = (unpacked / member.filename).resolve()
+                    if not target.is_relative_to(unpacked.resolve()):
+                        raise ValueError('Unsafe source ZIP member')
+                archive.extractall(unpacked)
+        else:
+            with tarfile.open(source) as archive:
+                archive.extractall(unpacked, filter='data')
+        roots = list(unpacked.iterdir())
+        if len(roots) != 1 or not roots[0].is_dir():
+            raise ValueError('Source archive must contain one package root')
+        source = roots[0]
+    build_env = dict(env)
+    if toolchain is not None:
+        mappings = ' '.join(f'{flag}={path}=/build/{name}' for path, name in
+                            ((source.resolve(), 'source'), (host_python.parents[2], 'toolchain'))
+                            for flag in ('-ffile-prefix-map', '-fdebug-prefix-map'))
+        cc, cxx = (toolchain['tools'][name]['path'] for name in ('cc', 'cxx'))
+        build_env.update(CC=cc, CXX=cxx, LD=toolchain['tools']['ld']['path'],
+                         AS=toolchain['tools']['as']['path'], CFLAGS='-O2 -g0 ' + mappings,
+                         CXXFLAGS='-O2 -g0 ' + mappings, LDFLAGS='',
+                         LDSHARED=cc + ' -shared')
     run('uv', 'build', '--wheel', '--no-build-isolation', '--no-sources', '--offline',
-        '--python', host_python, '--out-dir', destination, source, env=env)
+        '--python', host_python, '--out-dir', destination, source, env=build_env)
     wheels = list(destination.glob('*.whl'))
     if len(wheels) != 1:
         raise ValueError('Each source must build exactly one wheel')
+    if not wheels[0].name.endswith('-none-any.whl') and toolchain is None:
+        raise ValueError('Native source wheels require --native-toolchain with verified compiler identity')
     return wheels[0]
 
 
-def build(requirements, target, accelerator, output, cache, build_requirements=None):
+def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None):
     lock = json.loads(requirements.read_text())
     validate_requirements(lock, target, accelerator)
+    toolchain = validate_native_toolchain(native_toolchain)
     native = json.loads((LOCKS / 'native.json').read_text())
     if subprocess.check_output(['uv', '--version'], text=True).split()[1] != native['uvVersion']:
         raise ValueError(f"Build requires uv {native['uvVersion']}")
@@ -210,8 +276,7 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
     payload = output / 'payload'
     payload.mkdir()
     epoch = subprocess.check_output(['git', 'show', '-s', '--format=%ct', source['sourceCommit']], cwd=ROOT, text=True).strip()
-    env = dict(os.environ, UV_CACHE_DIR=str(cache / 'uv'), UV_PYTHON_DOWNLOADS='never',
-               SOURCE_DATE_EPOCH=epoch, PYTHONHASHSEED='0', PYTHONDONTWRITEBYTECODE='1')
+    env = build_environment(cache, epoch)
     python_record = native['targets'][target]['python']
     with tarfile.open(fetch(python_record, cache), 'r:gz') as archive:
         archive.extractall(payload, filter='data')
@@ -242,7 +307,7 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
             filename = record.get('filename') or unquote(Path(urlparse(record['url']).path).name)
             artifact = work / filename
             shutil.copyfile(fetch(record, cache), artifact)
-            wheel = artifact if filename.endswith('.whl') else build_wheel(artifact, work / f'built-{index}', host_python, env)
+            wheel = artifact if filename.endswith('.whl') else build_wheel(artifact, work / f'built-{index}', host_python, env, toolchain)
             if not filename.endswith('.whl') and not wheel.name.endswith('-none-any.whl') and target != host_target():
                 raise ValueError('Native source wheels must be built on the target runner')
             info = wheel_metadata(wheel)
@@ -311,6 +376,10 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
     if build_requirements is not None:
         provenance['processingBuildRequirements'] = build_requirements.read_text()
         provenance['processingBuildRequirementsSha256'] = digest(build_requirements)
+    if native_toolchain is not None:
+        provenance['nativeToolchain'] = toolchain
+        provenance['nativeToolchainSha256'] = digest(native_toolchain)
+        provenance['nativeBuildReproducibility'] = 'Compiler and supporting input identity for same-host reconstruction; this is not a hermetic cross-host toolchain claim'
     (payload / 'build-provenance.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n')
     input_lock = dict(schema=1, kind='processing-input',
                       appVersion=json.loads((ROOT / 'desktop/package.json').read_text())['version'],
@@ -337,8 +406,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--build-requirements', type=Path, help='Additional exact hash-locked host build wheels (no dependency resolution)')
+    parser.add_argument('--native-toolchain', type=Path, help='Exact host compiler executable/version and supporting input identity lock')
     args = parser.parse_args()
-    build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements)
+    build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements, args.native_toolchain)
 
 
 if __name__ == '__main__':

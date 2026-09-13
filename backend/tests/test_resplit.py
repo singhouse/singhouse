@@ -348,10 +348,15 @@ def test_windows_directory_sync_fails_closed_but_still_closes(tmp_path):
 async def test_pass2_forwards_managed_audio_separator_device(monkeypatch, tmp_path, device):
     seen = []
     async def run(cmd, timeout): seen.extend(cmd)
+    selected_python = tmp_path / "managed-pack" / "python"
+    monkeypatch.setattr(modal_worker, "DEMUCS_PYTHON", selected_python)
     monkeypatch.setattr(modal_worker, "configured_pass2_device", lambda: device)
     monkeypatch.setattr(modal_worker, "_await_subprocess", run)
     await modal_worker.run_pass2(tmp_path / "vocals.wav", tmp_path / "out", "model.ckpt",
                                  AsyncMock(), allow_alphabetical_fallback=False)
+    assert seen[:5] == [str(selected_python), "-I", "-B", "-m",
+                        "karaoke_backend.workers.managed_audio_separator"]
+    assert seen[5] == str(tmp_path / "vocals.wav")
     assert seen[-2:] == ["--device", device]
 
 
@@ -363,6 +368,7 @@ async def test_pass2_legacy_mode_does_not_force_a_device(monkeypatch, tmp_path):
     monkeypatch.setattr(modal_worker, "_await_subprocess", run)
     await modal_worker.run_pass2(tmp_path / "vocals.wav", tmp_path / "out", "model.ckpt",
                                  AsyncMock(), allow_alphabetical_fallback=False)
+    assert seen[0] == str(modal_worker.DEMUCS_PYTHON.parent / "audio-separator")
     assert "--device" not in seen
 
 def test_only_a_complete_generation_is_reusable(tmp_path):

@@ -76,12 +76,27 @@ class IsolationTests(unittest.TestCase):
                         "probe": {"schema": 1, "type": "python-imports-v1", "modules": ["faster_whisper"]},
                         "files": [{"path": "python/bin/python3", "size": 7,
                                    "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True}]}
+            dependency_names = ["setuptools/script (dev).tmpl", "setuptools/launcher manifest.xml",
+                                "setuptools/_vendor/jaraco/text/Lorem ipsum.txt", "scipy/io/tests/data/Transparent Busy.ani"]
+            for name in dependency_names:
+                manifest["files"].append({**manifest["files"][0], "path": name, "executable": False})
             raw = json.dumps(manifest, separators=(",", ":")).encode()
             pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
             (pack / "python/bin").mkdir(parents=True)
             (pack / "manifest.json").write_bytes(raw)
             (pack / "python/bin/python3").write_bytes(b"fixture")
             (pack / "python/bin/python3").chmod(0o755)
+            for name in dependency_names:
+                (pack / name).parent.mkdir(parents=True, exist_ok=True)
+                (pack / name).write_bytes(b"fixture")
+            for invalid_path in ("../escape", "dir/../escape", "dir/ file", "dir/file ", "dir/file.", "dir/CON", "dir/nul.txt"):
+                invalid = {**manifest, "files": [{**manifest["files"][0], "path": invalid_path}]}
+                invalid_raw = json.dumps(invalid, separators=(",", ":")).encode()
+                invalid_pack = root / "processing/packs" / hashlib.sha256(invalid_raw).hexdigest()
+                invalid_pack.mkdir()
+                (invalid_pack / "manifest.json").write_bytes(invalid_raw)
+                with self.assertRaisesRegex(RuntimeError, "file path"):
+                    backend.processing_environment(root / "backend", identity, invalid_pack, None)
             missing_probe = backend.processing_environment(root / "backend", identity, pack, None)
             self.assertEqual(missing_probe["KARAOKE_PROCESSING_PYTHON"], "")
             probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
@@ -93,6 +108,7 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(env["KARAOKE_PROCESSING_ACCELERATOR"], "")
             self.assertEqual(env["KARAOKE_AUDIO_SEPARATOR_DEVICE"], "")
             self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+            self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "0")
             attested = json.loads(env["KARAOKE_DESKTOP_PROCESSING_JSON"])
             self.assertTrue(attested["probePassed"])
             self.assertEqual(attested["runtimeManifestId"], pack.name)
@@ -235,6 +251,7 @@ class IsolationTests(unittest.TestCase):
                 self.assertEqual(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"]),
                                  {"installed": True, "modelId": "heart-transcriptor", "revision": revision})
                 self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+                self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "0")
                 self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
                 self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
             (pack / directory / "model.safetensors").write_bytes(b"corrupt")

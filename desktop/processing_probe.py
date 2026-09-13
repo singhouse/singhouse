@@ -10,6 +10,7 @@ import importlib
 import importlib.metadata
 import io
 import json
+import os
 import platform
 import sys
 
@@ -47,6 +48,12 @@ def onnx_add_graph():
 
 
 def run(capabilities, accelerator, modules):
+    if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") != "0":
+        raise RuntimeError("Runtime smoke requires PYTORCH_ENABLE_MPS_FALLBACK=0")
+    if "torch" in sys.modules:
+        raise RuntimeError("Runtime smoke must configure fallback before importing torch")
+    # Set before importing the backend package, whose cwd .env fills unset keys.
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
     if (not capabilities or len(set(capabilities)) != len(capabilities)
             or any(value not in {"transcription", "separation"} for value in capabilities)
             or accelerator not in {"cpu", "cuda", "metal"}):

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "kind": "processing-native-toolchain",
+  "host": "linux-x64",
+  "tools": {
+    "cc": {
+      "path": "/usr/bin/gcc",
+      "sha256": "8aac907d6fbf40394b424b5fa4a2ad1aa291dac7d3a0315c5b415c1f5ace1287",
+      "version": "gcc (GCC) 16.2.1 20260810\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+    },
+    "cxx": {
+      "path": "/usr/bin/g++",
+      "sha256": "f04191f6a7b2cd7d9a62e1745872b8a6088791e5af6955488c69c9b2c4668bc9",
+      "version": "g++ (GCC) 16.2.1 20260810\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+    },
+    "ld": {
+      "path": "/usr/bin/ld",
+      "sha256": "4d83828f709f0eade25bcae2f4a2508c47db2f01b58daaca5c1c4cefce897847",
+      "version": "GNU ld (GNU Binutils) 2.47\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) a later version.\nThis program has absolutely no warranty.\n"
+    },
+    "as": {
+      "path": "/usr/bin/as",
+      "sha256": "3dfdf6007545ea36176c350eef201d1ece55c347a182697bb5f9bac815a1f34b",
+      "version": "GNU assembler (GNU Binutils) 2.47\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or later.\nThis program has absolutely no warranty.\nThis assembler was configured for a target of `x86_64-pc-linux-gnu'.\n"
+    }
+  },
+  "inputs": [
+    {
+      "path": "/usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1",
+      "sha256": "49a325fc4c6c5aa5a8f9ea8c828e37f3900a757c6be48d997ff4af0b51ee8315"
+    },
+    {
+      "path": "/usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1plus",
+      "sha256": "0026a9e66550c7f470558dfbe99f861073294e601d62b7b74eeb50fdebb09bef"
+    },
+    {
+      "path": "/usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2",
+      "sha256": "6a575bbac80e335d20fc2ca631798899956cbbef882d6c3b83f8b13d01865155"
+    },
+    {
+      "path": "/usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so",
+      "sha256": "e59750234603efdc5395849bf15ce45eff1fde35ee5adead588a5c1e723662fe"
+    }
+  ]
+}

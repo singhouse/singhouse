@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from unittest.mock import patch
 import sys
 import tempfile
 import tarfile
@@ -111,6 +112,34 @@ class ProcessingBuildTests(unittest.TestCase):
         notices = builder.retain_notices(wheel, {'name': 'fixture', 'sha256': checksum,
             'url': 'https://example.org/fixture.tar.gz'}, self.root, self.root)
         self.assertEqual((self.root / notices[0]).read_bytes(), data)
+
+    def test_inventory_permits_real_dependency_names_but_rejects_unsafe_segments(self):
+        for name in ['setuptools/script (dev).tmpl', 'launcher manifest.xml', 'Lorem ipsum.txt']:
+            self.assertTrue(builder.relative(name), name)
+        for name in ['../outside', 'one/../two', ' trailing', 'trailing ', 'trailing.', 'CON', 'aux.txt', 'LPT1.exe', 'a\\b', 'a;command']:
+            self.assertFalse(builder.relative(name), name)
+
+    def test_build_environment_drops_ambient_compiler_and_python_overrides(self):
+        with patch.dict('os.environ', {'CC': 'untrusted', 'CFLAGS': '-march=native', 'PYTHONPATH': '/private', 'UV_INDEX_URL': 'https://private.invalid'}):
+            env = builder.build_environment(self.root, 1234)
+        for key in ('CC', 'CFLAGS', 'PYTHONPATH', 'UV_INDEX_URL'):
+            self.assertNotIn(key, env)
+        self.assertEqual(env['SOURCE_DATE_EPOCH'], '1234')
+        self.assertEqual(env['LC_ALL'], 'C')
+
+    def test_native_toolchain_rejects_changed_compiler_bytes(self):
+        compiler = self.root / 'compiler'
+        compiler.write_bytes(b'locked compiler fixture')
+        record = {'path': str(compiler), 'sha256': builder.digest(compiler), 'version': 'gcc fixture\n'}
+        lock = {'schema': 1, 'kind': 'processing-native-toolchain', 'host': builder.host_target(),
+                'tools': {name: dict(record) for name in ('cc', 'cxx', 'ld', 'as')}}
+        path = self.root / 'toolchain.json'
+        path.write_text(json.dumps(lock))
+        with patch.object(builder.subprocess, 'check_output', return_value='gcc fixture\n'):
+            self.assertEqual(builder.validate_native_toolchain(path), lock)
+            compiler.write_bytes(b'changed compiler fixture')
+            with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+                builder.validate_native_toolchain(path)
 
 
 if __name__ == '__main__':
