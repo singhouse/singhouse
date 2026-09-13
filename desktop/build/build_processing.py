@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import hashlib
 from email.parser import BytesParser
 import json
 import os
@@ -112,20 +113,45 @@ def retain_notices(artifact, record, payload, cache):
     directory = payload / 'notices' / name
     directory.mkdir(parents=True)
     retained = []
+    contents = set()
+
+    def retain(data):
+        checksum = hashlib.sha256(data).hexdigest()
+        if checksum in contents:
+            return
+        contents.add(checksum)
+        output = directory / f'{len(retained):03d}.txt'
+        output.write_bytes(data)
+        retained.append(output.relative_to(payload).as_posix())
+
     with zipfile.ZipFile(artifact) as wheel:
         for member in sorted(wheel.namelist()):
             base = Path(member).name
             if member.endswith('/') or not re.match(r'(?i)(license|licence|copying|notice|authors)', base):
                 continue
             # Numbered names avoid wheel paths with spaces or case collisions.
-            output = directory / f'{len(retained):03d}.txt'
-            output.write_bytes(wheel.read(member))
-            retained.append(output.relative_to(payload).as_posix())
+            retain(wheel.read(member))
+    # Some source builders omit upstream notices from their wheel. Retain
+    # those directly from the same hash-locked source archive, without
+    # extracting arbitrary archive members or substituting another release.
+    original = cache / record.get('sha256', 'missing')
+    if original.is_file() and not record.get('url', '').endswith('.whl'):
+        if digest(original) != record['sha256']:
+            raise ValueError('Cached source notice artifact checksum mismatch')
+        if tarfile.is_tarfile(original):
+            with tarfile.open(original) as archive:
+                for member in sorted(archive.getmembers(), key=lambda entry: entry.name):
+                    if member.isfile() and re.match(r'(?i)(license|licence|copying|notice|authors)', Path(member.name).name):
+                        with archive.extractfile(member) as stream:
+                            retain(stream.read())
+        elif zipfile.is_zipfile(original):
+            with zipfile.ZipFile(original) as archive:
+                for member in sorted(archive.namelist()):
+                    if not member.endswith('/') and re.match(r'(?i)(license|licence|copying|notice|authors)', Path(member).name):
+                        retain(archive.read(member))
     for notice in record.get('notices', []):
         source = fetch(notice, cache)
-        output = directory / f'{len(retained):03d}.txt'
-        shutil.copyfile(source, output)
-        retained.append(output.relative_to(payload).as_posix())
+        retain(source.read_bytes())
     if not retained or any((payload / p).stat().st_size == 0 for p in retained):
         raise ValueError(f'Package needs nonempty locked notices: {name}')
     return retained

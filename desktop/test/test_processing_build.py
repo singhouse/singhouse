@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
+import tarfile
 import unittest
 import zipfile
 
@@ -93,6 +95,22 @@ class ProcessingBuildTests(unittest.TestCase):
             archive.writestr('another-2.dist-info/METADATA', 'Name: another\nVersion: 2\n')
         with self.assertRaisesRegex(ValueError, 'fixture-1-py3-none-any.whl.*found 2'):
             builder.wheel_metadata(wheel)
+
+    def test_retains_notice_omitted_by_source_wheel_builder(self):
+        wheel = self.root / 'fixture.whl'
+        with zipfile.ZipFile(wheel, 'w'):
+            pass
+        archive_path = self.root / 'source.tar.gz'
+        with tarfile.open(archive_path, 'w:gz') as archive:
+            data = b'Upstream source license terms'
+            entry = tarfile.TarInfo('fixture-1/LICENSE')
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+        checksum = builder.digest(archive_path)
+        archive_path.rename(self.root / checksum)
+        notices = builder.retain_notices(wheel, {'name': 'fixture', 'sha256': checksum,
+            'url': 'https://example.org/fixture.tar.gz'}, self.root, self.root)
+        self.assertEqual((self.root / notices[0]).read_bytes(), data)
 
 
 if __name__ == '__main__':
