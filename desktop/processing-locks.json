@@ -1,5 +1,7 @@
 {
   "schema": 1,
-  "status": "No executable processing packs are trusted by this application release",
-  "lockSha256": []
+  "status": "Built compatible processing packs; native capability probes remain required on the selected device",
+  "lockSha256": [
+    "a1f615d7f7c8c63c5904fdfacadd7a5dfc285dd9724a75d78bf2324d025f8a8c"
+  ]
 }
