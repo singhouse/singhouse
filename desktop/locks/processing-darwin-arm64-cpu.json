@@ -860,11 +860,13 @@
       "version": "0.22.2"
     },
     {
+      "filename": "torch-2.10.0-2-cp312-none-macosx_11_0_arm64.whl",
       "license": "BSD-3-Clause",
       "licenseSource": "https://pypi.org/pypi/torch/2.10.0/json",
       "name": "torch",
-      "sha256": "6d3707a61863d1c4d6ebba7be4ca320f42b869ee657e9b2c21c736bf17000294",
-      "url": "https://files.pythonhosted.org/packages/c9/5c/dee910b87c4d5c0fcb41b50839ae04df87c1cfc663cf1b5fca7ea565eeaa/torch-2.10.0-cp312-none-macosx_11_0_arm64.whl",
+      "sha256": "13ec4add8c3faaed8d13e0574f5cd4a323c11655546f91fbe6afa77b57423574",
+      "size": 79498202,
+      "url": "https://files.pythonhosted.org/packages/d3/54/a2ba279afcca44bbd320d4e73675b282fcee3d81400ea1b53934efca6462/torch-2.10.0-2-cp312-none-macosx_11_0_arm64.whl",
       "version": "2.10.0"
     },
     {
