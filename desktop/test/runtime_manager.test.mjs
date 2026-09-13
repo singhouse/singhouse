@@ -28,6 +28,7 @@ function bindProvenance(manifest) {
       .map(key => [key, structuredClone(manifest[key])])), sourceCommit: 'a'.repeat(40),
   packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/fixture.whl', sha256: 'c'.repeat(64), notices: ['NOTICE.fixture'] }],
   files: manifest.files.map(({ url, ...record }) => structuredClone(record)) }
+  if (manifest.probe.schema === 2) inputLock.probe = structuredClone(manifest.probe)
   manifest.provenance = { sourceCommit: inputLock.sourceCommit, lockSha256: sha(JSON.stringify(inputLock)),
     inputLock: JSON.stringify(inputLock), packages: structuredClone(inputLock.packages), qualification: 'UNTESTED' }
   testTrustedLocks.add(manifest.provenance.lockSha256)
@@ -319,4 +320,52 @@ test('fixed self-test runs before activation and on offline restart; failure and
     await assert.rejects(manager.install(bad, { probeTimeout: 50 }))
     assert.equal((await manager.active()).id, installed.id)
   }
+})
+
+
+test('functional protocol enables only declared capabilities and rejects missing evidence and detached probe locks', { skip: process.platform === 'win32' }, async t => {
+  const { root, source, manifest } = await fixture(t)
+  manifest.probe = { ...manifest.probe, schema: 2, type: 'python-functional-v1' }
+  const protocol = { schema: 2, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
+    lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
+    capabilities: manifest.capabilities, hardwareAvailable: true,
+    components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])),
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }
+  const scriptFor = value => `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(value)}'\n`
+  const replaceProtocol = async value => {
+    const script = scriptFor(value)
+    await writeFile(source, script)
+    manifest.files[0].size = Buffer.byteLength(script)
+    manifest.files[0].sha256 = sha(script)
+    bindProvenance(manifest)
+  }
+  await replaceProtocol(protocol)
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  const installed = await manager.install(manifest)
+  const result = await manager.probe(installed)
+  assert.equal(result.capabilitiesReady, true)
+  assert.deepEqual(result.verifiedCapabilities, manifest.capabilities)
+  const attested = processingAttestation(installed, result)
+  assert.equal(attested.probeSchema, 2)
+  assert.deepEqual(attested.checks, protocol.checks)
+  for (const patch of [{ checks: { ...protocol.checks, transcription: false } },
+    { checks: { deviceTensor: true, nativeAudio: true } },
+    { checks: { ...protocol.checks, extra: true } }, { hardwareAvailable: false }, { schema: 1 }]) {
+    assert.throws(() => processingAttestation(installed, { ...result, ...patch }))
+    await replaceProtocol({ ...protocol, ...patch })
+    await assert.rejects(manager.install(manifest))
+    assert.equal((await manager.active()).id, installed.id)
+  }
+  const detached = structuredClone(installed.manifest)
+  detached.probe.type = 'python-imports-v1'
+  detached.probe.schema = 1
+  // A v2 lock cannot be upgraded in the reverse direction and then re-upgraded
+  // without its exact declaration; v1 never yields readiness in any event.
+  const oldLock = JSON.parse(detached.provenance.inputLock)
+  delete oldLock.probe
+  detached.provenance.inputLock = JSON.stringify(oldLock)
+  detached.provenance.lockSha256 = sha(detached.provenance.inputLock)
+  testTrustedLocks.add(detached.provenance.lockSha256)
+  detached.probe = structuredClone(installed.manifest.probe)
+  assert.throws(() => validateProcessingManifest(detached, identity, testTrustedLocks), /bound/)
 })

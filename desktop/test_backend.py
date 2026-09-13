@@ -146,6 +146,64 @@ class IsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "verification"):
                 backend.processing_environment(root / "backend", identity, pack, None)
 
+    def test_functional_processing_admission_requires_trust_and_exact_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            modules = ["faster_whisper", "karaoke_backend.workers.heart_transcriptor", "lyricsync.transcription.heart"]
+            manifest = {"schema": 1, "kind": "processing", **identity, "pythonVersion": "3.13.12",
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["heart-transcriptor"], "capabilities": ["transcription"],
+                        "modelCapabilities": {"heart-transcriptor": "transcription"},
+                        "probe": {"schema": 2, "type": "python-functional-v1", "modules": modules},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True}]}
+            input_lock = {**manifest, "kind": "processing-input", "packages": [], "sourceCommit": "a" * 40}
+            raw_lock = json.dumps(input_lock, separators=(",", ":"))
+            lock_hash = hashlib.sha256(raw_lock.encode()).hexdigest()
+            manifest["provenance"] = {"inputLock": raw_lock, "lockSha256": lock_hash,
+                                      "packages": [], "sourceCommit": "a" * 40}
+
+            def write_pack(value):
+                raw = json.dumps(value, separators=(",", ":")).encode()
+                pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+                (pack / "python/bin").mkdir(parents=True, exist_ok=True)
+                (pack / "manifest.json").write_bytes(raw)
+                (pack / "python/bin/python3").write_bytes(b"fixture")
+                return pack
+
+            pack = write_pack(manifest)
+            probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
+                     "pythonSha256": manifest["files"][0]["sha256"], "probePassed": True,
+                     "accelerator": "cpu", "components": {module: "1.0" for module in modules},
+                     "verifiedCapabilities": ["transcription"], "capabilitiesReady": True,
+                     "probeSchema": 2, "checks": {"deviceTensor": True, "nativeAudio": True, "transcription": True}}
+            selected = backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[lock_hash])
+            self.assertEqual(selected["KARAOKE_PROCESSING_PYTHON"], str(pack / "python/bin/python3"))
+            self.assertEqual(selected["KARAOKE_PROCESSING_ACCELERATOR"], "cpu")
+            attestation = json.loads(selected["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertTrue(attestation["capabilitiesReady"])
+            self.assertEqual(attestation["verifiedCapabilities"], ["transcription"])
+            self.assertNotIn("checks", attestation)
+            self.assertNotIn("probeSchema", attestation)
+            self.assertFalse(json.loads(selected["KARAOKE_HEART_MODEL_STATUS_JSON"])["installed"])
+            for changes in ({"checks": {"deviceTensor": True, "nativeAudio": True}},
+                            {"checks": {**probe["checks"], "transcription": 1}},
+                            {"checks": {**probe["checks"], "transcription": False}},
+                            {"verifiedCapabilities": ["transcription", "separation"]},
+                            {"capabilitiesReady": 1}, {"probePassed": 1}, {"probeSchema": 2.0},
+                            {"pythonPath": "/unmanaged/python"}, {"components": {}}, {"extra": True}):
+                rejected = backend.processing_environment(root / "backend", identity, pack, None,
+                                                          {**probe, **changes}, trusted_locks=[lock_hash])
+                self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
+                self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["capabilitiesReady"])
+            with self.assertRaisesRegex(RuntimeError, "not trusted"):
+                backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[])
+            changed = json.loads(json.dumps(manifest))
+            changed["probe"]["modules"] = ["faster_whisper"]
+            with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
+                backend.processing_environment(root / "backend", identity, write_pack(changed), None, probe, trusted_locks=[lock_hash])
+
     def test_missing_processing_preserves_playback_environment(self):
         env = backend.processing_environment(Path("/app/backend"), {}, None, None)
         self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")

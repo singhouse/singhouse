@@ -110,8 +110,12 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
         "inputLock": lock_path.read_text(),
         "packages": packages, "qualification": "UNTESTED: native execution and hardware qualification required",
     })
-    manifest["probe"] = {"schema": 1, "type": "python-imports-v1",
-                         "modules": sorted({module for capability in capabilities for module in required_modules[capability]})}
+    modules = sorted({module for capability in capabilities for module in required_modules[capability]})
+    probe = lock.get("probe", {"schema": 1, "type": "python-imports-v1", "modules": modules})
+    if probe not in ({"schema": 1, "type": "python-imports-v1", "modules": modules},
+                     {"schema": 2, "type": "python-functional-v1", "modules": modules}):
+        raise ValueError("Probe must bind the exact required capability modules")
+    manifest["probe"] = probe
     manifest["files"] = []
     for record in files:
         shutil.copyfile(payload / record["path"], output / "blobs" / record["sha256"])

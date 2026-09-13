@@ -112,7 +112,8 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
   let inputLock
   try { inputLock = JSON.parse(value?.provenance?.inputLock) } catch { throw new Error('Processing manifest provenance is missing or malformed') }
   if (!value || value.schema !== 1 || value.kind !== 'processing'
-      || value.probe?.schema !== 1 || value.probe?.type !== 'python-imports-v1'
+      || !((value.probe?.schema === 1 && value.probe?.type === 'python-imports-v1')
+        || (value.probe?.schema === 2 && value.probe?.type === 'python-functional-v1'))
       || !Array.isArray(value.probe.modules) || !value.probe.modules.length || value.probe.modules.some(v => !token.test(v))
       || !['cpu', 'cuda', 'metal'].includes(value.accelerator)
       || ['appVersion', 'backendVersion', 'lyricsyncVersion', 'pythonVersion', 'platform', 'arch'].some(key => !token.test(value[key] || ''))
@@ -134,6 +135,11 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
   if (JSON.stringify(value.probe.modules) !== JSON.stringify(expectedModules)
       || !value.modelCapabilities || Object.keys(value.modelCapabilities).sort().join('\0') !== [...value.models].sort().join('\0')
       || Object.values(value.modelCapabilities).some(capability => !value.capabilities.includes(capability))) throw new Error('Processing capability probe is incomplete')
+  if (value.probe.schema === 2 && (JSON.stringify(inputLock.probe) !== JSON.stringify(value.probe)
+      || !value.capabilities.length || new Set(value.capabilities).size !== value.capabilities.length
+      || (value.accelerator === 'metal' && value.models.some(model => value.modelCapabilities[model] === 'transcription' && model !== 'heart-transcriptor')))) {
+    throw new Error('Functional processing probe is not bound to a supported input lock')
+  }
   const boundKeys = ['appVersion', 'backendVersion', 'lyricsyncVersion', 'pythonVersion', 'platform', 'arch', 'accelerator', 'python', 'capabilities', 'models', 'modelCapabilities', 'files', 'packages', 'sourceCommit']
   for (const key of boundKeys) {
     const manifestValue = key === 'packages' ? value.provenance.packages : key === 'sourceCommit' ? value.provenance.sourceCommit
@@ -288,8 +294,11 @@ export class RuntimeManager {
     const env = Object.fromEntries(['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR']
       .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
     Object.assign(env, { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1' })
+    const functional = manifest.probe.schema === 2
+    const source = functional ? await checkedRead(new URL('./processing_probe.py', import.meta.url)) : PROBE
+    signal?.throwIfAborted()
     return new Promise((resolveProbe, reject) => {
-      const child = spawn(join(active.directory, manifest.python), ['-I', '-B', '-c', PROBE, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
+      const child = spawn(join(active.directory, manifest.python), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
         { cwd: active.directory, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
       if (process.platform !== 'win32') watchOwnedGroup(child)
       let output = '', failure
@@ -309,15 +318,15 @@ export class RuntimeManager {
         if (failure || code !== 0) { reject(failure || new Error('Processing dependencies could not be loaded')); return }
         try {
           const result = JSON.parse(output)
-          if (result.schema !== 1 || result.hardwareAvailable !== true
+          if (result.schema !== manifest.probe.schema || result.hardwareAvailable !== true
               || ['pythonVersion', 'backendVersion', 'lyricsyncVersion', 'accelerator'].some(key => result[key] !== manifest[key])
               || JSON.stringify(result.capabilities) !== JSON.stringify(manifest.capabilities)
               || !result.components || JSON.stringify(Object.keys(result.components).sort()) !== JSON.stringify([...manifest.probe.modules].sort())
               || Object.values(result.components).some(value => typeof value !== 'string' || !value)) throw new Error('Processing runtime self-test did not match its manifest or hardware')
-          // Importability is dependency evidence, not proof that model inference
-          // can run. Production locks may later add app-owned executable smoke
-          // fixtures; until then no capability is advertised runnable.
-          resolveProbe({ ...result, verifiedCapabilities: [], capabilitiesReady: false })
+          if (functional && !validFunctionalChecks(result.checks, manifest.capabilities)) {
+            throw new Error('Processing functional checks were incomplete')
+          }
+          resolveProbe({ ...result, verifiedCapabilities: functional ? [...manifest.capabilities] : [], capabilitiesReady: functional })
         } catch (error) { reject(error) }
       })
     })
@@ -542,24 +551,39 @@ export class RuntimeManager {
   }
 }
 
+function validFunctionalChecks(checks, capabilities) {
+  const names = ['deviceTensor', 'nativeAudio', ...capabilities].sort()
+  return checks && typeof checks === 'object' && !Array.isArray(checks)
+    && JSON.stringify(Object.keys(checks).sort()) === JSON.stringify(names)
+    && Object.values(checks).every(value => value === true)
+}
+
 export function processingAttestation(active, probeResult) {
-  const pythonRecord = active.manifest.files.find(file => file.path === active.manifest.python)
-  if (!pythonRecord || probeResult?.schema !== 1 || probeResult.accelerator !== active.manifest.accelerator
+  const manifest = active.manifest
+  const functional = manifest.probe.schema === 2
+  const pythonRecord = manifest.files.find(file => file.path === manifest.python)
+  if (!pythonRecord || probeResult?.schema !== manifest.probe.schema || probeResult.accelerator !== manifest.accelerator
       || !probeResult.components || typeof probeResult.components !== 'object' || Array.isArray(probeResult.components)
+      || JSON.stringify(Object.keys(probeResult.components).sort()) !== JSON.stringify([...manifest.probe.modules].sort())
       || Object.values(probeResult.components).some(value => typeof value !== 'string' || !value)
-      || probeResult.capabilitiesReady !== false || !Array.isArray(probeResult.verifiedCapabilities)
-      || probeResult.verifiedCapabilities.length !== 0) {
+      || probeResult.capabilitiesReady !== functional || !Array.isArray(probeResult.verifiedCapabilities)
+      || JSON.stringify(probeResult.verifiedCapabilities) !== JSON.stringify(functional ? manifest.capabilities : [])
+      || (functional && (probeResult.hardwareAvailable !== true
+          || ['pythonVersion', 'backendVersion', 'lyricsyncVersion'].some(key => probeResult[key] !== manifest[key])
+          || JSON.stringify(probeResult.capabilities) !== JSON.stringify(manifest.capabilities)
+          || !validFunctionalChecks(probeResult.checks, manifest.capabilities)))) {
     throw new Error('Invalid processing probe attestation')
   }
   return {
     runtimeManifestId: active.id,
-    pythonPath: join(active.directory, active.manifest.python),
+    pythonPath: join(active.directory, manifest.python),
     pythonSha256: pythonRecord.sha256,
     probePassed: true,
     accelerator: probeResult.accelerator,
     components: Object.fromEntries(Object.entries(probeResult.components).sort(([a], [b]) => a.localeCompare(b))),
     verifiedCapabilities: probeResult.verifiedCapabilities,
     capabilitiesReady: probeResult.capabilitiesReady,
+    ...(functional ? { probeSchema: 2, checks: probeResult.checks } : {}),
   }
 }
 

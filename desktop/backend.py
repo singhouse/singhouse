@@ -286,7 +286,8 @@ def persistent_environment(runtime: Path, origin: str, password: str, native: Pa
 
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
-                           model_policy: dict | None = None) -> dict[str, str]:
+                           model_policy: dict | None = None,
+                           trusted_locks: list[str] | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
     env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
@@ -398,25 +399,77 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         if python_record is None:
             raise RuntimeError("Processing runtime has no managed Python executable")
         python_path = str(processing / python_record["path"])
+        functional = manifest.get("probe", {}).get("schema") == 2
+        capabilities = manifest.get("capabilities", [])
+        checks = {name: True for name in ("deviceTensor", "nativeAudio", *capabilities)}
+        if functional:
+            # Independently bind positive admission to the app's exact trusted
+            # input lock. A selected path or IPC readiness boolean is insufficient.
+            if trusted_locks is None:
+                policy = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
+                if policy.get("schema") != 1:
+                    raise RuntimeError("Invalid application processing trust policy")
+                trusted_locks = policy.get("lockSha256", [])
+            provenance = manifest.get("provenance", {})
+            raw_lock = provenance.get("inputLock", "")
+            lock_hash = hashlib.sha256(raw_lock.encode()).hexdigest()
+            if (not isinstance(trusted_locks, list) or lock_hash not in trusted_locks
+                    or provenance.get("lockSha256") != lock_hash):
+                raise RuntimeError("Processing input lock is not trusted by this application release")
+            input_lock = json.loads(raw_lock)
+            if input_lock.get("schema") != 1 or input_lock.get("kind") != "processing-input":
+                raise RuntimeError("Invalid processing input lock")
+            for key in ("appVersion", "backendVersion", "lyricsyncVersion", "pythonVersion", "platform", "arch",
+                        "accelerator", "python", "capabilities", "models", "modelCapabilities", "probe", "files", "packages", "sourceCommit"):
+                actual = (provenance.get(key) if key in {"packages", "sourceCommit"} else
+                          [{name: value for name, value in record.items() if name != "url"} for record in manifest["files"]]
+                          if key == "files" else manifest.get(key))
+                if actual != input_lock.get(key):
+                    raise RuntimeError("Processing manifest differs from its input lock")
+            required = {"transcription": ["faster_whisper", "lyricsync.transcription.heart", "karaoke_backend.workers.heart_transcriptor"],
+                        "separation": ["demucs.separate", "audio_separator.separator"]}
+            if (not capabilities or len(set(capabilities)) != len(capabilities)
+                    or any(name not in required for name in capabilities)
+                    or manifest["probe"].get("type") != "python-functional-v1"
+                    or manifest["probe"].get("modules") != sorted({module for name in capabilities for module in required[name]})
+                    or manifest.get("accelerator") not in {"cpu", "cuda", "metal"}
+                    or (manifest["accelerator"] == "metal" and any(
+                        manifest.get("modelCapabilities", {}).get(model) == "transcription" and model != "heart-transcriptor"
+                        for model in manifest["models"]))):
+                raise RuntimeError("Unsupported functional processing probe")
         fixed_probe = {"runtimeManifestId": processing.name, "pythonPath": python_path,
                        "pythonSha256": python_record["sha256"], "probePassed": True,
-                       "accelerator": manifest["accelerator"], "verifiedCapabilities": [],
-                       "capabilitiesReady": False}
+                       "accelerator": manifest["accelerator"],
+                       "verifiedCapabilities": capabilities if functional else [],
+                       "capabilitiesReady": functional}
+        if functional:
+            fixed_probe.update({"probeSchema": 2, "checks": checks})
         expected_component_keys = set(manifest.get("probe", {}).get("modules", []))
+        # JSON equality alone accepts 1 == True in Python: require actual booleans
+        # for all readiness and demonstrated-check fields at this boundary.
         probe_passed = (isinstance(probe, dict) and set(probe) == {*fixed_probe, "components"}
                         and all(probe[key] == value for key, value in fixed_probe.items())
+                        and probe["probePassed"] is True
+                        and probe["capabilitiesReady"] is functional
+                        and (not functional or (probe["probeSchema"] == 2 and type(probe["probeSchema"]) is int
+                             and isinstance(probe["checks"], dict)
+                             and all(value is True for value in probe["checks"].values())))
                         and isinstance(probe["components"], dict)
                         and set(probe["components"]) == expected_component_keys
                         and all(isinstance(value, str) and value for value in probe["components"].values()))
-        capabilities_ready = probe_passed and probe["capabilitiesReady"] is True
+        capabilities_ready = probe_passed and functional
         env["KARAOKE_PROCESSING_PYTHON"] = python_path if capabilities_ready else ""
         env["KARAOKE_DEMUCS_PYTHON"] = env["KARAOKE_PROCESSING_PYTHON"]
         env["KARAOKE_PROCESSING_ACCELERATOR"] = manifest["accelerator"] if capabilities_ready else ""
         env["KARAOKE_AUDIO_SEPARATOR_DEVICE"] = ({"cpu": "cpu", "cuda": "cuda", "metal": "mps"}[manifest["accelerator"]]
                                                    if capabilities_ready else "")
         attestation = (probe if probe_passed else
-                       {**fixed_probe, "components": {}, "probePassed": False})
-        env["KARAOKE_DESKTOP_PROCESSING_JSON"] = json.dumps(attestation)
+                       {**fixed_probe, "components": {}, "probePassed": False,
+                        "capabilitiesReady": False, "verifiedCapabilities": []})
+        # The shared-core worker protocol remains the existing exact schema;
+        # functional evidence is checked at the desktop admission boundary.
+        env["KARAOKE_DESKTOP_PROCESSING_JSON"] = json.dumps(
+            {key: value for key, value in attestation.items() if key not in {"probeSchema", "checks"}})
     return env
 
 

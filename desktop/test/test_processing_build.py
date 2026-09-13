@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+import zipfile
+
+BUILD = Path(__file__).parents[1] / 'build'
+sys.path.insert(0, str(BUILD))
+spec = importlib.util.spec_from_file_location('build_processing', BUILD / 'build_processing.py')
+builder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(builder)
+
+
+class ProcessingBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_materializes_internal_file_alias_and_rejects_escape(self):
+        payload = self.root / 'payload'
+        payload.mkdir()
+        binary = payload / 'python3.12'
+        binary.write_bytes(b'python fixture')
+        binary.chmod(0o755)
+        (payload / 'python3').symlink_to('python3.12')
+        builder.materialize_links(payload)
+        files = builder.inventory(payload)
+        self.assertEqual(len(files), 2)
+        self.assertEqual(files[0]['sha256'], files[1]['sha256'])
+        self.assertTrue(all(f['executable'] for f in files))
+        (self.root / 'secret').write_bytes(b'outside')
+        (payload / 'escape').symlink_to('../secret')
+        with self.assertRaisesRegex(ValueError, 'Unsafe'):
+            builder.materialize_links(payload)
+
+    def test_directory_alias_rejected_without_recursive_expansion(self):
+        (self.root / 'loop').symlink_to('.', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'directory'):
+            builder.materialize_links(self.root)
+
+    def test_locked_wheel_notices_and_metadata_normalization(self):
+        wheel = self.root / 'fixture-1-py3-none-any.whl'
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr('fixture-1.dist-info/METADATA', 'Name: fixture\nVersion: 1\nLicense-Expression: MIT\n')
+            archive.writestr('fixture-1.dist-info/licenses/LICENSE', 'MIT fixture terms')
+        payload = self.root / 'payload'
+        payload.mkdir()
+        record = dict(name='fixture', version='1', url='https://example.org/fixture.whl', sha256=builder.digest(wheel))
+        notices = builder.retain_notices(wheel, record, payload, self.root)
+        self.assertEqual((payload / notices[0]).read_text(), 'MIT fixture terms')
+        site = payload / 'site-packages'
+        with zipfile.ZipFile(wheel) as archive:
+            archive.extractall(site)
+        dist = site / 'fixture-1.dist-info'
+        (dist / 'direct_url.json').write_text('{"url":"file:///tmp/private-source"}')
+        (dist / 'RECORD').write_text('fixture-1.dist-info/direct_url.json,,\nfixture-1.dist-info/RECORD,,\n')
+        builder.normalize_installer_metadata(site, [(wheel, record)])
+        direct = json.loads((dist / 'direct_url.json').read_text())
+        self.assertEqual(direct['url'], record['url'])
+        self.assertEqual(direct['archive_info']['hashes']['sha256'], builder.digest(wheel))
+        self.assertNotIn('/tmp/', (dist / 'RECORD').read_text())
+        self.assertIn('sha256=', (dist / 'RECORD').read_text())
+
+    def test_missing_notices_and_unlocked_artifacts_fail(self):
+        wheel = self.root / 'empty.whl'
+        with zipfile.ZipFile(wheel, 'w'):
+            pass
+        with self.assertRaisesRegex(ValueError, 'notices'):
+            builder.retain_notices(wheel, {'name': 'empty'}, self.root, self.root)
+        lock = dict(schema=1, kind='processing-requirements', target='linux-x64', accelerator='cpu', capabilities=['transcription'],
+                    packages=[dict(name='fixture', version='1', url='https://example.org/f.whl', sha256='a'*64)])
+        builder.validate_requirements(lock, 'linux-x64', 'cpu')
+        lock['packages'].append(dict(lock['packages'][0]))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            builder.validate_requirements(lock, 'linux-x64', 'cpu')
+
+
+if __name__ == '__main__':
+    unittest.main()

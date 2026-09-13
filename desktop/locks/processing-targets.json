@@ -2,6 +2,9 @@
   "schema": 1,
   "status": "Build inputs only; no artifacts or hardware qualification asserted",
   "inputLockKind": "processing-input",
+  "requirementsLockKind": "processing-requirements",
+  "builder": "desktop/build/build_processing.py",
+  "probeContract": "python-functional-v1",
   "variants": [
     {"platform": "linux", "arch": "x64", "accelerator": "cpu"},
     {"platform": "linux", "arch": "x64", "accelerator": "cuda"},

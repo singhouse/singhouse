@@ -1,0 +1,4 @@
+-r build.in
+# Native source extensions are built only on their target runner.
+numpy==2.4.2
+Cython==3.3.0
