@@ -108,10 +108,11 @@ After hash verification, the application runs its fixed `python-functional-v1`
 self-test through the selected interpreter before activation and on startup.
 It checks exact Python/application versions, native audio operations, selected
 device execution, and small synthetic architecture operations. The process has
-a 30-second bound and cannot retrieve models. Failure, invalid output, or timeout
+a 120-second default bound to accommodate cold native imports and cannot retrieve
+models. Explicit caller timeouts remain honored. Failure, invalid output, or timeout
 prevents activation; a failed startup check leaves playback available. Legacy
-`python-imports-v1` packs remain import evidence only and never grant a runnable
-capability. Functional runtime readiness is separate from installed model sets,
+`python-imports-v1` packs retain their 30-second default, remain import evidence
+only, and never grant a runnable capability. Functional runtime readiness is separate from installed model sets,
 model quality, and physical platform qualification.
 
 The pack assembler consumes an already-built target environment and a complete

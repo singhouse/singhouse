@@ -303,6 +303,11 @@ test('no-follow descriptors reject partial symlinks and path swaps without writi
 })
 
 test('fixed self-test runs before activation and on offline restart; failure and timeout retain active pointer', { skip: process.platform === 'win32' }, async t => {
+  const originalTimeout = globalThis.setTimeout, deadlines = []
+  t.mock.method(globalThis, 'setTimeout', (callback, milliseconds, ...args) => {
+    deadlines.push(milliseconds)
+    return originalTimeout(callback, milliseconds, ...args)
+  })
   const { root, source, manifest } = await fixture(t)
   const manager = new RuntimeManager(join(root, 'processing'), identity)
   const protocol = { schema: 1, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
@@ -317,6 +322,7 @@ test('fixed self-test runs before activation and on offline restart; failure and
   const installed = await manager.install(manifest)
   const restarted = new RuntimeManager(join(root, 'processing'), identity, { fetchImpl: () => { throw new Error('offline') } })
   assert.equal((await restarted.probe(await restarted.active())).schema, 1)
+  assert.ok(deadlines.includes(30000), 'Import-only probes retain their 30-second default')
   for (const badScript of ['#!/bin/sh\nprintf invalid\n', '#!/bin/sh\nexec sleep 5\n']) {
     await writeFile(source, badScript)
     const bad = structuredClone(manifest)
@@ -330,6 +336,11 @@ test('fixed self-test runs before activation and on offline restart; failure and
 
 
 test('functional protocol enables only declared capabilities and rejects missing evidence and detached probe locks', { skip: process.platform === 'win32' }, async t => {
+  const originalTimeout = globalThis.setTimeout, deadlines = []
+  t.mock.method(globalThis, 'setTimeout', (callback, milliseconds, ...args) => {
+    deadlines.push(milliseconds)
+    return originalTimeout(callback, milliseconds, ...args)
+  })
   const { root, source, manifest } = await fixture(t)
   manifest.probe = { ...manifest.probe, schema: 2, type: 'python-functional-v1' }
   const inheritedFallback = process.env.PYTORCH_ENABLE_MPS_FALLBACK
@@ -355,6 +366,7 @@ test('functional protocol enables only declared capabilities and rejects missing
   const manager = new RuntimeManager(join(root, 'processing'), identity)
   const installed = await manager.install(manifest)
   const result = await manager.probe(installed)
+  assert.ok(deadlines.includes(120000), 'Functional probes allow cold native imports within a two-minute bound')
   assert.equal(result.capabilitiesReady, true)
   assert.deepEqual(result.verifiedCapabilities, manifest.capabilities)
   const attested = processingAttestation(installed, result)
@@ -377,6 +389,15 @@ test('functional protocol enables only declared capabilities and rejects missing
   detached.provenance.lockSha256 = sha(detached.provenance.inputLock)
   testTrustedLocks.add(detached.provenance.lockSha256)
   assert.throws(() => validateProcessingManifest(detached, identity, testTrustedLocks), /bound/)
+  const slowScript = '#!/bin/sh\nexec /bin/sleep 5\n'
+  await writeFile(source, slowScript)
+  const slow = structuredClone(installed.manifest)
+  slow.files[0].size = Buffer.byteLength(slowScript)
+  slow.files[0].sha256 = sha(slowScript)
+  bindProvenance(slow)
+  await assert.rejects(manager.install(slow, { probeTimeout: 50 }), /timed out/)
+  assert.ok(deadlines.includes(50), 'Explicit shorter functional deadlines remain honored')
+  assert.equal((await manager.active()).id, installed.id)
 })
 
 
