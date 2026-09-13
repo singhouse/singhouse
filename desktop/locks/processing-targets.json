@@ -20,7 +20,7 @@
       "accelerator": "cuda",
       "inputLockSha256": "9448dcbea1766e069002873c5ebe39dea6c1723c1d19241c1daba9323ffef64a",
       "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
-      "functionalProbe": "hardware-execution-pending"
+      "functionalProbe": "native-passed"
     },
     {
       "platform": "linux",
