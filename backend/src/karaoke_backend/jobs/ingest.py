@@ -135,10 +135,8 @@ def _phase_progress(phase: str, sub_pct: int) -> int:
 async def _run_with_retry(coro_factory, *, job_id: str, timeout_s: int) -> None:
     """Run ``coro_factory()`` with one retry on StemSeparationError.
 
-    # known limitation (predates the durable queue): the timeout abandons the coroutine
-    # without reaping the demucs subprocess it started. The heartbeat is what
-    # keeps this safe under the queue — a live process never loses its lease,
-    # so an expiry requeue cannot race a separation that is still running.
+    The separation worker owns and reaps every local child before cancellation
+    reaches here, so timeout cannot release the queue slot ahead of GPU work.
     """
     last_err: Optional[Exception] = None
     for attempt in range(2):

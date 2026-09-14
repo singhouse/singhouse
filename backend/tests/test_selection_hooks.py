@@ -156,11 +156,10 @@ def test_make_transcriber_builtin_never_consults_plugins(monkeypatch) -> None:
     sentinel = object()
     import karaoke_backend.workers.modal_offload as mo
     monkeypatch.setattr(mo, "is_enabled", lambda: False)
-    import karaoke_backend.workers.remote as rmt
-    monkeypatch.setattr(rmt, "is_enabled", lambda: False)
     monkeypatch.setattr(
         word_sync_worker, "HeartTranscriber", lambda **k: sentinel, raising=False
     )
+    monkeypatch.setattr(word_sync_worker, "_attested_accelerator", lambda *_: "cpu")
     got = word_sync_worker._make_transcriber("heart", use_vad=False)
     assert got is sentinel
     assert called["n"] == 0  # plugin seam never touched for a built-in name

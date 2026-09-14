@@ -23,6 +23,11 @@ from karaoke_backend.export import raster, service
 from karaoke_backend.models.settings import AppSetting, CDG_CARD_KEY
 from karaoke_backend.models.song import LyricsSet, Song
 
+def test_export_resolves_the_active_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "STEMS_DIR", tmp_path)
+    song = Song(id=9, artist="a", title="t", filename="f", active_stem_generation="resplit-abc")
+    assert service._stems_dir(song) == tmp_path / "9" / ".generations" / "resplit-abc"
+
 
 # ---------------------------------------------------------------------------
 # Packaging: the vendored font must resolve for a wheel, not just this repo

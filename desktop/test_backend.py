@@ -3,14 +3,20 @@
 
 import asyncio
 import importlib.util
+import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import ctypes
+import errno
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import wave
 
 spec = importlib.util.spec_from_file_location("desktop_backend", Path(__file__).with_name("backend.py"))
@@ -19,6 +25,535 @@ spec.loader.exec_module(backend)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_activation_helper_serializes_bootstraps_until_holder_stdin_closes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            command = [sys.executable, "-I", "-B", str(Path(__file__).with_name("backend.py")),
+                       "--activation-lock", str(state)]
+            first = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            second = None
+            try:
+                self.assertEqual(first.stdout.readline().strip(), "READY")
+                second = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True)
+                acquired = threading.Event()
+                line = []
+                reader = threading.Thread(target=lambda: (line.append(second.stdout.readline().strip()), acquired.set()))
+                reader.start()
+                self.assertFalse(acquired.wait(0.05))
+                first.stdin.close()
+                first.wait(timeout=5)
+                self.assertTrue(acquired.wait(5))
+                self.assertEqual(line, ["READY"])
+                second.stdin.close()
+                second.wait(timeout=5)
+                reader.join(1)
+                self.assertEqual(first.returncode, 0)
+                self.assertEqual(second.returncode, 0)
+            finally:
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill(); process.wait(timeout=5)
+                for process in (first, second):
+                    if process is not None:
+                        process.stdout.close(); process.stderr.close()
+
+    def test_paired_recovery_owner_lock_wait_is_bounded_and_acquires_after_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            started = threading.Event()
+            acquired = threading.Event()
+
+            def contender():
+                started.set()
+                with backend.persistent_directory(data, wait_seconds=1):
+                    acquired.set()
+
+            with backend.persistent_directory(data):
+                worker = threading.Thread(target=contender)
+                worker.start()
+                self.assertTrue(started.wait(1))
+                self.assertFalse(acquired.wait(0.05))
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(acquired.is_set())
+
+    def test_paired_recovery_holds_owner_for_every_mutation_then_launches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"; data.mkdir()
+            source = root / "kit-runtime"; (source / "resources").mkdir(parents=True)
+            destination = root / "releases/prior"; destination.mkdir(parents=True)
+            (destination / "Singhouse").write_bytes(b"damaged")
+            application = {"schema": 1, "releaseId": "prior", "platform": "linux",
+                           "arch": "x64", "payloadSha256": "a" * 64,
+                           "manifestSha256": "b" * 64, "entrypoint": "Singhouse"}
+            files = {"Singhouse": b"recovered executable", "resources/app.asar": b"recovered asar",
+                     "installed.json": json.dumps(application).encode()}
+            for relative, contents in files.items():
+                path = source / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(contents)
+                path.chmod(0o600)
+            (source / "resources").chmod(0o700)
+            inventory = [{"path": "resources", "type": "directory", "mode": 0o700}]
+            inventory += [{"path": name, "type": "file", "size": len(contents),
+                           "sha256": hashlib.sha256(contents).hexdigest(), "mode": 0o600}
+                          for name, contents in files.items()]
+            database = root / "database.sqlite3"
+            with backend.sqlite3.connect(database) as connection:
+                connection.execute("create table recovered(value text)")
+                connection.execute("insert into recovered values ('yes')")
+            active = root / "state/active.json"; transaction = root / "state/recovery-transaction.json"
+            plan = {"schema": 1, "dataDirectory": str(data), "databaseSource": str(database),
+                    "applicationSource": str(source), "applicationDestination": str(destination),
+                    "applicationInventory": inventory, "application": application,
+                    "activePath": str(active), "transactionPath": str(transaction),
+                    "transaction": {"schema": 1, "kind": "recovery-transaction", "state": "in-progress"}}
+            plan_path = root / "plan.json"; plan_path.write_text(json.dumps(plan))
+            boundaries = []
+
+            def assert_competing_launch_blocked(name):
+                boundaries.append(name)
+                with self.assertRaisesRegex(RuntimeError, "already open"):
+                    with backend.persistent_directory(data):
+                        pass
+
+            launched = []
+            owner_waits = []
+            def launch(entrypoint):
+                # Ownership is released only after every durable mutation, so
+                # the recovered backend can acquire it during startup.
+                with backend.persistent_directory(data):
+                    launched.append(entrypoint)
+
+            native_lock = backend.persistent_directory
+            @backend.contextmanager
+            def observed_lock(path, wait_seconds=0):
+                owner_waits.append((Path(path), wait_seconds))
+                with native_lock(path, wait_seconds=wait_seconds) as owned:
+                    yield owned
+
+            with patch.object(backend, "persistent_directory", observed_lock):
+                result = backend.paired_recovery(plan_path, launch=launch,
+                                                 boundary=assert_competing_launch_blocked)
+            self.assertEqual(boundaries, ["application-replaced", "database-restored", "selection-committed"])
+            self.assertEqual(owner_waits[0], (data, backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS))
+            self.assertGreaterEqual(owner_waits[0][1], 30)
+            self.assertGreater(owner_waits[0][1], backend.BACKEND_PARENT_WATCHDOG_SECONDS)
+            self.assertEqual(launched, [destination / "Singhouse"])
+            self.assertTrue(result["recovered"])
+            self.assertEqual(json.loads(active.read_text()), application)
+            self.assertEqual(json.loads(transaction.read_text())["state"], "completed")
+            with backend.sqlite3.connect(data / "desktop.db") as connection:
+                self.assertEqual(connection.execute("select value from recovered").fetchone(), ("yes",))
+
+            with patch.dict(os.environ, {"ELECTRON_RUN_AS_NODE": "1",
+                                         "SINGHOUSE_RECOVERY_KIT": "1"}):
+                with patch.object(backend.subprocess, "Popen") as popen:
+                    backend.paired_recovery(plan_path)
+            arguments, options = popen.call_args
+            self.assertEqual(arguments[0], [str(destination / "Singhouse")])
+            self.assertNotIn("ELECTRON_RUN_AS_NODE", options["env"])
+            self.assertNotIn("SINGHOUSE_RECOVERY_KIT", options["env"])
+
+    def test_paired_recovery_rejects_missing_or_corrupt_retained_application(self):
+        # Inventory verification is the native boundary; neither case may be
+        # repaired from a damaged external managed slot.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / "runtime"; source.mkdir()
+            executable = source / "Singhouse"; executable.write_bytes(b"good")
+            executable.chmod(0o700)
+            record = [{"path": "Singhouse", "type": "file", "size": 4,
+                       "sha256": hashlib.sha256(b"good").hexdigest(), "mode": 0o700}]
+            executable.write_bytes(b"bad!")
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                backend._recovery_inventory(source, record)
+            executable.unlink()
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                backend._recovery_inventory(source, record)
+
+    def test_windows_durable_replace_uses_write_through_and_metadata_flush(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel)
+        kernel.MoveFileExW.assert_called_once_with(str(source), str(destination), 0x9)
+        self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
+        self.assertEqual(kernel.CloseHandle.call_count, 2)
+
+    def test_windows_durable_replace_refuses_without_raw_volume_fallback(self):
+        invalid = ctypes.c_void_p(-1).value
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=invalid),
+                                       FlushFileBuffers=Mock(return_value=True), CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        with self.assertRaisesRegex(RuntimeError, "application-owned directory metadata"):
+            backend.windows_durable_replace(source, destination, [source.parent], kernel)
+        self.assertFalse(any(str(call.args[0]).startswith("\\\\.\\") for call in kernel.CreateFileW.call_args_list))
+        kernel.MoveFileExW.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
+    def test_durable_replace_refuses_unsyncable_directory_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination = root / "pending", root / "active"
+            source.write_bytes(b"new")
+            destination.write_bytes(b"known-good")
+            original_sync = os.fsync
+            def sync(descriptor):
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError(errno.ENOTSUP, "directory metadata sync unavailable")
+                return original_sync(descriptor)
+            with patch.object(backend.os, "fsync", side_effect=sync):
+                with self.assertRaises(OSError):
+                    backend.durable_replace(source, destination)
+            self.assertEqual(destination.read_bytes(), b"known-good")
+            self.assertEqual(source.read_bytes(), b"new")
+
+    def test_processing_selection_is_verified_and_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            manifest = {"schema": 1, "kind": "processing", **identity,
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["whisper"], "capabilities": ["transcription"],
+                        "probe": {"schema": 1, "type": "python-imports-v1", "modules": ["faster_whisper"]},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True}]}
+            dependency_names = ["setuptools/script (dev).tmpl", "setuptools/launcher manifest.xml",
+                                "setuptools/_vendor/jaraco/text/Lorem ipsum.txt", "scipy/io/tests/data/Transparent Busy.ani"]
+            for name in dependency_names:
+                manifest["files"].append({**manifest["files"][0], "path": name, "executable": False})
+            raw = json.dumps(manifest, separators=(",", ":")).encode()
+            pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+            (pack / "python/bin").mkdir(parents=True)
+            (pack / "manifest.json").write_bytes(raw)
+            (pack / "python/bin/python3").write_bytes(b"fixture")
+            (pack / "python/bin/python3").chmod(0o755)
+            for name in dependency_names:
+                (pack / name).parent.mkdir(parents=True, exist_ok=True)
+                (pack / name).write_bytes(b"fixture")
+            for invalid_path in ("../escape", "dir/../escape", "dir/ file", "dir/file ", "dir/file.", "dir/CON", "dir/nul.txt"):
+                invalid = {**manifest, "files": [{**manifest["files"][0], "path": invalid_path}]}
+                invalid_raw = json.dumps(invalid, separators=(",", ":")).encode()
+                invalid_pack = root / "processing/packs" / hashlib.sha256(invalid_raw).hexdigest()
+                invalid_pack.mkdir()
+                (invalid_pack / "manifest.json").write_bytes(invalid_raw)
+                with self.assertRaisesRegex(RuntimeError, "file path"):
+                    backend.processing_environment(root / "backend", identity, invalid_pack, None)
+            missing_probe = backend.processing_environment(root / "backend", identity, pack, None)
+            self.assertEqual(missing_probe["KARAOKE_PROCESSING_PYTHON"], "")
+            probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
+                     "pythonSha256": manifest["files"][0]["sha256"], "probePassed": True,
+                     "accelerator": "cpu", "components": {"faster_whisper": "1.2.3"},
+                     "verifiedCapabilities": [], "capabilitiesReady": False}
+            env = backend.processing_environment(root / "backend", identity, pack, None, probe)
+            self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+            self.assertEqual(env["KARAOKE_PROCESSING_ACCELERATOR"], "")
+            self.assertEqual(env["KARAOKE_AUDIO_SEPARATOR_DEVICE"], "")
+            self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+            self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "0")
+            attested = json.loads(env["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertTrue(attested["probePassed"])
+            self.assertEqual(attested["runtimeManifestId"], pack.name)
+            self.assertEqual(attested["pythonSha256"], probe["pythonSha256"])
+            self.assertEqual(attested["verifiedCapabilities"], [])
+            self.assertFalse(attested["capabilitiesReady"])
+            managed_spec = importlib.util.spec_from_file_location(
+                "managed_processing",
+                Path(__file__).parents[1] / "backend/src/karaoke_backend/workers/managed_processing.py",
+            )
+            managed_processing = importlib.util.module_from_spec(managed_spec)
+            managed_spec.loader.exec_module(managed_processing)
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(managed_processing.validated_attestation(), attested)
+            for bad_probe in ({**probe, "pythonPath": "/wrong/python"},
+                              {**probe, "components": {}},
+                              {**probe, "accelerator": "cuda"},
+                              {**probe, "unexpected": True}):
+                rejected = backend.processing_environment(root / "backend", identity, pack, None, bad_probe)
+                self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
+                self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["probePassed"])
+            (pack / "unlisted.pth").write_text("unexpected")
+            with self.assertRaisesRegex(RuntimeError, "inventory"):
+                backend.processing_environment(root / "backend", identity, pack, None, probe)
+            (pack / "unlisted.pth").unlink()
+
+            revision = "a" * 40
+            model_file = {"path": "huggingface/model.bin", "size": 5,
+                          "sha256": hashlib.sha256(b"model").hexdigest(), "executable": False,
+                          "revision": revision, "url": f"https://huggingface.co/fixture/resolve/{revision}/model.bin"}
+            model_manifest = {"schema": 1, "kind": "models", "models": ["whisper"], "files": [model_file]}
+            model_raw = json.dumps(model_manifest, separators=(",", ":")).encode()
+            model_pack = root / "model-cache/packs" / hashlib.sha256(model_raw).hexdigest()
+            (model_pack / "huggingface").mkdir(parents=True)
+            (model_pack / "manifest.json").write_bytes(model_raw)
+            (model_pack / "huggingface/model.bin").write_bytes(b"model")
+            policy = {"schema": 1, "allowedHosts": ["huggingface.co"],
+                      "models": [{"id": "whisper", "files": [model_file]}]}
+            ready = json.loads(backend.processing_environment(root / "backend", identity, pack, model_pack, probe, policy)["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertFalse(ready["capabilitiesReady"])
+            self.assertEqual(set(ready), {"runtimeManifestId", "pythonPath", "pythonSha256",
+                                         "probePassed", "accelerator", "components",
+                                         "verifiedCapabilities", "capabilitiesReady"})
+            with self.assertRaisesRegex(RuntimeError, "not defined"):
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe)
+            wrong_policy = json.loads(json.dumps(policy))
+            wrong_policy["models"][0]["files"][0]["size"] = 6
+            with self.assertRaisesRegex(RuntimeError, "immutable application policy"):
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe, wrong_policy)
+            (pack / "python/bin/python3").write_bytes(b"changed")
+            with self.assertRaisesRegex(RuntimeError, "verification"):
+                backend.processing_environment(root / "backend", identity, pack, None)
+
+    def test_functional_processing_admission_requires_trust_and_exact_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            modules = ["faster_whisper", "karaoke_backend.workers.heart_transcriptor", "lyricsync.transcription.heart"]
+            manifest = {"schema": 1, "kind": "processing", **identity, "pythonVersion": "3.13.12",
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["heart-transcriptor"], "capabilities": ["transcription"],
+                        "modelCapabilities": {"heart-transcriptor": "transcription"},
+                        "probe": {"schema": 2, "type": "python-functional-v1", "modules": modules},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True}]}
+            input_lock = {**manifest, "kind": "processing-input", "packages": [], "sourceCommit": "a" * 40}
+            raw_lock = json.dumps(input_lock, separators=(",", ":"))
+            lock_hash = hashlib.sha256(raw_lock.encode()).hexdigest()
+            manifest["provenance"] = {"inputLock": raw_lock, "lockSha256": lock_hash,
+                                      "packages": [], "sourceCommit": "a" * 40}
+
+            def write_pack(value):
+                raw = json.dumps(value, separators=(",", ":")).encode()
+                pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+                (pack / "python/bin").mkdir(parents=True, exist_ok=True)
+                (pack / "manifest.json").write_bytes(raw)
+                (pack / "python/bin/python3").write_bytes(b"fixture")
+                return pack
+
+            pack = write_pack(manifest)
+            probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
+                     "pythonSha256": manifest["files"][0]["sha256"], "probePassed": True,
+                     "accelerator": "cpu", "components": {module: "1.0" for module in modules},
+                     "verifiedCapabilities": ["transcription"], "capabilitiesReady": True,
+                     "probeSchema": 2, "checks": {"deviceTensor": True, "nativeAudio": True, "transcription": True}}
+            selected = backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[lock_hash])
+            self.assertEqual(selected["KARAOKE_PROCESSING_PYTHON"], str(pack / "python/bin/python3"))
+            self.assertEqual(selected["KARAOKE_PROCESSING_ACCELERATOR"], "cpu")
+            attestation = json.loads(selected["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            self.assertTrue(attestation["capabilitiesReady"])
+            self.assertEqual(attestation["verifiedCapabilities"], ["transcription"])
+            self.assertNotIn("checks", attestation)
+            self.assertNotIn("probeSchema", attestation)
+            self.assertFalse(json.loads(selected["KARAOKE_HEART_MODEL_STATUS_JSON"])["installed"])
+            model_sets = json.loads(selected["KARAOKE_DESKTOP_MODEL_SETS_JSON"])
+            self.assertEqual(model_sets, {"schema": 1, "runtimeManifestId": pack.name,
+                                         "modelManifestId": None, "verifiedModelIds": [],
+                                         "requiredModels": {"transcription": ["heart-transcriptor"], "separation": []}})
+            for changes in ({"checks": {"deviceTensor": True, "nativeAudio": True}},
+                            {"checks": {**probe["checks"], "transcription": 1}},
+                            {"checks": {**probe["checks"], "transcription": False}},
+                            {"verifiedCapabilities": ["transcription", "separation"]},
+                            {"capabilitiesReady": 1}, {"probePassed": 1}, {"probeSchema": 2.0},
+                            {"pythonPath": "/unmanaged/python"}, {"components": {}}, {"extra": True}):
+                rejected = backend.processing_environment(root / "backend", identity, pack, None,
+                                                          {**probe, **changes}, trusted_locks=[lock_hash])
+                self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
+                self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["capabilitiesReady"])
+            with self.assertRaisesRegex(RuntimeError, "not trusted"):
+                backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[])
+            changed = json.loads(json.dumps(manifest))
+            changed["probe"]["modules"] = ["faster_whisper"]
+            with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
+                backend.processing_environment(root / "backend", identity, write_pack(changed), None, probe, trusted_locks=[lock_hash])
+
+    def test_processing_path_case_collisions_follow_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for platform in ("linux", "darwin", "win32"):
+                identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": platform, "arch": "x64"}
+                manifest = {"schema": 1, "kind": "processing", **identity, "models": [], "capabilities": [],
+                            "accelerator": "cpu", "python": "2621A",
+                            "probe": {"schema": 1, "type": "python-imports-v1", "modules": []},
+                            "files": [{"path": name, "size": 7, "executable": True,
+                                       "sha256": hashlib.sha256(b"fixture").hexdigest()} for name in ("2621A", "2621a")]}
+                raw = json.dumps(manifest, separators=(",", ":")).encode()
+                pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()
+                pack.mkdir(parents=True)
+                (pack / "manifest.json").write_bytes(raw)
+                for name in ("2621A", "2621a"):
+                    (pack / name).write_bytes(b"fixture")
+                if platform == "linux":
+                    backend.processing_environment(root / "backend", identity, pack, None)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+                        backend.processing_environment(root / "backend", identity, pack, None)
+
+    def test_missing_processing_preserves_playback_environment(self):
+        env = backend.processing_environment(Path("/app/backend"), {}, None, None)
+        self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+        self.assertNotIn("KARAOKE_DESKTOP_PROCESSING_JSON", env)
+        self.assertFalse(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"])["installed"])
+
+    def test_heart_checkpoint_survives_application_replacement_and_is_verified_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            revision = "a" * 40
+            directory = f"huggingface/heart/{revision}"
+            files = [{"path": f"{directory}/{name}", "size": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(), "executable": False,
+                      "revision": revision,
+                      "url": f"https://huggingface.co/fixture/resolve/{revision}/{name}"}
+                     for name, data in [("config.json", b"{}"), ("model.safetensors", b"fixture")]]
+            policy = {"schema": 1, "allowedHosts": ["huggingface.co"],
+                      "models": [{"id": "heart-transcriptor", "files": files}]}
+            manifest = {"schema": 1, "kind": "models", "models": ["heart-transcriptor"], "files": files}
+            raw = json.dumps(manifest).encode()
+            pack = root / "model-cache/packs" / hashlib.sha256(raw).hexdigest()
+            (pack / directory).mkdir(parents=True)
+            (pack / "manifest.json").write_bytes(raw)
+            (pack / directory / "config.json").write_bytes(b"{}")
+            (pack / directory / "model.safetensors").write_bytes(b"fixture")
+            for app_version in ("1", "2"):
+                env = backend.processing_environment(root / "backend", {"appVersion": app_version}, None, pack, model_policy=policy)
+                self.assertEqual(env["KARAOKE_HEART_CKPT"], str(pack / directory))
+                self.assertEqual(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"]),
+                                 {"installed": True, "modelId": "heart-transcriptor", "revision": revision})
+                self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+                self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "0")
+                self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
+                self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+            (pack / directory / "model.safetensors").write_bytes(b"corrupt")
+            with self.assertRaisesRegex(RuntimeError, "verification failed"):
+                backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy)
+
+    @unittest.skipIf(os.name == "nt", "POSIX session ownership; Windows needs native job-object validation")
+    def test_owned_tree_kill_closes_descendant_pipe(self):
+        script = """
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location("launcher", sys.argv[1])
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+launcher.own_process_tree()
+# Descendant inherits stdout. communicate cannot finish while it survives.
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+print("spawned", flush=True)
+launcher.kill_owned_tree()
+"""
+        process = subprocess.Popen([sys.executable, "-I", "-B", "-c", script,
+            str(Path(__file__).with_name("backend.py"))], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, err = process.communicate(timeout=5)
+            self.assertEqual(out, b"spawned\n")
+            self.assertEqual(process.returncode, -9)
+        finally:
+            if process.poll() is None:
+                import signal
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+    def test_persistent_settings_survive_relaunch_without_inheriting_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            with backend.persistent_directory(runtime):
+                first = backend.persistent_environment(runtime, "http://127.0.0.1:1234", "gate-one", Path("/native"))
+                (runtime / "desktop.db").write_text("keep-library")
+            with backend.persistent_directory(runtime):
+                second = backend.persistent_environment(runtime, "http://127.0.0.1:5678", "gate-two", Path("/native"))
+                self.assertEqual((runtime / "desktop.db").read_text(), "keep-library")
+            self.assertEqual(first["SESSION_SECRET"], second["SESSION_SECRET"])
+            self.assertNotEqual(first["KARAOKE_GATE_PASSWORD"], second["KARAOKE_GATE_PASSWORD"])
+            self.assertNotIn("HOME", second)
+            self.assertNotIn("USERPROFILE", second)
+            self.assertEqual(second["PATH"], "/native/ffmpeg/bin")
+
+    def test_owner_lock_rejects_second_process_and_recovers_after_crash(self):
+        script = """
+import importlib.util, pathlib, sys, time
+spec = importlib.util.spec_from_file_location("launcher", sys.argv[1])
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+with launcher.persistent_directory(pathlib.Path(sys.argv[2])):
+    print("locked", flush=True)
+    time.sleep(30)
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            process = subprocess.Popen([sys.executable, "-I", "-B", "-c", script,
+                str(Path(__file__).with_name("backend.py")), str(runtime)], stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "locked")
+                with self.assertRaisesRegex(RuntimeError, "already open"):
+                    with backend.persistent_directory(runtime):
+                        self.fail("Second owner accepted")
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+                process.stdout.close()
+            with backend.persistent_directory(runtime):
+                self.assertTrue((runtime / "owner.lock").exists())
+
+    def test_recovery_owner_lock_can_succeed_after_watchdog_without_real_delay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            elapsed = [0.0]
+            attempts = []
+
+            def acquire(_lock):
+                attempts.append(elapsed[0])
+                if elapsed[0] <= backend.BACKEND_PARENT_WATCHDOG_SECONDS:
+                    raise OSError("still held")
+
+            with backend.persistent_directory(runtime,
+                    wait_seconds=backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS,
+                    clock=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                    lock_attempt=acquire):
+                self.assertGreater(elapsed[0], backend.BACKEND_PARENT_WATCHDOG_SECONDS)
+                self.assertLess(elapsed[0], backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS)
+            self.assertGreater(len(attempts), 1)
+
+    def test_native_recovery_anchor_rejects_corrupt_runtime_before_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "kit"
+            (root / "runtime").mkdir(parents=True)
+            (root / "tools").mkdir()
+            runtime = root / "runtime" / "Singhouse"
+            cli = root / "tools" / "recovery_cli.mjs"
+            runtime.write_bytes(b"trusted runtime")
+            cli.write_bytes(b"trusted cli")
+            (root / "runtime").chmod(0o700); (root / "tools").chmod(0o700)
+            runtime.chmod(0o600); cli.chmod(0o600)
+            records = []
+            for path in (root / "runtime", runtime, root / "tools", cli):
+                relative = path.relative_to(root).as_posix()
+                if path.is_dir():
+                    records.append({"path": relative, "type": "directory", "mode": 0o700})
+                else:
+                    payload = path.read_bytes()
+                    records.append({"path": relative, "type": "file", "size": len(payload),
+                                    "sha256": hashlib.sha256(payload).hexdigest(), "mode": 0o600})
+            manifest = {"schema": 2, "kind": "recovery-kit",
+                        "target": {"platform": "linux", "arch": "x64"},
+                        "binding": {"schema": 1}, "runtimeEntrypoint": "runtime/Singhouse",
+                        "files": sorted(records, key=lambda record: record["path"].encode())}
+            (root / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n")
+            manifest_hash = hashlib.sha256(json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+            runtime.write_bytes(b"corrupt runtime")
+            executed = []
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                backend.launch_recovery_kit(root, manifest_hash, "linux", "x64", ["state", "point-1", "data"],
+                                            launch=lambda command, environment: executed.append(command) or 0)
+            self.assertEqual(executed, [])
+
+    def test_invalid_persistent_settings_are_preserved_and_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            settings = runtime / "settings.json"
+            settings.write_text('{"schema":1,"sessionSecret":"short"}')
+            with self.assertRaisesRegex(RuntimeError, "Invalid desktop settings"):
+                backend.persistent_environment(runtime, "http://127.0.0.1:1234", "gate", Path("/native"))
+            self.assertIn("short", settings.read_text())
+
     def test_demo_has_player_segments_and_consistent_stage_lines(self):
         payload = backend.demo_word_sync()
         # The player accepts initial timed lyrics only when segments exists;

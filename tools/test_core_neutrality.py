@@ -68,6 +68,22 @@ class LegalLiteralTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assert_gate(filename, PRODUCT, 1)
 
+    def test_desktop_delivery_may_name_public_product_but_not_private_brands(self):
+        for filename in ("desktop/main.mjs", "desktop/build/package.mjs", "desktop/README.md"):
+            with self.subTest(filename=filename):
+                self.assert_gate(filename, PRODUCT.title(), 0)
+                output = self.assert_gate(
+                    filename, PRODUCT.title() + " " + PRIVATE_BRAND, 1,
+                    private_brand=PRIVATE_BRAND,
+                )
+                self.assertIn("FAIL: brand literals", output)
+
+    def test_desktop_brand_exception_does_not_disable_other_gates(self):
+        output = self.assert_gate("desktop/main.mjs", VENDOR_SAMPLE, 1)
+        self.assertIn("FAIL: vendor literals", output)
+        output = self.assert_gate("desktop/main.mjs", HOME_SAMPLE, 1)
+        self.assertIn("FAIL: private-infra literals", output)
+
     def test_exact_lookup_url_allowed(self):
         for content in (LOOKUP, "`" + LOOKUP + "`", LOOKUP + " followed by text"):
             with self.subTest(content=content):

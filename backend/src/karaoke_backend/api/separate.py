@@ -184,6 +184,9 @@ async def submit_separation(
             ),
         )
 
+    from karaoke_backend.workers.managed_processing import require_heart_model
+    require_heart_model()
+
     # Validate content type (best-effort — browsers often send wrong MIME)
     content_type = (file.content_type or "").lower()
     if content_type and content_type not in ACCEPTED_AUDIO_TYPES:

@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "status": "Built artifacts; device capability checks run before activation and on restart",
+  "inputLockKind": "processing-input",
+  "requirementsLockKind": "processing-requirements",
+  "builder": "desktop/build/build_processing.py",
+  "probeContract": "python-functional-v1",
+  "variants": [
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "accelerator": "cpu",
+      "inputLockSha256": "a1f615d7f7c8c63c5904fdfacadd7a5dfc285dd9724a75d78bf2324d025f8a8c",
+      "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "accelerator": "cuda",
+      "inputLockSha256": "9448dcbea1766e069002873c5ebe39dea6c1723c1d19241c1daba9323ffef64a",
+      "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "linux",
+      "arch": "arm64",
+      "accelerator": "cpu",
+      "inputLockSha256": "f557c6257e7421b56b18f0d527e80de9a392b13ca7c938ea4a928a8aa306f959",
+      "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "accelerator": "metal",
+      "inputLockSha256": "94529f8b3587a4101b81dc41dc3303225f1f4c9435a8c04e02b59edae45b3714",
+      "sourceCommit": "250d6732ff85d18bcc166a78313a5bf2f319b26a",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "accelerator": "cpu",
+      "inputLockSha256": "cfdbfc30b209fec45f550bd30d97b37697e56c066ce633e2eed4188bf3275c03",
+      "sourceCommit": "250d6732ff85d18bcc166a78313a5bf2f319b26a",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "accelerator": "cpu",
+      "inputLockSha256": "712dd95dc58f87d4103bcd4c3d1e21226b3428322d9864a7fa1a246103f937b3",
+      "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
+      "functionalProbe": "native-passed"
+    },
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "accelerator": "cuda",
+      "inputLockSha256": "002209faa5b6f747103d85b99f1b05320114514d38bb5e790ae974b5a9ba0fd7",
+      "sourceCommit": "bbfe46e6fa988254a76b4d5d7aeff679795f8027",
+      "functionalProbe": "hardware-execution-pending"
+    }
+  ]
+}

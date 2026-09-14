@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from karaoke_backend.api.auth import require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
+from karaoke_backend import stem_storage
 from lyricsync import (
     MatchConfig,
     PipelineConfig,
@@ -51,6 +52,7 @@ from lyricsync import (
 from karaoke_backend.jobs import queue
 from karaoke_backend.models.song import JobKind, LyricsSet, LyricsSource, Song, SongStatus
 from karaoke_backend.workers import transcription_cache
+from karaoke_backend.workers.managed_processing import require_heart_model
 from karaoke_backend.workers.lyrics_worker import (
     BUILTIN_LYRICS_LABEL,
     LyricsNotFoundError,
@@ -410,7 +412,7 @@ async def _resolve_reference(
 
 
 def _vocals_path_for(song: Song) -> Path:
-    stems_dir = Path(song.stems_path) if song.stems_path else STEMS_DIR / str(song.id)
+    stems_dir = stem_storage.active_stems_dir(song, STEMS_DIR)
     for name in ("lead_vocals.flac", "lead_vocals.wav", "vocals.wav", "Vocals.wav"):
         candidate = stems_dir / name
         if candidate.exists():
@@ -682,6 +684,7 @@ async def transcribe(
     if body.whisper_model not in ALL_MODELS:
         raise HTTPException(400, f"Invalid model. Must be one of: {sorted(ALL_MODELS)}")
 
+    require_heart_model(body.whisper_model)
     song = await get_song_or_404(db, song_id, user.id)
     require_ready(song)
     vocals_path = _vocals_path_for(song)

@@ -27,6 +27,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  desktop-runtime:
+    name: Desktop runtime fixture gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Runtime activation, interruption, and upstream model cache
+        run: node --test desktop/test/*.test.mjs
+      - name: Locked processing pack fixtures
+        run: python -m unittest discover -s desktop/test -p test_processing_pack.py
+      - name: Desktop backend isolation and readiness attestation
+        run: python -m unittest discover -s desktop -p test_backend.py
+
   # The brand/vendor/private-infra gate. This is what makes the project's
   # bright lines structural rather than a matter of reviewer attention, so it
   # is a hard failure and must stay one.
@@ -126,6 +145,14 @@ jobs:
           cache-dependency-path: |
             backend/pyproject.toml
             lyricsync/pyproject.toml
+
+      # Re-split coverage rebuilds vocals with the real FFmpeg executable.
+      # Install the runner architecture's package in every Python matrix job.
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version
 
       # Order matters. backend depends on lyricsync[...] >=0.1,<0.2, which is
       # NOT published to PyPI — installing backend first makes pip go looking

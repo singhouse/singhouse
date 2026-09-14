@@ -65,3 +65,73 @@ test('failed executable spawn still cleans runtime without waiting for exit', as
     assert.equal(existsSync(runtime.root), false)
   } finally { runtime.remove() }
 })
+
+test('pipe-owned shutdown requests EOF before resorting to signals', async () => {
+  const backend = child(false)
+  backend.stdin = { destroyed: false, end() { setImmediate(() => { backend.exitCode = 0; backend.emit('exit') }) } }
+  await stopChild(backend, 20)
+  assert.deepEqual(backend.signals, [])
+})
+
+test('persistent runtime shutdown preserves library and settings', async () => {
+  const { persistentRuntime } = await import('../lifecycle.mjs')
+  const temporary = createRuntime()
+  try {
+    const runtime = persistentRuntime(temporary.electron)
+    const song = join(runtime.backend, 'desktop.db')
+    writeFileSync(song, 'library')
+    await stopRuntime(child(false), runtime, 20)
+    assert.equal(existsSync(song), true)
+    assert.equal(persistentRuntime(temporary.electron).backend, runtime.backend)
+  } finally { temporary.remove() }
+})
+
+test('failed forced shutdown rejects and preserves runtime without throwing from a timer', async () => {
+  const runtime = createRuntime()
+  const backend = child(true)
+  backend.kill = signal => { if (signal === 'SIGKILL') throw new Error('permission denied') }
+  try {
+    await assert.rejects(stopRuntime(backend, runtime, 5), /permission denied/)
+    assert.equal(existsSync(runtime.root), true)
+    assert.equal(backend.listenerCount('exit'), 0)
+  } finally { runtime.remove() }
+})
+
+test('missing exit after forced shutdown is bounded', async () => {
+  const backend = child(true)
+  backend.kill = () => true
+  await assert.rejects(stopChild(backend, 5), /did not exit/)
+  assert.equal(backend.listenerCount('exit'), 0)
+})
+
+test('unexpected leader death immediately kills its surviving descendants', { skip: process.platform === 'win32' }, async () => {
+  const { watchOwnedGroup, forceChild } = await import('../lifecycle.mjs')
+  const script = `
+import subprocess, sys, time
+subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+print('ready', flush=True)
+time.sleep(30)
+  `
+  const backend = spawn('python3', ['-I', '-B', '-c', script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  watchOwnedGroup(backend)
+  try {
+    await new Promise((resolve, reject) => {
+      let stderr = ''
+      backend.stderr.on('data', data => { stderr += data })
+      const timer = setTimeout(() => reject(new Error(`Child did not announce startup: ${stderr}`)), 3000)
+      backend.stdout.once('data', () => { clearTimeout(timer); resolve() })
+      backend.once('error', error => { clearTimeout(timer); reject(error) })
+      backend.once('exit', () => { clearTimeout(timer); reject(new Error(`Child exited before startup: ${stderr}`)) })
+    })
+    const closed = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Grandchild survived leader death and retained stdout')), 3000)
+      backend.once('close', () => { clearTimeout(timer); resolve() })
+    })
+    backend.kill('SIGKILL') // Kill only the leader; exit handler owns descendants.
+    await closed
+    assert.equal(backend.treeCleanupError, undefined)
+    await stopChild(backend, 5)
+    // The old group ID was consumed; later cleanup cannot signal reused IDs.
+    forceChild(backend)
+  } finally { forceChild(backend) }
+})

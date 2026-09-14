@@ -175,6 +175,7 @@
 // field's placeholder ("Token set") is the only readback there is, and leaving
 // it blank on save means "keep the one you have".
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { prepareHeart } from '@/composables/useHeartSetup'
 import { plexApi } from '@/api/client'
 import { useFeaturesStore } from '@/stores/features'
 import { useSongsStore } from '@/stores/songs'
@@ -460,12 +461,19 @@ async function onTest() {
   }
 }
 
+let dialogActive = true
 async function onImport() {
-  if (!selectedCount.value) return
+  if (!selectedCount.value || importing.value) return
   importing.value = true
   error.value = ''
   notice.value = ''
   try {
+    const selection = selected.value
+    await prepareHeart()
+    if (!dialogActive) return
+    if (selected.value !== selection) {
+      throw new Error('The selection changed during model setup. Review it and retry the import.')
+    }
     const picked = [...selected.value.values()].map(t => ({
       rating_key: t.rating_key,
       title: t.title,
@@ -491,7 +499,7 @@ async function onImport() {
 
 // The debounce can outlive the dialog — a timer that fires after the modal is
 // gone touches refs nobody is watching, and in a test it leaks into the next one.
-onUnmounted(() => { clearTimeout(filterTimer) })
+onUnmounted(() => { dialogActive = false; clearTimeout(filterTimer) })
 
 onMounted(async () => {
   features.load()

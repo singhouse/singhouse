@@ -4,6 +4,7 @@ import { ref, computed } from 'vue'
 import { songApi, lyricsSetsApi } from '@/api/client'
 import { pollUntil } from '@/utils/pollUntil'
 import { fetchAllSongs } from '@/utils/fetchAllSongs'
+import { prepareHeart } from '@/composables/useHeartSetup'
 
 // What each job kind is called in the UI, in one place: the panel that starts
 // the job and the library row that only sees it running must not name it two
@@ -465,7 +466,10 @@ export const useSongsStore = defineStore('songs', () => {
   }
 
   function startTranscribe(songId, body = {}) {
-    return runSongJob(songId, 'transcribe', () => reTranscribe(songId, body), {
+    return runSongJob(songId, 'transcribe', async () => {
+      await prepareHeart(body.whisper_model || 'heart')
+      return reTranscribe(songId, body)
+    }, {
       onDone: () => _refreshSongDetail(songId),
     })
   }
@@ -486,7 +490,16 @@ export const useSongsStore = defineStore('songs', () => {
 
   function startRetryIngest(songId) {
     return runSongJob(songId, 'retry', async () => {
-      const res = await songApi.retryIngest(songId)
+      let res
+      try {
+        res = await songApi.retryIngest(songId)
+      } catch (error) {
+        // The server knows the original job kind. Prepared-video retries do
+        // not need transcription, so only its missing-Heart refusal opens setup.
+        if (error.code !== 'heart_model_missing') throw error
+        await prepareHeart()
+        res = await songApi.retryIngest(songId)
+      }
       // The 202 means the server has ALREADY moved the row to `processing`,
       // and every surface that reads the row is still looking at `failed`:
       // Details keeps offering a retry it will now refuse, Lyrics keeps

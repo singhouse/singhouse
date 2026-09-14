@@ -71,24 +71,6 @@ def stems_dir(tmp_path: Path) -> Path:
     return d
 
 
-async def _run_remote(choice, stems_dir: Path):
-    """Drive separate_stems down the remote-MPS branch, return the kwargs the
-    remote separator was called with."""
-    raw = {"drums": None, "bass": None, "other": None}
-    with patch.object(modal_worker.modal_offload, "is_enabled", return_value=False), \
-         patch.object(modal_worker.remote, "is_enabled", return_value=True), \
-         patch.object(modal_worker.remote, "remote_separate", return_value=raw) as sep, \
-         patch.object(modal_worker, "_mix_and_finalize", new=AsyncMock(return_value={})):
-        await modal_worker.separate_stems(
-            audio_path=Path("song.wav"),
-            stems_dir=stems_dir,
-            job_id="j1",
-            karaoke_model=choice,
-        )
-    assert sep.call_count == 1
-    return sep.call_args.kwargs
-
-
 async def _run_modal(choice, stems_dir: Path):
     """Same, down the Modal branch."""
     raw = {"drums": None, "bass": None, "other": None}
@@ -106,14 +88,14 @@ async def _run_modal(choice, stems_dir: Path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runner", [_run_remote, _run_modal])
+@pytest.mark.parametrize("runner", [_run_modal])
 async def test_pick_reaches_offload_path_as_a_filename(runner, stems_dir: Path):
     kwargs = await runner("mdxnet_kara2", stems_dir)
     assert kwargs["karaoke_model"] == "UVR_MDXNET_KARA_2.onnx"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runner", [_run_remote, _run_modal])
+@pytest.mark.parametrize("runner", [_run_modal])
 async def test_unset_pick_sends_the_configured_model(runner, stems_dir: Path):
     """No pick → the module's KARAOKE_MODEL, i.e. the original behaviour."""
     kwargs = await runner(None, stems_dir)

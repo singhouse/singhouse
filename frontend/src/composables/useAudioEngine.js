@@ -20,7 +20,14 @@ export function useAudioEngine() {
   // Audio-reactive analyser taps (post-volume/post-mute) shared with the canvas
   // stage via audioReactive.js: `mix` sums every stem, `inst`/`vocals` tap one.
   const analysers = { mix: null, inst: null, vocals: null }
-  let animFrame = null
+  // Transport publication must not depend on whether the host window is
+  // composited. On Wayland an rAF owned by a window on an inactive workspace
+  // can stop even with Electron backgroundThrottling disabled, while Web Audio
+  // and the media elements continue playing. A regular timer remains active
+  // under that Electron preference and lets the visible projector keep
+  // receiving the one audio owner's clock.
+  let clockTimer = null
+  const CLOCK_INTERVAL_MS = 1000 / 60
   // Last callbacks handed to startAnimationLoop, retained so play() can
   // restart the loop after a natural end tore it down (see the end branch in
   // tick() and the re-arm in play()).
@@ -187,13 +194,12 @@ export function useAudioEngine() {
     resetClock()
     playerState.value = 'playing'
 
-    // Re-arm the animation loop if a prior natural end let it stop. The end
-    // branch in tick() runs stop() and returns without rescheduling a frame
-    // (and nulls animFrame to mark the loop torn down), while startAnimationLoop
+    // Re-arm the clock loop if a prior natural end let it stop. The end
+    // branch in tick() runs stop() and clears the timer, while startAnimationLoop
     // is otherwise only called once, at song load. Without this, pressing Play
     // again after a song reaches its end leaves the transport clock frozen at
     // 0:00 and the stage dark until a hard reload.
-    if (animFrame == null && onTickCb) startAnimationLoop(onTickCb, onEndedCb)
+    if (clockTimer == null && onTickCb) startAnimationLoop(onTickCb, onEndedCb)
   }
 
   function pause() {
@@ -383,6 +389,7 @@ export function useAudioEngine() {
     onTickCb = onTick
     onEndedCb = onEnded
     stopAnimation()
+    let timer = null
     const tick = () => {
       const primary = audioElements[primaryKey] || Object.values(audioElements).find(Boolean)
       if (primary && playerState.value === 'playing') {
@@ -397,10 +404,9 @@ export function useAudioEngine() {
           ? pitchLatencySeconds
           : 0
         // Same contract as onEnded below: a throwing time-update listener must
-        // not escape tick() before the reschedule at the bottom, or the loop
-        // dies mid-play with animFrame still holding a fired id — a frozen deck
-        // the play() re-arm can't detect (it trusts animFrame == null). Catch
-        // keeps the invariant total: animFrame is non-null iff a frame pends.
+        // not escape tick(), or that publication is lost and the error can
+        // obscure the real transport state. The interval itself survives, but
+        // catching here also keeps listener failures local to the listener.
         try {
           onTick?.(Math.max(0, currentTime.value - lyricLatency))
         } catch (e) {
@@ -424,8 +430,8 @@ export function useAudioEngine() {
         //
         // The catch is what makes that ordering safe to keep: a listener that
         // throws must not be able to wedge the transport by skipping stop()
-        // and leaving the deck reporting 'playing' forever with no frame
-        // scheduled. Ordering is a contract with the listener; running the
+        // and leaving the deck reporting 'playing' forever with no clock
+        // tick scheduled. Ordering is a contract with the listener; running the
         // transport is not negotiable.
         if (primaryTime >= duration.value - 0.1) {
           try {
@@ -434,23 +440,23 @@ export function useAudioEngine() {
             console.error('onEnded listener threw:', e)
           }
           stop()
-          // Tear the loop down rather than re-arm: a stopped deck should not
-          // spin rAF. Null animFrame (stop() does not) so the invariant holds —
-          // animFrame is non-null iff a frame is pending — and play() can tell
-          // the loop is dead and restart it.
-          animFrame = null
+          // Tear the timer down: a stopped deck should not keep polling. Null
+          // clockTimer (stop() does not) so play() can tell the loop is dead
+          // and restart it.
+          clearInterval(timer)
+          if (clockTimer === timer) clockTimer = null
           return
         }
       }
-      animFrame = requestAnimationFrame(tick)
     }
-    animFrame = requestAnimationFrame(tick)
+    timer = setInterval(tick, CLOCK_INTERVAL_MS)
+    clockTimer = timer
   }
 
   function stopAnimation() {
-    if (animFrame) {
-      cancelAnimationFrame(animFrame)
-      animFrame = null
+    if (clockTimer != null) {
+      clearInterval(clockTimer)
+      clockTimer = null
     }
   }
 

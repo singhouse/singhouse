@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "kind": "processing-native-toolchain",
+  "host": "linux-arm64",
+  "tools": {
+    "cc": {
+      "path": "/usr/bin/gcc",
+      "sha256": "a20520ee21543f243d40636a9181a142c45ecd989de31ab86b99a8ea5ada870d",
+      "version": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+    },
+    "cxx": {
+      "path": "/usr/bin/g++",
+      "sha256": "fc02363794280f404c6ca6f5da1c8fe469be902e9de140d35d8573bb3393f53b",
+      "version": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+    },
+    "ld": {
+      "path": "/usr/bin/ld",
+      "sha256": "1e4d3369b76845fa8e099b83513bf28f6f722e046f9b2cde1378c9e27f96d19c",
+      "version": "GNU ld (GNU Binutils for Ubuntu) 2.42\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) a later version.\nThis program has absolutely no warranty.\n"
+    },
+    "as": {
+      "path": "/usr/bin/as",
+      "sha256": "1ffda50efb6d91b6b05ef933aced099595c36577594c0296c91161f2d13db374",
+      "version": "GNU assembler (GNU Binutils for Ubuntu) 2.42\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or later.\nThis program has absolutely no warranty.\nThis assembler was configured for a target of `aarch64-linux-gnu'.\n"
+    }
+  },
+  "inputs": [
+    {
+      "path": "/usr/libexec/gcc/aarch64-linux-gnu/13/cc1",
+      "sha256": "64edfe466dd55c4216c006e9fa237af012e4974281dd4d11640aacfc3b3693af"
+    },
+    {
+      "path": "/usr/libexec/gcc/aarch64-linux-gnu/13/cc1plus",
+      "sha256": "110b837d05f403bcd21a63eb1f2341338d613aaf3d977d7db6d2c1661c8afa7d"
+    },
+    {
+      "path": "/usr/libexec/gcc/aarch64-linux-gnu/13/collect2",
+      "sha256": "f116dad8aa42ff4feff154ccfb2db9ecc79edcccb5c2e34244aff80ad123ab19"
+    },
+    {
+      "path": "/usr/lib/gcc/aarch64-linux-gnu/13/liblto_plugin.so",
+      "sha256": "794cf47ea8c45517fa56bbca0d3b853b0934368125fea1b12543277ad55171fc"
+    }
+  ]
+}

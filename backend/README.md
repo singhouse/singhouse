@@ -120,8 +120,7 @@ before uploading anything.
 |---|---|---|
 | 1 | Separator plugin | `KARAOKE_SEPARATOR` naming an installed plugin — the core ships none |
 | 2 | Modal | `KARAOKE_MODAL=1` **and** the `modal` SDK importable |
-| 3 | SSH remote worker | `KARAOKE_REMOTE_HOST` set |
-| 4 | **Local (the default)** | a `.venv-demucs` virtualenv inside `backend/` |
+| 3 | **Local (the default)** | a `.venv-demucs` virtualenv inside `backend/` |
 
 ### Local separation (default)
 
@@ -691,7 +690,7 @@ FastAPI (karaoke_backend/main.py)
   │                     │
   │                     ├─ separation dispatch (workers/modal_worker.py):
   │                     │    separator plugin → Modal (opt-in, your own
-  │                     │    account, off by default) → SSH remote → local
+  │                     │    account, off by default) → local
   │                     │    Demucs venv (the default)
   │                     │
   │                     └─ updates Job (status/phase/progress) + Song in SQLite

@@ -2,22 +2,21 @@
 """
 Offload GPU-heavy worker steps to a Modal cloud container.
 
-Cloud counterpart of ``workers/remote.py`` (which offloads to a Mac mini over
-SSH). The compute lives in ``backend/modal_app.py`` (deployed separately with
+The compute lives in ``backend/modal_app.py`` (deployed separately with
 ``modal deploy``); this module is the dispatcher-side client. The backend, DB,
 file storage and HTTP serving all stay local — only the two GPU subprocesses
 (stem separation, Heart transcription) move to Modal.
 
 Activation is purely env-driven::
 
-    KARAOKE_MODAL=1                 # enable (unset/0 → fall through to remote/local)
+    KARAOKE_MODAL=1                 # enable (unset/0 → fall through to local)
     KARAOKE_MODAL_APP=karaoke-gpu   # deployed Modal app name (must match modal_app.py)
 
 Authentication uses the standard Modal client config: ``~/.modal.toml`` (written
 by ``modal token set``) or ``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` env vars
 (preferred under systemd, which has no interactive login).
 
-The return types match ``remote.py`` exactly — ``modal_separate`` produces
+``modal_separate`` produces
 ``lead_vocals.wav`` / ``backing_vocals.wav`` in ``stems_dir`` and returns the
 drums/bass/other paths for local ffmpeg mixing; ``ModalHeartTranscriber`` is a
 drop-in for ``lyricsync.transcription.HeartTranscriber``.
@@ -51,6 +50,35 @@ def is_enabled() -> bool:
     return True
 
 
+def readiness() -> dict[str, object]:
+    """Describe user-owned Modal configuration without substituting for it."""
+    configured = _ENABLED
+    sdk_available = False
+    if configured:
+        try:
+            import modal  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            sdk_available = True
+    token_configured = bool(
+        os.getenv("MODAL_TOKEN_ID", "").strip()
+        and os.getenv("MODAL_TOKEN_SECRET", "").strip()
+    )
+    home_raw = os.getenv("HOME", "").strip()
+    config_file = Path(home_raw).expanduser() / ".modal.toml" if home_raw else None
+    credentials_configured = token_configured or bool(
+        config_file is not None and config_file.is_file()
+    )
+    return {
+        "configured": configured,
+        "ready": configured and sdk_available and credentials_configured and bool(APP_NAME),
+        "sdk_available": sdk_available,
+        "credentials_configured": credentials_configured,
+        "app": APP_NAME,
+    }
+
+
 def _lookup(fn_name: str):
     """Resolve a deployed Modal function handle by app + function name."""
     import modal
@@ -67,11 +95,11 @@ def modal_separate(
     *,
     demucs_model: str,
     karaoke_model: str = "",
-    timeout: int = 1800,  # accepted for signature parity with remote_separate
+    timeout: int = 1800,
 ) -> dict[str, Path]:
     """Run both separation passes on Modal GPU, stage results locally.
 
-    Mirrors ``remote.remote_separate``: writes ``lead_vocals.wav`` and
+    Writes ``lead_vocals.wav`` and
     ``backing_vocals.wav`` into ``stems_dir``, stages drums/bass/other under
     ``stems_dir/_remote_raw``, and returns those three local paths so the caller
     can run the instrumental/karaoke ffmpeg mixes locally.
@@ -91,18 +119,9 @@ def modal_separate(
     # deployment understands, and a pick against a stale deployment degrades to
     # the baked-in model with a loud warning instead of failing the job.
     extra = {"karaoke_model": karaoke_model} if karaoke_model else {}
-    try:
-        result = fn.remote(audio_bytes, audio_path.name, demucs_model, **extra)
-    except TypeError:
-        if not extra:
-            raise
-        logger.warning(
-            "Deployed Modal app %s does not accept karaoke_model — falling back "
-            "to its baked-in Pass-2 model. Re-run `modal deploy` to pick up %s.",
-            APP_NAME,
-            karaoke_model,
-        )
-        result = fn.remote(audio_bytes, audio_path.name, demucs_model)
+    # A configured model is part of the requested result.  A stale deployment
+    # must fail loudly rather than silently run its baked-in substitute.
+    result = fn.remote(audio_bytes, audio_path.name, demucs_model, **extra)
 
     if not result.get("ok"):
         raise RuntimeError(f"Modal separation error: {result.get('error')}")
@@ -134,7 +153,7 @@ class ModalHeartTranscriber:
     """Drop-in for ``lyricsync.transcription.HeartTranscriber`` that runs the
     Heart model on Modal GPU instead of a local subprocess.
 
-    VAD runs locally (cheap, CPU) exactly as in the local/remote transcribers;
+    VAD runs locally (cheap, CPU) exactly as in the local transcriber;
     only the model forward passes move to Modal. Returns the same
     ``TranscriptionResult`` type, so ``word_sync_worker`` and the transcription
     cache are unaffected.

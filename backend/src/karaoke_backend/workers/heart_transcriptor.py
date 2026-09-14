@@ -48,6 +48,7 @@ def main():
     parser.add_argument("audio_path", help="Path to audio file (WAV)")
     parser.add_argument("--language", default="en", help="Language code")
     parser.add_argument("--model-path", default=None, help="Path to checkpoint dir")
+    parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=None)
     parser.add_argument(
         "--vad-segments",
         default=None,
@@ -83,16 +84,19 @@ def main():
 
     # fp16 matmul is unimplemented on PyTorch CPU ("addmm_impl_cpu_ not
     # implemented for 'Half'"), so only use it on CUDA; CPU runs fp32.
-    use_cuda = torch.cuda.is_available()
-    device = "cuda" if use_cuda else "cpu"
-    dtype = torch.float16 if use_cuda else torch.float32
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("Attested CUDA accelerator is unavailable")
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("Attested Metal accelerator is unavailable")
+    dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
 
     sys.stderr.write(f"Loading HeartTranscriptor from {ckpt_dir} on {device} ({dtype})...\n")
 
     model = WhisperForConditionalGeneration.from_pretrained(
-        ckpt_dir, torch_dtype=dtype, low_cpu_mem_usage=True
+        ckpt_dir, torch_dtype=dtype, low_cpu_mem_usage=True, local_files_only=True
     )
-    processor = WhisperProcessor.from_pretrained(ckpt_dir)
+    processor = WhisperProcessor.from_pretrained(ckpt_dir, local_files_only=True)
 
     pipe = pipeline(
         "automatic-speech-recognition",

@@ -405,6 +405,9 @@ async def import_tracks(
             ),
         )
 
+    from karaoke_backend.workers.managed_processing import require_heart_model
+    require_heart_model()
+
     # Fail before writing anything when there is nothing to import FROM: the
     # job would raise the same complaint a minute later, having already put a
     # `processing` song in the library.

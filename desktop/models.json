@@ -1,0 +1,178 @@
+{
+  "schema": 1,
+  "kind": "upstream-model-policy",
+  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. No model weights are shipped or mirrored by Singhouse.",
+  "allowedHosts": [
+    "huggingface.co",
+    "download.pytorch.org",
+    "dl.fbaipublicfiles.com",
+    "github.com",
+    "raw.githubusercontent.com"
+  ],
+  "cacheLayout": "model-cache/packs/<manifest-sha256>/{huggingface,torch,audio-separator}/<file-path>",
+  "offlineDefault": true,
+  "models": [
+    {
+      "id": "heart-transcriptor",
+      "directory": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+      "files": [
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/added_tokens.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9715fd2243b6f06a5858b5e32950d2853f73dd5bc201aafcf76f5082a2d8acd1",
+          "size": 34604,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/added_tokens.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "1cf4e023d6cc6801eebc0c2009c7daf6ade83932bb96a19611c496549a17f323",
+          "size": 1328,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/generation_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "4b7ebbbe7a99573c12749a53e5d119e56a4110d6c44c4336ce33d1fd405ca846",
+          "size": 3727,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/generation_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/merges.txt",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6",
+          "size": 493869,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/merges.txt",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/model.safetensors",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9e09145b687c26330da96ad2d7ca1fe542d46247700a43a3156b924a6b6e6a07",
+          "size": 3055544304,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/model.safetensors",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/normalizer.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+          "size": 52666,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/normalizer.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/preprocessor_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "9b5cd03a36fbb8a627c64d98a5b5b126ead95a77720723944487311f0110b666",
+          "size": 184990,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/preprocessor_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/special_tokens_map.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "e67ae3a0aaa99abcd9f187138e12db1f65c16a14761c50ef10eef2c174a7a691",
+          "size": 2194,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/special_tokens_map.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566",
+          "size": 2480466,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer_config.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "2a4c4281cf9f51ac6ccc406fdc711a087afe6530f671fa7b80953edc498275ce",
+          "size": 282683,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/tokenizer_config.json",
+          "executable": false
+        },
+        {
+          "path": "huggingface/heart/918f88917c17489c1f8dbae0165cd1019c4d5cd3/vocab.json",
+          "revision": "918f88917c17489c1f8dbae0165cd1019c4d5cd3",
+          "sha256": "8f680bba319e01a653d2e8a5dbc17a9157179e0576e6ce74ce0c06356c6e24f9",
+          "size": 835550,
+          "url": "https://huggingface.co/HeartMuLa/HeartTranscriptor-oss/resolve/918f88917c17489c1f8dbae0165cd1019c4d5cd3/vocab.json",
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "demucs-mdx-extra",
+      "directory": "torch/hub/checkpoints",
+      "files": [
+        {
+          "path": "torch/hub/checkpoints/e51eebcc-c1b80bdd.th",
+          "revision": "c1b80bdd6de58274abf359e66822a76f49ce2b9f086fc5dc917ac14598e6bebf",
+          "sha256": "c1b80bdd6de58274abf359e66822a76f49ce2b9f086fc5dc917ac14598e6bebf",
+          "size": 167399275,
+          "url": "https://dl.fbaipublicfiles.com/demucs/mdx_final/e51eebcc-c1b80bdd.th",
+          "executable": false
+        },
+        {
+          "path": "torch/hub/checkpoints/a1d90b5c-ae9d2452.th",
+          "revision": "ae9d245283bf24b552913ee233a1101dcd0aeaed59b1c0a2da0e1f6eda15101b",
+          "sha256": "ae9d245283bf24b552913ee233a1101dcd0aeaed59b1c0a2da0e1f6eda15101b",
+          "size": 167391595,
+          "url": "https://dl.fbaipublicfiles.com/demucs/mdx_final/a1d90b5c-ae9d2452.th",
+          "executable": false
+        },
+        {
+          "path": "torch/hub/checkpoints/5d2d6c55-db83574e.th",
+          "revision": "db83574e05b2308f76e2764819da673f2d16d437b9e619f5fcb72f275fc0e24f",
+          "sha256": "db83574e05b2308f76e2764819da673f2d16d437b9e619f5fcb72f275fc0e24f",
+          "size": 167391595,
+          "url": "https://dl.fbaipublicfiles.com/demucs/mdx_final/5d2d6c55-db83574e.th",
+          "executable": false
+        },
+        {
+          "path": "torch/hub/checkpoints/cfa93e08-61801ae1.th",
+          "revision": "61801ae1567d606c97a9c3469e943ae306d0a873eeb60d623ae7cfc7042b3f68",
+          "sha256": "61801ae1567d606c97a9c3469e943ae306d0a873eeb60d623ae7cfc7042b3f68",
+          "size": 167399275,
+          "url": "https://dl.fbaipublicfiles.com/demucs/mdx_final/cfa93e08-61801ae1.th",
+          "executable": false
+        }
+      ]
+    },
+    {
+      "id": "karaoke-roformer",
+      "directory": "audio-separator",
+      "files": [
+        {
+          "path": "audio-separator/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+          "revision": "1de20d459332fe8869aeb01327a31df0032262706e1365114e852dc271779813",
+          "sha256": "1de20d459332fe8869aeb01327a31df0032262706e1365114e852dc271779813",
+          "size": 913096801,
+          "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+          "executable": false
+        },
+        {
+          "path": "audio-separator/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml",
+          "revision": "b35077d94861f068097cce1a5e54633c055e7dcc2613eade4e4dc7c7c9c3f48b",
+          "sha256": "b35077d94861f068097cce1a5e54633c055e7dcc2613eade4e4dc7c7c9c3f48b",
+          "size": 1726,
+          "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml",
+          "executable": false
+        },
+        {
+          "path": "audio-separator/download_checks.json",
+          "revision": "8a65b784b5f075e46c43537cb0f3de3a802d00a9",
+          "sha256": "d3622e1fa19c161d3cf704927711b453d593a3f1eb0f2e0838c3136907935151",
+          "size": 28267,
+          "url": "https://raw.githubusercontent.com/TRvlvr/application_data/8a65b784b5f075e46c43537cb0f3de3a802d00a9/filelists/download_checks.json",
+          "executable": false
+        }
+      ]
+    }
+  ]
+}

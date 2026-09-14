@@ -424,6 +424,10 @@ fi
 #   - tools/check_core_neutrality.sh          — this script (carries the pattern)
 #   - README.md, PROJECT_DOCS.md              — the product name (Singhouse)
 #     is settled and allowed in the two root docs
+#   - desktop/                                — product-delivery code and
+#     packaging must name the installed public product. This is a content-level
+#     exception for the built-in public name only: private/supplement names
+#     remain checked, and desktop stays in every vendor, infra, and leak gate.
 # NOTE (residual risk): the allowlist is per-FILE for the WHOLE brand
 # pattern — an allowlisted file is exempt from every alternative, not just the
 # product name, so the allowlisted docs must stay free of the supplement's
@@ -503,6 +507,10 @@ BRAND_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
       file_brand_pattern="$BRAND_PATTERN"
       case "$f" in
         .github/scripts/cla.cjs|CLA.md|CCLA.md|CLA-SIGNATURES.json|CONTRIBUTING.md|LICENSING.md)
+          [ -n "$BRAND_PRIVATE" ] || continue
+          file_brand_pattern="$BRAND_PRIVATE"
+          ;;
+        desktop/*)
           [ -n "$BRAND_PRIVATE" ] || continue
           file_brand_pattern="$BRAND_PRIVATE"
           ;;

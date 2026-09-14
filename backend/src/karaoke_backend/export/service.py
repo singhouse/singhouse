@@ -43,7 +43,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from karaoke_backend import cdg, stem_layout
+from karaoke_backend import cdg, stem_layout, stem_storage
 from karaoke_backend.branding import EXPORT_ID_PREFIX
 from karaoke_backend.export import raster
 from karaoke_backend.export.card_provider import get_card_provider
@@ -150,9 +150,7 @@ def filename_base(song_id: int, artist: Optional[str], title: Optional[str]) -> 
 
 
 def _stems_dir(song: Song) -> Path:
-    if song.stems_path:
-        return Path(song.stems_path)
-    return STEMS_DIR / str(song.id)
+    return stem_storage.active_stems_dir(song, STEMS_DIR)
 
 
 def _find_audio(stems_dir: Path, audio: Optional[str]) -> Optional[Path]:

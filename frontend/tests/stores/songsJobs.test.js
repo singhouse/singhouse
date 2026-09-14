@@ -46,6 +46,7 @@ async function settle() {
 }
 
 beforeEach(() => {
+  delete window.karaokeDesktop
   setActivePinia(createPinia())
   vi.clearAllMocks()
   vi.useFakeTimers()
@@ -55,6 +56,36 @@ beforeEach(() => {
   setsApi.page.mockResolvedValue({ data: { job_id: 'j-page' } })
   api.resplit.mockResolvedValue({ data: { job_id: 'j-resplit' } })
   api.pollJob.mockResolvedValue({ data: { status: 'done', message: 'Finished' } })
+})
+
+it('does not submit transcription after declined model setup', async () => {
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: vi.fn().mockResolvedValue({ installed: false }) }
+  const store = useSongsStore()
+  await store.startTranscribe(7, { whisper_model: 'heart' })
+  expect(setsApi.transcribe).not.toHaveBeenCalled()
+  expect(store.jobFor(7).message).toContain('cancelled')
+  expect(store.jobFor(7).jobId).toBeNull()
+})
+
+it('does not resubmit a refused retry when model setup requires reopening', async () => {
+  window.karaokeDesktop = { isDesktop: true,
+    prepareHeart: vi.fn().mockResolvedValue({ installed: true, restartRequired: true }) }
+  api.retryIngest.mockRejectedValueOnce(Object.assign(new Error('Set up Heart'), { code: 'heart_model_missing' }))
+  const store = useSongsStore()
+  await store.startRetryIngest(7)
+  expect(api.retryIngest).toHaveBeenCalledTimes(1)
+  expect(store.jobFor(7).message).toContain('Reopen the app')
+})
+
+it('does not ask for Heart when the server admits a prepared-video retry', async () => {
+  const setup = vi.fn()
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: setup }
+  api.retryIngest.mockResolvedValueOnce({ data: { job_id: 'video-retry' } })
+  const store = useSongsStore()
+  store.startRetryIngest(7)
+  await settle()
+  expect(setup).not.toHaveBeenCalled()
+  expect(store.jobFor(7).status).toBe('done')
 })
 
 describe('runSongJob', () => {

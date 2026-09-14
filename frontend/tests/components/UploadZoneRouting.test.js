@@ -13,7 +13,7 @@
 // the picture — stay out of a video-only batch.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/client', () => ({
@@ -52,9 +52,52 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  delete window.karaokeDesktop
   wrapper?.unmount()
   wrapper = null
   vi.restoreAllMocks()
+})
+
+it('keeps pending audio and metadata when model setup is cancelled or requires reopening', async () => {
+  const setup = vi.fn().mockResolvedValue({ installed: false })
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: setup }
+  await drop(file('Artist - Song.mp3', 'audio/mpeg'))
+  await wrapper.find('.btn-upload').trigger('click')
+  await flushPromises()
+  expect(store.uploadSong).not.toHaveBeenCalled()
+  expect(wrapper.find('.btn-upload').exists()).toBe(true)
+  expect(wrapper.text()).toContain('cancelled')
+  setup.mockResolvedValue({ installed: true, restartRequired: true })
+  await wrapper.find('.btn-upload').trigger('click')
+  await flushPromises()
+  expect(store.uploadSong).not.toHaveBeenCalled()
+  expect(wrapper.find('.btn-upload').exists()).toBe(true)
+  expect(wrapper.text()).toContain('Reopen the app')
+  expect(wrapper.findAll('input').some(input => input.element.value === 'Artist')).toBe(true)
+})
+
+it('never asks for Heart when importing a prepared video', async () => {
+  const setup = vi.fn()
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: setup }
+  await dropAndSubmit(file('clip.mp4', 'video/mp4'))
+  expect(setup).not.toHaveBeenCalled()
+  expect(store.importVideoSong).toHaveBeenCalledTimes(1)
+})
+
+it.each([false, true])('protects a pending setup from duplicate submit and removal=%s', async (remove) => {
+  let complete
+  const setup = vi.fn(() => new Promise(resolve => { complete = resolve }))
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: setup }
+  await drop(file('song.mp3', 'audio/mpeg'))
+  await wrapper.find('.btn-upload').trigger('click')
+  expect(wrapper.find('.btn-upload').element.disabled).toBe(true)
+  // Enter on a metadata field also submits; it must obey the same guard.
+  await wrapper.find('.upload-item__fields input').trigger('keydown.enter')
+  expect(setup).toHaveBeenCalledTimes(1)
+  if (remove) await wrapper.find('.btn-cancel').trigger('click')
+  complete({ installed: true, restartRequired: false })
+  await flushPromises()
+  expect(store.uploadSong).toHaveBeenCalledTimes(remove ? 0 : 1)
 })
 
 describe('a dropped file reaches the route its type and container name', () => {
