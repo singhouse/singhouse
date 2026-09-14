@@ -4,10 +4,12 @@ __pycache__/
 *.egg-info/
 .venv/
 .venv-*/
-# setuptools wheel-build staging: `uv build` / `python -m build` leave a full
-# copy of the package under build/ — an artifact, never source. (dist/ is
-# already ignored below with the Vite output.)
-build/
+# Python wheel-build staging: `uv build` / `python -m build` leave artifacts
+# at the repository root or below either Python package. Keep these rules
+# explicit so the tracked desktop/build/ packaging source remains visible.
+/build/
+/backend/build/
+/lyricsync/build/
 
 # Test / coverage artifacts
 .coverage
@@ -134,6 +136,4 @@ backend/karaoke.db.*-snapshot-*
 /desktop/native/
 /desktop/artifacts/
 /desktop/.build-cache/
-!/desktop/build/
-!/desktop/build/**
 /desktop/build/__pycache__/

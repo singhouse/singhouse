@@ -29,8 +29,8 @@ class DatabaseRecoveryTests(unittest.TestCase):
         kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=invalid),
                                        FlushFileBuffers=Mock(return_value=True),
                                        CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
-        source = PureWindowsPath("C:/Users/person/AppData/Roaming/Singhouse/pending")
-        destination = PureWindowsPath("C:/Users/person/AppData/Roaming/Singhouse/active")
+        source = PureWindowsPath("C:/FixtureData/Application/pending")
+        destination = PureWindowsPath("C:/FixtureData/Application/active")
         with self.assertRaisesRegex(RuntimeError, "application-owned directory metadata"):
             windows_durable_replace(source, destination, [source.parent], kernel)
         self.assertFalse(any(str(call.args[0]).startswith("\\\\.\\")
@@ -41,10 +41,10 @@ class DatabaseRecoveryTests(unittest.TestCase):
         kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10),
                                        FlushFileBuffers=Mock(return_value=True),
                                        CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
-        source = PureWindowsPath("C:/Users/person/AppData/Roaming/Singhouse/staged/pending")
-        destination = PureWindowsPath("C:/Users/person/AppData/Roaming/Singhouse/releases/release")
+        source = PureWindowsPath("C:/FixtureData/Application/staged/pending")
+        destination = PureWindowsPath("C:/FixtureData/Application/releases/release")
         owned = [source.parent, destination.parent,
-                 PureWindowsPath("C:/Users/person/AppData/Roaming/Singhouse")]
+                 PureWindowsPath("C:/FixtureData/Application")]
         windows_durable_replace(source, destination, owned, kernel)
         self.assertEqual([call.args[0] for call in kernel.CreateFileW.call_args_list],
                          [str(path) for path in owned])
