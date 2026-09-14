@@ -177,7 +177,7 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
   return value
 }
 
-async function checkedFile(path, flags) {
+export async function checkedFile(path, flags) {
   const file = await open(path, flags | (constants.O_NOFOLLOW || 0), 0o600)
   try {
     const info = await file.stat()
@@ -194,9 +194,36 @@ async function fileHash(file, signal) {
   return hash.digest('hex')
 }
 
-async function checkedRead(path) {
+export async function checkedRead(path) {
   const file = await checkedFile(path, constants.O_RDONLY)
   try { return await file.readFile('utf8') } finally { await file.close() }
+}
+
+export async function runNativeHelper(python, helper, args, { failure = 'Native helper failed', timeout = 60000 } = {}) {
+  if (![python, helper].every(value => typeof value === 'string' && isAbsolute(value))) {
+    throw new Error('The bundled native helper requires absolute application-owned paths')
+  }
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(python, ['-I', '-B', helper, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    let output = '', errors = '', settled = false
+    const timer = setTimeout(() => { child.kill('SIGKILL'); finish(new Error(`${failure}: timed out`)) }, timeout)
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error); else resolveResult(value)
+    }
+    child.stdout.on('data', bytes => {
+      output += bytes.toString('utf8')
+      if (output.length > 65536) { child.kill('SIGKILL'); finish(new Error(`${failure}: invalid output`)) }
+    })
+    child.stderr.on('data', bytes => { errors = (errors + bytes.toString('utf8')).slice(-4096) })
+    child.once('error', error => finish(error))
+    child.once('close', code => {
+      if (code !== 0) return finish(new Error(errors.trim() || failure))
+      try { finish(null, JSON.parse(output)) } catch { finish(new Error(`${failure}: invalid confirmation`)) }
+    })
+  })
 }
 
 async function plainDirectory(path) {

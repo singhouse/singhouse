@@ -10,7 +10,9 @@
     "test": "node --test test/*.test.mjs",
     "test:smoke": "node test/smoke.mjs",
     "assemble": "python build/assemble.py",
-    "package": "node build/package.mjs"
+    "package": "node build/package.mjs",
+    "package:first-installers": "node build/package.mjs --first-installers",
+    "metadata": "node build/update_metadata.mjs"
   },
   "devDependencies": {
     "electron": "44.3.0",

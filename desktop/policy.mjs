@@ -6,11 +6,13 @@ export function parseLaunch(line, expectedIdentity) {
       || url.origin !== value.origin || url.username || url.password
       || !Number.isInteger(Number(url.port)) || Number(url.port) < 1024
       || typeof value.password !== 'string' || value.password.length < 32
-      || typeof value.nonce !== 'string' || value.nonce.length < 32) {
+      || typeof value.nonce !== 'string' || value.nonce.length < 32
+      || typeof value.controlToken !== 'string' || value.controlToken.length < 32) {
     throw new Error('Backend returned an invalid launch handshake')
   }
   if (expectedIdentity && !sameIdentity(value.identity, expectedIdentity)) throw new Error("Backend runtime identity mismatch")
-  return { origin: value.origin, password: value.password, nonce: value.nonce, ...(expectedIdentity ? { identity: value.identity } : {}) }
+  return { origin: value.origin, password: value.password, nonce: value.nonce,
+    controlToken: value.controlToken, ...(expectedIdentity ? { identity: value.identity } : {}) }
 }
 
 export function ownURL(raw, origin) {

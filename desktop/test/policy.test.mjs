@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment } from '../policy.mjs'
 
 const origin = 'http://127.0.0.1:43871'
-const valid = { origin, password: 'p'.repeat(48), nonce: 'n'.repeat(48) }
+const valid = { origin, password: 'p'.repeat(48), nonce: 'n'.repeat(48), controlToken: 'c'.repeat(48) }
 test('private launch handshake rejects credentials, paths, non-loopback and weak secrets', () => {
   assert.deepEqual(parseLaunch(JSON.stringify(valid)), valid)
   for (const invalid of ['http://localhost:43871', 'http://127.0.0.1:80', `${origin}/`, `${origin}/api`, 'https://127.0.0.1:43871', 'http://u@127.0.0.1:43871', 'http://203.0.113.1:8000']) {

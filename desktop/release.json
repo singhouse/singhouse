@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "channel": "private-test",
+  "edition": "core",
+  "policyId": "8cb57b4c3042f5544df8adc3287a02b515b81eeb81c464fea4d4f638268d8643",
+  "schemaHistory": 1,
+  "minimumReadableSchemaHistory": 1,
+  "updatesEnabled": false,
+  "signatureThreshold": 1,
+  "trustedUpdateKeys": [],
+  "platformTrust": {
+    "darwin": { "enabled": false, "mode": "codesign" },
+    "win32": { "enabled": false, "mode": "authenticode" }
+  }
+}

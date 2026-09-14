@@ -34,6 +34,28 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def canonical_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def assembly_descriptor(files, edition="core", paired_core_release_id=None):
+    if edition not in {"core", "premium"}:
+        raise ValueError("Edition must be core or premium")
+    if edition == "premium" and not re.fullmatch(r"[0-9a-f]{64}", paired_core_release_id or ""):
+        raise ValueError("Premium assembly requires an exact paired core release ID")
+    if edition == "core" and paired_core_release_id is not None:
+        raise ValueError("Core assembly cannot declare a paired core release")
+    descriptor = {
+        "schema": 1,
+        "kind": "singhouse-assembly",
+        "edition": edition,
+        "payloadDigest": canonical_digest(files),
+    }
+    if paired_core_release_id is not None:
+        descriptor["pairedCoreReleaseId"] = paired_core_release_id
+    return descriptor
+
+
 def fetch(record, cache):
     """Only lockfile URLs are accepted; verify cached and fresh bytes alike."""
     if not record["url"].startswith("https://"):
@@ -177,6 +199,8 @@ def main():
     parser.add_argument("--cache", type=Path, default=DESKTOP / ".build-cache")
     parser.add_argument("--target", choices=sorted(PLATFORMS), help="Target payload platform (default: host)")
     parser.add_argument("--source-commit", help="Recorded Git commit for an exported source tree without .git")
+    parser.add_argument("--edition", choices=("core", "premium"), default="core")
+    parser.add_argument("--paired-core-release-id", help="Exact core release ID required by a premium assembly")
     args = parser.parse_args()
     source_info = source_provenance(args.source_commit)
     output, cache = args.output.resolve(), args.cache.resolve()
@@ -244,6 +268,8 @@ def main():
     files = {str(p.relative_to(output)).replace(os.sep, "/"): digest(p)
              for p in sorted(output.rglob("*")) if p.is_file() and not p.is_symlink()}
     (output / "files.json").write_text(json.dumps(files, indent=2) + "\n")
+    descriptor = assembly_descriptor(files, args.edition, args.paired_core_release_id)
+    (output / "assembly.json").write_text(json.dumps(descriptor, indent=2) + "\n")
     identity = {
         "schema": 1, "appVersion": json.loads((DESKTOP / "package.json").read_text())["version"],
         "backendVersion": packages["karaoke-backend"], "lyricsyncVersion": packages["lyricsync"],

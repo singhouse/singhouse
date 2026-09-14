@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch, Mock
@@ -24,6 +25,153 @@ spec.loader.exec_module(backend)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_activation_helper_serializes_bootstraps_until_holder_stdin_closes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            command = [sys.executable, "-I", "-B", str(Path(__file__).with_name("backend.py")),
+                       "--activation-lock", str(state)]
+            first = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            second = None
+            try:
+                self.assertEqual(first.stdout.readline().strip(), "READY")
+                second = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True)
+                acquired = threading.Event()
+                line = []
+                reader = threading.Thread(target=lambda: (line.append(second.stdout.readline().strip()), acquired.set()))
+                reader.start()
+                self.assertFalse(acquired.wait(0.05))
+                first.stdin.close()
+                first.wait(timeout=5)
+                self.assertTrue(acquired.wait(5))
+                self.assertEqual(line, ["READY"])
+                second.stdin.close()
+                second.wait(timeout=5)
+                reader.join(1)
+                self.assertEqual(first.returncode, 0)
+                self.assertEqual(second.returncode, 0)
+            finally:
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill(); process.wait(timeout=5)
+                for process in (first, second):
+                    if process is not None:
+                        process.stdout.close(); process.stderr.close()
+
+    def test_paired_recovery_owner_lock_wait_is_bounded_and_acquires_after_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            started = threading.Event()
+            acquired = threading.Event()
+
+            def contender():
+                started.set()
+                with backend.persistent_directory(data, wait_seconds=1):
+                    acquired.set()
+
+            with backend.persistent_directory(data):
+                worker = threading.Thread(target=contender)
+                worker.start()
+                self.assertTrue(started.wait(1))
+                self.assertFalse(acquired.wait(0.05))
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(acquired.is_set())
+
+    def test_paired_recovery_holds_owner_for_every_mutation_then_launches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"; data.mkdir()
+            source = root / "kit-runtime"; (source / "resources").mkdir(parents=True)
+            destination = root / "releases/prior"; destination.mkdir(parents=True)
+            (destination / "Singhouse").write_bytes(b"damaged")
+            application = {"schema": 1, "releaseId": "prior", "platform": "linux",
+                           "arch": "x64", "payloadSha256": "a" * 64,
+                           "manifestSha256": "b" * 64, "entrypoint": "Singhouse"}
+            files = {"Singhouse": b"recovered executable", "resources/app.asar": b"recovered asar",
+                     "installed.json": json.dumps(application).encode()}
+            for relative, contents in files.items():
+                path = source / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(contents)
+                path.chmod(0o600)
+            (source / "resources").chmod(0o700)
+            inventory = [{"path": "resources", "type": "directory", "mode": 0o700}]
+            inventory += [{"path": name, "type": "file", "size": len(contents),
+                           "sha256": hashlib.sha256(contents).hexdigest(), "mode": 0o600}
+                          for name, contents in files.items()]
+            database = root / "database.sqlite3"
+            with backend.sqlite3.connect(database) as connection:
+                connection.execute("create table recovered(value text)")
+                connection.execute("insert into recovered values ('yes')")
+            active = root / "state/active.json"; transaction = root / "state/recovery-transaction.json"
+            plan = {"schema": 1, "dataDirectory": str(data), "databaseSource": str(database),
+                    "applicationSource": str(source), "applicationDestination": str(destination),
+                    "applicationInventory": inventory, "application": application,
+                    "activePath": str(active), "transactionPath": str(transaction),
+                    "transaction": {"schema": 1, "kind": "recovery-transaction", "state": "in-progress"}}
+            plan_path = root / "plan.json"; plan_path.write_text(json.dumps(plan))
+            boundaries = []
+
+            def assert_competing_launch_blocked(name):
+                boundaries.append(name)
+                with self.assertRaisesRegex(RuntimeError, "already open"):
+                    with backend.persistent_directory(data):
+                        pass
+
+            launched = []
+            owner_waits = []
+            def launch(entrypoint):
+                # Ownership is released only after every durable mutation, so
+                # the recovered backend can acquire it during startup.
+                with backend.persistent_directory(data):
+                    launched.append(entrypoint)
+
+            native_lock = backend.persistent_directory
+            @backend.contextmanager
+            def observed_lock(path, wait_seconds=0):
+                owner_waits.append((Path(path), wait_seconds))
+                with native_lock(path, wait_seconds=wait_seconds) as owned:
+                    yield owned
+
+            with patch.object(backend, "persistent_directory", observed_lock):
+                result = backend.paired_recovery(plan_path, launch=launch,
+                                                 boundary=assert_competing_launch_blocked)
+            self.assertEqual(boundaries, ["application-replaced", "database-restored", "selection-committed"])
+            self.assertEqual(owner_waits[0], (data, backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS))
+            self.assertGreaterEqual(owner_waits[0][1], 30)
+            self.assertGreater(owner_waits[0][1], backend.BACKEND_PARENT_WATCHDOG_SECONDS)
+            self.assertEqual(launched, [destination / "Singhouse"])
+            self.assertTrue(result["recovered"])
+            self.assertEqual(json.loads(active.read_text()), application)
+            self.assertEqual(json.loads(transaction.read_text())["state"], "completed")
+            with backend.sqlite3.connect(data / "desktop.db") as connection:
+                self.assertEqual(connection.execute("select value from recovered").fetchone(), ("yes",))
+
+            with patch.dict(os.environ, {"ELECTRON_RUN_AS_NODE": "1",
+                                         "SINGHOUSE_RECOVERY_KIT": "1"}):
+                with patch.object(backend.subprocess, "Popen") as popen:
+                    backend.paired_recovery(plan_path)
+            arguments, options = popen.call_args
+            self.assertEqual(arguments[0], [str(destination / "Singhouse")])
+            self.assertNotIn("ELECTRON_RUN_AS_NODE", options["env"])
+            self.assertNotIn("SINGHOUSE_RECOVERY_KIT", options["env"])
+
+    def test_paired_recovery_rejects_missing_or_corrupt_retained_application(self):
+        # Inventory verification is the native boundary; neither case may be
+        # repaired from a damaged external managed slot.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / "runtime"; source.mkdir()
+            executable = source / "Singhouse"; executable.write_bytes(b"good")
+            executable.chmod(0o700)
+            record = [{"path": "Singhouse", "type": "file", "size": 4,
+                       "sha256": hashlib.sha256(b"good").hexdigest(), "mode": 0o700}]
+            executable.write_bytes(b"bad!")
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                backend._recovery_inventory(source, record)
+            executable.unlink()
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                backend._recovery_inventory(source, record)
+
     def test_windows_durable_replace_uses_write_through_and_metadata_flush(self):
         kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
                                        CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
@@ -33,19 +181,14 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
         self.assertEqual(kernel.CloseHandle.call_count, 2)
 
-    def test_windows_durable_replace_falls_back_to_volume_or_refuses_before_rename(self):
+    def test_windows_durable_replace_refuses_without_raw_volume_fallback(self):
         invalid = ctypes.c_void_p(-1).value
-        kernel = types.SimpleNamespace(CreateFileW=Mock(side_effect=lambda name, *args: 20 if name.startswith("\\\\.\\") else invalid),
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=invalid),
                                        FlushFileBuffers=Mock(return_value=True), CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
         source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
-        backend.windows_durable_replace(source, destination, [source.parent], kernel)
-        self.assertTrue(any(call.args[0] == "\\\\.\\C:" for call in kernel.CreateFileW.call_args_list))
-        kernel.MoveFileExW.assert_called_once()
-        kernel.MoveFileExW.reset_mock()
-        kernel.CreateFileW.side_effect = None
-        kernel.CreateFileW.return_value = invalid
-        with self.assertRaisesRegex(RuntimeError, "denied both"):
+        with self.assertRaisesRegex(RuntimeError, "application-owned directory metadata"):
             backend.windows_durable_replace(source, destination, [source.parent], kernel)
+        self.assertFalse(any(str(call.args[0]).startswith("\\\\.\\") for call in kernel.CreateFileW.call_args_list))
         kernel.MoveFileExW.assert_not_called()
 
     @unittest.skipIf(os.name == "nt", "POSIX directory fsync contract")
@@ -349,6 +492,58 @@ with launcher.persistent_directory(pathlib.Path(sys.argv[2])):
                 process.stdout.close()
             with backend.persistent_directory(runtime):
                 self.assertTrue((runtime / "owner.lock").exists())
+
+    def test_recovery_owner_lock_can_succeed_after_watchdog_without_real_delay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "library"
+            elapsed = [0.0]
+            attempts = []
+
+            def acquire(_lock):
+                attempts.append(elapsed[0])
+                if elapsed[0] <= backend.BACKEND_PARENT_WATCHDOG_SECONDS:
+                    raise OSError("still held")
+
+            with backend.persistent_directory(runtime,
+                    wait_seconds=backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS,
+                    clock=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                    lock_attempt=acquire):
+                self.assertGreater(elapsed[0], backend.BACKEND_PARENT_WATCHDOG_SECONDS)
+                self.assertLess(elapsed[0], backend.RECOVERY_OWNER_LOCK_WAIT_SECONDS)
+            self.assertGreater(len(attempts), 1)
+
+    def test_native_recovery_anchor_rejects_corrupt_runtime_before_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "kit"
+            (root / "runtime").mkdir(parents=True)
+            (root / "tools").mkdir()
+            runtime = root / "runtime" / "Singhouse"
+            cli = root / "tools" / "recovery_cli.mjs"
+            runtime.write_bytes(b"trusted runtime")
+            cli.write_bytes(b"trusted cli")
+            (root / "runtime").chmod(0o700); (root / "tools").chmod(0o700)
+            runtime.chmod(0o600); cli.chmod(0o600)
+            records = []
+            for path in (root / "runtime", runtime, root / "tools", cli):
+                relative = path.relative_to(root).as_posix()
+                if path.is_dir():
+                    records.append({"path": relative, "type": "directory", "mode": 0o700})
+                else:
+                    payload = path.read_bytes()
+                    records.append({"path": relative, "type": "file", "size": len(payload),
+                                    "sha256": hashlib.sha256(payload).hexdigest(), "mode": 0o600})
+            manifest = {"schema": 2, "kind": "recovery-kit",
+                        "target": {"platform": "linux", "arch": "x64"},
+                        "binding": {"schema": 1}, "runtimeEntrypoint": "runtime/Singhouse",
+                        "files": sorted(records, key=lambda record: record["path"].encode())}
+            (root / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n")
+            manifest_hash = hashlib.sha256(json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+            runtime.write_bytes(b"corrupt runtime")
+            executed = []
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                backend.launch_recovery_kit(root, manifest_hash, "linux", "x64", ["state", "point-1", "data"],
+                                            launch=lambda command, environment: executed.append(command) or 0)
+            self.assertEqual(executed, [])
 
     def test_invalid_persistent_settings_are_preserved_and_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

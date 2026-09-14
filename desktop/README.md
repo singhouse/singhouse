@@ -14,10 +14,10 @@ establish that local AI processing is available.
 
 | Target | Artifacts | Installation |
 | --- | --- | --- |
-| Linux x64 | AppImage, `tar.gz` | Make the AppImage executable and open it, or extract the archive and run `Singhouse`. |
-| Linux ARM64 | AppImage, `tar.gz` | Same installation steps on ARM64 Linux; native qualification is required. |
-| macOS Apple Silicon | DMG, ZIP | Open the DMG and copy Singhouse to Applications, or extract the ZIP. The package requires macOS 14 or newer. |
-| Windows x64 | NSIS `.exe` installer | Run the installer and choose a per-user installation directory. |
+| Linux x64 | Portable application, optional AppImage/`tar.gz` first installer | Run the installed launcher; native qualification is required. |
+| Linux ARM64 | Portable application, optional AppImage/`tar.gz` first installer | Same installation steps on ARM64 Linux; native qualification is required. |
+| macOS Apple Silicon | Portable application, optional DMG/ZIP first installer | Open the DMG and copy Singhouse to Applications for first installation. The package requires macOS 14 or newer. |
+| Windows x64 | Portable application, optional NSIS first installer | Run the installer and choose a per-user installation directory for first installation. |
 
 These are build targets, not certification of every operating-system, audio,
 or display configuration. Asahi Linux compatibility is a separate qualification
@@ -63,10 +63,196 @@ application wheels with a pinned host toolchain, installs locked dependencies,
 and rebuilds the frontend using its npm lockfile. It refuses an existing output
 directory: choose a fresh path for each assembly.
 
-The default payload is `desktop/native/`; installers are written to
-`desktop/artifacts/` as `Singhouse-<version>-<os>-<arch>.<extension>`. The packaging
-step also creates an unpacked application directory there. Packaging never
-publishes artifacts. Create macOS installers on macOS.
+The default native payload is `desktop/native/`. Packaging creates a deterministic
+`Singhouse-<version>-<os>-<arch>.shapp` portable application and a canonical build
+receipt in `desktop/artifacts/`. The portable header binds the exact recursive
+file inventory and its digest, entry point, target, native assembly, Electron `app.asar`, source
+commit, runtime locks, model policy, database schema history, and core/premium
+pairing. The receipt re-inspects that payload instead of trusting neighboring
+build files and records the modeled application subtree. `npm --prefix desktop
+run package:first-installers` embeds that receipt in the native first-install
+app. On first launch, every modeled file, directory, and internal link is
+checked. Any injected entry is rejected; the only non-modeled entries are the
+canonical receipt itself and the exact Windows uninstaller wrapper. Packaging
+also reads the current Git `HEAD` and `git status --porcelain=v1
+--untracked-files=all`: the checkout must be clean and must exactly match the
+native provenance both before the build and again immediately before publishing
+the immutable receipt. Source exports without `.git` fail closed because no
+separately authenticated export-manifest verifier is configured. Packaging
+never signs or publishes anything. Create macOS artifacts on macOS.
+
+Release policy is edition-owned. Core uses the checked-in `release.json`;
+premium packaging must set `SINGHOUSE_RELEASE_POLICY` to its premium policy.
+That policy explicitly approves one core policy ID and channel/schema train.
+The approved core authority, channel, and policy ID are stable; its schema
+history and minimum-readable bounds are separate moving state, so a compatible
+core schema advance does not silently rotate the premium authority.
+The policy's content-derived ID binds its edition, channel, signature threshold,
+trust roots, and native signing gates into the application identity and signed
+update metadata. The assembly, package, installed application, target, and
+rollback must all name that exact edition and policy. A premium old/new pair is
+therefore authenticated under premium trust and cannot consume the core feed or
+core trust roots. This separation is an update-integrity contract, not license
+enforcement.
+
+Authenticated update metadata is generated only from an inspected target receipt
+and an inspected rollback receipt. Premium metadata additionally requires the
+inspected old and new core receipts and payloads. Both receipts must use the
+explicitly approved core policy and compatible schema train; their release IDs
+and application versions must exactly match the premium rollback and target
+pairings. Both portable applications are signed into the
+metadata so a first update from an NSIS or DMG installation can seed a verified
+rollback copy. The checked-in trust-root list is deliberately empty: signing and
+distribution remain inactive until release keys are provisioned through the
+separate publication gate.
+
+## Coordinated application updates and recovery
+
+NSIS, DMG, and AppImage/archive outputs remain first-install surfaces. Later
+updates do not overwrite those installations. From **Application release**, an
+operator selects locally supplied, signed update metadata; Singhouse retrieves
+the exact target and rollback `.shapp` files named by it. An adjacent local
+artifact is preferred. Only when that exact filename is absent may Singhouse
+use the artifact's signed HTTPS URL; unsafe local entries and other local read
+failures are rejected rather than hidden by a network fallback. Singhouse verifies the
+signature and complete inventories, and safely extracts them into private,
+managed release slots in application data. Archive traversal, devices, unsafe
+links, case collisions, omitted files, extra files, and changed bytes are
+rejected. Two checksummed selection records retain current and last-good state.
+The original OS-installed executable remains a stable launcher outside the
+managed release root. On every later invocation it authenticates the currently
+selected managed slot and opens it, so it still reaches v2 after v0→v1→v2 even
+though the latest handoff names v1 as its prior release. Executables inside a
+managed slot remain release-specific and still fail closed on an unrelated
+identity mismatch; the launcher does not retain or walk a handoff chain.
+
+Activation is allowed only after playback is silent, the projector is closed,
+jobs and installers are idle, the backend is ready, and the database can be
+quiesced. Singhouse then creates and verifies a SQLite recovery point, persists
+an authenticated handoff, stops the old backend, and atomically selects the new
+slot. A small bootstrap waits for the old process to exit and launches only that
+verified selection. A stale old process may redirect only for the handoff's
+exact prior-to-target pair; every other identity mismatch is shown to the
+operator. Handoff completion is durable only after the target UI finishes
+loading, reaches Electron's `ready-to-show` boundary, is shown, completes two
+renderer animation frames, and yields a nonempty compositor capture. Merely
+calling `show()` is not an acknowledgement. A renderer crash after that call
+but before the frame evidence leaves the handoff incomplete, so the supervising
+launcher restores the paired prior application and database; an exit after the
+durable acknowledgement does not. Interrupted retrieval, extraction, backup,
+selection, or first startup therefore leaves an explicit retry/recovery state
+instead of guessing which application or database belongs together.
+
+The highest signed sequence accepted and the highest sequence successfully
+presented are stored durably with the handoff and selected-release record.
+Restarting cannot reset that anti-replay floor or substitute a different
+release at the same sequence. An interrupted exact staged release may be
+retried; recovery to its signed prior application preserves the floor, so any
+different later update must carry a higher signed sequence.
+
+Release versions use canonical `MAJOR.MINOR.PATCH` SemVer; this work does not
+assign a public release version. Patch releases are compatible corrections,
+minor releases add backward-compatible features or migrations, and major
+releases may intentionally change product or data contracts. The updater only
+accepts a version strictly newer than the installed version. Its signed schema
+history may not decrease, and its signed minimum-readable history must include
+the installed history; those checks are independent of the version number.
+Signed sequences increase strictly within one exact edition, channel, and
+policy identity and remain at their accepted floor through rollback or
+recovery. Core and premium releases share a coordinated release train and app
+version: a premium target binds the exact new core release ID, while its signed
+rollback payload retains the exact old core/premium pair. Core has no premium
+license enforcement; it checks only the generic signed edition and policy
+identity.
+
+Update-bound recovery always restores the exact prior managed application and
+its database as one transaction. It cannot be invoked through the ordinary
+database-only restore action, and a recovery point written by another release
+is likewise rejected. Before quiescing, each update copies the currently
+attested application runtime, native Python recovery helper, minimal verifier,
+and recovery implementation to a point-specific
+`recovery-tool/kits/kit-<recovery-point>/` beside (not inside) both
+managed release slots. It therefore needs neither a system Node installation
+nor a working target slot. The stable first-install executable is recorded by
+exact path and digest outside the kit. Bootstrap, Python, and native-helper
+bytes are recorded by digest but resolved anew inside the authenticated
+installer application on every launch. Linux must not derive the stable
+executable from ambient `APPIMAGE` or `APPDIR`; those variables are untrusted
+hints. AppImage anchor creation, rotation, standalone recovery, and therefore
+update enablement fail closed until a qualified release supplies a native/detached
+verifier that binds the exact outer-image bytes to the real active mount. Every
+immutable kit calls one stable per-user invoker, which a verified reinstall may
+atomically retarget after an authorized install-directory relocation without
+rewriting old kits. Automatic recovery uses the already-running authenticated
+bootstrap; standalone recovery starts the current anchor application and
+applies its platform signature hook. The stable native helper verifies the complete kit inventory
+before it executes any retained Electron or recovery-code byte. A missing or
+damaged anchor fails closed with a reinstall/recovery instruction. On POSIX it
+additionally checks current-user ownership and private permission bits. The
+native-verified stable installer owns that anchor and atomically repairs a
+corrupt anchor or rotates one whose installed executable/helper digests have
+changed during a verified reinstall; managed update targets can only read and
+verify it. A bundled release receipt authenticates modeled inner files but
+cannot authenticate the wrapper that supplied it. Linux and Windows anchor
+rotation remain disabled pending their qualified trust hooks;
+macOS additionally requires its enabled `codesign` gate. An explicitly
+update-disabled build leaves anchor state untouched, so
+ordinary first launch does not depend on unavailable signing hooks. Reinstalling
+changes no library or recovery-point data. The
+standalone entry is the reported kit's `recover.sh` on Linux/macOS and
+`recover.cmd` on Windows; pass the application-data directory,
+the reported recovery-point identifier, and its `backend/` library directory.
+Each immutable kit manifest binds the exact recovery point, signed update,
+prior and target release identities, and sequence. The authenticated handoff
+atomically selects that already-durable kit; an aborted attempt before the
+handoff journal is published leaves every earlier compatible kit intact.
+The UI reports the recovery-point identifier if handoff fails; keep the staged
+metadata, prior managed slot, recovery point, and recovery kit together for
+diagnosis. A completed recovery transaction is retained until a later fully
+verified target has loaded and been shown, at which point that handoff durably
+supersedes it. It therefore cannot block all future updates or be mistaken for
+the new rollback after an interrupted presentation.
+
+The replaceable prior slot is never an executable recovery source. One native
+paired-recovery transaction holds `owner.lock` continuously while it verifies
+and copies the complete retained-kit application into that slot, restores
+SQLite, and durably commits the active pointer and completion record. Competing
+launches are blocked throughout those mutation boundaries. After success the
+helper releases ownership and immediately starts the exact recovered entrypoint,
+so that recovered backend can acquire `owner.lock` normally.
+
+Manual and update-bound recovery use separate durable latest pointers. The UI
+offers only the newest verified manual point for database-only restore, while
+the read-only **Show update recovery information** action reports the update
+point and versioned kit selected by the authenticated handoff journal. The authenticated
+handoff and standalone recovery path use that update point; creating either
+kind can never hide or reclassify the other.
+
+Linux launches the already-verified executable by descriptor. macOS verifies
+the selected app bundle with `codesign` before launch when that release-policy
+gate is enabled. Windows reserves the equivalent Authenticode gate; it fails
+closed until the qualified native verification hook and signing policy are
+enabled. The checked-in release policy explicitly disables updates and has an
+empty update trust root; its macOS and Windows gates are likewise disabled, so
+these builds cannot accidentally claim signed
+activation. Cross-platform tests exercise injectable launch/trust primitives.
+Recovery self-verification detects corruption and replacement by accounts that
+cannot also rewrite the current user's private state. Signed metadata, private
+permissions or ACLs, and held file handles do **not** defend against malware
+already running as that same user. In particular, coherent same-user
+replacement while verification is running, and coherent at-rest replacement
+of both a recovery kit and its manifest before recovery begins, are outside the
+supported boundary. No combination of the checks described here should be read
+as claiming otherwise.
+
+Within that boundary, each supported platform uses non-symlink leaf checks,
+exact inventory verification immediately before launch, authenticated update
+metadata, private managed slots, and fail-closed OS-signing policy hooks.
+Current-user ownership and group/world mode enforcement are POSIX guarantees
+only. Windows ACL and Authenticode enforcement remain disabled and fail closed
+pending Windows/macOS packaging trust qualification, which also
+owns real Windows x64 and macOS arm64 signing, crash, and clean-machine release
+qualification.
 
 To use a different payload path, set `KARAOKE_NATIVE_PAYLOAD` for packaging:
 
@@ -80,11 +266,14 @@ it defaults to the host. Cross-assembly does not execute target Python or
 FFmpeg. Its provenance marks the result `UNTESTED`, requiring execution on the
 target machine. Windows payload staging is possible on another supported host;
 build and test its installer on Windows. `--cache <directory>` selects a build
-cache. For a source export without `.git`, also pass
-`--source-commit <40-hex-commit>`; provenance records that export cleanliness
-cannot be independently established.
+cache. An export without `.git` can be assembled for inspection with
+`--source-commit <40-hex-commit>`, but it cannot be packaged as a release. A
+future export path must authenticate the complete source inventory rather than
+trust a caller-supplied commit string. Release packaging currently requires a
+clean Git checkout whose exact HEAD matches the native provenance, including a
+clean full untracked-file status.
 
-Each payload includes `manifest.json`, `files.json`, `provenance.json`, and
+Each native payload includes `manifest.json`, `files.json`, `assembly.json`, `provenance.json`, and
 `notices/` to identify its runtime, file hashes, upstream inputs, installed
 packages, and licenses. Preserve these with the artifact.
 
@@ -164,10 +353,12 @@ Installation checks free disk space, takes an exclusive lock, resumes partial
 files where supported, checks every size and hash, and synchronizes payload files
 and directory metadata through a fixed helper in the bundled playback Python.
 POSIX requires directory `fsync`; Windows uses `MoveFileExW` with
-`MOVEFILE_WRITE_THROUGH`, `FlushFileBuffers`, and a volume-flush fallback when
-directory handles cannot flush metadata. If the OS or account denies both
-metadata-flush routes, installation fails without claiming activation; the app
-does not request elevation. Both staging-to-pack moves and inactive pointer-slot
+`MOVEFILE_WRITE_THROUGH` and `FlushFileBuffers` on ordinary-user file and
+directory handles inside the application-owned subtree, through their narrow
+common ancestor. It never opens a raw volume or climbs into unrelated protected
+ancestors. If any required metadata handle cannot be flushed, installation
+fails before replacement without claiming activation; the app does not request
+elevation. Both staging-to-pack moves and inactive pointer-slot
 replacement use this native durability path. Two checksummed pointer slots keep
 the previous verified selection recoverable if an interrupted commit loses new
 directory entries. This engineering contract does not establish physical Windows

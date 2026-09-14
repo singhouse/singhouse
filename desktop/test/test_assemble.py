@@ -21,6 +21,18 @@ finally:
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_generic_assembly_descriptor_binds_opaque_payload_and_pairing(self):
+        files = {"backend.py": "a" * 64, "static/index.html": "b" * 64}
+        core = assemble.assembly_descriptor(files)
+        self.assertEqual(core["kind"], "singhouse-assembly")
+        self.assertNotIn("pairedCoreReleaseId", core)
+        premium = assemble.assembly_descriptor(files, "premium", "c" * 64)
+        self.assertEqual(premium["pairedCoreReleaseId"], "c" * 64)
+        with self.assertRaisesRegex(ValueError, "exact paired"):
+            assemble.assembly_descriptor(files, "premium")
+        with self.assertRaisesRegex(ValueError, "cannot declare"):
+            assemble.assembly_descriptor(files, "core", "c" * 64)
+
     def test_executable_unpack_supports_existing_gzip_and_pinned_single_member_zip(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
