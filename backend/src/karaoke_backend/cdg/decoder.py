@@ -13,6 +13,8 @@ numpy.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .spec import (
@@ -22,6 +24,7 @@ from .spec import (
     CDG_MEMORY_PRESET,
     CDG_TILE_NORMAL,
     CDG_TILE_XOR,
+    MAX_DECODE_PACKETS,
     PACKET_BYTES,
     PACKETS_PER_SEC,
     SC_CDG_COMMAND,
@@ -33,14 +36,27 @@ from .spec import (
 
 
 class Decoder:
-    """Replays subcode packets into a 300x216 indexed framebuffer."""
+    """Replays a bounded packet stream into a 300x216 indexed framebuffer.
+
+    The counter is a second line of defence for incremental callers. Bulk
+    callers should use :func:`decode_at`, which can reject an oversized stream
+    before dispatching even its first packet.
+    """
 
     def __init__(self):
         self.framebuffer = np.zeros((SCREEN_H, SCREEN_W), dtype=np.uint8)
         self.clut: list[tuple[int, int, int]] = [(0, 0, 0)] * 16
+        self.packets_applied = 0
 
     def apply(self, pkt: bytes) -> None:
         """Apply one 24-byte packet. Non-CD+G subcode packets are ignored."""
+        if self.packets_applied >= MAX_DECODE_PACKETS:
+            raise ValueError(
+                f"CD+G decode exceeds the {MAX_DECODE_PACKETS}-packet limit"
+            )
+        # Every packet costs dispatch CPU even when it is a no-op or malformed,
+        # so every call consumes the budget rather than only recognised writes.
+        self.packets_applied += 1
         if len(pkt) < 20 or (pkt[0] & 0x3F) != SC_CDG_COMMAND:
             return
         instr = pkt[1] & 0x3F
@@ -101,9 +117,24 @@ def iter_packets(stream: bytes):
 
 
 def decode_at(stream: bytes, seconds: float) -> Decoder:
-    """Decode a .cdg stream up to `seconds` and return the resulting screen."""
+    """Decode a bounded .cdg stream through ``seconds``.
+
+    A stream of exactly :data:`MAX_DECODE_PACKETS` whole packets is accepted;
+    one packet more is refused before a ``Decoder`` is constructed or
+    ``Decoder.apply`` is called. As before, a trailing partial packet is
+    ignored and time zero includes packet zero.
+    """
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError(f"decode time must be a finite non-negative number, got {seconds!r}")
+
+    packet_count = len(stream) // PACKET_BYTES
+    if packet_count > MAX_DECODE_PACKETS:
+        raise ValueError(
+            f"CD+G stream has {packet_count} packets; limit is {MAX_DECODE_PACKETS}"
+        )
+
     decoder = Decoder()
-    last = min(int(seconds * PACKETS_PER_SEC), len(stream) // PACKET_BYTES - 1)
-    for i in range(max(0, last) + 1):
+    last = min(int(seconds * PACKETS_PER_SEC), packet_count - 1)
+    for i in range(last + 1):
         decoder.apply(stream[i * PACKET_BYTES : (i + 1) * PACKET_BYTES])
     return decoder
