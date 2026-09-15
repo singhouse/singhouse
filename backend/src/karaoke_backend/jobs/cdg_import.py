@@ -142,15 +142,32 @@ def _prepare_source(upload: Path, work: Path) -> tuple[Path, Path | None]:
 
 
 def _run(cmd: list[str], timeout: int) -> None:
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError as exc:
-        raise CdgImportError("ffmpeg is required to import CD+G files.") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CdgImportError("ffmpeg timed out while importing this CD+G file.") from exc
-    if result.returncode:
-        logger.error("ffmpeg failed during CD+G import: %s", (result.stderr or "")[-1000:])
-        raise CdgImportError("ffmpeg could not prepare this CD+G file.")
+    # Decoder diagnostics are attacker-influenced and can be much larger than
+    # the media. Keep them off the heap, retaining only a small tail on error.
+    with tempfile.TemporaryFile() as errors:
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=errors,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise CdgImportError("ffmpeg is required to import CD+G files.") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CdgImportError(
+                "ffmpeg timed out while importing this CD+G file."
+            ) from exc
+        if result.returncode:
+            logger.error("ffmpeg failed during CD+G import: %s", _tail(errors))
+            raise CdgImportError("ffmpeg could not prepare this CD+G file.")
+
+
+def _tail(stream, limit: int = 1000) -> str:
+    """Read at most ``limit`` trailing bytes from a disk-backed subprocess log."""
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - limit))
+    return stream.read(limit).decode(errors="replace")
 
 
 def _make_audio(source: Path | None, dest: Path, duration: float) -> None:
@@ -304,14 +321,36 @@ async def run_cdg_import(ctx: JobContext) -> str:
 def _probe_duration(path: Path) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise CdgImportError("ffprobe could not read the prepared audio track.") from exc
-    try:
-        duration = float(proc.stdout.strip())
-    except (ValueError, AttributeError) as exc:
-        raise CdgImportError("The prepared audio track has no usable duration.") from exc
-    if proc.returncode or not math.isfinite(duration) or duration <= 0:
-        raise CdgImportError("The prepared audio track has no usable duration.")
+    # Even ffprobe's output is derived from caller media. Disk-backed streams
+    # keep a corrupt file from amplifying diagnostics into process memory.
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=output,
+                stderr=errors,
+                timeout=_PROBE_TIMEOUT,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise CdgImportError(
+                "ffprobe could not read the prepared audio track."
+            ) from exc
+        output.seek(0)
+        raw_duration = output.read(128)
+        too_much_output = bool(output.read(1))
+        try:
+            duration = float(raw_duration.strip())
+        except (ValueError, TypeError) as exc:
+            raise CdgImportError(
+                "The prepared audio track has no usable duration."
+            ) from exc
+        if (
+            proc.returncode
+            or too_much_output
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
+            if proc.returncode:
+                logger.error("ffprobe failed during CD+G import: %s", _tail(errors))
+            raise CdgImportError("The prepared audio track has no usable duration.")
     return duration

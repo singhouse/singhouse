@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -22,6 +23,8 @@ from karaoke_backend.jobs.cdg_import import (
     MAX_ARCHIVE_ENTRIES,
     MAX_CDG_BYTES,
     _make_audio,
+    _probe_duration,
+    _run,
     _safe_members,
     _render,
     completed,
@@ -202,6 +205,96 @@ def test_render_watchdog_bounds_the_stdin_write_phase(tmp_path, monkeypatch):
 
     with pytest.raises(CdgImportError, match="timed out"):
         _render(source, tmp_path / "video.mp4")
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="FFmpeg tools are not installed",
+)
+def test_real_render_produces_one_second_h264_playback_artifact(tmp_path):
+    source = tmp_path / "graphics.cdg"
+    source.write_bytes(NOOP_PACKET * 300)
+    video = tmp_path / "video.mp4"
+
+    assert _render(source, video) == 1.0
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,width,height,duration",
+            "-of",
+            "json",
+            str(video),
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=10,
+    )
+    stream = json.loads(probe.stdout)["streams"][0]
+    assert stream["codec_name"] == "h264"
+    assert stream["pix_fmt"] == "yuv420p"
+    assert (stream["width"], stream["height"]) == (300, 216)
+    assert float(stream["duration"]) == pytest.approx(1.0, abs=0.05)
+
+
+def test_media_subprocess_output_is_disk_backed_and_read_in_bounded_chunks(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def run(_cmd, **kwargs):
+        calls.append(
+            {
+                "stdout_is_devnull": kwargs["stdout"] == subprocess.DEVNULL,
+                "stdout_is_file": hasattr(kwargs["stdout"], "fileno"),
+                "stderr_is_file": hasattr(kwargs["stderr"], "fileno"),
+                "captures_in_memory": "capture_output" in kwargs,
+            }
+        )
+        if kwargs["stdout"] != subprocess.DEVNULL:
+            kwargs["stdout"].write(b"2.0\n")
+        kwargs["stderr"].write(b"x" * 5000)
+        return Mock(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    _run(["ffmpeg"], 1)
+    assert _probe_duration(tmp_path / "audio.flac") == 2.0
+
+    assert calls == [
+        {
+            "stdout_is_devnull": True,
+            "stdout_is_file": False,
+            "stderr_is_file": True,
+            "captures_in_memory": False,
+        },
+        {
+            "stdout_is_devnull": False,
+            "stdout_is_file": True,
+            "stderr_is_file": True,
+            "captures_in_memory": False,
+        },
+    ]
+
+
+def test_failed_media_command_logs_only_a_bounded_diagnostic_tail(monkeypatch):
+    def run(_cmd, **kwargs):
+        kwargs["stderr"].write(b"prefix" + b"x" * 5000)
+        return Mock(returncode=1)
+
+    log = Mock()
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(cdg_import_job.logger, "error", log)
+
+    with pytest.raises(CdgImportError, match="could not prepare"):
+        _run(["ffmpeg"], 1)
+
+    assert log.call_args.args[1] == "x" * 1000
 
 
 @pytest.mark.parametrize("with_source", [False, True])
