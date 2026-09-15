@@ -243,9 +243,7 @@ def test_real_render_produces_one_second_h264_playback_artifact(tmp_path):
     assert float(stream["duration"]) == pytest.approx(1.0, abs=0.05)
 
 
-def test_media_subprocess_output_is_disk_backed_and_read_in_bounded_chunks(
-    tmp_path, monkeypatch
-):
+def test_media_subprocess_diagnostics_are_discarded(tmp_path, monkeypatch):
     calls = []
 
     def run(_cmd, **kwargs):
@@ -253,13 +251,12 @@ def test_media_subprocess_output_is_disk_backed_and_read_in_bounded_chunks(
             {
                 "stdout_is_devnull": kwargs["stdout"] == subprocess.DEVNULL,
                 "stdout_is_file": hasattr(kwargs["stdout"], "fileno"),
-                "stderr_is_file": hasattr(kwargs["stderr"], "fileno"),
+                "stderr_is_devnull": kwargs["stderr"] == subprocess.DEVNULL,
                 "captures_in_memory": "capture_output" in kwargs,
             }
         )
         if kwargs["stdout"] != subprocess.DEVNULL:
             kwargs["stdout"].write(b"2.0\n")
-        kwargs["stderr"].write(b"x" * 5000)
         return Mock(returncode=0)
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -270,31 +267,16 @@ def test_media_subprocess_output_is_disk_backed_and_read_in_bounded_chunks(
         {
             "stdout_is_devnull": True,
             "stdout_is_file": False,
-            "stderr_is_file": True,
+            "stderr_is_devnull": True,
             "captures_in_memory": False,
         },
         {
             "stdout_is_devnull": False,
             "stdout_is_file": True,
-            "stderr_is_file": True,
+            "stderr_is_devnull": True,
             "captures_in_memory": False,
         },
     ]
-
-
-def test_failed_media_command_logs_only_a_bounded_diagnostic_tail(monkeypatch):
-    def run(_cmd, **kwargs):
-        kwargs["stderr"].write(b"prefix" + b"x" * 5000)
-        return Mock(returncode=1)
-
-    log = Mock()
-    monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(cdg_import_job.logger, "error", log)
-
-    with pytest.raises(CdgImportError, match="could not prepare"):
-        _run(["ffmpeg"], 1)
-
-    assert log.call_args.args[1] == "x" * 1000
 
 
 @pytest.mark.parametrize("with_source", [False, True])

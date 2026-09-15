@@ -143,31 +143,24 @@ def _prepare_source(upload: Path, work: Path) -> tuple[Path, Path | None]:
 
 def _run(cmd: list[str], timeout: int) -> None:
     # Decoder diagnostics are attacker-influenced and can be much larger than
-    # the media. Keep them off the heap, retaining only a small tail on error.
-    with tempfile.TemporaryFile() as errors:
-        try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=errors,
-                timeout=timeout,
-            )
-        except FileNotFoundError as exc:
-            raise CdgImportError("ffmpeg is required to import CD+G files.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise CdgImportError(
-                "ffmpeg timed out while importing this CD+G file."
-            ) from exc
-        if result.returncode:
-            logger.error("ffmpeg failed during CD+G import: %s", _tail(errors))
-            raise CdgImportError("ffmpeg could not prepare this CD+G file.")
-
-
-def _tail(stream, limit: int = 1000) -> str:
-    """Read at most ``limit`` trailing bytes from a disk-backed subprocess log."""
-    stream.seek(0, os.SEEK_END)
-    stream.seek(max(0, stream.tell() - limit))
-    return stream.read(limit).decode(errors="replace")
+    # the media. Discard them rather than moving an unbounded stream from RAM
+    # to a temporary file that could fill the host's filesystem.
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise CdgImportError("ffmpeg is required to import CD+G files.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CdgImportError(
+            "ffmpeg timed out while importing this CD+G file."
+        ) from exc
+    if result.returncode:
+        logger.error("ffmpeg failed during CD+G import (exit %d)", result.returncode)
+        raise CdgImportError("ffmpeg could not prepare this CD+G file.")
 
 
 def _make_audio(source: Path | None, dest: Path, duration: float) -> None:
@@ -323,12 +316,12 @@ def _probe_duration(path: Path) -> float:
            "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
     # Even ffprobe's output is derived from caller media. Disk-backed streams
     # keep a corrupt file from amplifying diagnostics into process memory.
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+    with tempfile.TemporaryFile() as output:
         try:
             proc = subprocess.run(
                 cmd,
                 stdout=output,
-                stderr=errors,
+                stderr=subprocess.DEVNULL,
                 timeout=_PROBE_TIMEOUT,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
@@ -351,6 +344,6 @@ def _probe_duration(path: Path) -> float:
             or duration <= 0
         ):
             if proc.returncode:
-                logger.error("ffprobe failed during CD+G import: %s", _tail(errors))
+                logger.error("ffprobe failed during CD+G import (exit %d)", proc.returncode)
             raise CdgImportError("The prepared audio track has no usable duration.")
     return duration
