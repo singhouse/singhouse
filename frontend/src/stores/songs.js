@@ -103,7 +103,7 @@ export const useSongsStore = defineStore('songs', () => {
     }, 3000)
   }
 
-  // Both ingest paths — stem separation and karaoke-video import — have the
+  // All ingest paths — separation, prepared video, and CDG — have the
   // same shape: register an upload row, POST the file with progress, then poll
   // the job to completion, refreshing the library as it goes. Only the request
   // itself differs, so the caller hands one in. Keeping a single body means the
@@ -165,6 +165,11 @@ export const useSongsStore = defineStore('songs', () => {
   function importVideoSong(file, artist = '', title = '') {
     return _runIngest(file, onProgress =>
       songApi.importVideo(file, onProgress, artist, title))
+  }
+
+  function importCdgSong(file, artist = '', title = '') {
+    return _runIngest(file, onProgress =>
+      songApi.importCdg(file, onProgress, artist, title))
   }
 
   async function pollJobUntilDone(uploadId, jobId) {
@@ -542,7 +547,7 @@ export const useSongsStore = defineStore('songs', () => {
   return {
     songs, currentSong, uploads, statusFilter, searchQuery, loading, error,
     filteredSongs, readySongs, processingCount,
-    fetchSongs, uploadSong, importVideoSong, loadSong, deleteSong,
+    fetchSongs, uploadSong, importVideoSong, importCdgSong, loadSong, deleteSong,
     fetchLyrics,
     listLyricsSets, activateLyricsSet, verifyLyricsSet, deleteLyricsSet,
     createManualLyricsSet, reTranscribe, realign, cacheStatus,

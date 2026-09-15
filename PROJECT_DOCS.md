@@ -322,9 +322,12 @@ input and ingest resumes off them.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/separate` | Import an audio file, create Song + queued ingest Job. Returns 202 + job id |
+| `POST` | `/api/import/cdg` | Import one bare CDG or same-basename MP3+G ZIP; renders bounded H.264 playback media |
 | `GET` | `/api/jobs/:job_id` | Poll job status / phase / progress |
 
 Upload limits: 500 MB max (`MAX_FILE_SIZE_MB`), MP3/WAV/FLAC/M4A/OGG/AAC.
+CDG import is single-song only: one `.cdg` or one exporter-compatible ZIP,
+with a 30-minute graphics packet ceiling and a 550 MB request cap.
 
 #### Lyric Sets
 

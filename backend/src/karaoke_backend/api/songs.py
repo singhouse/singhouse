@@ -72,8 +72,8 @@ class SongSummary(BaseModel):
     external_provider: Optional[str] = None
     lyrics_format_version: Optional[int] = None
     external_id: Optional[str] = None
-    # Whether this row was created by importing a karaoke video the operator
-    # already had — the video is retained and IS the song's picture. Defaults
+    # Whether this row has prepared picture media (an imported karaoke video
+    # or a bounded video rendered from CDG). The video IS the song's picture. Defaults
     # False, which is also what the guest projection serves (see
     # _GUEST_SONG_FIELDS: the field is deliberately not on the allowlist).
     has_video: bool = False
@@ -120,7 +120,7 @@ class SongDetail(SongSummary):
     # Derived from the active set's external_id + provider capability
     # (no filesystem stat) — the endpoint itself still 404s if unavailable.
     has_source_doc: bool = False
-    # Relative URL for the retained video, populated only when the song is
+    # Relative URL for the prepared video, populated only when the song is
     # ready AND the file is actually on disk. `has_video` (inherited from
     # SongSummary) answers "was this a video import"; this answers "can it be
     # played right now", which is the disk-checked question — same split as
@@ -189,6 +189,7 @@ SONG_PRODUCING_KINDS = (
     JobKind.INGEST.value,
     JobKind.PLEX_IMPORT.value,
     JobKind.VIDEO_IMPORT.value,
+    JobKind.CDG_IMPORT.value,
 )
 
 # What the retry response calls each of them. The message is shown verbatim,
@@ -198,6 +199,7 @@ _RETRY_NOUN = {
     JobKind.INGEST.value: "Ingest",
     JobKind.PLEX_IMPORT.value: "Media server import",
     JobKind.VIDEO_IMPORT.value: "Video import",
+    JobKind.CDG_IMPORT.value: "CD+G import",
 }
 
 
@@ -1090,7 +1092,7 @@ async def retry_ingest(
     # upload name adopts nothing — so it takes the same default-ingest path as
     # no row at all, and the upload check below tells the operator so.
     kind = last_job.kind if options_recovered else JobKind.INGEST.value
-    if kind != JobKind.VIDEO_IMPORT.value:
+    if kind not in (JobKind.VIDEO_IMPORT.value, JobKind.CDG_IMPORT.value):
         from karaoke_backend.workers.managed_processing import require_heart_model
         require_heart_model()
     stems_dir = INGEST_STEMS_DIR / str(song_id)
@@ -1119,7 +1121,7 @@ async def retry_ingest(
                 ),
             )
         enqueue_message = "Retrying media server import"
-    elif kind == JobKind.VIDEO_IMPORT.value:
+    elif kind in (JobKind.VIDEO_IMPORT.value, JobKind.CDG_IMPORT.value):
         # Verbatim, all of it: `run_video_import` reads only `upload_name`, and
         # neither artist nor title, so there is nothing here for a metadata
         # correction to have gone stale against.
@@ -1127,7 +1129,16 @@ async def retry_ingest(
         # An import that wrote both artifacts re-runs off them (the handler's
         # own re-entry gate) and needs no upload; one that did not has nothing
         # else to adopt.
-        if completed_video_name(stems_dir) is None:
+        if kind == JobKind.CDG_IMPORT.value:
+            from karaoke_backend.jobs.cdg_import import completed as import_complete
+            complete = import_complete(stems_dir)
+            medium = "CD+G file"
+            retry_instruction = "upload the file again"
+        else:
+            complete = completed_video_name(stems_dir) is not None
+            medium = "video"
+            retry_instruction = "upload the video again"
+        if not complete:
             upload_name = payload.get("upload_name")
             # Basename-checked for the same reason as the ingest branch below.
             upload_name = Path(str(upload_name)).name if upload_name else ""
@@ -1140,13 +1151,16 @@ async def retry_ingest(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        f"The video song {song_id} was imported from is no "
+                        f"The {medium} song {song_id} was imported from is no "
                         f"longer on disk (missing: "
                         f"{upload_name or 'no file recorded'}) and the import "
-                        f"never finished — upload the video again."
+                        f"never finished — {retry_instruction}."
                     ),
                 )
-        enqueue_message = "Retrying video import"
+        enqueue_message = (
+            "Retrying CD+G import" if kind == JobKind.CDG_IMPORT.value
+            else "Retrying video import"
+        )
     else:
         if options_recovered:
             payload = dict(recovered)

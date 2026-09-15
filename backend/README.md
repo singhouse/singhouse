@@ -498,6 +498,7 @@ means no authentication.
 | `GET /api/features` | session | Operator-gated capability flags (lyrics lookup opt-in state, CD+G export availability) |
 | `GET /api/export/settings` | session | Read the export settings (attribution-card toggle) |
 | `PUT /api/export/settings` | session | Update the export settings |
+| `POST /api/import/cdg` | session | Import one bare `.cdg` or exporter-compatible same-basename MP3+G zip |
 | `GET /api/export/songs/{id}` | session | Download the song as an MP3+G zip (`?format=mp3g`, default) or bare `.cdg` (`?format=cdg`); `501` when the optional export extra is not installed |
 | `GET /api/catalog/providers` | session or guest | Installed catalog providers — `[]` on a stock install (core ships none) |
 

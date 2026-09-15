@@ -663,6 +663,27 @@ async def test_retry_of_a_finished_video_import_needs_no_upload(client: AsyncCli
     assert resp.json()["kind"] == "video_import"
 
 
+@pytest.mark.asyncio
+async def test_retry_of_an_unfinished_cdg_import_with_source_gone_is_409(
+    client: AsyncClient,
+):
+    upload = Path(os.environ["UPLOADS_DIR"]) / "cdg-gone_song.cdg"
+    upload.write_bytes(b"fake cdg bytes")
+    song_id = await _failed_import_song(
+        kind=JobKind.CDG_IMPORT.value, job_id="cdg-gone",
+        payload={"upload_name": upload.name},
+    )
+    upload.unlink()
+
+    resp = await client.post(f"/api/songs/{song_id}/retry")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert upload.name in detail
+    assert "CD+G file" in detail
+    assert "upload the file again" in detail
+
+
 # ---------------------------------------------------------------------------
 # The other end of the retained upload: deleting the song
 # ---------------------------------------------------------------------------

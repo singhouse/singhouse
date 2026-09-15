@@ -71,6 +71,7 @@ class JobKind(str, enum.Enum):
     RESPLIT = "resplit"
     CATALOG_IMPORT = "catalog_import"
     VIDEO_IMPORT = "video_import"
+    CDG_IMPORT = "cdg_import"
     PLEX_IMPORT = "plex_import"
 
 
@@ -134,11 +135,11 @@ class Song(Base):
     # NULL preserves the legacy flat layout without a backfill.
     active_stem_generation: Optional[str] = Column(String(64), nullable=True)
     # Basename — never a path — of a karaoke video retained inside this song's
-    # stems directory (e.g. "video.mp4"). Set only by the video-import job,
-    # which keeps the operator's own file as the song's display content and
-    # extracts its audio into the usual instrumental stem so playback runs
-    # through the existing mixer. NULL on every other song: no video, and the
-    # player falls back to its own rendering.
+    # stems directory (e.g. "video.mp4"). Set by prepared-media imports: the
+    # video importer retains the operator's file, while CDG import renders its
+    # bounded graphics stream to H.264. Both put audio in the usual
+    # instrumental stem so playback runs through the existing mixer. NULL on
+    # every other song: no prepared picture, and the player renders lyrics.
     video_filename: Optional[str] = Column(String(512), nullable=True)
     job_id: Optional[str] = Column(String(64), nullable=True, index=True)  # Modal job reference
     active_lyrics_id: Optional[int] = Column(

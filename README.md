@@ -6,7 +6,8 @@ mixing, key shift, and a popout projector display.
 
 ## What It Does
 
-1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG
+1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG,
+   a bare CDG, or a same-basename MP3+G ZIP
 2. **Two-pass stem separation** — Demucs (`mdx_extra`) splits vocals vs.
    instrumental, then mel_band_roformer splits lead vs. backing vocals.
    Runs locally on your GPU (CPU fallback), or on your own Modal deployment
@@ -252,6 +253,7 @@ singhouse/
 | Health | `GET /health` |
 | Songs | `GET/PATCH/DELETE /api/songs[/:id]`, `GET /api/songs/:id/stems/:file` |
 | Import + separation | `POST /api/separate`, `GET /api/jobs/:id` |
+| Single-song CDG / MP3+G import | `POST /api/import/cdg` |
 | Lyric sets | `GET/POST/PATCH/DELETE /api/songs/:id/lyrics[/:setId]`, `POST …/transcribe`, `POST …/realign` |
 | Lyrics lookup | `GET /api/lyrics?artist=&title=` (503 unless the opt-in lookup is enabled) |
 | Queue | `GET/POST/DELETE /api/queue`, `PUT /api/queue/order` |
