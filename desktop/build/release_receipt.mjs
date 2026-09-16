@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { chmod, link, mkdir, open, readFile, rm, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes } from '../release.mjs'
+import { allowedPortableCaseAlias, canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes } from '../release.mjs'
 export { PORTABLE_MAGIC, inspectPortablePayload } from '../release.mjs'
 
 const execFile = promisify(execFileCallback)
@@ -140,7 +140,7 @@ export async function createPortablePayload({ sourceDirectory, output, identity,
   for (const file of inventory) {
     const folded = file.path.toLowerCase()
     const prior = foldedPaths.get(folded)
-    if (prior && !(platform === 'linux' && prior.startsWith('resources/native/python/share/terminfo/') && file.path.startsWith('resources/native/python/share/terminfo/'))) {
+    if (prior && !allowedPortableCaseAlias(platform, prior, file.path)) {
       throw new Error('Portable payload contains case-colliding paths')
     }
     foldedPaths.set(folded, file.path)

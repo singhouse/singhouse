@@ -73,7 +73,16 @@ test('Linux payload permits the pinned Python terminfo case aliases only', async
       await mkdir(resolve(path, '..'), { recursive: true }); await writeFile(path, name)
     }
     const identity = await identityFor(app)
-    await createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'terminfo.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint })
+    const result = await createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'terminfo.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint })
+    const files = result.header.files.map(record => record.type === 'file'
+      ? { type: 'file', path: record.path, sha256: record.sha256 }
+      : record.type === 'directory' ? { type: 'directory', path: record.path }
+        : { type: 'symlink', path: record.path, target: record.target })
+    const receipt = { schema: 1, kind: 'singhouse-release-receipt', identity, target: { platform: 'linux', arch: 'x64' },
+      application: { schema: 1, entrypoint, inventoryDigest: sha256Hex(canonicalJson(files)), files } }
+    const observed = new Map(files.map(record => [record.path, record.type === 'file' ? record.sha256 : record.type === 'directory' ? 'directory' : `symlink:${record.target}`]))
+    observed.set('resources/release-receipt.json', sha256Hex('receipt'))
+    assert.equal(validateInstalledReleaseReceipt(receipt, observed, { platform: 'linux', arch: 'x64' }).releaseId, identity.releaseId)
     await writeFile(resolve(app, 'A'), 'one'); await writeFile(resolve(app, 'a'), 'two')
     await assert.rejects(createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'collision.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint }), /case-colliding/)
   } finally { await rm(temporary, { recursive: true, force: true }) }

@@ -16,6 +16,11 @@ const I = pow(2n, (P - 1n) / 4n)
 const IDENTITY = { x: 0n, y: 1n }
 export const PORTABLE_MAGIC = Buffer.from('SINGHOUSEAPP\0\r\n\x1a', 'binary')
 const SAFE_PORTABLE_PART = /^[A-Za-z0-9@._+() -]+$/
+export function allowedPortableCaseAlias(platform, prior, path) {
+  return platform === 'linux' && typeof prior === 'string' && typeof path === 'string'
+    && prior.startsWith('resources/native/python/share/terminfo/')
+    && path.startsWith('resources/native/python/share/terminfo/')
+}
 function safePortablePath(value) {
   return typeof value === 'string' && value.length > 0 && value.length < 1024 && !value.startsWith('/') && !value.includes('\\') && value.split('/').every(part =>
     SAFE_PORTABLE_PART.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
@@ -203,7 +208,7 @@ export function parsePortablePayload(bytes) {
   for (const file of header.files) {
     const lower = String(file?.path).toLowerCase()
     const prior = folded.get(lower)
-    const allowedTerminfoAlias = prior && header.target.platform === 'linux' && prior.startsWith('resources/native/python/share/terminfo/') && file?.path?.startsWith('resources/native/python/share/terminfo/')
+    const allowedTerminfoAlias = allowedPortableCaseAlias(header.target.platform, prior, file?.path)
     if (!file || !safePortablePath(file.path) || file.path <= previous || (prior && !allowedTerminfoAlias) || !['file', 'directory', 'symlink'].includes(file.type)) throw new Error('Invalid portable inventory')
     if (file.type === 'file') {
       if (Object.keys(file).sort().join(',') !== 'mode,offset,path,sha256,size,type' || file.offset !== next || !Number.isSafeInteger(file.size) || file.size < 0 || ![0o644, 0o755].includes(file.mode) || !HEX_64.test(file.sha256)) throw new Error('Invalid portable file record')
@@ -243,15 +248,16 @@ export function validateInstalledReleaseReceipt(receipt, observedRecords, target
       receipt.application.inventoryDigest !== sha256Hex(canonicalJson(receipt.application.files)) ||
       receipt.application.inventoryDigest !== receipt.identity.applicationInventoryDigest) throw new Error('Installed release receipt evidence is inconsistent')
   const expected = new Map()
-  let previous = ''; const folded = new Set()
+  let previous = ''; const folded = new Map()
   for (const record of receipt.application.files) {
     const lower = String(record?.path).toLowerCase()
-    if (!record || !safePortablePath(record.path) || record.path <= previous || folded.has(lower) || !['file', 'directory', 'symlink'].includes(record.type) ||
+    const prior = folded.get(lower)
+    if (!record || !safePortablePath(record.path) || record.path <= previous || (prior && !allowedPortableCaseAlias(target.platform, prior, record.path)) || !['file', 'directory', 'symlink'].includes(record.type) ||
         (record.type === 'file' && (Object.keys(record).sort().join(',') !== 'path,sha256,type' || !HEX_64.test(record.sha256))) ||
         (record.type === 'directory' && Object.keys(record).sort().join(',') !== 'path,type') ||
         (record.type === 'symlink' && (Object.keys(record).sort().join(',') !== 'path,target,type' || !safePortablePath(record.target)))) throw new Error('Invalid installed application inventory')
     expected.set(record.path, record.type === 'file' ? record.sha256 : record.type === 'directory' ? 'directory' : `symlink:${record.target}`)
-    previous = record.path; folded.add(lower)
+    previous = record.path; folded.set(lower, record.path)
   }
   if (!expected.has(receipt.application.entrypoint)) throw new Error('Installed application entrypoint is absent from its receipt')
   for (const [path, value] of expected) if (observedRecords.get(path) !== value) throw new Error(`Installed application changed: ${path}`)
