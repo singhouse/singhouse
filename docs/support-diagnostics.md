@@ -40,6 +40,29 @@ For a release candidate, also preserve:
 - the recovery-point identifier shown by the application after an interrupted
   update.
 
+Singhouse does not write a separate persistent application log in this
+candidate. To capture one reproduction, close Singhouse and start the installed
+executable from a terminal with output redirected to a new file:
+
+```sh
+# Linux AppImage
+./Singhouse-*.AppImage >singhouse-reproduction.log 2>&1
+
+# macOS installed application
+/Applications/Singhouse.app/Contents/MacOS/Singhouse >singhouse-reproduction.log 2>&1
+```
+
+On Windows, replace the example path if you selected a different installation
+directory:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Singhouse\Singhouse.exe" *> .\singhouse-reproduction.log
+```
+
+Reproduce the problem once, close Singhouse, then review the captured file
+before sharing it. These commands do not change operating-system security
+settings.
+
 Do not share media, stems, lyrics, model weights, the application database,
 `settings.json`, session secrets, API keys, update signing keys, access tokens,
 or full environment dumps. Review logs for local paths, usernames, song names,

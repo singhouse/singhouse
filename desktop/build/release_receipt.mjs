@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { chmod, link, mkdir, open, readFile, rm, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { allowedPortableCaseAlias, canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes } from '../release.mjs'
+import { allowedPortableCaseAlias, canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes, validatePortableSymlinkTargets } from '../release.mjs'
 export { PORTABLE_MAGIC, inspectPortablePayload } from '../release.mjs'
 
 const execFile = promisify(execFileCallback)
@@ -145,12 +145,7 @@ export async function createPortablePayload({ sourceDirectory, output, identity,
     }
     foldedPaths.set(folded, file.path)
   }
-  const names = new Map(inventory.map(record => [record.path, record]))
-  for (const record of inventory.filter(record => record.type === 'symlink')) {
-    if (!names.has(record.target)) throw new Error(`Portable symlink target is absent: ${record.path}`)
-    const seen = new Set([record.path]); let target = names.get(record.target)
-    while (target?.type === 'symlink') { if (seen.has(target.path)) throw new Error(`Portable symlink cycle: ${record.path}`); seen.add(target.path); target = names.get(target.target) }
-  }
+  validatePortableSymlinkTargets(inventory)
   if (inventory.find(file => file.path === entrypoint)?.mode !== 0o755 || !inventory.some(file => file.type === 'file' && /(^|\/)app\.asar$/.test(file.path)) || !inventory.some(file => file.type === 'file' && /(^|\/)native\/manifest\.json$/.test(file.path)) || !inventory.some(file => file.type === 'file' && /(^|\/)native\/files\.json$/.test(file.path))) throw new Error('Portable payload lacks executable entrypoint, app.asar, or native identity evidence')
   const header = { schema: 1, kind: 'singhouse-portable-application', identity, target: { platform, arch }, entrypoint, files: inventory }
   const headerBytes = Buffer.from(canonicalJson(header)); const length = Buffer.alloc(4); length.writeUInt32BE(headerBytes.length)

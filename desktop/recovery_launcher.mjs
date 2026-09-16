@@ -26,7 +26,11 @@ function cmdQuotedLiteral(value) {
   return `"${value.replaceAll('%', '%%')}"`
 }
 
-function safeFile(path, label, { required = true, source = false } = {}) {
+export function trustedSourceFileMetadata(info, { requireOwner = true, currentUid = typeof process.getuid === 'function' ? process.getuid() : null } = {}) {
+  return currentUid === null || ((!requireOwner || info.uid === currentUid) && !(info.mode & 0o022))
+}
+
+function safeFile(path, label, { required = true, source = false, requireOwner = true } = {}) {
   if (!isAbsolute(path)) throw new Error(`${label} must be an absolute path`)
   let info
   try { info = lstatSync(path) } catch (error) {
@@ -34,28 +38,38 @@ function safeFile(path, label, { required = true, source = false } = {}) {
     throw error
   }
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${label} must be a regular non-symlink file`)
-  if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || info.mode & (source ? 0o022 : 0o077))) {
+  if (typeof process.getuid === 'function' && (source ? !trustedSourceFileMetadata(info, { requireOwner }) : info.uid !== process.getuid() || info.mode & 0o077)) {
     throw new Error(`${label} must be private and owned by the current user`)
   }
   return info
 }
 
-function safeDirectory(path, label, { source = false } = {}) {
+function safeDirectory(path, label, { source = false, requireOwner = true } = {}) {
   const info = lstatSync(path)
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${label} must be a non-symlink directory`)
-  if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || info.mode & (source ? 0o022 : 0o077))) {
+  if (typeof process.getuid === 'function' && ((requireOwner && info.uid !== process.getuid()) || info.mode & (source ? 0o022 : 0o077))) {
     throw new Error(`${label} must be private and owned by the current user`)
   }
   return info
 }
 
-function canonicalFile(path, label) {
+function canonicalFile(path, label, { requireOwner = true } = {}) {
   if (!isAbsolute(path || '') || path !== resolve(path)) throw new Error(`${label} must use its exact canonical path`)
   let canonical
   try { canonical = realpathSync(path) } catch { throw new Error(`${label} must use its exact canonical path`) }
   if (canonical !== path) throw new Error(`${label} must use its exact canonical path`)
-  safeFile(path, label, { source: true })
+  safeFile(path, label, { source: true, requireOwner })
   return path
+}
+
+function mountedFile(path, label, mount) {
+  if (!isAbsolute(path || '') || path !== resolve(path)) throw new Error(`${label} must use its exact canonical path`)
+  let target
+  try { target = realpathSync(path) } catch { throw new Error(`${label} must stay inside the verified AppImage mount`) }
+  const rel = relative(mount, target)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`${label} must stay inside the verified AppImage mount`)
+  safeFile(target, label, { source: true, requireOwner: false })
+  return target
 }
 
 const APPIMAGE_LAYOUT = Object.freeze({
@@ -134,7 +148,10 @@ export function verifiedAppImageRuntime({ platform = process.platform, executabl
   if (executablePath !== resolve(executablePath) || actualExecutablePath !== executablePath || selfExecutable !== actualExecutablePath) {
     throw new Error('AppImage runtime executable is not canonical')
   }
-  canonicalFile(actualExecutablePath, 'AppImage runtime executable')
+  // AppImageKit's `-all-root` SquashFS contents are root-owned even when an
+  // ordinary desktop user mounts and launches the image. The read-only FUSE
+  // mount and authenticated outer-image ancestry provide ownership here.
+  canonicalFile(actualExecutablePath, 'AppImage runtime executable', { requireOwner: false })
   let mount
   try { mount = appImageMount(readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8'), actualExecutablePath) } catch {}
   if (!mount || mount.mountPath !== dirname(actualExecutablePath) || basename(actualExecutablePath) !== APPIMAGE_LAYOUT.actualExecutablePath) {
@@ -171,10 +188,13 @@ export function verifiedAppImageRuntime({ platform = process.platform, executabl
 }
 
 export function exactComponentLayout(platform, paths, verifiedAppImage = null) {
-  for (const [name, path] of Object.entries(paths)) canonicalFile(path, `Recovery anchor ${name}`)
   if (platform === 'linux') {
     const outer = stableFirstInstallerExecutable({ platform, executablePath: verifiedAppImage?.actualExecutablePath,
       verifiedAppImage })
+    canonicalFile(paths.executablePath, 'Recovery anchor executablePath')
+    for (const name of ['bootstrapPath', 'pythonPath', 'helperPath']) {
+      mountedFile(paths[name], `Recovery anchor ${name}`, verifiedAppImage.mountPath)
+    }
     if (paths.executablePath !== outer) throw new Error('Recovery anchor executable does not match the verified outer AppImage')
     const mount = verifiedAppImage.mountPath
     for (const [name, logical] of Object.entries(APPIMAGE_LAYOUT)) {
@@ -183,6 +203,7 @@ export function exactComponentLayout(platform, paths, verifiedAppImage = null) {
     }
     return { kind: 'appimage-v1', ...APPIMAGE_LAYOUT }
   }
+  for (const [name, path] of Object.entries(paths)) canonicalFile(path, `Recovery anchor ${name}`)
   let expected
   if (platform === 'win32') {
     const root = dirname(paths.executablePath)
@@ -303,8 +324,8 @@ export function stableFirstInstallerExecutable({ platform = process.platform, en
       throw new Error('AppImage recovery anchor requires canonical verified outer-image and mount evidence')
     }
     safeFile(outer, 'Verified outer AppImage', { source: true })
-    safeDirectory(mount, 'Verified AppImage mount', { source: true })
-    safeFile(actual, 'Verified AppImage executable', { source: true })
+    safeDirectory(mount, 'Verified AppImage mount', { source: true, requireOwner: false })
+    safeFile(actual, 'Verified AppImage executable', { source: true, requireOwner: false })
     const mountedRelative = relative(mount, actual)
     if (!mountedRelative || mountedRelative.startsWith('..') || isAbsolute(mountedRelative)) {
       throw new Error('AppImage recovery anchor requires explicit verified outer-image and mount evidence')

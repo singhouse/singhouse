@@ -7,7 +7,7 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
 import { verifyRecoveryAnchor } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { recoveryDataDirectory, recoveryHandoff, recoveryStateRoot } from '../recovery_cli.mjs'
@@ -18,6 +18,12 @@ const kitBinding = (recoveryPoint = 'point-1') => ({ schema: 1, recoveryPoint,
   recoveryManifestSha256: '1'.repeat(64), updateMetadataSha256: '2'.repeat(64),
   previousReleaseId: '3'.repeat(64), targetReleaseId: '4'.repeat(64), sequence: 1 })
 process.umask(0o077)
+
+test('read-only AppImage mount contents may be root-owned but never writable', () => {
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100555 }, { requireOwner: false, currentUid: 1000 }), true)
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100575 }, { requireOwner: false, currentUid: 1000 }), false)
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100555 }, { requireOwner: true, currentUid: 1000 }), false)
+})
 const anchorFor = (platform = 'linux', arch = 'x64', recoveryRoot) => {
   const stateRoot = dirname(dirname(dirname(recoveryRoot))), anchorPath = resolve(dirname(dirname(recoveryRoot)), 'anchor.json')
   return { schema: 3, kind: 'recovery-anchor', platform, arch, executablePath: process.execPath, stateRoot, anchorPath,
@@ -354,9 +360,10 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
     const bootstrapPath = resolve(mount, 'resources', 'app.asar', 'bootstrap.mjs')
     const pythonPath = resolve(mount, 'resources', 'native', 'python', 'bin', 'python3')
     const helperPath = resolve(mount, 'resources', 'native', 'backend.py')
-    for (const [path, bytes] of [[actualExecutablePath, 'mounted executable'], [bootstrapPath, 'bootstrap'], [pythonPath, 'python'], [helperPath, 'helper']]) {
+    for (const [path, bytes] of [[actualExecutablePath, 'mounted executable'], [bootstrapPath, 'bootstrap'], [`${pythonPath}.12`, 'python'], [helperPath, 'helper']]) {
       mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes)
     }
+    symlinkSync('python3.12', pythonPath)
     return { actualExecutablePath, bootstrapPath, pythonPath, helperPath }
   }
   const first = paths(firstMount), second = paths(secondMount)
@@ -409,7 +416,7 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
   const linkedEvidence = { ...firstEvidence, mountPath: linkedMount, actualExecutablePath: linked.actualExecutablePath }
   assert.throws(() => ensureRecoveryAnchor(untouchedAnchor, { executablePath: outer, bootstrapPath: linked.bootstrapPath,
     pythonPath: linked.pythonPath, helperPath: linked.helperPath, platform: 'linux', arch: process.arch },
-  { verifiedFirstInstaller: true, verifiedAppImage: linkedEvidence }), /exact canonical path/)
+  { verifiedFirstInstaller: true, verifiedAppImage: linkedEvidence }), /verified AppImage mount/)
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
 
   const parentMount = resolve(root, '.mount_parent-link'), parent = paths(parentMount)
@@ -418,7 +425,7 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
   const parentEvidence = { ...firstEvidence, mountPath: parentMount, actualExecutablePath: parent.actualExecutablePath }
   assert.throws(() => ensureRecoveryAnchor(untouchedAnchor, { executablePath: outer, bootstrapPath: parent.bootstrapPath,
     pythonPath: parent.pythonPath, helperPath: parent.helperPath, platform: 'linux', arch: process.arch },
-  { verifiedFirstInstaller: true, verifiedAppImage: parentEvidence }), /exact canonical path/)
+  { verifiedFirstInstaller: true, verifiedAppImage: parentEvidence }), /verified AppImage mount/)
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
 })
 

@@ -21,9 +21,38 @@ export function allowedPortableCaseAlias(platform, prior, path) {
     && prior.startsWith('resources/native/python/share/terminfo/')
     && path.startsWith('resources/native/python/share/terminfo/')
 }
-function safePortablePath(value) {
+export function safePortablePath(value) {
   return typeof value === 'string' && value.length > 0 && value.length < 1024 && !value.startsWith('/') && !value.includes('\\') && value.split('/').every(part =>
     SAFE_PORTABLE_PART.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
+}
+export function validatePortableSymlinkTargets(records) {
+  const byName = new Map(records.map(record => [record.path, record]))
+  for (const record of records.filter(record => record.type === 'symlink')) {
+    let targetPath = record.target
+    const seen = new Set([record.path])
+    for (let hops = 0; hops <= records.length; hops++) {
+      if (!safePortablePath(targetPath) || seen.has(targetPath)) throw new Error(`Portable symlink cycle: ${record.path}`)
+      seen.add(targetPath)
+      const direct = byName.get(targetPath)
+      if (direct) {
+        if (direct.type !== 'symlink') break
+        targetPath = direct.target
+        continue
+      }
+      const parts = targetPath.split('/')
+      let expanded = false
+      for (let index = parts.length - 1; index > 0; index--) {
+        const prefix = parts.slice(0, index).join('/'); const link = byName.get(prefix)
+        if (link?.type === 'symlink') {
+          targetPath = [link.target, ...parts.slice(index)].join('/')
+          expanded = true
+          break
+        }
+      }
+      if (!expanded) throw new Error(`Portable symlink target is absent: ${record.path}`)
+    }
+    if (!byName.has(targetPath)) throw new Error(`Portable symlink cycle: ${record.path}`)
+  }
 }
 
 function mod(n) { const value = n % P; return value < 0n ? value + P : value }
@@ -220,12 +249,7 @@ export function parsePortablePayload(bytes) {
     } else if (Object.keys(file).sort().join(',') !== 'path,target,type' || !safePortablePath(file.target)) throw new Error('Invalid portable symlink record')
     previous = file.path; folded.set(lower, file.path)
   }
-  const names = new Map(header.files.map(record => [record.path, record]))
-  for (const record of header.files.filter(record => record.type === 'symlink')) {
-    if (!names.has(record.target)) throw new Error('Portable symlink target is absent')
-    const seen = new Set([record.path]); let target = names.get(record.target)
-    while (target?.type === 'symlink') { if (seen.has(target.path)) throw new Error('Portable symlink cycle'); seen.add(target.path); target = names.get(target.target) }
-  }
+  validatePortableSymlinkTargets(header.files)
   if (dataStart + next !== bytes.length || header.files.find(file => file.path === header.entrypoint)?.mode !== 0o755) throw new Error('Portable payload boundary or entrypoint is invalid')
   return { header, dataStart, bytes }
 }

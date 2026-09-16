@@ -134,10 +134,12 @@ test('portable inventory preserves internal symlinks and rejects escapes and cyc
     const versions = resolve(app, 'Singhouse.app/Contents/Frameworks/Example.framework/Versions')
     await mkdir(resolve(versions, 'A'), { recursive: true }); await writeFile(resolve(versions, 'A/library'), 'library')
     await symlink('A', resolve(versions, 'Current'))
+    await symlink('Versions/Current/library', resolve(versions, '..', 'library-current'))
     const identity = await identityFor(app)
     const payload = resolve(temporary, 'links.shapp')
     const result = await createPortablePayload({ sourceDirectory: app, output: payload, identity, platform: 'darwin', arch: 'arm64' })
     assert.deepEqual(result.header.files.find(record => record.path.endsWith('/Versions/Current')), { type: 'symlink', path: 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/Current', target: 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/A' })
+    assert.equal(result.header.files.find(record => record.path.endsWith('/library-current')).target, 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/Current/library')
     await symlink('../../../../../../outside', resolve(versions, 'Escape'))
     await assert.rejects(createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'escape.shapp'), identity, platform: 'darwin', arch: 'arm64' }), /escapes payload/)
   } finally { await rm(temporary, { recursive: true, force: true }) }

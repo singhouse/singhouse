@@ -43,8 +43,8 @@ dependencies = [
   # greenlet is required at runtime by SQLAlchemy's async engine, but
   # SQLAlchemy 2.0.36's conditional greenlet dependency marker does not fire
   # on Python 3.14, so it must be declared explicitly. Pinned to the exact
-  # version already present in existing installs so an editable
-  # `pip install --no-deps` upgrade stays dependency-neutral (pip check clean).
+  # compatibility version used by existing installations so an editable
+  # `pip install --no-deps` remains dependency-neutral (pip check clean).
   "greenlet==3.3.2",
   # Read at package import to load backend/.env (karaoke_backend/__init__.py).
   # Declared explicitly rather than leaned on: it is already present in every
@@ -94,8 +94,8 @@ karaoke_backend = ["migrations/*.mako", "migrations/*.py", "migrations/versions/
 
 [tool.setuptools.packages.find]
 where = ["src"]
-exclude = ["karaoke_backend.api.providers.local*"]   # belt-and-braces vs an older checkout's stale
-                                                     # autoloader-written local/__init__.py
+exclude = ["karaoke_backend.api.providers.local*"]   # exclude legacy autoloader-written
+                                                     # local/__init__.py files
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

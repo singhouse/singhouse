@@ -68,8 +68,8 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'     # editable install + dev/test extras
 ```
 
-`requirements.txt` is retained as a frozen mirror of the pins for the
-older installs; new environments should prefer the editable install.
+`requirements.txt` is retained as a frozen compatibility mirror of the pins;
+new environments should prefer the editable install.
 
 ### 2. Configure environment
 

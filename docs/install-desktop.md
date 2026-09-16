@@ -12,7 +12,10 @@ Download the installer and checksum only from the release page. Compare the
 SHA-256 value before opening it:
 
 ```sh
-# Linux or macOS
+# Linux
+sha256sum /path/to/download
+
+# macOS
 shasum -a 256 /path/to/download
 ```
 
