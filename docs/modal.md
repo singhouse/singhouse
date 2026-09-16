@@ -1,9 +1,15 @@
 # Deploy processing to your own Modal account
 
-Singhouse can send stem separation and Heart transcription jobs to a Modal app
-that you deploy and pay for in your own account. This path is optional and off
-by default. Singhouse does not provide a shared Modal deployment, receive the
-audio, or manage your Modal account.
+The source-install backend can send stem separation and Heart transcription
+jobs to a Modal app that you deploy and pay for in your own account. This path
+is optional and off by default. Singhouse does not provide a shared Modal
+deployment, receive the audio, or manage your Modal account.
+
+The current packaged desktop does not include the Modal client or expose its
+credentials and settings to the isolated backend. The instructions below apply
+only when you run the backend from a source checkout with the `modal` extra.
+Desktop support remains pending; exporting these variables before opening the
+desktop app does not enable Modal processing.
 
 Deploying builds a remote image and can create billable work. Review Modal's
 current pricing and account limits before running a deploy or a job. The setup
