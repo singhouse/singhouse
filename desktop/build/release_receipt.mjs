@@ -136,7 +136,15 @@ export async function createPortablePayload({ sourceDirectory, output, identity,
     } else if (entry.type === 'directory') inventory.push({ type: 'directory', path: name, mode: 0o755 })
     else inventory.push({ type: 'symlink', path: name, target: entry.target })
   }
-  if (new Set(inventory.map(file => file.path.toLowerCase())).size !== inventory.length) throw new Error('Portable payload contains case-colliding paths')
+  const foldedPaths = new Map()
+  for (const file of inventory) {
+    const folded = file.path.toLowerCase()
+    const prior = foldedPaths.get(folded)
+    if (prior && !(platform === 'linux' && prior.startsWith('resources/native/python/share/terminfo/') && file.path.startsWith('resources/native/python/share/terminfo/'))) {
+      throw new Error('Portable payload contains case-colliding paths')
+    }
+    foldedPaths.set(folded, file.path)
+  }
   const names = new Map(inventory.map(record => [record.path, record]))
   for (const record of inventory.filter(record => record.type === 'symlink')) {
     if (!names.has(record.target)) throw new Error(`Portable symlink target is absent: ${record.path}`)

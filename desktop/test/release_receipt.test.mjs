@@ -64,6 +64,21 @@ test('portable payload permits npm scope names in packaged notice paths', async 
   } finally { await rm(temporary, { recursive: true, force: true }) }
 })
 
+test('Linux payload permits the pinned Python terminfo case aliases only', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'portable-terminfo-'))
+  try {
+    const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'linux')
+    for (const name of ['E/Eterm', 'e/eterm']) {
+      const path = resolve(app, 'resources/native/python/share/terminfo', name)
+      await mkdir(resolve(path, '..'), { recursive: true }); await writeFile(path, name)
+    }
+    const identity = await identityFor(app)
+    await createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'terminfo.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint })
+    await writeFile(resolve(app, 'A'), 'one'); await writeFile(resolve(app, 'a'), 'two')
+    await assert.rejects(createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'collision.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint }), /case-colliding/)
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+})
+
 test('receipt inspects payload bytes and rejects substitution or trailing bytes', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'receipt-'))
   try {

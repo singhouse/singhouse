@@ -199,10 +199,12 @@ export function parsePortablePayload(bytes) {
   exactKeys(header.target, ['platform', 'arch'])
   assertReleaseIdentity(header.identity)
   if (!safePortablePath(header.entrypoint) || !((header.target.platform === 'linux' && ['x64', 'arm64'].includes(header.target.arch)) || (header.target.platform === 'win32' && header.target.arch === 'x64') || (header.target.platform === 'darwin' && header.target.arch === 'arm64')) || !Array.isArray(header.files) || !header.files.length) throw new Error('Invalid portable target or inventory')
-  let next = 0; let previous = ''; const folded = new Set()
+  let next = 0; let previous = ''; const folded = new Map()
   for (const file of header.files) {
     const lower = String(file?.path).toLowerCase()
-    if (!file || !safePortablePath(file.path) || file.path <= previous || folded.has(lower) || !['file', 'directory', 'symlink'].includes(file.type)) throw new Error('Invalid portable inventory')
+    const prior = folded.get(lower)
+    const allowedTerminfoAlias = prior && header.target.platform === 'linux' && prior.startsWith('resources/native/python/share/terminfo/') && file?.path?.startsWith('resources/native/python/share/terminfo/')
+    if (!file || !safePortablePath(file.path) || file.path <= previous || (prior && !allowedTerminfoAlias) || !['file', 'directory', 'symlink'].includes(file.type)) throw new Error('Invalid portable inventory')
     if (file.type === 'file') {
       if (Object.keys(file).sort().join(',') !== 'mode,offset,path,sha256,size,type' || file.offset !== next || !Number.isSafeInteger(file.size) || file.size < 0 || ![0o644, 0o755].includes(file.mode) || !HEX_64.test(file.sha256)) throw new Error('Invalid portable file record')
       const payload = bytes.subarray(dataStart + file.offset, dataStart + file.offset + file.size)
@@ -211,7 +213,7 @@ export function parsePortablePayload(bytes) {
     } else if (file.type === 'directory') {
       if (Object.keys(file).sort().join(',') !== 'mode,path,type' || file.mode !== 0o755) throw new Error('Invalid portable directory record')
     } else if (Object.keys(file).sort().join(',') !== 'path,target,type' || !safePortablePath(file.target)) throw new Error('Invalid portable symlink record')
-    previous = file.path; folded.add(lower)
+    previous = file.path; folded.set(lower, file.path)
   }
   const names = new Map(header.files.map(record => [record.path, record]))
   for (const record of header.files.filter(record => record.type === 'symlink')) {
