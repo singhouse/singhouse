@@ -251,6 +251,22 @@ def test_the_two_system_prompts_differ_only_in_the_break_rule():
         assert "karaoke display pager" in prompt
 
 
+def test_clause_split_example_is_invented_and_keeps_the_measured_shape():
+    """The prompt still teaches one comma-joined row becoming two lines."""
+    joined = "Lanterns glow beyond the hill, quiet footsteps cross the sill"
+    first = "Lanterns glow beyond the hill"
+    second = "quiet footsteps cross the sill"
+
+    for prompt in (_SYSTEM_PROMPT, _TIMED_SYSTEM_PROMPT):
+        assert joined in prompt
+        assert first in prompt and second in prompt
+        joined_at = prompt.index(joined)
+        first_at = prompt.index(first, joined_at + len(joined))
+        second_at = prompt.index(second, first_at + len(first))
+        assert joined_at < first_at < second_at
+        assert len(first.split()) == 5 == len(second.split())
+
+
 class _CapturingClient:
     def __init__(self):
         self.system = self.user = None

@@ -146,16 +146,8 @@ somewhere other than `backend/.venv-demucs/bin/python`.
 Modal is **opt-in and off by default**, and it runs in *your* Modal account —
 deploy `modal_app.py` there yourself. Installing the SDK is not enough; the
 backend does not auto-detect it.
-
-```bash
-pip install modal
-modal setup                    # authenticate with your own Modal account
-modal deploy backend/modal_app.py
-export KARAOKE_MODAL=1         # required — see .env.example
-```
-
-`KARAOKE_MODAL_APP` (default `karaoke-gpu`) must match the app name in
-`modal_app.py`; a mismatch fails the lookup rather than falling back.
+The complete setup, deploy-time variables, backend variables, data flow, and
+cost controls are in [the user-owned Modal guide](../docs/modal.md).
 
 ### If no backend is configured
 

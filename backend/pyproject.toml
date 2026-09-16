@@ -58,10 +58,8 @@ dependencies = [
 ]
 
 [project.urls]
-# An ADDRESS, not a brand literal: this is where the source lives, for anyone,
-# and it does not vary with a rebrand. The neutrality gate exempts the
-# URL by content rather than exempting this whole file, so everything else here
-# stays graded — including the retired codenames.
+# The public source address is stable package metadata and is also used by
+# packaging tools and indexes to direct users to the corresponding source.
 Homepage = "https://github.com/singhouse/singhouse"
 
 [project.optional-dependencies]

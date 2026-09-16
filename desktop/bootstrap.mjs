@@ -362,9 +362,9 @@ export async function runStableBootstrap({ stateRoot, parentPid, contract, platf
 }
 
 async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
-  // Linux remains disabled until a qualified release supplies a native/detached verifier for
-  // the exact outer AppImage bytes. A digest recorded by an untrusted first
-  // launch is integrity evidence, not publisher authentication.
+  // This fallback cannot authenticate the outer AppImage bytes on Linux.
+  // Callers must inject trust established by the native/detached verifier; a
+  // digest recorded by an untrusted first launch is only integrity evidence.
   if (anchor.platform === 'linux') return false
   const command = anchor.platform === 'darwin' ? '/usr/bin/codesign' : 'powershell.exe'
   const args = anchor.platform === 'darwin'

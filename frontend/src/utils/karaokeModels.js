@@ -5,8 +5,8 @@
 // These ids are the server's allowlist (`karaoke_models.CHOICES`) — the
 // backend resolves each into the checkpoint a subprocess is handed, so what
 // travels over the wire is only ever one of these strings. Upload picks the
-// model for a new song and the mixer re-picks it for an existing one;
-// two copies of the list meant one of them was always about to drift.
+// model for a new song and the mixer can re-pick it for an existing one; two
+// copies of the list would drift.
 //
 // Roformer is better on ordinary mixes and stays the default. It struggles
 // when one singer is multi-tracked against themselves: the doubles read as one

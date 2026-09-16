@@ -177,10 +177,10 @@ class TranscribeRequest(BaseModel):
     reference_mode: ReferenceMode = "none"
     pipeline_config: Optional[PipelineConfigIn] = None
     activate: bool = True
-    # The two LLM stages the upload form offers. Both were ingest-only, so
-    # every way of redoing a song's lyrics silently dropped them. Both
-    # default off: they reach the operator's own configured endpoint, and a
-    # re-sync that quietly started calling one would be a surprise.
+    # The two LLM stages the upload form offers are also explicit choices when
+    # redoing a song's lyrics. Both default off: they reach the operator's own
+    # configured endpoint, and a re-sync that quietly started calling one
+    # would be a surprise.
     #
     # Correction runs inside the aligner, so it is honoured on BOTH routes,
     # but only the PLAIN-TEXT alignment path holds a corrector. A synced (LRC)
@@ -827,9 +827,8 @@ async def page_set(
     """Queue LLM page structuring for an existing set; result is a new set.
 
     The cheap half of a re-sync. Paging groups already-timed words into
-    display pages, so it needs neither the GPU nor the aligner — but before
-    this route existed, the only way to reach it was a fresh ingest, which meant re-running
-    both.
+    display pages, so it needs neither the GPU nor the aligner. Keeping this as
+    a standalone operation avoids re-running separation or transcription.
 
     The synchronous refusals are the ones the caller can act on: a song that
     is not ready has nothing settled to page (409), a set with no word timings

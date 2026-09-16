@@ -61,8 +61,8 @@ fi
 # else's library, reached through somebody else's account. Media-server names
 # (Plex, Jellyfin) are deliberately NOT in this pattern and must not be added:
 # they name a server the user runs themselves, holding music the user already
-# has, and a source that reads it is core rather than a provider. That
-# distinction is a product-scope decision; a change here needs a decision, not a commit.
+# has, and a source that reads it is core rather than a provider. Changing that
+# distinction changes product scope and requires an explicit policy decision.
 VENDOR_PATTERN=''
 
 # --- Optional pattern-supplement load ---
@@ -247,7 +247,7 @@ HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
       [ -n "$VENDOR_PATTERN" ] && grep -inE -- "$VENDOR_PATTERN" "$REPO_ROOT/$f" 2>/dev/null \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$HITS" ]; then
@@ -291,7 +291,7 @@ PREMIUM_HITS=$(printf '%s\n' "$PREMIUM_FILES" \
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
       [ -n "$VENDOR_PATTERN" ] && grep -inE -- "$VENDOR_PATTERN" "$REPO_ROOT/$f" 2>/dev/null \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$PREMIUM_HITS" ]; then
@@ -308,7 +308,7 @@ PREMIUM_IMPORT_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files -- 'f
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
       grep -n 'karaoke_premium' "$REPO_ROOT/$f" 2>/dev/null \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$PREMIUM_IMPORT_HITS" ]; then
@@ -344,7 +344,7 @@ LANG_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files -- 'frontend/sr
         | grep -vE '^[0-9]+:[[:space:]]*(//|\*|/\*|<!--)' \
         | sed -E 's/(\.|[[:space:]]|:)download[[:space:]]*=//gI' \
         | grep -iE 'download' \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$LANG_HITS" ]; then
@@ -364,7 +364,7 @@ AUTH_LEAK_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files -- 'fronte
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
       grep -nE "$AUTH_LEAK_PATTERN" "$REPO_ROOT/$f" 2>/dev/null \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$AUTH_LEAK_HITS" ]; then
@@ -392,7 +392,7 @@ ROTATION_LEAK_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files -- 'fr
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
       grep -nE "$ROTATION_LEAK_PATTERN" "$REPO_ROOT/$f" 2>/dev/null \
-        | sed "s|^|$f:|"
+        | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
     done || true)
 
 if [ -n "$ROTATION_LEAK_HITS" ]; then
@@ -428,6 +428,9 @@ fi
 #     packaging must name the installed public product. This is a content-level
 #     exception for the built-in public name only: private/supplement names
 #     remain checked, and desktop stays in every vendor, infra, and leak gate.
+#   - seven named release/setup documents under docs/ — user-facing instructions
+#     that must name the installed product. This is the same content-level
+#     exception as desktop: exact paths, public name only, every other gate live.
 # NOTE (residual risk): the allowlist is per-FILE for the WHOLE brand
 # pattern — an allowlisted file is exempt from every alternative, not just the
 # product name, so the allowlisted docs must stay free of the supplement's
@@ -435,15 +438,15 @@ fi
 #
 # ADDRESS EXEMPTION. The pattern matches the product name as a bare
 # SUBSTRING, so it also fires inside the repository URL — where those letters
-# are an ADDRESS, not a brand literal. The rebrand policy scopes the rename surface to the
-# presentation layer and leaves load-bearing identifiers alone; a customer
-# rebranding through the branding slot no more gets a different GitHub URL than
-# they get a different `karaoke_backend` package name. Without this, the two
+# are an ADDRESS, not a brand literal. Rebranding changes the presentation
+# layer, not stable package identifiers or the public source address; it no
+# more creates a different GitHub URL than a different `karaoke_backend`
+# package name. Without this, the two
 # package manifests cannot carry the `[project.urls]` / `repository` field
 # every published package has, and the only other way out is widening the
 # per-file allowlist — which by the NOTE above would also blind those files to
-# the RETIRED codenames. That trade is the trap this exemption exists to prevent, so
-# the exemption is by CONTENT and applies to every file equally.
+# private supplement names. The exemption is therefore by CONTENT and applies
+# to every file equally.
 #
 # Applied by stripping the exempt substring from a candidate line and
 # re-testing what remains, NOT by dropping the line: a line carrying the URL
@@ -457,9 +460,8 @@ fi
 # exempt, and each would be its own ruling: `api.github.com/repos/...`,
 # `raw.githubusercontent.com/...`, the Pages host, `/orgs/` paths, and any
 # renamed owner. If one of those is ever genuinely needed, widen THIS constant
-# after deciding it; do NOT reach for the per-file allowlist, which is the trap
-# this exemption exists to prevent (see the NOTE above — it is per-file for the whole
-# pattern, retired codenames included).
+# after deciding it; do NOT reach for the per-file allowlist, which is per-file
+# for the whole pattern and would also exempt private supplement names.
 BRAND_PATTERN="$(join_pattern 'singhouse' "$BRAND_PRIVATE")"
 validate_ere "the brand pattern" "$BRAND_PATTERN"
 BRAND_EXEMPT='github\.com[:/]singhouse/singhouse'
@@ -507,6 +509,10 @@ BRAND_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
       file_brand_pattern="$BRAND_PATTERN"
       case "$f" in
         .github/scripts/cla.cjs|CLA.md|CCLA.md|CLA-SIGNATURES.json|CONTRIBUTING.md|LICENSING.md)
+          [ -n "$BRAND_PRIVATE" ] || continue
+          file_brand_pattern="$BRAND_PRIVATE"
+          ;;
+        docs/install-desktop.md|docs/modal.md|docs/release-notes-draft.md|docs/release-qualification.md|docs/support-diagnostics.md|docs/asahi-local-test.md|docs/release-checklist.md)
           [ -n "$BRAND_PRIVATE" ] || continue
           file_brand_pattern="$BRAND_PRIVATE"
           ;;
@@ -604,7 +610,7 @@ if [ -s "$KEEP_TMP" ]; then
     | while IFS= read -r f; do
         [ -f "$REPO_ROOT/$f" ] || continue
         grep -nFf "$KEEP_TMP" "$REPO_ROOT/$f" 2>/dev/null \
-          | sed "s|^|$f:|"
+          | p="$f" awk '{ print ENVIRON["p"] ":" $0 }'
       done || true)
   if [ -n "$DANGLE" ]; then
     echo "FAIL: surviving files reference keep-private paths:"

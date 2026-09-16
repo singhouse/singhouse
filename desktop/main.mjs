@@ -12,7 +12,7 @@ import { HeartSetup, authorizedHeartCaller } from './heart_setup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
@@ -134,16 +134,18 @@ async function platformTrust({ root: applicationRoot, manifest }) {
 
 async function verifiedFirstInstallerPlatformTrust() {
   // A bundled receipt cannot authenticate the wrapper that supplied it.
-  // Linux remains disabled until a qualified release supplies verified outer-AppImage bytes
-  // and real-mount evidence; APPIMAGE/APPDIR are never authority. The other
-  // platforms may rotate the anchor only after their native trust hook passes.
-  if (process.platform === 'linux') return { verified: false, appImage: null }
+  // Kernel-owned ancestry and the read-only FUSE mount bind Linux to its exact
+  // outer AppImage. APPIMAGE/APPDIR remain diagnostic hints, never authority.
+  if (process.platform === 'linux') {
+    try { return { verified: true, appImage: verifiedAppImageRuntime() } }
+    catch { return { verified: false, appImage: null } }
+  }
   if (!releasePolicy.platformTrust?.[process.platform]?.enabled) return { verified: false }
   if (process.platform === 'darwin') return new Promise(resolveTrust => {
     const check = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
     check.once('error', () => resolveTrust({ verified: false })); check.once('exit', code => resolveTrust({ verified: code === 0 }))
   })
-  // The qualified Windows Authenticode verifier is owned by the packaging trust qualification work.
+  // Windows trust stays fail-closed until the Authenticode verifier is enabled.
   return { verified: false }
 }
 
@@ -420,9 +422,11 @@ async function start() {
       if (recoveryArguments.length !== 6) throw new Error('Invalid stable recovery invocation')
       const lockPython = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
       const durabilityHelper = resolve(nativeDir, 'backend.py')
+      const appImage = process.platform === 'linux' ? verifiedAppImageRuntime() : null
       await runRecoveryAnchor({ anchorPath: recoveryArguments[1], kitRoot: recoveryArguments[2], recoveryArgs: recoveryArguments.slice(3),
-        executablePath: stableFirstInstallerExecutable(), bootstrapPath: resolve(desktopDir, 'bootstrap.mjs'),
-        pythonPath: lockPython, helperPath: durabilityHelper })
+        executablePath: stableFirstInstallerExecutable({ verifiedAppImage: appImage }), bootstrapPath: resolve(desktopDir, 'bootstrap.mjs'),
+        pythonPath: lockPython, helperPath: durabilityHelper, verifiedAppImage: appImage,
+        ...(process.platform === 'linux' ? { platformTrust: async (_anchor, evidence) => evidence.verifiedAppImage?.verified === true } : {}) })
       shutdownComplete = true; app.quit(); return
     }
     expectedIdentity = validateManifest(JSON.parse(readFileSync(resolve(nativeDir, 'manifest.json'), 'utf8')), app.getVersion(), process.platform, process.arch)

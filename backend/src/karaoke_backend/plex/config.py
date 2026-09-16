@@ -83,13 +83,10 @@ def plex_lyrics_enabled() -> bool:
     track's audio is the operator's own file, sitting on the operator's own
     server. A track's lyrics on a Plex server may not be: Plex can populate
     them from a licensed metadata supplier, and whether the resulting text may
-    be copied into a second application is a provenance question for a lawyer
-    to answer, not one this module can settle from a JSON field. So the audio path
-    is unconditional and the lyric path is opt-in, and the operator who turns
-    it on is the person who knows where their lyrics came from.
-
-    Sidecar-only / self-owned lyrics are a different question with a different
-    answer — see the Jellyfin source, where they are unconditional.
+    be copied into a second application depends on its provenance and terms,
+    which this module cannot determine from a JSON field. So the audio path is
+    unconditional and the lyric path is opt-in; the operator who turns it on
+    is the person who knows where their lyrics came from.
     """
     return os.getenv(PLEX_LYRICS_ENV, "").strip().lower() in _ON_VALUES
 

@@ -24,13 +24,10 @@ import aurora from './aurora.js'
 import particles from './particles.js'
 import waveform from './waveform.js'
 
-// Private visualizers — optional local backdrops that are not part of this repo.
-// `private/` is excluded from the public build; this must
-// therefore be a glob and not an import, because a static import of a deleted
-// file fails the core build (premium/tools/check_public_cut.sh proves it).
-// A glob matching nothing resolves to {} at build time, so the public tree
-// simply has three visualizers instead of four. Dropping a *.viz.js file into
-// private/ registers it with no edit here — nothing is curated at the boundary.
+// Optional local visualizers are discovered rather than statically imported,
+// so an installation with no local modules builds with only the standard
+// visualizers. Dropping a *.viz.js file into private/ registers it without an
+// edit here; a glob matching nothing resolves to {} at build time.
 // Sorted by codepoint (not localeCompare — this must not vary with the
 // runtime's locale) so the picker order is stable, never glob-order.
 //
@@ -44,7 +41,7 @@ const PRIVATE = Object.entries(import.meta.glob('./private/*.viz.js', { eager: t
   .map(([, mod]) => mod.default)
   .filter(v => v && typeof v.id === 'string' && typeof v.draw === 'function')
 
-// Order here is the order shown in the host picker; private entries come last.
+// Order here is the order shown in the host picker; local entries come last.
 const REGISTRY = [aurora, particles, waveform, ...PRIVATE]
 const BY_ID = new Map(REGISTRY.map(v => [v.id, v]))
 

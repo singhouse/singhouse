@@ -7,7 +7,7 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable } from '../recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
 import { verifyRecoveryAnchor } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { recoveryDataDirectory, recoveryHandoff, recoveryStateRoot } from '../recovery_cli.mjs'
@@ -420,6 +420,49 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
     pythonPath: parent.pythonPath, helperPath: parent.helperPath, platform: 'linux', arch: process.arch },
   { verifiedFirstInstaller: true, verifiedAppImage: parentEvidence }), /exact canonical path/)
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
+})
+
+test('AppImage runtime evidence comes from Linux ancestry and a read-only FUSE mount', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-proc-'))
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const outer = resolve(root, 'Downloaded Singhouse.AppImage'), intermediate = resolve(root, 'AppRun')
+  const proc = resolve(root, 'proc')
+  mkdirSync(mount); writeFileSync(executable, 'mounted electron')
+  const header = Buffer.alloc(32); header.set(Buffer.from([0x7f, 0x45, 0x4c, 0x46]), 0)
+  header.set(Buffer.from([0x41, 0x49, 0x02]), 8); writeFileSync(outer, Buffer.concat([header, Buffer.from('outer payload')]))
+  writeFileSync(intermediate, 'intermediate')
+  for (const directory of ['self', '41', '17']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe'))
+  symlinkSync(intermediate, resolve(proc, '41', 'exe'))
+  symlinkSync(outer, resolve(proc, '17', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse Helper) S 41 0 0 0\n')
+  writeFileSync(resolve(proc, '41', 'stat'), '41 (AppRun shell) S 17 0 0 0\n')
+  writeFileSync(resolve(proc, '17', 'stat'), '17 (Downloaded Singhouse.AppImage) S 1 0 0 0\n')
+  const encodedMount = mount.replaceAll(' ', '\\040')
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro,user_id=1000\n`)
+
+  const evidence = verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc })
+  assert.deepEqual(evidence, { verified: true, outerPath: outer, outerSha256: digest(readFileSync(outer)),
+    mountPath: mount, actualExecutablePath: executable })
+  assert.equal(verifiedAppImageRuntime({ platform: 'darwin', executablePath: executable, procRoot: proc }), null)
+
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} rw,nosuid,nodev - fuse.Singhouse Singhouse.AppImage rw,user_id=1000\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /read-only FUSE root/)
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} ro,nosuid,nodev - ext4 /dev/test ro\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /read-only FUSE root/)
+})
+
+test('AppImage runtime evidence rejects ambient candidates and non-AppImage ancestors', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-negative-'))
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const candidate = resolve(root, 'Singhouse.AppImage'), proc = resolve(root, 'proc')
+  mkdirSync(mount); writeFileSync(executable, 'mounted electron'); writeFileSync(candidate, 'ordinary executable')
+  for (const directory of ['self', '7']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe')); symlinkSync(candidate, resolve(proc, '7', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '8 (Singhouse) S 7 0 0 0\n')
+  writeFileSync(resolve(proc, '7', 'stat'), '7 (attacker) S 0 0 0 0\n')
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${mount} ro - fuse.Singhouse Singhouse.AppImage ro\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
 })
 
 test('verified installer relocation rotates one invoker without invalidating existing recovery kits', () => {

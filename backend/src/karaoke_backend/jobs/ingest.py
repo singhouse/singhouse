@@ -189,9 +189,9 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
     llm_correction: bool = bool(payload.get("llm_correction"))
     llm_paging: bool = bool(payload.get("llm_paging"))
     # Pass-2 lead/backing model for this song, as an ID from
-    # karaoke_models.CHOICES. Absent on every job enqueued before the picker existed, and on
-    # any upload that did not touch the picker — separate_stems reads that as
-    # "use the server-configured model", i.e. the behaviour those jobs had.
+    # karaoke_models.CHOICES. It is absent on legacy jobs and on uploads that
+    # did not touch the picker; separate_stems reads that as "use the
+    # server-configured model", preserving their original behaviour.
     karaoke_model: Optional[str] = payload.get("karaoke_model")
 
     stems_dir = STEMS_DIR / str(song_id)

@@ -11,9 +11,8 @@ touches ``Song.status`` — a re-transcription of a song that is already `ready`
 must not knock it out of the library if it fails, and that is the pre-queue
 semantic these preserve.
 
-All three can run the LLM stages the upload path offers, which is the whole
-point: correction and paging were ingest-only choices, so any attempt
-to redo a song's lyrics silently dropped them.
+All three can run the same optional LLM stages as the upload path. This keeps
+correction and paging as explicit choices when a song's lyrics are redone.
 """
 
 from __future__ import annotations

@@ -26,7 +26,7 @@ from typing import Optional
 # name on first use. Both entries declare stems [vocals, instrumental] with
 # vocals as the target, so the "(Vocals)=lead / (Instrumental)=backing" naming
 # the workers match on holds for both — verified against audio-separator
-# 0.41.1's model index, 2026-08-24.
+# 0.41.1's model index on 2026-08-24.
 CHOICES: dict[str, Optional[str]] = {
     "roformer": None,
     "mdxnet_kara2": "UVR_MDXNET_KARA_2.onnx",

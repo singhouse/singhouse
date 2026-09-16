@@ -3,8 +3,8 @@
 // has no Electron dependency, so a broken target application cannot prevent a
 // rollback.
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { chmodSync, closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
@@ -64,6 +64,111 @@ const APPIMAGE_LAYOUT = Object.freeze({
   pythonPath: 'resources/native/python/bin/python3',
   helperPath: 'resources/native/backend.py',
 })
+
+function procMountValue(value) {
+  return value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
+}
+
+function appImageMount(mountInfo, executablePath) {
+  const matches = []
+  for (const line of mountInfo.split('\n')) {
+    if (!line) continue
+    const separator = line.indexOf(' - ')
+    if (separator < 0) continue
+    const before = line.slice(0, separator).split(' '), after = line.slice(separator + 3).split(' ')
+    if (before.length < 6 || after.length < 3) continue
+    const mountPath = procMountValue(before[4]), options = before[5].split(','), filesystem = after[0]
+    const rel = relative(mountPath, executablePath)
+    if ((rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) && /^fuse(?:\.|$)/.test(filesystem) && options.includes('ro')) {
+      matches.push({ mountPath, filesystem })
+    }
+  }
+  matches.sort((left, right) => right.mountPath.length - left.mountPath.length)
+  return matches[0] || null
+}
+
+function procParent(stat) {
+  const end = stat.lastIndexOf(')')
+  if (end < 0) throw new Error('Invalid Linux process ancestry')
+  const fields = stat.slice(end + 1).trim().split(/\s+/)
+  if (!/^\d+$/.test(fields[1] || '')) throw new Error('Invalid Linux process ancestry')
+  return fields[1]
+}
+
+function appImageHeader(bytes) {
+  return bytes.length >= 11 && bytes[0] === 0x7f && bytes.subarray(1, 4).toString() === 'ELF' &&
+    bytes[8] === 0x41 && bytes[9] === 0x49 && bytes[10] === 0x02
+}
+
+function ancestorImageBytes(procExecutable, outerPath) {
+  let ancestor, path
+  try {
+    ancestor = openSync(procExecutable, 'r')
+    path = openSync(outerPath, 'r')
+    const before = fstatSync(ancestor), found = fstatSync(path)
+    if (before.dev !== found.dev || before.ino !== found.ino || before.size !== found.size) {
+      throw new Error('Outer AppImage path does not name the running ancestor image')
+    }
+    const bytes = readFileSync(ancestor), after = fstatSync(ancestor)
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      throw new Error('Outer AppImage changed while it was authenticated')
+    }
+    return bytes
+  } finally {
+    if (path !== undefined) closeSync(path)
+    if (ancestor !== undefined) closeSync(ancestor)
+  }
+}
+
+// Bind the running Electron executable to the immutable outer AppImage using
+// kernel-owned process ancestry and mount-table evidence. APPIMAGE and APPDIR
+// are deliberately not consulted: either can be replaced by the caller.
+export function verifiedAppImageRuntime({ platform = process.platform, executablePath = process.execPath,
+  procRoot = '/proc', maximumAncestors = 64 } = {}) {
+  if (platform !== 'linux') return null
+  let actualExecutablePath, selfExecutable
+  try {
+    actualExecutablePath = realpathSync(executablePath)
+    selfExecutable = realpathSync(join(procRoot, 'self', 'exe'))
+  } catch { throw new Error('AppImage runtime evidence is unavailable') }
+  if (executablePath !== resolve(executablePath) || actualExecutablePath !== executablePath || selfExecutable !== actualExecutablePath) {
+    throw new Error('AppImage runtime executable is not canonical')
+  }
+  canonicalFile(actualExecutablePath, 'AppImage runtime executable')
+  let mount
+  try { mount = appImageMount(readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8'), actualExecutablePath) } catch {}
+  if (!mount || mount.mountPath !== dirname(actualExecutablePath) || basename(actualExecutablePath) !== APPIMAGE_LAYOUT.actualExecutablePath) {
+    throw new Error('AppImage runtime is not executing from its read-only FUSE root')
+  }
+  let pid
+  try { pid = procParent(readFileSync(join(procRoot, 'self', 'stat'), 'utf8')) } catch {
+    throw new Error('AppImage runtime ancestry is unavailable')
+  }
+  const visited = new Set()
+  for (let depth = 0; depth < maximumAncestors && pid !== '0' && !visited.has(pid); depth += 1) {
+    visited.add(pid)
+    const procExecutable = join(procRoot, pid, 'exe')
+    let outerPath
+    try { outerPath = realpathSync(procExecutable) } catch { outerPath = null }
+    if (outerPath && outerPath !== actualExecutablePath) {
+      try {
+        canonicalFile(outerPath, 'Outer AppImage')
+        const bytes = ancestorImageBytes(procExecutable, outerPath)
+        if (appImageHeader(bytes)) {
+          const outerSha256 = sha256(bytes)
+          if (realpathSync(procExecutable) !== outerPath || realpathSync(outerPath) !== outerPath) {
+            throw new Error('Outer AppImage changed while it was authenticated')
+          }
+          return { verified: true, outerPath, outerSha256, mountPath: mount.mountPath, actualExecutablePath }
+        }
+      } catch (error) {
+        if (error.message === 'Outer AppImage changed while it was authenticated') throw error
+      }
+    }
+    try { pid = procParent(readFileSync(join(procRoot, pid, 'stat'), 'utf8')) } catch { break }
+  }
+  throw new Error('The running AppImage has no authenticated outer-image ancestor')
+}
 
 export function exactComponentLayout(platform, paths, verifiedAppImage = null) {
   for (const [name, path] of Object.entries(paths)) canonicalFile(path, `Recovery anchor ${name}`)

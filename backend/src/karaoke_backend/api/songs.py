@@ -800,9 +800,9 @@ async def resplit_stems(
 ) -> ResplitResponse:
     """Queue a fresh Pass-2 split of this song's vocals.
 
-    The Pass-2 model is chosen at upload time and was final until re-split existed — the
-    upload is deleted once separation finishes, so nothing could re-run the
-    lead/backing split. This can, off the stems already on disk.
+    The Pass-2 model is chosen at upload time, while the uploaded source is
+    deleted once separation finishes. This operation can still re-run the
+    lead/backing split from the stems already on disk.
 
     Every refusal here is one the caller can act on. What it cannot be is a
     partial job: the handler builds the replacements in a scratch directory
