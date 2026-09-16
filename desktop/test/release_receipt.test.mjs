@@ -51,6 +51,19 @@ for (const [platform, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['win32', 
   } finally { await rm(temporary, { recursive: true, force: true }) }
 })
 
+test('portable payload permits npm scope names in packaged notice paths', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'portable-scope-'))
+  try {
+    const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'linux')
+    const notice = resolve(app, 'resources/native/notices/frontend/@babel_helper-string-parser')
+    await mkdir(notice, { recursive: true }); await writeFile(resolve(notice, 'LICENSE'), 'MIT\n')
+    const identity = await identityFor(app)
+    const output = resolve(temporary, 'scoped.shapp')
+    const result = await createPortablePayload({ sourceDirectory: app, output, identity, platform: 'linux', arch: 'x64', entrypoint })
+    assert.ok(result.header.files.some(file => file.path === 'resources/native/notices/frontend/@babel_helper-string-parser/LICENSE'))
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+})
+
 test('receipt inspects payload bytes and rejects substitution or trailing bytes', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'receipt-'))
   try {

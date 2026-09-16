@@ -15,7 +15,7 @@ const D = mod(-121665n * invert(121666n))
 const I = pow(2n, (P - 1n) / 4n)
 const IDENTITY = { x: 0n, y: 1n }
 export const PORTABLE_MAGIC = Buffer.from('SINGHOUSEAPP\0\r\n\x1a', 'binary')
-const SAFE_PORTABLE_PART = /^[A-Za-z0-9._+() -]+$/
+const SAFE_PORTABLE_PART = /^[A-Za-z0-9@._+() -]+$/
 function safePortablePath(value) {
   return typeof value === 'string' && value.length > 0 && value.length < 1024 && !value.startsWith('/') && !value.includes('\\') && value.split('/').every(part =>
     SAFE_PORTABLE_PART.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
