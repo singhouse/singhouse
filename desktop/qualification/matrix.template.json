@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "candidate": {
+    "sourceRevision": null,
+    "version": null,
+    "artifacts": []
+  },
+  "checks": [
+    {"id":"source-automated-suites","area":"build","platform":"all","result":"untested","evidence":[],"notes":"Repository unit, integration, frontend build, and policy suites."},
+    {"id":"artifact-reproducibility","area":"build","platform":"each target","result":"untested","evidence":[],"notes":"Two clean builds have identical modeled payload inventory and release identity; platform container differences are explained."},
+    {"id":"artifact-integrity-notices","area":"build","platform":"each target","result":"untested","evidence":[],"notes":"Receipt, checksum, source inventory, native notices, and installed font/license notices inspected in the actual installer."},
+    {"id":"windows-clean-install","area":"install","platform":"windows-x64","result":"untested","evidence":[],"notes":"Windows 11 25H2; downloaded unsigned installer behavior recorded."},
+    {"id":"macos-clean-install","area":"install","platform":"darwin-arm64","result":"untested","evidence":[],"notes":"macOS 14 or newer; downloaded unsigned installer behavior recorded."},
+    {"id":"linux-x64-clean-install","area":"install","platform":"linux-x64","result":"untested","evidence":[],"notes":"Ubuntu 24.04 baseline; AppImage and archive surfaces tested separately."},
+    {"id":"linux-arm64-clean-install","area":"install","platform":"linux-arm64","result":"untested","evidence":[],"notes":"Ubuntu 24.04 baseline and actual Asahi show system."},
+    {"id":"prepared-media-offline-restart","area":"workflow","platform":"each target","result":"untested","evidence":[],"notes":"Imported user-owned media remains playable after network-disabled restart without AI packs."},
+    {"id":"complete-user-workflow","area":"workflow","platform":"each advertised processing route","result":"untested","evidence":[],"notes":"Import, two-pass separation, Heart transcription, edit, save, queue, and playback using the fixed private corpus."},
+    {"id":"heart-quality","area":"quality","platform":"each advertised model/device combination","result":"untested","evidence":[],"notes":"20-song corpus; WER regression <=2 percentage points, p95 word-start regression <=100 ms, and every new whole-section omission reviewed."},
+    {"id":"separation-quality","area":"quality","platform":"each advertised model/device combination","result":"untested","evidence":[],"notes":"Both passes complete; stems readable and aligned; truncation, silence, and audible comparison recorded."},
+    {"id":"speed-memory","area":"performance","platform":"each advertised model/device combination","result":"untested","evidence":[],"notes":"Preparation duration and peak RAM/VRAM recorded; minimum is measured peak plus 25% and verified on representative hardware."},
+    {"id":"processing-cancel-restart","area":"recovery","platform":"each advertised processing route","result":"untested","evidence":[],"notes":"Cancellation and process interruption leave a usable show, recoverable job, and no partial output marked complete."},
+    {"id":"download-interruption","area":"recovery","platform":"each downloadable runtime/model","result":"untested","evidence":[],"notes":"Interrupted download and failed activation preserve the prior working runtime/model and support a retry."},
+    {"id":"insufficient-memory","area":"recovery","platform":"each advertised processing route","result":"untested","evidence":[],"notes":"Controlled insufficient-memory failure does not publish partial outputs or break prepared playback."},
+    {"id":"coordinated-update-recovery","area":"update","platform":"each target","result":"untested","evidence":[],"notes":"Authenticated update, interruption boundaries, rollback pair, database recovery, anti-replay, and offline restart."},
+    {"id":"linux-appimage-anchor","area":"update","platform":"linux-x64 and linux-arm64 AppImage","result":"untested","evidence":[],"notes":"Real outer image is bound to active mount; anchor create/rotate/standalone recovery fail closed on substitution."},
+    {"id":"uninstall-data-retention","area":"install","platform":"each target","result":"untested","evidence":[],"notes":"Normal uninstall result and retained application-data contents recorded; explicit removal tested separately."},
+    {"id":"four-hour-physical-show","area":"show","platform":"each launch target","result":"untested","evidence":[],"notes":"1080p, physical audio and projector, host minimize/workspace switch, reconnect, output selection/disconnect, no app-caused dropout/freeze."},
+    {"id":"support-diagnostics","area":"support","platform":"each target","result":"untested","evidence":[],"notes":"A user can collect useful redacted diagnostics without exposing library media, lyrics, secrets, or tokens."}
+  ]
+}

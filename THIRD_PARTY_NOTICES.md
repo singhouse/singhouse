@@ -17,10 +17,11 @@ checkout does not include.
 
 The built frontend, Python environments, and model files are excluded from
 the source repository. The frontend build serves bundled JavaScript and fonts
-to connected browsers. This inventory describes the source checkout and its
-default frontend build; it is not a complete notice inventory for a future
-container image, desktop application, or release archive. Those artifacts
-must account for the dependencies and license texts they actually contain.
+to connected browsers. Native desktop assembly generates an exact dependency
+inventory and collects the corresponding license files under `notices/` in
+the payload; optional processing packs do the same for their own contents.
+Any other release image or archive must account for the dependencies and
+license texts it actually contains.
 
 ---
 
@@ -92,14 +93,14 @@ output, in addition to the vendored Signalsmith files from group A.
 - **Distributed via:** the `@fontsource-variable/space-grotesk` npm package;
   the built frontend embeds three `.woff2` files (latin, latin-ext,
   vietnamese) and serves them to browsers.
-- **Full text:** installed with the package, at
-  `frontend/node_modules/@fontsource-variable/space-grotesk/LICENSE`
+- **Full text:** installed with the package at
+  `frontend/node_modules/@fontsource-variable/space-grotesk/LICENSE`; native
+  assembly copies it to `notices/frontend/_fontsource-variable_space-grotesk/`
+  and beside the emitted fonts as `static/assets/SpaceGrotesk-LICENSE.txt`.
 
-The OFL requires the copyright notice and license text to accompany the font
-files. Listing the package license path here does not copy that text into
-built output; a distributed frontend must include it alongside the fonts.
-The font is used unmodified and under its original name, and is not sold on
-its own.
+The native assembler fails if the package license is absent and copies the
+OFL text into the packaged payload. The font is used unmodified and under its
+original name, and is not sold on its own.
 
 ### Frontend runtime libraries
 
@@ -153,7 +154,7 @@ containing them must account for their redistribution terms.
 | audio-separator | MIT | Runs the RoFormer separation models. |
 | lameenc | **LGPL-3.0** | MP3 encoding. A required dependency of Demucs. Copyleft — packaging it into a redistributed build carries notice and relinking obligations. |
 | soxr | **LGPL-2.1-or-later** | Sample-rate conversion, via librosa. Same consideration as `lameenc`. |
-| diffq | **CC BY-NC 4.0** | A required dependency of `audio-separator` on non-Windows platforms. **Non-commercial terms.** Used only when loading quantized Demucs models, which is not the default configuration. Relevant if you package or redistribute the separation environment. |
+| diffq / diffq-fixed | **CC BY-NC 4.0** | Declared by `audio-separator` for quantized Demucs state. Release processing packs use only the non-quantized `mdx_extra` and RoFormer routes and fail the build if either package, its distribution metadata, or its notices enter the payload. They are not redistributed in release packs. A user-created environment that selects quantized models must evaluate the non-commercial terms separately. |
 
 ### Speech recognition and alignment
 

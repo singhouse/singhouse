@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // @vitest-environment happy-dom
 //
-// The drop zone feeds two different ingest routes, and picking the wrong one
+// The drop zone feeds three different ingest routes, and picking the wrong one
 // is expensive: the server's answer to a mismatch is a 415 that arrives only
 // after the whole file — up to 2GB of it — has crossed the wire.
 //
@@ -9,8 +9,8 @@
 // (tests/utils/uploadRouting.test.js). What this file pins is the WIRING: a
 // dropped file reaches the route its classification names, a container we
 // cannot import is refused here with a reason rather than queued, and the
-// transcription options — meaningless for a video whose lyrics are already in
-// the picture — stay out of a video-only batch.
+// transcription options — meaningless for prepared media whose lyrics are
+// already in the picture — stay out of a prepared-only batch.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -48,6 +48,7 @@ beforeEach(() => {
   store = useSongsStore()
   vi.spyOn(store, 'uploadSong').mockResolvedValue(undefined)
   vi.spyOn(store, 'importVideoSong').mockResolvedValue(undefined)
+  vi.spyOn(store, 'importCdgSong').mockResolvedValue(undefined)
   wrapper = mount(UploadZone)
 })
 
@@ -82,6 +83,18 @@ it('never asks for Heart when importing a prepared video', async () => {
   await dropAndSubmit(file('clip.mp4', 'video/mp4'))
   expect(setup).not.toHaveBeenCalled()
   expect(store.importVideoSong).toHaveBeenCalledTimes(1)
+})
+
+it.each([
+  ['song.cdg', 'application/octet-stream'],
+  ['song.zip', 'application/zip'],
+])('routes %s as one prepared CD+G import without Heart', async (name, type) => {
+  const setup = vi.fn()
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: setup }
+  await dropAndSubmit(file(name, type))
+  expect(setup).not.toHaveBeenCalled()
+  expect(store.importCdgSong).toHaveBeenCalledTimes(1)
+  expect(store.uploadSong).not.toHaveBeenCalled()
 })
 
 it.each([false, true])('protects a pending setup from duplicate submit and removal=%s', async (remove) => {

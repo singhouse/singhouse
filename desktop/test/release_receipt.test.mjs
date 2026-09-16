@@ -51,6 +51,43 @@ for (const [platform, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['win32', 
   } finally { await rm(temporary, { recursive: true, force: true }) }
 })
 
+test('portable payload permits npm scope names in packaged notice paths', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'portable-scope-'))
+  try {
+    const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'linux')
+    const notice = resolve(app, 'resources/native/notices/frontend/@babel_helper-string-parser')
+    await mkdir(notice, { recursive: true }); await writeFile(resolve(notice, 'LICENSE'), 'MIT\n')
+    const identity = await identityFor(app)
+    const output = resolve(temporary, 'scoped.shapp')
+    const result = await createPortablePayload({ sourceDirectory: app, output, identity, platform: 'linux', arch: 'x64', entrypoint })
+    assert.ok(result.header.files.some(file => file.path === 'resources/native/notices/frontend/@babel_helper-string-parser/LICENSE'))
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+})
+
+test('Linux payload permits the pinned Python terminfo case aliases only', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'portable-terminfo-'))
+  try {
+    const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'linux')
+    for (const name of ['E/Eterm', 'e/eterm']) {
+      const path = resolve(app, 'resources/native/python/share/terminfo', name)
+      await mkdir(resolve(path, '..'), { recursive: true }); await writeFile(path, name)
+    }
+    const identity = await identityFor(app)
+    const result = await createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'terminfo.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint })
+    const files = result.header.files.map(record => record.type === 'file'
+      ? { type: 'file', path: record.path, sha256: record.sha256 }
+      : record.type === 'directory' ? { type: 'directory', path: record.path }
+        : { type: 'symlink', path: record.path, target: record.target })
+    const receipt = { schema: 1, kind: 'singhouse-release-receipt', identity, target: { platform: 'linux', arch: 'x64' },
+      application: { schema: 1, entrypoint, inventoryDigest: sha256Hex(canonicalJson(files)), files } }
+    const observed = new Map(files.map(record => [record.path, record.type === 'file' ? record.sha256 : record.type === 'directory' ? 'directory' : `symlink:${record.target}`]))
+    observed.set('resources/release-receipt.json', sha256Hex('receipt'))
+    assert.equal(validateInstalledReleaseReceipt(receipt, observed, { platform: 'linux', arch: 'x64' }).releaseId, identity.releaseId)
+    await writeFile(resolve(app, 'A'), 'one'); await writeFile(resolve(app, 'a'), 'two')
+    await assert.rejects(createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'collision.shapp'), identity, platform: 'linux', arch: 'x64', entrypoint }), /case-colliding/)
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+})
+
 test('receipt inspects payload bytes and rejects substitution or trailing bytes', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'receipt-'))
   try {
@@ -97,10 +134,12 @@ test('portable inventory preserves internal symlinks and rejects escapes and cyc
     const versions = resolve(app, 'Singhouse.app/Contents/Frameworks/Example.framework/Versions')
     await mkdir(resolve(versions, 'A'), { recursive: true }); await writeFile(resolve(versions, 'A/library'), 'library')
     await symlink('A', resolve(versions, 'Current'))
+    await symlink('Versions/Current/library', resolve(versions, '..', 'library-current'))
     const identity = await identityFor(app)
     const payload = resolve(temporary, 'links.shapp')
     const result = await createPortablePayload({ sourceDirectory: app, output: payload, identity, platform: 'darwin', arch: 'arm64' })
     assert.deepEqual(result.header.files.find(record => record.path.endsWith('/Versions/Current')), { type: 'symlink', path: 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/Current', target: 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/A' })
+    assert.equal(result.header.files.find(record => record.path.endsWith('/library-current')).target, 'Singhouse.app/Contents/Frameworks/Example.framework/Versions/Current/library')
     await symlink('../../../../../../outside', resolve(versions, 'Escape'))
     await assert.rejects(createPortablePayload({ sourceDirectory: app, output: resolve(temporary, 'escape.shapp'), identity, platform: 'darwin', arch: 'arm64' }), /escapes payload/)
   } finally { await rm(temporary, { recursive: true, force: true }) }

@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Re-run the Pass-2 lead/backing split on a song that is already in the library.
 
-The Pass-2 model is picked at upload time, and until re-split existed that pick was final:
-the uploaded audio is deleted the moment separation finishes, and ingest
-short-circuits on the ``.separation-complete`` marker, so nothing could ever
-run Pass 2 again. Discovering after the fact that a track's doubled vocals
-needed the other model meant re-uploading it and losing the song's history.
+The Pass-2 model is picked at upload time, but the uploaded audio is deleted
+the moment separation finishes and ingest short-circuits on the
+``.separation-complete`` marker. This job makes a later model change possible
+without re-uploading the track or losing the song's history.
 
 Pass 1 is not re-run and does not need to be: it produced the vocal stem this
-job splits. When the older ``vocals.wav`` is still on disk that stem is
-used directly; otherwise the existing lead and backing are summed back into
-one, which is the same signal to within the mix.
+job splits. When the legacy ``vocals.wav`` is still on disk that stem is used
+directly; otherwise the existing lead and backing are summed back into one,
+which is the same signal to within the mix.
 
 **Nothing existing is touched until the replacements are complete.** Every
 output is built in a scratch directory inside the song's stems directory and

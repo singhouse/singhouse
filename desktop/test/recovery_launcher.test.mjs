@@ -7,7 +7,7 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable } from '../recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
 import { verifyRecoveryAnchor } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { recoveryDataDirectory, recoveryHandoff, recoveryStateRoot } from '../recovery_cli.mjs'
@@ -18,6 +18,12 @@ const kitBinding = (recoveryPoint = 'point-1') => ({ schema: 1, recoveryPoint,
   recoveryManifestSha256: '1'.repeat(64), updateMetadataSha256: '2'.repeat(64),
   previousReleaseId: '3'.repeat(64), targetReleaseId: '4'.repeat(64), sequence: 1 })
 process.umask(0o077)
+
+test('read-only AppImage mount contents may be root-owned but never writable', () => {
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100555 }, { requireOwner: false, currentUid: 1000 }), true)
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100575 }, { requireOwner: false, currentUid: 1000 }), false)
+  assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100555 }, { requireOwner: true, currentUid: 1000 }), false)
+})
 const anchorFor = (platform = 'linux', arch = 'x64', recoveryRoot) => {
   const stateRoot = dirname(dirname(dirname(recoveryRoot))), anchorPath = resolve(dirname(dirname(recoveryRoot)), 'anchor.json')
   return { schema: 3, kind: 'recovery-anchor', platform, arch, executablePath: process.execPath, stateRoot, anchorPath,
@@ -354,9 +360,10 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
     const bootstrapPath = resolve(mount, 'resources', 'app.asar', 'bootstrap.mjs')
     const pythonPath = resolve(mount, 'resources', 'native', 'python', 'bin', 'python3')
     const helperPath = resolve(mount, 'resources', 'native', 'backend.py')
-    for (const [path, bytes] of [[actualExecutablePath, 'mounted executable'], [bootstrapPath, 'bootstrap'], [pythonPath, 'python'], [helperPath, 'helper']]) {
+    for (const [path, bytes] of [[actualExecutablePath, 'mounted executable'], [bootstrapPath, 'bootstrap'], [`${pythonPath}.12`, 'python'], [helperPath, 'helper']]) {
       mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes)
     }
+    symlinkSync('python3.12', pythonPath)
     return { actualExecutablePath, bootstrapPath, pythonPath, helperPath }
   }
   const first = paths(firstMount), second = paths(secondMount)
@@ -409,7 +416,7 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
   const linkedEvidence = { ...firstEvidence, mountPath: linkedMount, actualExecutablePath: linked.actualExecutablePath }
   assert.throws(() => ensureRecoveryAnchor(untouchedAnchor, { executablePath: outer, bootstrapPath: linked.bootstrapPath,
     pythonPath: linked.pythonPath, helperPath: linked.helperPath, platform: 'linux', arch: process.arch },
-  { verifiedFirstInstaller: true, verifiedAppImage: linkedEvidence }), /exact canonical path/)
+  { verifiedFirstInstaller: true, verifiedAppImage: linkedEvidence }), /verified AppImage mount/)
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
 
   const parentMount = resolve(root, '.mount_parent-link'), parent = paths(parentMount)
@@ -418,8 +425,51 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
   const parentEvidence = { ...firstEvidence, mountPath: parentMount, actualExecutablePath: parent.actualExecutablePath }
   assert.throws(() => ensureRecoveryAnchor(untouchedAnchor, { executablePath: outer, bootstrapPath: parent.bootstrapPath,
     pythonPath: parent.pythonPath, helperPath: parent.helperPath, platform: 'linux', arch: process.arch },
-  { verifiedFirstInstaller: true, verifiedAppImage: parentEvidence }), /exact canonical path/)
+  { verifiedFirstInstaller: true, verifiedAppImage: parentEvidence }), /verified AppImage mount/)
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
+})
+
+test('AppImage runtime evidence comes from Linux ancestry and a read-only FUSE mount', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-proc-'))
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const outer = resolve(root, 'Downloaded Singhouse.AppImage'), intermediate = resolve(root, 'AppRun')
+  const proc = resolve(root, 'proc')
+  mkdirSync(mount); writeFileSync(executable, 'mounted electron')
+  const header = Buffer.alloc(32); header.set(Buffer.from([0x7f, 0x45, 0x4c, 0x46]), 0)
+  header.set(Buffer.from([0x41, 0x49, 0x02]), 8); writeFileSync(outer, Buffer.concat([header, Buffer.from('outer payload')]))
+  writeFileSync(intermediate, 'intermediate')
+  for (const directory of ['self', '41', '17']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe'))
+  symlinkSync(intermediate, resolve(proc, '41', 'exe'))
+  symlinkSync(outer, resolve(proc, '17', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse Helper) S 41 0 0 0\n')
+  writeFileSync(resolve(proc, '41', 'stat'), '41 (AppRun shell) S 17 0 0 0\n')
+  writeFileSync(resolve(proc, '17', 'stat'), '17 (Downloaded Singhouse.AppImage) S 1 0 0 0\n')
+  const encodedMount = mount.replaceAll(' ', '\\040')
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro,user_id=1000\n`)
+
+  const evidence = verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc })
+  assert.deepEqual(evidence, { verified: true, outerPath: outer, outerSha256: digest(readFileSync(outer)),
+    mountPath: mount, actualExecutablePath: executable })
+  assert.equal(verifiedAppImageRuntime({ platform: 'darwin', executablePath: executable, procRoot: proc }), null)
+
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} rw,nosuid,nodev - fuse.Singhouse Singhouse.AppImage rw,user_id=1000\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /read-only FUSE root/)
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${encodedMount} ro,nosuid,nodev - ext4 /dev/test ro\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /read-only FUSE root/)
+})
+
+test('AppImage runtime evidence rejects ambient candidates and non-AppImage ancestors', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-negative-'))
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const candidate = resolve(root, 'Singhouse.AppImage'), proc = resolve(root, 'proc')
+  mkdirSync(mount); writeFileSync(executable, 'mounted electron'); writeFileSync(candidate, 'ordinary executable')
+  for (const directory of ['self', '7']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe')); symlinkSync(candidate, resolve(proc, '7', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '8 (Singhouse) S 7 0 0 0\n')
+  writeFileSync(resolve(proc, '7', 'stat'), '7 (attacker) S 0 0 0 0\n')
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${mount} ro - fuse.Singhouse Singhouse.AppImage ro\n`)
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
 })
 
 test('verified installer relocation rotates one invoker without invalidating existing recovery kits', () => {

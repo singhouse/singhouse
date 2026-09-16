@@ -1,0 +1,72 @@
+{
+  "_readme": [
+    "Signature ledger for the Singhouse Contributor License Agreements",
+    "(CLA.md for individuals, CCLA.md for organizations).",
+    "",
+    "This file is the record of who is covered. It is read by the CLA check in",
+    ".github/workflows/cla.yml, which reads it FROM THE BASE BRANCH \u2014 so an",
+    "entry only counts once the Owner has merged it. Adding yourself inside the",
+    "pull request you want unblocked does not work, and is not meant to.",
+    "",
+    "To sign as an individual, see CONTRIBUTING.md. Do not edit anyone else's",
+    "entry.",
+    "",
+    "Matching is on the numeric GitHub account id, never the login: logins are",
+    "mutable and GitHub releases them for reuse after an account is deleted, so",
+    "a login is not a stable identity for a legal record. Find yours at",
+    "https://api.github.com/users/YOUR_LOGIN (the top-level `id` field)."
+  ],
+  "version": 1,
+  "cla_document": "CLA.md",
+  "ccla_document": "CCLA.md",
+  "_cla_version_note": [
+    "Prepared version; intake is not active until the required status and owner-only merge controls are configured and tested. Material revisions require fresh acceptance."
+  ],
+  "cla_version": "1.0",
+  "_owners_note": [
+    "These are authorized account representatives of Bones Consulting LLC, not individual copyright-owner claims or contributor signatures. Owner exemptions cover authorized company submissions; they do not cover unrelated third-party work. Verify each numeric account ID before activation."
+  ],
+  "owners": [
+    {
+      "login": "jonesy827",
+      "id": 7884323,
+      "entity": "Bones Consulting LLC",
+      "representative": "Michael Jones"
+    }
+  ],
+  "_signature_format": {
+    "login": "your GitHub login at the time of signing, for human readability",
+    "id": "your numeric GitHub account id \u2014 this is what the check matches on",
+    "name": "your full legal name \u2014 the agreement is with a person, not an account",
+    "email": "a contact email address for CLA matters",
+    "employer": "OPTIONAL: employer or client with rights in your work, per Section 6(c) \u2014 omit if none",
+    "cla_version": "the value of cla_version above, at the time you signed",
+    "signed_at": "ISO date, YYYY-MM-DD",
+    "reference": "URL of the pull request in which you signed"
+  },
+  "signatures": [],
+  "_corporate_format": {
+    "_note": [
+      "Organizations sign CCLA.md offline, so these entries are added by the",
+      "Owner from the executed agreement \u2014 never by a contributor pull request.",
+      "`designated_contributors` mirrors that agreement's Schedule A.",
+      "",
+      "The CCLA's alternative Schedule A form \u2014 a tick-box designating everyone",
+      "at a given email domain \u2014 cannot be enforced automatically: a commit's",
+      "author email is frequently a GitHub `noreply` address and is unverified",
+      "either way. Organizations using that form still need their people listed",
+      "here individually to get through the check."
+    ],
+    "corporation": "legal name exactly as executed",
+    "cla_version": "agreement version signed",
+    "signed_at": "ISO date, YYYY-MM-DD",
+    "reference": "pointer to the executed agreement in the Owner's records",
+    "designated_contributors": [
+      {
+        "login": "\u2026",
+        "id": 0
+      }
+    ]
+  },
+  "corporate": []
+}

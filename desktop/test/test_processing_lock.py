@@ -96,6 +96,32 @@ wheels = [{url="https://example.org/linux_only-1-py3-none-any.whl",hashes={sha25
             with self.assertRaisesRegex(ValueError, 'target/accelerator'):
                 MODULE.generate(path, target='linux-x64', accelerator='metal')
 
+    def test_noncommercial_quantizers_are_explicitly_excluded_on_every_target(self):
+        text = '''lock-version = "1.0"
+requires-python = ">=3.12"
+[[packages]]
+name = "diffq"
+version = "0.2.4"
+wheels = [{url="https://example.org/diffq-0.2.4-py3-none-any.whl",hashes={sha256="HASH"}}]
+[[packages]]
+name = "diffq-fixed"
+version = "0.2.4"
+marker = "sys_platform == 'win32'"
+wheels = [{url="https://example.org/diffq_fixed-0.2.4-py3-none-any.whl",hashes={sha256="HASH"}}]
+[[packages]]
+name = "separation"
+version = "1"
+wheels = [{url="https://example.org/separation-1-py3-none-any.whl",hashes={sha256="HASH"}}]
+'''.replace('HASH', 'a' * 64)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'pylock.toml'
+            path.write_text(text)
+            for target in ('linux-x64', 'win32-x64'):
+                with self.subTest(target=target):
+                    output = MODULE.generate(path, target=target, metadata=lambda _: {'license': 'MIT'})
+                    self.assertEqual([package['name'] for package in output['packages']], ['separation'])
+                    self.assertEqual(output['excludedPackages'], MODULE.EXCLUDED_PACKAGES)
+
 
 if __name__ == '__main__':
     unittest.main()

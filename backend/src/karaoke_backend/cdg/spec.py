@@ -33,6 +33,9 @@ SC_CDG_COMMAND = 0x09
 CDG_MEMORY_PRESET = 1
 CDG_BORDER_PRESET = 2
 CDG_TILE_NORMAL = 6
+CDG_SCROLL_PRESET = 20
+CDG_SCROLL_COPY = 24
+CDG_DEFINE_TRANSPARENT = 28
 CDG_LOAD_CLUT_LO = 30
 CDG_LOAD_CLUT_HI = 31
 CDG_TILE_XOR = 38
@@ -110,6 +113,20 @@ CARD_MAX_HOLD = 5.0
 CARD_MIN_HOLD = 1.5
 
 # --- limits -----------------------------------------------------------------
+
+#: Most packets a decoder instance will accept from one CD+G stream.
+#:
+#: Decode cost is driven by packet count, and a hostile stream can make every
+#: packet an expensive tile write rather than the no-op-heavy mix a normal
+#: disc carries. Thirty minutes is well beyond a single karaoke song while
+#: putting a deterministic ceiling on that CPU work and on the whole-packet
+#: portion of a stream (12,960,000 bytes at 24 bytes/packet). The decoder's
+#: longstanding behavior is to ignore a trailing partial packet.
+#: This is deliberately tighter than ``MAX_STREAM_SECONDS``: the encoder's
+#: four-hour ceiling also accommodates generated artifacts, while the decoder
+#: is about to receive files supplied by a caller.
+MAX_DECODE_SECONDS = 30 * 60
+MAX_DECODE_PACKETS = MAX_DECODE_SECONDS * PACKETS_PER_SEC
 
 #: Longest stream this encoder will produce, in seconds.
 #:

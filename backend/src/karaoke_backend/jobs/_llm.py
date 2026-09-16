@@ -2,8 +2,8 @@
 """Job-side glue for the LLM stages: correction progress, from any handler.
 
 Lived in ``jobs.ingest`` while ingest was the only place LLM correction could
-be switched on. Re-transcribe and re-align can ask for it too now, and
-importing the ingest orchestrator to borrow one callback would drag the whole
+be switched on. Re-transcribe and re-align can ask for it too, and importing
+the ingest orchestrator to borrow one callback would drag the whole
 separation pipeline — and its module-level worker imports — into handlers that
 never separate anything.
 """

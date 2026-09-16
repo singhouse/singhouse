@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, readFile, realpath } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { RecoveryStore, UpdateStore } from './update_manager.mjs'
 import { canonicalJson } from './release.mjs'
@@ -362,9 +362,9 @@ export async function runStableBootstrap({ stateRoot, parentPid, contract, platf
 }
 
 async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
-  // Linux remains disabled until a qualified release supplies a native/detached verifier for
-  // the exact outer AppImage bytes. A digest recorded by an untrusted first
-  // launch is integrity evidence, not publisher authentication.
+  // This fallback cannot authenticate the outer AppImage bytes on Linux.
+  // Callers must inject trust established by the native/detached verifier; a
+  // digest recorded by an untrusted first launch is only integrity evidence.
   if (anchor.platform === 'linux') return false
   const command = anchor.platform === 'darwin' ? '/usr/bin/codesign' : 'powershell.exe'
   const args = anchor.platform === 'darwin'
@@ -418,10 +418,16 @@ export async function verifyRecoveryAnchor(anchorPath, { platform = process.plat
   }
   for (const [name, path] of Object.entries(paths)) {
     let canonical, info
-    try { canonical = await realpath(path); info = await lstat(path) } catch {
+    try {
+      canonical = await realpath(path)
+      info = await lstat(anchor.platform === 'linux' && name !== 'executablePath' ? canonical : path)
+    } catch {
       throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
     }
-    if (path !== resolve(path) || canonical !== path || info.isSymbolicLink() || !info.isFile()) {
+    const mountedComponent = anchor.platform === 'linux' && name !== 'executablePath'
+    const mountedRelative = mountedComponent ? relative(verifiedAppImage.mountPath, canonical) : null
+    if (path !== resolve(path) || !info.isFile() ||
+        (mountedComponent ? !mountedRelative || mountedRelative.startsWith('..') || isAbsolute(mountedRelative) : canonical !== path || info.isSymbolicLink())) {
       throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
     }
     let bytes

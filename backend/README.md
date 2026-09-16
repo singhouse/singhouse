@@ -68,8 +68,8 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'     # editable install + dev/test extras
 ```
 
-`requirements.txt` is retained as a frozen mirror of the pins for the
-older installs; new environments should prefer the editable install.
+`requirements.txt` is retained as a frozen compatibility mirror of the pins;
+new environments should prefer the editable install.
 
 ### 2. Configure environment
 
@@ -146,16 +146,8 @@ somewhere other than `backend/.venv-demucs/bin/python`.
 Modal is **opt-in and off by default**, and it runs in *your* Modal account —
 deploy `modal_app.py` there yourself. Installing the SDK is not enough; the
 backend does not auto-detect it.
-
-```bash
-pip install modal
-modal setup                    # authenticate with your own Modal account
-modal deploy backend/modal_app.py
-export KARAOKE_MODAL=1         # required — see .env.example
-```
-
-`KARAOKE_MODAL_APP` (default `karaoke-gpu`) must match the app name in
-`modal_app.py`; a mismatch fails the lookup rather than falling back.
+The complete setup, deploy-time variables, backend variables, data flow, and
+cost controls are in [the user-owned Modal guide](../docs/modal.md).
 
 ### If no backend is configured
 
@@ -506,6 +498,7 @@ means no authentication.
 | `GET /api/features` | session | Operator-gated capability flags (lyrics lookup opt-in state, CD+G export availability) |
 | `GET /api/export/settings` | session | Read the export settings (attribution-card toggle) |
 | `PUT /api/export/settings` | session | Update the export settings |
+| `POST /api/import/cdg` | session | Import one bare `.cdg` or exporter-compatible same-basename MP3+G zip |
 | `GET /api/export/songs/{id}` | session | Download the song as an MP3+G zip (`?format=mp3g`, default) or bare `.cdg` (`?format=cdg`); `501` when the optional export extra is not installed |
 | `GET /api/catalog/providers` | session or guest | Installed catalog providers — `[]` on a stock install (core ships none) |
 

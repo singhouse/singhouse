@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Which ingest route a dropped file takes, and whether it may be sent at all.
 //
-// Two routes exist and they are not interchangeable: the separation route
-// (audio in, stems out) and the karaoke-video import route (a video the host
-// already owns, played as the song's display). The server enforces its own
+// Three routes exist and they are not interchangeable: separation (audio in,
+// stems out), prepared video, and single-song CDG/MP3+G. The server enforces its own
 // MIME + extension allowlists on both and answers a mismatch with a 415 —
 // AFTER the whole file has crossed the wire. A video is gigabytes. So the
 // decision has to be right HERE, before a byte moves.
@@ -28,9 +27,11 @@ export const ACCEPTED_AUDIO_EXTS = ['.mp3', '.flac', '.wav', '.ogg', '.m4a', '.a
 // The containers the import route accepts. Anything else the browser calls a
 // video is refused here by name, not handed to the server to 415.
 export const ACCEPTED_VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.mkv']
+export const ACCEPTED_CDG_EXTS = ['.cdg', '.zip']
 
 export const MAX_AUDIO_SIZE = 500 * 1024 * 1024        // 500MB
 export const MAX_VIDEO_SIZE = 2048 * 1024 * 1024       // 2GB — the server's cap
+export const MAX_CDG_SIZE = 30 * 60 * 300 * 24 + 23    // 30 min + ignored partial packet
 
 // Human list for the copy below; kept next to the allowlist so the two cannot
 // drift apart.
@@ -48,9 +49,10 @@ export function extOf(name) {
 /**
  * The ingest route for one file.
  *
- * @returns {'audio'|'video'|'unsupported-video'|'unsupported'}
+ * @returns {'audio'|'video'|'cdg'|'unsupported-video'|'unsupported'}
  *   'audio'             — the separation route
  *   'video'             — the karaoke-video import route
+ *   'cdg'               — one bare CDG or one MP3+G ZIP
  *   'unsupported-video' — the browser calls it video, we cannot import that
  *                         container; refuse by name
  *   'unsupported'       — not media as far as we can tell; ignored in a mixed
@@ -60,6 +62,7 @@ export function routeUpload(file) {
   const ext = extOf(file?.name)
   const type = String(file?.type || '').toLowerCase()
   const videoExt = ACCEPTED_VIDEO_EXTS.includes(ext)
+  if (ACCEPTED_CDG_EXTS.includes(ext)) return 'cdg'
 
   // An allowlisted container the browser reports as audio is an AUDIO upload.
   // The import route refuses audio/* outright, and this is the pre-video
@@ -95,12 +98,23 @@ export function validateUpload(file) {
     return null
   }
 
+  if (route === 'cdg') {
+    const cap = extOf(file.name) === '.cdg' ? MAX_CDG_SIZE : MAX_AUDIO_SIZE + 50 * 1024 * 1024
+    if (file.size > cap) {
+      if (extOf(file.name) === '.cdg') {
+        return `"${file.name}" exceeds the 30-minute CDG packet limit`
+      }
+      return `"${file.name}" exceeds the 550MB CD+G import limit`
+    }
+    return null
+  }
+
   if (route === 'unsupported-video') {
     return `"${file.name}" is a video format we can't import — supported: ${VIDEO_CONTAINERS}`
   }
 
   if (route === 'unsupported') {
-    return `"${file.name}" is not a supported format (audio: ${AUDIO_FORMATS} — karaoke video: ${VIDEO_CONTAINERS})`
+    return `"${file.name}" is not a supported format (audio: ${AUDIO_FORMATS}; karaoke graphics: CDG or MP3+G ZIP; karaoke video: ${VIDEO_CONTAINERS})`
   }
 
   // Audio: unchanged from before the video route existed. A file that reached

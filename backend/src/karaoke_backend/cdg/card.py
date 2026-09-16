@@ -5,8 +5,8 @@ An exported .cdg travels: it gets burned, copied, handed around, and played on
 rigs that know nothing about where it came from. The card is how it says so --
 the mark, the sentence naming the tool that made it, and the domain. That is a
 factual statement about a tool, and it is deliberately the only claim the card
-makes; careful copy is what keeps the exporter clear of implying
-anything about the material it encodes.
+makes. Keeping the attribution limited to the tool avoids implying anything
+about the source, ownership, or licensing of the material it encodes.
 
 The pixels are baked at authoring time by `backend/scripts/gen-card-asset.py`
 and committed as `card_asset`, so nothing here rasterises: the runtime cost is

@@ -80,11 +80,46 @@ class ProcessingBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'notices'):
             builder.retain_notices(wheel, {'name': 'empty'}, self.root, self.root)
         lock = dict(schema=1, kind='processing-requirements', target='linux-x64', accelerator='cpu', capabilities=['transcription'],
+                    excludedPackages=builder.EXCLUDED_PACKAGES,
                     packages=[dict(name='fixture', version='1', url='https://example.org/f.whl', sha256='a'*64)])
         builder.validate_requirements(lock, 'linux-x64', 'cpu')
         lock['packages'].append(dict(lock['packages'][0]))
         with self.assertRaisesRegex(ValueError, 'duplicate'):
             builder.validate_requirements(lock, 'linux-x64', 'cpu')
+
+    def test_diffq_packages_and_payload_paths_fail_closed(self):
+        base = dict(schema=1, kind='processing-requirements', target='linux-x64', accelerator='cpu', capabilities=['separation'],
+                    excludedPackages=builder.EXCLUDED_PACKAGES,
+                    packages=[dict(name='fixture', version='1', url='https://example.org/f.whl', sha256='a'*64)])
+        builder.validate_requirements(base, 'linux-x64', 'cpu')
+        for name in ('diffq', 'diffq-fixed'):
+            lock = dict(base, packages=[dict(base['packages'][0], name=name)])
+            with self.assertRaisesRegex(ValueError, 'Excluded non-commercial'):
+                builder.validate_requirements(lock, 'linux-x64', 'cpu')
+        for name in ('diffq/module.py', 'diffq.py', 'diffq_fixed/module.py', 'diffq_fixed.cp312-win_amd64.pyd',
+                     'diffq-0.2.4.dist-info/METADATA', 'notices/diffq/000.txt'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('excluded')
+            self.assertIn(name, builder.excluded_payload_paths(self.root))
+            path.unlink()
+
+    def test_static_dependency_validation_allows_only_target_diffq_exclusion(self):
+        def distribution(name, version, requires=()):
+            directory = self.root / f'{name}-{version}.dist-info'
+            directory.mkdir()
+            directory.joinpath('METADATA').write_text(
+                f'Metadata-Version: 2.2\nName: {name}\nVersion: {version}\n' +
+                ''.join(f'Requires-Dist: {value}\n' for value in requires))
+        distribution('audio-separator', '1', ['diffq>=0.2; sys_platform != "win32"', 'diffq-fixed>=0.2; sys_platform == "win32"', 'fixture>=1'])
+        distribution('fixture', '1')
+        installed = builder.validate_installed_requirements(self.root, 'linux-x64', '3.12.14')
+        self.assertEqual(str(installed['fixture']), '1')
+        installed = builder.validate_installed_requirements(self.root, 'win32-x64', '3.12.14')
+        self.assertEqual(str(installed['fixture']), '1')
+        (self.root / 'fixture-1.dist-info').rename(self.root / 'fixture-hidden')
+        with self.assertRaisesRegex(ValueError, 'unsatisfied'):
+            builder.validate_installed_requirements(self.root, 'linux-x64', '3.12.14')
 
     def test_vendored_metadata_does_not_replace_wheel_identity_or_lose_notices(self):
         wheel = self.root / 'fixture-1-py3-none-any.whl'

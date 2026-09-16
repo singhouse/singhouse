@@ -5,18 +5,13 @@ import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readlink, readdir, rename, rm, statfs, symlink } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, validateUpdateMetadata } from './release.mjs'
+import { allowedPortableCaseAlias, assertReleaseIdentity, assertReleasePolicy, canonicalJson, safePortablePath, validatePortableSymlinkTargets, validateUpdateMetadata } from './release.mjs'
 import { checkedFile, runNativeHelper } from './runtime_manager.mjs'
 
 const MAGIC = Buffer.from('SINGHOUSEAPP\0\r\n\x1a', 'binary')
 const HASH = /^[a-f0-9]{64}$/
 const POINT = /^point-[A-Za-z0-9]+$/
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
-const portablePath = value => typeof value === 'string' && value.length > 0 && value.length < 1024
-  && !value.startsWith('/') && !value.includes('\\') && value.split('/').every(part =>
-    /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part)
-    && !part.endsWith('.') && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
-
 function assertPrivate(info, kind) {
   if (kind === 'directory' ? !info.isDirectory() : !info.isFile()) throw new Error(`Private ${kind} has the wrong type`)
   if (info.isSymbolicLink()) throw new Error(`Private ${kind} must not be a symbolic link`)
@@ -118,18 +113,19 @@ async function exactTree(root, prefix = '') {
 function validatePortableHeader(value, expected) {
   if (!value || value.schema !== 1 || value.kind !== 'singhouse-portable-application'
       || value.target?.platform !== expected.platform || value.target?.arch !== expected.arch
-      || !portablePath(value.entrypoint) || !Array.isArray(value.files) || !value.files.length) {
+      || !safePortablePath(value.entrypoint) || !Array.isArray(value.files) || !value.files.length) {
     throw new Error('Portable application manifest is malformed or targets another platform')
   }
   if (!((expected.platform === 'linux' && ['x64', 'arm64'].includes(expected.arch))
       || (expected.platform === 'win32' && expected.arch === 'x64')
       || (expected.platform === 'darwin' && expected.arch === 'arm64'))) throw new Error('Portable target is outside the launch matrix')
   assertReleaseIdentity(value.identity, { published: true })
-  const names = new Set(), folded = new Set()
+  const names = new Set(), folded = new Map()
   let offset = 0
   for (const record of value.files) {
     const lower = String(record.path).toLowerCase()
-    if (!portablePath(record.path) || names.has(record.path) || folded.has(lower)
+    const prior = folded.get(lower)
+    if (!safePortablePath(record.path) || names.has(record.path) || (prior && !allowedPortableCaseAlias(expected.platform, prior, record.path))
         || !['file', 'directory', 'symlink'].includes(record.type)) {
       throw new Error('Portable application inventory is unsafe or non-deterministic')
     }
@@ -137,8 +133,8 @@ function validatePortableHeader(value, expected) {
         || !HASH.test(record.sha256 || '') || ![0o644, 0o755].includes(record.mode))) throw new Error('Portable file record is invalid')
     if (record.type === 'file') offset += record.size
     if (record.type === 'directory' && record.mode !== 0o755) throw new Error('Portable directory record is invalid')
-    if (record.type === 'symlink' && !portablePath(record.target)) throw new Error('Portable symlink target is invalid')
-    names.add(record.path); folded.add(lower)
+    if (record.type === 'symlink' && !safePortablePath(record.target)) throw new Error('Portable symlink target is invalid')
+    names.add(record.path); folded.set(lower, record.path)
   }
   const byName = new Map(value.files.map(record => [record.path, record]))
   for (const record of value.files) {
@@ -146,16 +142,8 @@ function validatePortableHeader(value, expected) {
     for (let index = 1; index < parts.length; index++) {
       if (byName.get(parts.slice(0, index).join('/'))?.type !== 'directory') throw new Error('Portable path has an undeclared parent directory')
     }
-    if (record.type === 'symlink') {
-      let target = byName.get(record.target), hops = 0
-      if (!target) throw new Error('Portable symlink target is absent')
-      while (target.type === 'symlink') {
-        if (++hops > value.files.length) throw new Error('Portable symlink cycle')
-        target = byName.get(target.target)
-        if (!target) throw new Error('Portable symlink target is absent')
-      }
-    }
   }
+  validatePortableSymlinkTargets(value.files)
   if (!names.has(value.entrypoint) || value.files.find(file => file.path === value.entrypoint).type !== 'file'
       || value.files.find(file => file.path === value.entrypoint).mode !== 0o755) {
     throw new Error('Portable application entrypoint is absent or non-executable')
@@ -392,7 +380,7 @@ export class UpdateStore {
     try {
       const names = new Set()
       for (const record of signed.files) {
-        if (record.name !== basename(record.name) || !portablePath(record.name) || names.has(record.name.toLowerCase())) throw new Error('Update artifact name is unsafe or ambiguous')
+        if (record.name !== basename(record.name) || !safePortablePath(record.name) || names.has(record.name.toLowerCase())) throw new Error('Update artifact name is unsafe or ambiguous')
         names.add(record.name.toLowerCase())
         await this.download(record, join(temp, record.name), signal, artifactDirectory)
       }
@@ -618,7 +606,7 @@ export class UpdateStore {
         assertReleaseIdentity(value.previousIdentity); assertReleaseIdentity(value.targetIdentity)
         for (const record of [value.previousApplication, value.targetApplication]) {
           if (record?.schema !== 1 || !HASH.test(record.releaseId || '') || !HASH.test(record.payloadSha256 || '')
-              || !HASH.test(record.manifestSha256 || '') || !portablePath(record.entrypoint)) throw new Error('Invalid handoff application record')
+              || !HASH.test(record.manifestSha256 || '') || !safePortablePath(record.entrypoint)) throw new Error('Invalid handoff application record')
         }
         if (value.previousApplication.releaseId !== value.previousIdentity.releaseId
             || value.targetApplication.releaseId !== value.targetIdentity.releaseId

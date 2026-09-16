@@ -16,6 +16,27 @@ import shutil
 from urllib.parse import urlparse
 
 
+EXCLUDED_PACKAGES = {
+    "diffq": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.",
+    "diffq-fixed": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.",
+}
+
+
+def normalized(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def excluded_path(value):
+    for part in value.split("/"):
+        lowered = part.lower().replace("_", "-")
+        if (lowered in EXCLUDED_PACKAGES
+                or any(lowered.startswith(name + ".") for name in EXCLUDED_PACKAGES)
+                or any(lowered.startswith(name + "-") and lowered.endswith(".dist-info")
+                       for name in EXCLUDED_PACKAGES)):
+            return True
+    return False
+
+
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -48,12 +69,16 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
     packages = lock.get("packages")
     if not isinstance(packages, list) or not packages:
         raise ValueError("Package provenance is required")
+    if lock.get("excludedPackages") != EXCLUDED_PACKAGES:
+        raise ValueError("Input lock must declare the exact diffq exclusion policy")
     notice_paths = set()
     for package in packages:
         if not all(isinstance(package.get(key), str) and package[key] for key in ("name", "version", "license", "sourceUrl")):
             raise ValueError("Each package needs version, license and upstream provenance")
         if not re.fullmatch(r"[a-f0-9]{64}", package.get("sha256", "")) or urlparse(package["sourceUrl"]).scheme != "https":
             raise ValueError("Each package needs its locked upstream artifact digest")
+        if normalized(package["name"]) in EXCLUDED_PACKAGES:
+            raise ValueError("Excluded non-commercial dependency in processing package provenance")
         notices = package.get("notices")
         if not isinstance(notices, list) or not notices or any(not relative(path) for path in notices):
             raise ValueError("Each package needs a non-empty locked notice inventory")
@@ -67,6 +92,8 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
         name = record.get("path")
         if not relative(name) or path_identity(name) in names or name == "manifest.json" or name.endswith(".partial"):
             raise ValueError("Invalid or duplicate input path")
+        if excluded_path(name):
+            raise ValueError("Processing input contains excluded diffq code, metadata, or notices")
         names.add(path_identity(name))
         source = payload / name
         if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(payload):
@@ -108,7 +135,7 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
     if urlparse(base_url).scheme not in {"https", "file"} or not base_url.endswith("/"):
         raise ValueError("Artifact base URL must be an HTTPS or local directory URL")
     (output / "blobs").mkdir(parents=True)
-    manifest = {key: lock[key] for key in ("appVersion", "backendVersion", "lyricsyncVersion", "pythonVersion", "platform", "arch", "accelerator", "python", "capabilities", "models", "modelCapabilities")}
+    manifest = {key: lock[key] for key in ("appVersion", "backendVersion", "lyricsyncVersion", "pythonVersion", "platform", "arch", "accelerator", "python", "capabilities", "models", "modelCapabilities", "excludedPackages")}
     manifest.update(schema=1, kind="processing", provenance={
         "sourceCommit": lock["sourceCommit"], "lockSha256": digest(lock_path),
         "inputLock": lock_path.read_text(),

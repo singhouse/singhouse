@@ -52,10 +52,10 @@
 </template>
 
 <script setup>
-// Dev-only playground wrapper around EditorWorkbench: adds the gitignored
-// fixture corpus (import.meta.glob must never reach a prod bundle — the
-// fixtures hold personal library data) and quick song/set pickers. The
-// production entry point is /songs/:songId/lyrics-editor (LyricsEditorView).
+// Dev-only playground wrapper around EditorWorkbench: adds locally generated,
+// gitignored fixtures and quick song/set pickers. The route is excluded from
+// production builds; the production entry point is
+// /songs/:songId/lyrics-editor (LyricsEditorView).
 import { ref } from 'vue'
 
 import { lyricsSetsApi } from '@/api/client'

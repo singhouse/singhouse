@@ -15,6 +15,15 @@ LEGAL_FILES = (
     ".github/scripts/cla.cjs", "CLA.md", "CCLA.md", "CLA-SIGNATURES.json",
     "CONTRIBUTING.md", "LICENSING.md",
 )
+PUBLIC_BRAND_DOCS = (
+    "docs/install-desktop.md",
+    "docs/modal.md",
+    "docs/release-notes-draft.md",
+    "docs/release-qualification.md",
+    "docs/support-diagnostics.md",
+    "docs/asahi-local-test.md",
+    "docs/release-checklist.md",
+)
 LOOKUP = "https://api.github.com/" + "users/YOUR_LOGIN"
 HOME_SAMPLE = "/" + "home/fixture_account/media"
 PRIVATE_BRAND = "retired_fixture"
@@ -22,14 +31,21 @@ VENDOR_SAMPLE = "fixture_vendor"
 
 
 class LegalLiteralTests(unittest.TestCase):
-    def check_gate(self, filename, content, *, private_brand=None, private_infra=None):
+    def check_gate(
+        self, filename, content, *, private_brand=None, private_infra=None,
+        extra_files=None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q", directory], check=True)
-            target = root / filename
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content + "\n")
-            subprocess.run(["git", "-C", directory, "add", filename], check=True)
+            files = {filename: content, **(extra_files or {})}
+            for relative, body in files.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body + "\n")
+            subprocess.run(
+                ["git", "-C", directory, "add", "--", *files], check=True,
+            )
             if private_brand or private_infra:
                 (root / "tools").mkdir(exist_ok=True)
                 supplement = root / "tools" / ("private-" + "patterns.txt")
@@ -84,6 +100,29 @@ class LegalLiteralTests(unittest.TestCase):
         output = self.assert_gate("desktop/main.mjs", HOME_SAMPLE, 1)
         self.assertIn("FAIL: private-infra literals", output)
 
+    def test_named_public_docs_may_name_product_but_not_private_brands(self):
+        for filename in PUBLIC_BRAND_DOCS:
+            with self.subTest(filename=filename, kind="public-product"):
+                self.assert_gate(filename, PRODUCT.title(), 0)
+            with self.subTest(filename=filename, kind="private-brand"):
+                output = self.assert_gate(
+                    filename, PRODUCT.title() + " " + PRIVATE_BRAND, 1,
+                    private_brand=PRIVATE_BRAND,
+                )
+                self.assertIn(filename + ":1:", output)
+                self.assertIn("FAIL: brand literals", output)
+
+    def test_unlisted_public_doc_still_requires_brand_indirection(self):
+        self.assert_gate("docs/another-guide.md", PRODUCT.title(), 1)
+
+    def test_named_public_docs_remain_in_vendor_and_infra_checks(self):
+        content = PRODUCT.title() + " " + VENDOR_SAMPLE + " " + HOME_SAMPLE
+        for filename in PUBLIC_BRAND_DOCS:
+            with self.subTest(filename=filename):
+                output = self.assert_gate(filename, content, 1)
+                self.assertIn("FAIL: vendor literals", output)
+                self.assertIn("FAIL: private-infra literals", output)
+
     def test_exact_lookup_url_allowed(self):
         for content in (LOOKUP, "`" + LOOKUP + "`", LOOKUP + " followed by text"):
             with self.subTest(content=content):
@@ -114,6 +153,46 @@ class LegalLiteralTests(unittest.TestCase):
 
     def test_other_account_lookup_is_not_exempt(self):
         self.assert_gate("CONTRIBUTING.md", LOOKUP.replace("YOUR_LOGIN", "fixture"), 1)
+
+    def test_hit_labels_treat_awkward_filenames_as_data(self):
+        cases = (
+            ("docs/vendor|fixture.txt", VENDOR_SAMPLE, "FAIL: vendor literals"),
+            ("premium/vendor&fixture.txt", VENDOR_SAMPLE, "FAIL: vendor literals"),
+            ("frontend/src/import|fixture.js", "karaoke_premium", "FAIL: premium import paths"),
+            ("frontend/src/-download-fixture.js", "Download this", "FAIL: Download-verb language"),
+            ("frontend/src/auth&fixture.js", "invite_token", "FAIL: multi-user auth markers"),
+            ("frontend/src/rotation|fixture.js", "useRotationStore", "FAIL: premium rotation markers"),
+        )
+        for filename, content, failure in cases:
+            with self.subTest(filename=filename):
+                output = self.assert_gate(filename, content, 1)
+                self.assertIn(filename + ":1:" + content, output)
+                self.assertIn(failure, output)
+                self.assertNotIn("sed:", output)
+
+    def test_dangling_reference_label_treats_filename_as_data(self):
+        filename = "docs/dangling|fixture.md"
+        withheld = "notes/withheld.md"
+        output = self.assert_gate(
+            filename,
+            f"See {withheld}",
+            1,
+            private_brand="retired_fixture",
+            private_infra="fixture_infra",
+            extra_files={
+                withheld: "private notes",
+                "tools/keep-private.txt": withheld,
+            },
+        )
+        self.assertIn(filename + ":1:See " + withheld, output)
+        self.assertIn("FAIL: surviving files reference keep-private paths", output)
+        self.assertNotIn("sed:", output)
+
+    def test_git_quoted_filenames_fail_closed_during_enumeration(self):
+        for filename in (r"docs/backslash\fixture.txt", "docs/newline\nfixture.txt"):
+            with self.subTest(filename=filename):
+                output = self.assert_gate(filename, VENDOR_SAMPLE, 1)
+                self.assertIn("FAIL: tracked paths missing from the worktree", output)
 
 
 if __name__ == "__main__":

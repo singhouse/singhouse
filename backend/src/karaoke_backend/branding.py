@@ -20,14 +20,11 @@ TUNNEL_LOG_PREFIX = f"{PRODUCT_SLUG}-cloudflared."
 #
 # Both lines are load-bearing rather than decorative: the card travels into
 # rooms and onto discs we do not control, and "Created with <Name>" is the
-# factual attribution of a tool that keeps it clear of the Grokster reading.
-# A bare mark without the sentence is the ambiguity this pairing exists to foreclose, so
-# the two ship together (2026-08-13).
+# factual attribution of a tool. A bare mark could be read as labeling the
+# disc or its content instead, so the sentence and mark always ship together.
 #
-# PRODUCT_URL is the canonical domain, deliberately bare -- no scheme,
-# no path. It is the one registered domain; the still-open .io/.org are not
-# alternates here. REPO_URL above is the source repository, not the
-# product domain, and is not shown on the card.
+# PRODUCT_URL is the canonical product domain, deliberately bare: no scheme or
+# path. REPO_URL above is the source repository and is not shown on the card.
 PRODUCT_URL = "sing.house"
 ATTRIBUTION_CARD_TEXT = f"Created with {PRODUCT_NAME}"
 # Brand-derived id prefix baked into exported filenames ("SH0001 - Artist -

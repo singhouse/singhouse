@@ -3,15 +3,14 @@
 # SOURCE OF TRUTH: pyproject.toml. The backend is now an installable package
 # (`karaoke-backend`); new environments should `pip install -e '.[dev]'`
 # instead of using this file. This requirements.txt is retained as a FROZEN
-# MIRROR of the pins so older installs (which install from it)
-# stay byte-for-byte reproducible.
+# MIRROR of the pins so installations that still consume this file remain
+# byte-for-byte reproducible.
 #
 # Note: pyproject additionally pins `greenlet==3.3.2` explicitly — SQLAlchemy
 # 2.0.36's conditional greenlet marker does not fire on Python 3.14, so the
-# async engine needs it declared. It is present transitively in the live venv;
-# the packaged metadata makes it explicit.
+# async engine needs it declared. The packaged metadata makes it explicit.
 #
-# Install (legacy/live-tree path): pip install -r requirements.txt
+# Install (legacy requirements path): pip install -r requirements.txt
 
 # --- Web framework ---
 fastapi==0.115.5
@@ -21,7 +20,7 @@ itsdangerous==2.2.0      # backs starlette.middleware.sessions (signed cookies)
 # --- File uploads ---
 python-multipart==0.0.12
 
-# --- Auth ---
+# --- Authentication ---
 bcrypt==4.2.1
 email-validator==2.2.0   # backs pydantic.EmailStr
 

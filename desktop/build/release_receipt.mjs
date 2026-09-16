@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { chmod, link, mkdir, open, readFile, rm, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes } from '../release.mjs'
+import { allowedPortableCaseAlias, canonicalJson, assertReleaseIdentity, assertReleasePolicy, deriveReleaseIdentity, sha256Hex, PORTABLE_MAGIC, inspectPortablePayload, parsePortablePayload, portableFileBytes, validatePortableSymlinkTargets } from '../release.mjs'
 export { PORTABLE_MAGIC, inspectPortablePayload } from '../release.mjs'
 
 const execFile = promisify(execFileCallback)
@@ -50,7 +50,7 @@ function targetEntrypoint(platform, productName = 'Singhouse') {
   throw new Error('Unsupported portable target platform')
 }
 function safePath(path) {
-  if (typeof path !== 'string' || path.length < 1 || path.length >= 1024 || path.startsWith('/') || path.includes('\\') || !path.split('/').every(part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error(`Unsafe portable path: ${path}`)
+  if (typeof path !== 'string' || path.length < 1 || path.length >= 1024 || path.startsWith('/') || path.includes('\\') || !path.split('/').every(part => /^[A-Za-z0-9@._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error(`Unsafe portable path: ${path}`)
   return path
 }
 async function publishNew(temporary, destination) {
@@ -94,8 +94,8 @@ export async function deriveIdentityFromApplication({ applicationDirectory, poli
   assertReleasePolicy(policy)
   const root = resolve(applicationDirectory)
   const { records, inventoryDigest } = await inspectApplicationInventory(root)
-  const asar = singleFile(records, path => /(^|\/)resources\/app\.asar$/.test(path), 'app.asar')
-  const nativeManifest = singleFile(records, path => /(^|\/)resources\/native\/manifest\.json$/.test(path), 'native manifest')
+  const asar = singleFile(records, path => /(^|\/)resources\/app\.asar$/i.test(path), 'app.asar')
+  const nativeManifest = singleFile(records, path => /(^|\/)resources\/native\/manifest\.json$/i.test(path), 'native manifest')
   const prefix = nativeManifest.path.slice(0, -'manifest.json'.length)
   const nativeFilesRecord = singleFile(records, path => path === `${prefix}files.json`, 'native file inventory')
   const provenanceRecord = singleFile(records, path => path === `${prefix}provenance.json`, 'native provenance')
@@ -136,13 +136,16 @@ export async function createPortablePayload({ sourceDirectory, output, identity,
     } else if (entry.type === 'directory') inventory.push({ type: 'directory', path: name, mode: 0o755 })
     else inventory.push({ type: 'symlink', path: name, target: entry.target })
   }
-  if (new Set(inventory.map(file => file.path.toLowerCase())).size !== inventory.length) throw new Error('Portable payload contains case-colliding paths')
-  const names = new Map(inventory.map(record => [record.path, record]))
-  for (const record of inventory.filter(record => record.type === 'symlink')) {
-    if (!names.has(record.target)) throw new Error(`Portable symlink target is absent: ${record.path}`)
-    const seen = new Set([record.path]); let target = names.get(record.target)
-    while (target?.type === 'symlink') { if (seen.has(target.path)) throw new Error(`Portable symlink cycle: ${record.path}`); seen.add(target.path); target = names.get(target.target) }
+  const foldedPaths = new Map()
+  for (const file of inventory) {
+    const folded = file.path.toLowerCase()
+    const prior = foldedPaths.get(folded)
+    if (prior && !allowedPortableCaseAlias(platform, prior, file.path)) {
+      throw new Error('Portable payload contains case-colliding paths')
+    }
+    foldedPaths.set(folded, file.path)
   }
+  validatePortableSymlinkTargets(inventory)
   if (inventory.find(file => file.path === entrypoint)?.mode !== 0o755 || !inventory.some(file => file.type === 'file' && /(^|\/)app\.asar$/.test(file.path)) || !inventory.some(file => file.type === 'file' && /(^|\/)native\/manifest\.json$/.test(file.path)) || !inventory.some(file => file.type === 'file' && /(^|\/)native\/files\.json$/.test(file.path))) throw new Error('Portable payload lacks executable entrypoint, app.asar, or native identity evidence')
   const header = { schema: 1, kind: 'singhouse-portable-application', identity, target: { platform, arch }, entrypoint, files: inventory }
   const headerBytes = Buffer.from(canonicalJson(header)); const length = Buffer.alloc(4); length.writeUInt32BE(headerBytes.length)
@@ -161,8 +164,8 @@ export async function createReleaseReceipt({ payload, output, sourceCommit, sour
   if (typeof verifySourceBeforePublish !== 'function') throw new Error('Receipt publication requires an immediate packaging source verification')
   const inspected = await inspectPortablePayload(payload); const identity = inspected.header.identity
   const parsed = parsePortablePayload(await readFile(payload))
-  const asar = singleFile(parsed.header.files, path => /(^|\/)resources\/app\.asar$/.test(path), 'app.asar')
-  const nativeManifest = singleFile(parsed.header.files, path => /(^|\/)resources\/native\/manifest\.json$/.test(path), 'native manifest')
+  const asar = singleFile(parsed.header.files, path => /(^|\/)resources\/app\.asar$/i.test(path), 'app.asar')
+  const nativeManifest = singleFile(parsed.header.files, path => /(^|\/)resources\/native\/manifest\.json$/i.test(path), 'native manifest')
   const prefix = nativeManifest.path.slice(0, -'manifest.json'.length)
   const nativeFilesRecord = singleFile(parsed.header.files, path => path === `${prefix}files.json`, 'native file inventory')
   const provenanceRecord = singleFile(parsed.header.files, path => path === `${prefix}provenance.json`, 'native provenance')

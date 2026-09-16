@@ -11,8 +11,10 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  ACCEPTED_CDG_EXTS,
   ACCEPTED_VIDEO_EXTS,
   MAX_AUDIO_SIZE,
+  MAX_CDG_SIZE,
   MAX_VIDEO_SIZE,
   extOf,
   isRoutableUpload,
@@ -77,6 +79,24 @@ describe('routeUpload — ordinary audio', () => {
 
   it('routes a typeless .flac on its extension', () => {
     expect(routeUpload(file('track.flac', ''))).toBe('audio')
+  })
+})
+
+describe('routeUpload — single-song karaoke graphics', () => {
+  for (const ext of ACCEPTED_CDG_EXTS) {
+    it(`routes ${ext} to the CD+G importer`, () => {
+      expect(routeUpload(file(`Artist - Song${ext}`, 'application/octet-stream'))).toBe('cdg')
+    })
+  }
+
+  it('holds a CD+G archive to 550MB', () => {
+    expect(validateUpload(file('song.zip', 'application/zip', 550 * 1024 * 1024 + 1)))
+      .toContain('550MB')
+  })
+
+  it('refuses a bare stream beyond the 30-minute packet budget', () => {
+    expect(validateUpload(file('song.cdg', 'application/x-cdg', MAX_CDG_SIZE + 1)))
+      .toContain('30-minute')
   })
 })
 

@@ -33,6 +33,14 @@ TARGETS = {'linux-x64': ('Linux', 'linux', 'x86_64', {'cpu', 'cuda'}),
            'darwin-arm64': ('Darwin', 'darwin', 'arm64', {'cpu', 'metal'}),
            'win32-x64': ('Windows', 'win32', 'AMD64', {'cpu', 'cuda'})}
 
+# The approved mdx_extra and RoFormer release routes use ordinary state dicts.
+# diffq is needed only for quantized Demucs state and is CC BY-NC; never select
+# either platform distribution into a redistributable managed pack.
+EXCLUDED_PACKAGES = {
+    'diffq': 'Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.',
+    'diffq-fixed': 'Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.',
+}
+
 
 def target_tags(python_version, glibc_minor, target='linux-x64'):
     if target.startswith('linux-'):
@@ -182,6 +190,8 @@ def generate(path, python_version='3.12.14', glibc_minor=39, metadata=None,
         if name in seen or name in {'karaoke-backend', 'lyricsync'}:
             raise ValueError(f'Duplicate or application package in dependency lock: {name}')
         seen.add(name)
+        if name in EXCLUDED_PACKAGES:
+            continue
         if name in {'torch', 'torchaudio', 'torchvision'}:
             local_version = Version(package['version']).local or ''
             if (accelerator == 'cuda' and local_version == 'cpu') or (accelerator != 'cuda' and local_version.startswith('cu')):
@@ -202,6 +212,7 @@ def generate(path, python_version='3.12.14', glibc_minor=39, metadata=None,
             **({'glibcMinimum': f'2.{glibc_minor}'} if target.startswith('linux-') else {}),
             **({'macosMinimum': '14.0'} if target == 'darwin-arm64' else {}),
             'resolutionSha256': hashlib.sha256(raw).hexdigest(),
+            'excludedPackages': EXCLUDED_PACKAGES,
             'capabilities': ['transcription', 'separation'],
             'models': ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'],
             'modelCapabilities': {'heart-transcriptor': 'transcription', 'demucs-mdx-extra': 'separation',

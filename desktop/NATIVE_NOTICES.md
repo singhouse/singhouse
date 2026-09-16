@@ -1,6 +1,6 @@
-# Native desktop test-artifact inventory
+# Native desktop artifact inventory
 
-This supplements the repository's source inventory. Native test installers
+This supplements the repository's source inventory. Native installers
 bundle Electron, a CPython runtime, installed Python packages, the compiled
 frontend and fonts, and FFmpeg/ffprobe. No model checkpoints are included.
 
@@ -9,6 +9,13 @@ application-wheel hashes, Python archive URL/hash, build tools, native binary
 URL/hash, and observed executable version/configuration where executed.
 `native/manifest.json` identifies the compatible application/backend/runtime.
 Cross-assembled payloads explicitly require native execution tests.
+
+Optional managed processing packs carry a separate exact package and notice
+inventory. Their release policy excludes the CC BY-NC diffq and diffq-fixed
+quantizers because the selected `mdx_extra` and RoFormer checkpoints are
+non-quantized. Both the pack builder and the final assembler reject their
+code, distribution metadata, and notices; previously built packs containing
+them are not trusted by this release.
 
 - CPython comes from python-build-standalone. Its license and bundled library
   notices are retained from the archive; upstream source/build information is
@@ -52,10 +59,10 @@ Cross-assembled payloads explicitly require native execution tests.
   `--enable-nonfree` in native execution or cross-binary inspection; changing
   distributors does not relax that guard.
 
-These are private engineering artifacts. Public redistribution remains blocked
-until the exact binaries' complete corresponding source and third-party
-obligations have been verified and source delivery is prepared alongside the
-installers. Upstream links and a GPL text alone do not establish a complete
-corresponding-source delivery. Signing/notarization and platform qualification
-are separate release checks. This inventory makes no license assertion for
-model weights or later optional processing environments.
+Before redistributing an artifact, verify the exact binaries' complete
+corresponding-source and third-party obligations and prepare the required
+source delivery alongside the installer. Upstream links and a GPL text alone
+do not establish a complete corresponding-source delivery. Platform code
+signing and native qualification are separate release checks. This inventory
+makes no license assertion for model weights or later optional processing
+environments.

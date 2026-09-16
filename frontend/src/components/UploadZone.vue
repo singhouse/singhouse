@@ -5,7 +5,7 @@
     <div
       class="drop-zone"
       role="button"
-      aria-label="Upload an audio file or a karaoke video"
+      aria-label="Upload audio, karaoke graphics, or a karaoke video"
       tabindex="0"
       :class="{
         'drop-zone--active': isDragging,
@@ -21,7 +21,7 @@
       <input
         ref="fileInput"
         type="file"
-        accept=".mp3,.flac,.wav,.ogg,.m4a,.mp4,.webm,.mov,.mkv,audio/*,video/*"
+        accept=".mp3,.flac,.wav,.ogg,.m4a,.mp4,.webm,.mov,.mkv,.cdg,.zip,audio/*,video/*"
         multiple
         class="hidden"
         @change="onFileSelect"
@@ -44,7 +44,7 @@
 
         <div class="drop-zone__text">
           <p class="drop-zone__title">
-            {{ isDragging ? 'Drop to upload' : 'Drop audio or video files here' }}
+            {{ isDragging ? 'Drop to upload' : 'Drop audio or karaoke files here' }}
           </p>
           <p class="drop-zone__sub">
             or <span class="drop-zone__link">click to browse</span>
@@ -52,6 +52,9 @@
           <p class="drop-zone__formats">MP3 · FLAC · WAV · M4A · OGG · up to 500MB</p>
           <p class="drop-zone__formats">
             or a karaoke video from your library — MP4 · WebM · MOV · MKV · up to 2GB
+          </p>
+          <p class="drop-zone__formats">
+            or karaoke graphics from your library — CDG up to 30 min · MP3+G ZIP up to 550MB
           </p>
         </div>
       </div>
@@ -80,9 +83,8 @@
         class="upload-item upload-item--pending"
       >
         <div class="upload-item__icon">
-          <!-- Film frame for a karaoke video, note for audio — the host can see
-               at a glance which of the two ingest paths a pending file takes. -->
-          <svg v-if="pending.isVideo" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <!-- Prepared picture formats use a frame; separable audio a note. -->
+          <svg v-if="pending.isPrepared" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="2" y="4" width="20" height="16" rx="2"/>
             <path d="M7 4v16M17 4v16M2 12h20M2 8h5M2 16h5M17 8h5M17 16h5"/>
           </svg>
@@ -127,10 +129,8 @@
       </div>
     </TransitionGroup>
 
-    <!-- Ingest options (shown when AUDIO files are pending). They drive
-         transcription and alignment, which a karaoke video has no use for —
-         its lyrics are already in the picture — so a video-only batch hides
-         them, and submitPending never sends them for a video. -->
+    <!-- Ingest options are only for separable audio. Prepared video and CDG
+         already carry their on-screen words, so these controls do not apply. -->
     <div v-if="pendingAudioCount" class="ingest-options">
       <div class="ingest-options__toggles">
         <label class="toggle-opt toggle-opt--select" :title="karaokeModelHint">
@@ -273,7 +273,7 @@ const PHASE_LABELS = {
 
 // Drives the ingest-options panel: transcription settings are meaningless for
 // a video-only batch, so they only appear once an audio file is waiting.
-const pendingAudioCount = computed(() => pendingFiles.value.filter(p => !p.isVideo).length)
+const pendingAudioCount = computed(() => pendingFiles.value.filter(p => !p.isPrepared).length)
 
 const karaokeModelHint = computed(
   () => KARAOKE_MODELS.find(m => m.id === optKaraokeModel.value)?.hint || ''
@@ -337,7 +337,7 @@ function processFiles(files) {
   const usableFiles = files.filter(isRoutableUpload)
 
   if (usableFiles.length === 0) {
-    validationError.value = 'Please drop audio files (MP3, FLAC, WAV, M4A) or a karaoke video (MP4, WebM, MOV, MKV)'
+    validationError.value = 'Please drop audio, a CDG or MP3+G ZIP, or a karaoke video from your library'
     setTimeout(() => { validationError.value = '' }, 4000)
     return
   }
@@ -360,16 +360,23 @@ function processFiles(files) {
       artist,
       title,
       isVideo: routeUpload(file) === 'video',
+      isCdg: routeUpload(file) === 'cdg',
+      isPrepared: ['video', 'cdg'].includes(routeUpload(file)),
     })
   }
 }
 
 async function submitPending(pending) {
   if (pending.submitting || !pendingFiles.value.includes(pending)) return
-  // A karaoke video already carries its lyrics; the transcription options
-  // below belong to the audio path only and are not sent for one.
+  // Prepared video and CDG already carry their words in the picture; the
+  // transcription options below belong only to separable audio.
   if (pending.isVideo) {
     store.importVideoSong(pending.file, pending.artist, pending.title)
+    removePending(pending.id)
+    return
+  }
+  if (pending.isCdg) {
+    store.importCdgSong(pending.file, pending.artist, pending.title)
     removePending(pending.id)
     return
   }

@@ -199,6 +199,23 @@ export const songApi = {
     })
   },
 
+  /** Import one bare CDG or one same-basename MP3+G ZIP. */
+  importCdg(file, onProgress, artist = '', title = '') {
+    const form = new FormData()
+    form.append('file', file)
+    if (artist) form.append('artist', artist)
+    if (title) form.append('title', title)
+    return client.post('/import/cdg', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000,
+      onUploadProgress: e => {
+        if (onProgress && e.total) {
+          onProgress(Math.round((e.loaded / e.total) * 100))
+        }
+      }
+    })
+  },
+
   /** GET /api/jobs/:jobId — poll job status */
   pollJob(jobId) {
     return client.get(`/jobs/${jobId}`)

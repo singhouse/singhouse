@@ -46,7 +46,13 @@ if (process.argv.includes('--first-installers')) {
   const resources = nativeManifest.platform === 'darwin'
     ? resolve(application, 'Singhouse.app', 'Contents', 'Resources') : resolve(application, 'resources')
   await copyFile(receipt, resolve(resources, 'release-receipt.json'))
-  await build({ config, prepackaged: application, publish: 'never',
+  // A prepackaged application already contains the selected files and native
+  // resources. Passing those source-copy rules to electron-builder again both
+  // reopens the clean payload and triggers invalid config merging in current
+  // electron-builder releases.
+  const { files: _files, extraResources: _extraResources, directories, ...installerConfig } = config
+  installerConfig.directories = { output: directories.output }
+  await build({ config: installerConfig, prepackaged: application, publish: 'never',
     targets: platform.createTarget(undefined, Arch[nativeManifest.arch]) })
 }
 console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))

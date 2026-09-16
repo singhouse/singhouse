@@ -23,6 +23,11 @@ import tempfile
 from urllib.parse import unquote, urlparse
 import zipfile
 
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
+
 from assemble import (ROOT, LOCKS, PLATFORMS, digest, fetch, host_target,
                       python_path, site_packages, run, metadata, source_provenance)
 from assemble_processing import assemble, relative
@@ -30,6 +35,11 @@ from assemble_processing import assemble, relative
 MODULES = {
     'transcription': ['faster_whisper', 'lyricsync.transcription.heart', 'karaoke_backend.workers.heart_transcriptor'],
     'separation': ['demucs.separate', 'audio_separator.separator'],
+}
+
+EXCLUDED_PACKAGES = {
+    'diffq': 'Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.',
+    'diffq-fixed': 'Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.',
 }
 
 
@@ -72,6 +82,53 @@ def inventory(root, target=None):
         result.append(dict(path=name, size=path.stat().st_size, sha256=digest(path),
                            executable=bool(path.stat().st_mode & 0o111)))
     return result
+
+
+def excluded_payload_paths(root):
+    """Return installed modules, metadata, or notices owned by excluded packages."""
+    found = []
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(root).parts
+        for part in parts:
+            value = part.lower().replace('_', '-')
+            if (value in EXCLUDED_PACKAGES
+                    or any(value.startswith(name + '.') for name in EXCLUDED_PACKAGES)
+                    or any(value.startswith(name + '-') and value.endswith('.dist-info')
+                           for name in EXCLUDED_PACKAGES)):
+                found.append(path.relative_to(root).as_posix())
+                break
+    return sorted(found)
+
+
+def validate_installed_requirements(destination, target, python_version):
+    """Validate dependency metadata, allowing only the explicit model-route exclusions."""
+    import importlib.metadata
+    distributions = list(importlib.metadata.distributions(path=[str(destination)]))
+    installed = {canonicalize_name(item.metadata['Name']): Version(item.version) for item in distributions}
+    environment = default_environment()
+    system = {'linux': ('Linux', 'linux'), 'darwin': ('Darwin', 'darwin'), 'win32': ('Windows', 'win32')}[target.split('-')[0]]
+    machine = {'linux-x64': 'x86_64', 'linux-arm64': 'aarch64', 'darwin-arm64': 'arm64', 'win32-x64': 'AMD64'}[target]
+    environment.update(platform_system=system[0], sys_platform=system[1], os_name='nt' if system[1] == 'win32' else 'posix',
+                       platform_machine=machine,
+                       python_full_version=python_version, python_version='.'.join(python_version.split('.')[:2]), extra='')
+    excluded = set()
+    for distribution in distributions:
+        for raw in distribution.requires or []:
+            requirement = Requirement(raw)
+            if requirement.marker and not requirement.marker.evaluate(environment):
+                continue
+            name = canonicalize_name(requirement.name)
+            if name in EXCLUDED_PACKAGES:
+                excluded.add(name)
+                continue
+            if name not in installed or (requirement.specifier and installed[name] not in requirement.specifier):
+                raise ValueError(f'Installed dependency requirement is unsatisfied: {distribution.metadata["Name"]} requires {requirement}')
+    expected_excluded = {'diffq-fixed'} if target.startswith('win32-') else {'diffq'}
+    if excluded != expected_excluded:
+        raise ValueError('Installed dependency metadata does not match the target diffq exclusion')
+    return installed
 
 
 def wheel_metadata(artifact):
@@ -169,6 +226,8 @@ def validate_requirements(lock, target, accelerator):
     packages = lock.get('packages')
     if not isinstance(packages, list) or not packages:
         raise ValueError('An exact dependency artifact inventory is required')
+    if lock.get('excludedPackages') != EXCLUDED_PACKAGES:
+        raise ValueError('Requirements lock must declare the exact diffq exclusion policy')
     names = set()
     for record in packages:
         name = normalized(record.get('name', ''))
@@ -181,6 +240,8 @@ def validate_requirements(lock, target, accelerator):
             raise ValueError('Invalid or duplicate locked dependency artifact')
         if name in {'karaoke-backend', 'lyricsync'}:
             raise ValueError('Application packages must come from the source tree')
+        if name in EXCLUDED_PACKAGES:
+            raise ValueError(f'Excluded non-commercial dependency in release lock: {name}')
         names.add(name)
     capabilities = lock.get('capabilities')
     if not capabilities or len(set(capabilities)) != len(capabilities) or not set(capabilities) <= set(MODULES):
@@ -394,12 +455,17 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
         if path.is_dir():
             shutil.rmtree(path)
     materialize_links(payload)
+    excluded = excluded_payload_paths(payload)
+    if excluded:
+        raise ValueError(f'Processing payload contains excluded diffq code, metadata, or notices: {excluded[0]}')
     installed = {normalized(k): v for k, v in metadata(site_packages(payload, target, native['pythonVersion'])).items()}
     expected = {normalized(p['name']): p['version'] for p in packages if p['name'] != 'cpython'}
     if installed != expected:
         raise ValueError('Installed dependency inventory differs from locked artifacts')
-    if target == host_target():
-        run('uv', 'pip', 'check', '--python', python_path(payload, target), env=env)
+    validated = {normalized(k): str(v) for k, v in validate_installed_requirements(
+        site_packages(payload, target, native['pythonVersion']), target, native['pythonVersion']).items()}
+    if validated != installed:
+        raise ValueError('Static dependency validation differs from installed metadata')
     provenance = dict(sourceCommit=source['sourceCommit'], sourceDateEpoch=epoch,
                       requirements=lock, requirementsSha256=digest(requirements),
                       nativeLockSha256=digest(LOCKS / 'native.json'), buildLockSha256=digest(LOCKS / 'build.txt'),
@@ -419,6 +485,7 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
                       pythonVersion=native['pythonVersion'], platform=target.split('-')[0], arch=target.split('-')[1],
                       accelerator=accelerator, python=python_path(payload, target).relative_to(payload).as_posix(),
                       sourceCommit=source['sourceCommit'], packages=packages,
+                      excludedPackages=EXCLUDED_PACKAGES,
                       capabilities=lock['capabilities'], models=lock['models'], modelCapabilities=lock['modelCapabilities'],
                       probe=dict(schema=2, type='python-functional-v1', modules=sorted({m for c in lock['capabilities'] for m in MODULES[c]})),
                       files=inventory(payload, target))

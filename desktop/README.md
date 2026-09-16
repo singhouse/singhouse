@@ -5,6 +5,12 @@ and FFmpeg/FFprobe. It opens an authenticated private loopback service and a
 separate projector window. Installed applications keep your library across
 restarts; the source-development shell uses a disposable library.
 
+Release operators should use the [qualification
+harness](qualification/README.md) and the checked-in [release
+checklist](../docs/release-checklist.md). User installation and diagnostic
+instructions live in [Install Singhouse Core](../docs/install-desktop.md) and
+[Support diagnostics](../docs/support-diagnostics.md).
+
 The bundled runtime supports prepared-media playback. It does not bundle model
 weights or the heavy separation/transcription dependencies, and it does not
 download models automatically. Installing the desktop application does not
@@ -179,8 +185,8 @@ bytes are recorded by digest but resolved anew inside the authenticated
 installer application on every launch. Linux must not derive the stable
 executable from ambient `APPIMAGE` or `APPDIR`; those variables are untrusted
 hints. AppImage anchor creation, rotation, standalone recovery, and therefore
-update enablement fail closed until a qualified release supplies a native/detached
-verifier that binds the exact outer-image bytes to the real active mount. Every
+update enablement fail closed unless a native/detached verifier binds the exact
+outer-image bytes to the real active mount. Every
 immutable kit calls one stable per-user invoker, which a verified reinstall may
 atomically retarget after an authorized install-directory relocation without
 rewriting old kits. Automatic recovery uses the already-running authenticated
@@ -194,8 +200,8 @@ corrupt anchor or rotates one whose installed executable/helper digests have
 changed during a verified reinstall; managed update targets can only read and
 verify it. A bundled release receipt authenticates modeled inner files but
 cannot authenticate the wrapper that supplied it. Linux and Windows anchor
-rotation remain disabled pending their qualified trust hooks;
-macOS additionally requires its enabled `codesign` gate. An explicitly
+rotation remain disabled unless their qualified platform trust hooks are
+enabled; macOS additionally requires its enabled `codesign` gate. An explicitly
 update-disabled build leaves anchor state untouched, so
 ordinary first launch does not depend on unavailable signing hooks. Reinstalling
 changes no library or recovery-point data. The
@@ -250,9 +256,9 @@ exact inventory verification immediately before launch, authenticated update
 metadata, private managed slots, and fail-closed OS-signing policy hooks.
 Current-user ownership and group/world mode enforcement are POSIX guarantees
 only. Windows ACL and Authenticode enforcement remain disabled and fail closed
-pending Windows/macOS packaging trust qualification, which also
-owns real Windows x64 and macOS arm64 signing, crash, and clean-machine release
-qualification.
+until their platform trust hooks are qualified and enabled. Real Windows x64
+and macOS arm64 signing, crash, and clean-machine release qualification remain
+separate release checks.
 
 To use a different payload path, set `KARAOKE_NATIVE_PAYLOAD` for packaging:
 

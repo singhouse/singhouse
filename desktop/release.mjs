@@ -15,10 +15,44 @@ const D = mod(-121665n * invert(121666n))
 const I = pow(2n, (P - 1n) / 4n)
 const IDENTITY = { x: 0n, y: 1n }
 export const PORTABLE_MAGIC = Buffer.from('SINGHOUSEAPP\0\r\n\x1a', 'binary')
-const SAFE_PORTABLE_PART = /^[A-Za-z0-9._+() -]+$/
-function safePortablePath(value) {
+const SAFE_PORTABLE_PART = /^[A-Za-z0-9@._+() -]+$/
+export function allowedPortableCaseAlias(platform, prior, path) {
+  return platform === 'linux' && typeof prior === 'string' && typeof path === 'string'
+    && prior.startsWith('resources/native/python/share/terminfo/')
+    && path.startsWith('resources/native/python/share/terminfo/')
+}
+export function safePortablePath(value) {
   return typeof value === 'string' && value.length > 0 && value.length < 1024 && !value.startsWith('/') && !value.includes('\\') && value.split('/').every(part =>
     SAFE_PORTABLE_PART.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
+}
+export function validatePortableSymlinkTargets(records) {
+  const byName = new Map(records.map(record => [record.path, record]))
+  for (const record of records.filter(record => record.type === 'symlink')) {
+    let targetPath = record.target
+    const seen = new Set([record.path])
+    for (let hops = 0; hops <= records.length; hops++) {
+      if (!safePortablePath(targetPath) || seen.has(targetPath)) throw new Error(`Portable symlink cycle: ${record.path}`)
+      seen.add(targetPath)
+      const direct = byName.get(targetPath)
+      if (direct) {
+        if (direct.type !== 'symlink') break
+        targetPath = direct.target
+        continue
+      }
+      const parts = targetPath.split('/')
+      let expanded = false
+      for (let index = parts.length - 1; index > 0; index--) {
+        const prefix = parts.slice(0, index).join('/'); const link = byName.get(prefix)
+        if (link?.type === 'symlink') {
+          targetPath = [link.target, ...parts.slice(index)].join('/')
+          expanded = true
+          break
+        }
+      }
+      if (!expanded) throw new Error(`Portable symlink target is absent: ${record.path}`)
+    }
+    if (!byName.has(targetPath)) throw new Error(`Portable symlink cycle: ${record.path}`)
+  }
 }
 
 function mod(n) { const value = n % P; return value < 0n ? value + P : value }
@@ -199,10 +233,12 @@ export function parsePortablePayload(bytes) {
   exactKeys(header.target, ['platform', 'arch'])
   assertReleaseIdentity(header.identity)
   if (!safePortablePath(header.entrypoint) || !((header.target.platform === 'linux' && ['x64', 'arm64'].includes(header.target.arch)) || (header.target.platform === 'win32' && header.target.arch === 'x64') || (header.target.platform === 'darwin' && header.target.arch === 'arm64')) || !Array.isArray(header.files) || !header.files.length) throw new Error('Invalid portable target or inventory')
-  let next = 0; let previous = ''; const folded = new Set()
+  let next = 0; let previous = ''; const folded = new Map()
   for (const file of header.files) {
     const lower = String(file?.path).toLowerCase()
-    if (!file || !safePortablePath(file.path) || file.path <= previous || folded.has(lower) || !['file', 'directory', 'symlink'].includes(file.type)) throw new Error('Invalid portable inventory')
+    const prior = folded.get(lower)
+    const allowedTerminfoAlias = allowedPortableCaseAlias(header.target.platform, prior, file?.path)
+    if (!file || !safePortablePath(file.path) || file.path <= previous || (prior && !allowedTerminfoAlias) || !['file', 'directory', 'symlink'].includes(file.type)) throw new Error('Invalid portable inventory')
     if (file.type === 'file') {
       if (Object.keys(file).sort().join(',') !== 'mode,offset,path,sha256,size,type' || file.offset !== next || !Number.isSafeInteger(file.size) || file.size < 0 || ![0o644, 0o755].includes(file.mode) || !HEX_64.test(file.sha256)) throw new Error('Invalid portable file record')
       const payload = bytes.subarray(dataStart + file.offset, dataStart + file.offset + file.size)
@@ -211,14 +247,9 @@ export function parsePortablePayload(bytes) {
     } else if (file.type === 'directory') {
       if (Object.keys(file).sort().join(',') !== 'mode,path,type' || file.mode !== 0o755) throw new Error('Invalid portable directory record')
     } else if (Object.keys(file).sort().join(',') !== 'path,target,type' || !safePortablePath(file.target)) throw new Error('Invalid portable symlink record')
-    previous = file.path; folded.add(lower)
+    previous = file.path; folded.set(lower, file.path)
   }
-  const names = new Map(header.files.map(record => [record.path, record]))
-  for (const record of header.files.filter(record => record.type === 'symlink')) {
-    if (!names.has(record.target)) throw new Error('Portable symlink target is absent')
-    const seen = new Set([record.path]); let target = names.get(record.target)
-    while (target?.type === 'symlink') { if (seen.has(target.path)) throw new Error('Portable symlink cycle'); seen.add(target.path); target = names.get(target.target) }
-  }
+  validatePortableSymlinkTargets(header.files)
   if (dataStart + next !== bytes.length || header.files.find(file => file.path === header.entrypoint)?.mode !== 0o755) throw new Error('Portable payload boundary or entrypoint is invalid')
   return { header, dataStart, bytes }
 }
@@ -241,15 +272,16 @@ export function validateInstalledReleaseReceipt(receipt, observedRecords, target
       receipt.application.inventoryDigest !== sha256Hex(canonicalJson(receipt.application.files)) ||
       receipt.application.inventoryDigest !== receipt.identity.applicationInventoryDigest) throw new Error('Installed release receipt evidence is inconsistent')
   const expected = new Map()
-  let previous = ''; const folded = new Set()
+  let previous = ''; const folded = new Map()
   for (const record of receipt.application.files) {
     const lower = String(record?.path).toLowerCase()
-    if (!record || !safePortablePath(record.path) || record.path <= previous || folded.has(lower) || !['file', 'directory', 'symlink'].includes(record.type) ||
+    const prior = folded.get(lower)
+    if (!record || !safePortablePath(record.path) || record.path <= previous || (prior && !allowedPortableCaseAlias(target.platform, prior, record.path)) || !['file', 'directory', 'symlink'].includes(record.type) ||
         (record.type === 'file' && (Object.keys(record).sort().join(',') !== 'path,sha256,type' || !HEX_64.test(record.sha256))) ||
         (record.type === 'directory' && Object.keys(record).sort().join(',') !== 'path,type') ||
         (record.type === 'symlink' && (Object.keys(record).sort().join(',') !== 'path,target,type' || !safePortablePath(record.target)))) throw new Error('Invalid installed application inventory')
     expected.set(record.path, record.type === 'file' ? record.sha256 : record.type === 'directory' ? 'directory' : `symlink:${record.target}`)
-    previous = record.path; folded.add(lower)
+    previous = record.path; folded.set(lower, record.path)
   }
   if (!expected.has(receipt.application.entrypoint)) throw new Error('Installed application entrypoint is absent from its receipt')
   for (const [path, value] of expected) if (observedRecords.get(path) !== value) throw new Error(`Installed application changed: ${path}`)

@@ -32,6 +32,8 @@ from .display import Display, LineLayout, WordRect, bitmap_cost, show_cost
 from .lyrics import build_pages, normalize_doc
 from .spec import (
     LINE_H,
+    MAX_DECODE_PACKETS,
+    MAX_DECODE_SECONDS,
     PACKET_BYTES,
     PACKETS_PER_SEC,
     REGION_W,
@@ -66,6 +68,8 @@ __all__ = [
     "serialize",
     "show_cost",
     "LINE_H",
+    "MAX_DECODE_PACKETS",
+    "MAX_DECODE_SECONDS",
     "PACKETS_PER_SEC",
     "PACKET_BYTES",
     "REGION_W",

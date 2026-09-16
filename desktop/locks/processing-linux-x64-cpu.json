@@ -207,14 +207,6 @@
       "version": "4.0.1"
     },
     {
-      "license": "Creative Commons Attribution-NonCommercial 4.0 International",
-      "licenseSource": "https://pypi.org/pypi/diffq/0.2.4/json",
-      "name": "diffq",
-      "sha256": "049064861e974ebf00d0badab8b324c775037371419eda3150985b9d477b5bd2",
-      "url": "https://files.pythonhosted.org/packages/5a/fd/4c58807bf855c5929ffa6da55f26dd6b9ae462a4193f5e09cc49fbbfd451/diffq-0.2.4.tar.gz",
-      "version": "0.2.4"
-    },
-    {
       "license": "License :: OSI Approved :: ISC License (ISCL)",
       "licenseSource": "https://pypi.org/pypi/dnspython/2.8.0/json",
       "name": "dnspython",
@@ -975,5 +967,9 @@
   "pythonVersion": "3.12.14",
   "resolutionSha256": "747ca44bee9f3111cab230fd4173d2df7ebba9b6109f56f2006c4cb04f4c511b",
   "schema": 1,
-  "target": "linux-x64"
+  "target": "linux-x64",
+  "excludedPackages": {
+    "diffq": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.",
+    "diffq-fixed": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed."
+  }
 }

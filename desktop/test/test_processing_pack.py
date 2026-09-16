@@ -24,6 +24,7 @@ class ProcessingPackTests(unittest.TestCase):
         self.lock = {"schema": 1, "kind": "processing-input", "appVersion": "0.1.0", "backendVersion": "0.1.0", "lyricsyncVersion": "0.1.0",
                      "pythonVersion": "3.12.14", "platform": "linux", "arch": "x64", "accelerator": "cpu", "python": "python/bin/python3",
                      "sourceCommit": "a" * 40, "capabilities": ["transcription"], "models": ["whisper"], "modelCapabilities": {"whisper": "transcription"},
+                     "excludedPackages": builder.EXCLUDED_PACKAGES,
                      "packages": [{"name": "fixture", "version": "1", "license": "MIT", "sourceUrl": "https://example.org/fixture.whl", "sha256": "b" * 64, "notices": ["NOTICE.fixture"]}],
                      "files": [{"path": "python/bin/python3", "size": 7, "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True},
                                {"path": "NOTICE.fixture", "size": 10, "sha256": hashlib.sha256(b"MIT notice").hexdigest(), "executable": False}]}
@@ -80,6 +81,25 @@ validateProcessingManifest(value, {appVersion:'0.1.0',backendVersion:'0.1.0',lyr
         self.lock["packages"][0]["notices"] = ["NOTICE.fixture"]
         self.lock["modelCapabilities"] = {}
         with self.assertRaisesRegex(ValueError, "Every model"):
+            self.assemble()
+
+    def test_rejects_diffq_provenance_code_metadata_and_notices(self):
+        for name in ("diffq", "diffq-fixed"):
+            self.lock["packages"][0]["name"] = name
+            with self.assertRaisesRegex(ValueError, "Excluded non-commercial"):
+                self.assemble()
+        self.lock["packages"][0]["name"] = "fixture"
+        self.lock["excludedPackages"] = {}
+        with self.assertRaisesRegex(ValueError, "exact diffq exclusion"):
+            self.assemble()
+        self.lock["excludedPackages"] = builder.EXCLUDED_PACKAGES
+        path = self.payload / "python/lib/python3.12/site-packages/diffq/__init__.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("excluded")
+        data = path.read_bytes()
+        self.lock["files"].append({"path": path.relative_to(self.payload).as_posix(), "size": len(data),
+                                   "sha256": hashlib.sha256(data).hexdigest(), "executable": False})
+        with self.assertRaisesRegex(ValueError, "excluded diffq"):
             self.assemble()
 
 

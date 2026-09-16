@@ -6,7 +6,8 @@ mixing, key shift, and a popout projector display.
 
 ## What It Does
 
-1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG
+1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG,
+   a bare CDG, or a same-basename MP3+G ZIP
 2. **Two-pass stem separation** — Demucs (`mdx_extra`) splits vocals vs.
    instrumental, then mel_band_roformer splits lead vs. backing vocals.
    Runs locally on your GPU (CPU fallback), or on your own Modal deployment
@@ -61,15 +62,12 @@ queue, and a projector window for the second screen.
   **opt-in** setting that is **off by default** (`KARAOKE_LRCLIB`); with it
   unset — the shipped state — this install never contacts lrclib, and the
   lookup endpoint answers 503. Turning it on is a deliberate act.
-- **Exactly two features can reach a third party, and both are off until you
-  configure them.** The lrclib lookup above sends an artist and title. The
-  optional LLM cleanup for transcribed lyrics (`KARAOKE_LLM_BASE_URL`) sends
-  lyric text to whichever endpoint you point it at — which may be a model
-  running on your own machine, and is nothing at all until you set that
-  variable. One more feature makes a network request, and only to a server
-  *you* name: the Plex import below reads the media server whose address you
-  type in, on your own network. Nothing else in a shipped install contacts
-  anything: no telemetry, no update check, no phone-home.
+- **Optional network features stay off until you configure them.** The lrclib
+  lookup above sends an artist and title. Optional LLM cleanup sends lyric text
+  to the endpoint in `KARAOKE_LLM_BASE_URL`. Optional GPU offload sends audio
+  to an app in your own Modal account. Plex import reads only the media server
+  address you enter. The stock configuration enables none of these and sends
+  no telemetry.
 - **It does not share anything between users.** No stem sharing, no lyric
   sharing, no accounts on our infrastructure. Two installs have no way to
   reach each other.
@@ -255,6 +253,7 @@ singhouse/
 | Health | `GET /health` |
 | Songs | `GET/PATCH/DELETE /api/songs[/:id]`, `GET /api/songs/:id/stems/:file` |
 | Import + separation | `POST /api/separate`, `GET /api/jobs/:id` |
+| Single-song CDG / MP3+G import | `POST /api/import/cdg` |
 | Lyric sets | `GET/POST/PATCH/DELETE /api/songs/:id/lyrics[/:setId]`, `POST …/transcribe`, `POST …/realign` |
 | Lyrics lookup | `GET /api/lyrics?artist=&title=` (503 unless the opt-in lookup is enabled) |
 | Queue | `GET/POST/DELETE /api/queue`, `PUT /api/queue/order` |
@@ -275,6 +274,9 @@ pay for, on your own accounts: offloading GPU work to Modal (`KARAOKE_MODAL`),
 and the LLM transcription cleanup (`KARAOKE_LLM_BASE_URL`), which may want an
 API key depending on the endpoint you choose. Neither is on in a fresh
 install.
+
+See [Deploy processing to your own Modal account](docs/modal.md) for the exact
+deploy-time and backend configuration, data flow, and cost controls.
 
 | Processing | Speed (consumer GPU) |
 |------------|----------------------|

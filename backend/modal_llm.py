@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Modal-hosted OpenAI-compatible LLM endpoint for lyric correction.
 
-Serves the same Qwen3.6-35B-A3B the Mac mini runs — but the official FP8
-checkpoint on an H100 via vLLM, so a region call that takes 3-9 min of
-thinking on the M2 finishes in ~20-40 s. The lyricsync correction client
-speaks OpenAI chat completions, so switching between the Mac and this is
-purely `KARAOKE_LLM_BASE_URL`/`KARAOKE_LLM_MODEL`/`KARAOKE_LLM_API_KEY`.
+Serves the official Qwen3.6-35B-A3B FP8 checkpoint on an H100 through vLLM.
+The lyricsync correction client speaks OpenAI chat completions, so selecting
+this endpoint is purely
+`KARAOKE_LLM_BASE_URL`/`KARAOKE_LLM_MODEL`/`KARAOKE_LLM_API_KEY`.
 
 Deploy / use:
     cd backend && .venv/bin/modal deploy modal_llm.py

@@ -479,4 +479,3 @@ async def page_word_sync(word_data: dict, paging_text: str) -> dict:
 
     word_data.setdefault("metadata", {})[PAGING_STATUS_KEY] = status
     return word_data
-

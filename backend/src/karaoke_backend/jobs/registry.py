@@ -75,6 +75,10 @@ _SPECS: dict[str, JobSpec] = {
         "karaoke_backend.jobs.video_import:run_video_import",
         mirrors_song_status=True,
     ),
+    JobKind.CDG_IMPORT.value: JobSpec(
+        "karaoke_backend.jobs.cdg_import:run_cdg_import",
+        mirrors_song_status=True,
+    ),
     # Mirrors for the same reason the two above do: the job IS the song's
     # creation. It materialises the audio and then delegates to run_ingest, so
     # a failure at either end leaves a row with no stems that nothing will fix.

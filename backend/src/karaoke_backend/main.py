@@ -41,6 +41,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from karaoke_backend.api.identity import config_router
 from karaoke_backend.api.catalog import router as catalog_router
+from karaoke_backend.api.cdg_import import router as cdg_import_router
 from karaoke_backend.api.export import router as export_router
 from karaoke_backend.api.features import router as features_router
 from karaoke_backend.api.lyrics import router as lyrics_router
@@ -478,6 +479,7 @@ for _r in extension_routers():
 
 app.include_router(separate_router)      # POST /api/separate + GET /api/jobs/{id}
 app.include_router(video_import_router)  # POST /api/import/video
+app.include_router(cdg_import_router)    # POST /api/import/cdg
 app.include_router(features_router)      # GET  /api/features
 # Core, not a catalog provider: it reads a media server the operator
 # already runs, so it mounts at import time like every other core router.
@@ -512,6 +514,7 @@ async def api_info() -> JSONResponse:
             "endpoints": {
                 "separate": "POST /api/separate",
                 "video_import": "POST /api/import/video",
+                "cdg_import": "POST /api/import/cdg",
                 "job_status": "GET /api/jobs/{job_id}",
                 "features": "GET /api/features",
                 "lyrics": "GET /api/lyrics?artist=&title=",
