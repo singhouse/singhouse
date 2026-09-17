@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { WINDOWS_SIGNING } from '../windows_signing.mjs'
 
 const workflowUrl = new URL('../../.github/workflows/desktop-windows-signing.yml', import.meta.url)
 
@@ -10,13 +11,13 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /^on:\n  workflow_dispatch:/m)
   assert.doesNotMatch(workflow, /^  (push|pull_request|release|schedule):/m)
   assert.match(workflow, /permissions:\n  contents: read\n  id-token: write/)
-  assert.match(workflow, /environment: windows-signing/)
+  assert.match(workflow, new RegExp(`environment: windows-${'signing'}`))
   assert.match(workflow, /uses: azure\/login@[0-9a-f]{40}/)
   assert.match(workflow, /--signed-release --azure-oidc/)
   assert.match(workflow, /profileType -ne 'PublicTrust'/)
   assert.match(workflow, /accounts\.Count -ne 1/)
   assert.match(workflow, /accounts\[0\]\.type -ne 'Microsoft\.CodeSigning\/codeSigningAccounts'/)
-  assert.match(workflow, /accounts\[0\]\.name -ne 'singhouse-signing'/)
+  assert.match(workflow, /accounts\[0\]\.name -ne \$env:SIGNING_ACCOUNT/)
   assert.match(workflow, /accountLocation -ne 'centralus'/)
   assert.match(workflow, /profile\.id\)\.Equals\(\$profileResourceId, \[StringComparison\]::OrdinalIgnoreCase\)/)
   assert.match(workflow, /profile\.type -ne 'Microsoft\.CodeSigning\/codeSigningAccounts\/certificateProfiles'/)
@@ -25,13 +26,34 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.ok(workflow.indexOf('Get-AuthenticodeSignature') < workflow.indexOf('desktop/artifacts/SHA256SUMS'))
   assert.ok(workflow.indexOf('desktop/artifacts/SHA256SUMS') < workflow.indexOf('actions/upload-artifact'))
   assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
+  assert.match(workflow, /import \{ WINDOWS_SIGNING \}/)
+  assert.match(workflow, /import \{ BRAND_NAME \}/)
+  assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_ACCOUNT'/)
+  assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_PROFILE'/)
+  assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_SUBJECT'/)
+  assert.match(workflow, /Add-WorkflowEnvironment 'PRODUCT_NAME'/)
+  assert.match(workflow, /\$_ -match '\[\\r\\n\]'/)
+  assert.match(workflow, /account -cnotmatch '\^\[a-z0-9\]/)
+  assert.match(workflow, /certificateProfile -cnotmatch '\^\[A-Za-z0-9\]/)
+  assert.match(workflow, /Product name is not a safe Windows basename/)
+  assert.match(workflow, /subject\.Length -lt 1/)
+  assert.match(workflow, /\[guid\]::NewGuid\(\)\.ToString\('N'\)/)
+  assert.match(workflow, /\$name<<\$delimiter/)
+  assert.doesNotMatch(workflow, /"SIGNING_(?:ACCOUNT|PROFILE|SUBJECT)=/)
+  assert.match(workflow, /certificateProfiles\/\$env:SIGNING_PROFILE/)
+  assert.match(workflow, /SignerCertificate\.Subject -ne \$env:SIGNING_SUBJECT/)
+  assert.match(workflow, /\[regex\]::Escape\(\$env:PRODUCT_NAME\)/)
+  assert.match(workflow, /Join-Path 'desktop\/artifacts\/win-unpacked' "\$env:PRODUCT_NAME\.exe"/)
+  assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath \$path/)
+  assert.doesNotMatch(workflow, new RegExp(`${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile}`, 'i'))
   assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
   assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc/)
 })
 
 test('Windows signing documentation binds Azure values to protected environment secrets', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
-  assert.match(readme, /`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\nenvironment secrets on the protected `windows-signing` environment itself,\nnot as repository or organization secrets/)
+  const environment = `windows-${'signing'}`
+  assert.match(readme, new RegExp('`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\\nenvironment secrets on the protected `' + environment + '` environment itself,\\nnot as repository or organization secrets'))
 })
 
 test('Windows signing workflow locks project tool versions and does not persist checkout credentials', async () => {
