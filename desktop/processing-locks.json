@@ -1,5 +1,7 @@
 {
   "schema": 1,
-  "status": "No release-approved processing packs; rebuild and requalify after the diffq exclusion",
-  "lockSha256": []
+  "status": "Windows x64 CPU pack rebuilt without excluded dependencies and passed its native functional probe; remaining targets require rebuild and requalification",
+  "lockSha256": [
+    "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb"
+  ]
 }
