@@ -53,6 +53,12 @@ function safePath(path) {
   if (typeof path !== 'string' || path.length < 1 || path.length >= 1024 || path.startsWith('/') || path.includes('\\') || !path.split('/').every(part => /^[A-Za-z0-9@._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error(`Unsafe portable path: ${path}`)
   return path
 }
+async function orderedPortableEntries(root) {
+  return (await walk(root)).map(entry => ({
+    ...entry,
+    portablePath: safePath(relative(root, entry.path).split(sep).join('/')),
+  })).sort((a, b) => Buffer.from(a.portablePath).compare(Buffer.from(b.portablePath)))
+}
 async function publishNew(temporary, destination) {
   try {
     await link(temporary, destination)
@@ -76,9 +82,9 @@ function receiptInventory(records) {
 }
 export async function inspectApplicationInventory(applicationDirectory) {
   const root = resolve(applicationDirectory)
-  const entries = (await walk(root)).sort((a, b) => Buffer.from(relative(root, a.path)).compare(Buffer.from(relative(root, b.path))))
+  const entries = await orderedPortableEntries(root)
   const records = await Promise.all(entries.map(async entry => ({
-    path: relative(root, entry.path).split(sep).join('/'), type: entry.type,
+    path: entry.portablePath, type: entry.type,
     ...(entry.type === 'file' ? { sha256: sha256Hex(await readFile(entry.path)) } : entry.type === 'symlink' ? { target: entry.target } : {}),
   })))
   const files = receiptInventory(records)
@@ -125,11 +131,12 @@ export async function deriveIdentityFromApplication({ applicationDirectory, poli
 export async function createPortablePayload({ sourceDirectory, output, identity, platform, arch, entrypoint = targetEntrypoint(platform) }) {
   assertReleaseIdentity(identity)
   if (!['linux', 'win32', 'darwin'].includes(platform) || !['x64', 'arm64'].includes(arch) || (platform === 'win32' && arch !== 'x64') || (platform === 'darwin' && arch !== 'arm64')) throw new Error('Unsupported portable target')
-  const source = resolve(sourceDirectory); const entries = (await walk(source)).sort((a, b) => Buffer.from(relative(source, a.path)).compare(Buffer.from(relative(source, b.path))))
+  const source = resolve(sourceDirectory)
+  const entries = await orderedPortableEntries(source)
   let offset = 0
   const inventory = []
   for (const entry of entries) {
-    const name = safePath(relative(source, entry.path).split(sep).join('/'))
+    const name = entry.portablePath
     if (entry.type === 'file') {
       const bytes = await readFile(entry.path); const info = await stat(entry.path)
       // Windows does not carry POSIX executable bits in stat(). The exact

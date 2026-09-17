@@ -66,6 +66,25 @@ test('portable payload permits npm scope names in packaged notice paths', async 
   } finally { await rm(temporary, { recursive: true, force: true }) }
 })
 
+test('portable inventory sorts normalized slash paths rather than Windows source paths', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'portable-order-'))
+  try {
+    const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'win32')
+    await writeFile(resolve(app, 'resources0'), 'sibling')
+    const identity = await identityFor(app)
+    const output = resolve(temporary, 'ordered.shapp')
+    const result = await createPortablePayload({ sourceDirectory: app, output, identity, platform: 'win32', arch: 'x64', entrypoint })
+    const paths = result.header.files.map(file => file.path)
+    assert.ok(paths.indexOf('resources/app.asar') < paths.indexOf('resources0'))
+    assert.deepEqual(
+      ['resources\\app.asar', 'resources0'].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))),
+      ['resources0', 'resources\\app.asar'],
+      'raw Windows separators produce the opposite order',
+    )
+    assert.deepEqual(paths, [...paths].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))))
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+})
+
 test('Linux payload permits the pinned Python terminfo case aliases only', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'portable-terminfo-'))
   try {
