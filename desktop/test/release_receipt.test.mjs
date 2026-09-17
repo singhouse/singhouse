@@ -17,7 +17,7 @@ async function fixture(root, platform) {
   const resources = platform === 'darwin' ? 'Singhouse.app/Contents/Resources' : 'resources'
   await mkdir(resolve(root, resources, 'native'), { recursive: true })
   await mkdir(resolve(root, entrypoint, '..'), { recursive: true })
-  await writeFile(resolve(root, entrypoint), 'executable', { mode: 0o755 })
+  await writeFile(resolve(root, entrypoint), 'executable', { mode: platform === 'win32' ? 0o644 : 0o755 })
   await writeFile(resolve(root, resources, 'app.asar'), 'asar')
   await writeFile(resolve(root, resources, 'native/manifest.json'), JSON.stringify({ runtimeId: H }))
   await writeFile(resolve(root, resources, 'native/files.json'), '{}')
@@ -34,6 +34,8 @@ for (const [platform, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['win32', 
     await createPortablePayload({ sourceDirectory: app, output: second, identity, platform, arch, entrypoint })
     assert.deepEqual(await readFile(first), await readFile(second))
     const inspected = await inspectPortablePayload(first); assert.equal(inspected.header.target.platform, platform); assert.equal(inspected.header.entrypoint, entrypoint)
+    assert.equal(inspected.header.files.find(file => file.path === entrypoint).mode, 0o755)
+    assert.equal(inspected.header.files.find(file => file.path.endsWith('/app.asar')).mode, 0o644)
     const files = inspected.header.files.map(record => record.type === 'file' ? { type: 'file', path: record.path, sha256: record.sha256 }
       : record.type === 'directory' ? { type: 'directory', path: record.path } : { type: 'symlink', path: record.path, target: record.target })
     const receipt = { schema: 1, kind: 'singhouse-release-receipt', identity, target: { platform, arch },

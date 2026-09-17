@@ -166,7 +166,7 @@ async function application(root, platform, arch, release) {
     `${resourceRoot}/native/files.json`, `${resourceRoot}/native/assembly.json`]) {
     await mkdir(join(source, path, '..'), { recursive: true }); await writeFile(join(source, path), `bytes:${path}:${release.releaseId}`)
   }
-  await chmod(join(source, entrypoint), 0o755)
+  if (platform !== 'win32') await chmod(join(source, entrypoint), 0o755)
   const output = join(root, `${platform}-${release.releaseId.slice(0, 8)}.shapp`)
   await createPortablePayload({ sourceDirectory: source, output, identity: release, platform, arch, entrypoint })
   const bytes = await readFile(output)
