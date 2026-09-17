@@ -39,5 +39,18 @@ export default {
   linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo' },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null },
   win: { target: ['nsis'], signAndEditExecutable: false },
-  nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, deleteAppDataOnUninstall: false },
+  // Nsis7z cannot extract ARM64-filtered blocks produced by the current 7za
+  // compressor. The managed Python payload includes ARM launcher templates, so
+  // use the ZIP extractor and disable the differential 7z package path.
+  nsis: {
+    oneClick: false,
+    perMachine: false,
+    allowToChangeInstallationDirectory: true,
+    deleteAppDataOnUninstall: false,
+    useZip: true,
+    differentialPackage: false,
+    // Updates use the authenticated Singhouse payload flow. Do not let the
+    // NSIS pass add an updater helper after release receipt derivation.
+    packElevateHelper: false,
+  },
 }

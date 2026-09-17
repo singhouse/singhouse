@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { derivePolicyId } from '../release.mjs'
-import { packagedReleasePolicyPath, verifyPackagedReleasePolicy } from '../build/package.mjs'
+import { inspectApplicationInventory } from '../build/release_receipt.mjs'
+import { packagedReleasePolicyPath, verifyInstallerPreservedApplication, verifyPackagedReleasePolicy } from '../build/package.mjs'
 
 const desktop = fileURLToPath(new URL('../', import.meta.url))
 const installer = new URL('../build/installer.mjs', import.meta.url).href
@@ -43,6 +44,22 @@ test('packaging verifies the exact selected core and premium runtime policy', as
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('installer packaging may not mutate the receipt-bound application', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'installer-inventory-'))
+  try {
+    await mkdir(resolve(root, 'resources'), { recursive: true })
+    await writeFile(resolve(root, 'Singhouse.exe'), 'application')
+    await writeFile(resolve(root, 'resources/release-receipt.json'), 'receipt')
+    const expectedInventory = await inspectApplicationInventory(root)
+    assert.equal((await verifyInstallerPreservedApplication({ applicationDirectory: root, expectedInventory })).files.length, 3)
+    await writeFile(resolve(root, 'resources/elevate.exe'), 'late helper')
+    await assert.rejects(
+      verifyInstallerPreservedApplication({ applicationDirectory: root, expectedInventory }),
+      /changed the receipt-bound application/,
+    )
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('installer rejects stale native admission policy instead of overlaying it', async () => {
   const native = await mkdtemp(resolve(tmpdir(), 'installer-policy-'))
   const previous = process.env.KARAOKE_NATIVE_PAYLOAD
@@ -62,6 +79,12 @@ test('installer rejects stale native admission policy instead of overlaying it',
       { from: native, to: 'native', filter: ['**/*'] },
       { from: releasePolicyPath, to: 'release.json' },
     ])
+    // electron-builder 26 only creates the ZIP selected by `useZip` when
+    // differential packaging is disabled. Keeping this pair prevents Nsis7z
+    // from dropping payload members stored with an ARM64 executable filter.
+    assert.equal(valid.nsis.useZip, true)
+    assert.equal(valid.nsis.differentialPackage, false)
+    assert.equal(valid.nsis.packElevateHelper, false)
     assert.ok(!valid.files.some(file => typeof file === 'object' && file.to === 'release.json'))
     await writeFile(resolve(native, 'processing-locks.json'), '{}\n')
     await assert.rejects(import(`${installer}?stale=${Date.now()}`), /Reassemble the native runtime after changing processing-locks.json/)

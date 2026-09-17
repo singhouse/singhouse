@@ -3,7 +3,7 @@ import { copyFile, readFile, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assertReleasePolicy, canonicalJson } from '../release.mjs'
-import { createPortablePayload, createReleaseReceipt, deriveIdentityFromApplication, verifyPackagingSource } from './release_receipt.mjs'
+import { createPortablePayload, createReleaseReceipt, deriveIdentityFromApplication, inspectApplicationInventory, verifyPackagingSource } from './release_receipt.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -23,6 +23,14 @@ export async function verifyPackagedReleasePolicy({ applicationDirectory, platfo
   catch (error) { throw new Error(`Packaged release policy is invalid: ${error.message}`) }
   if (canonicalJson(installed) !== canonicalJson(expected)) throw new Error('Packaged release policy does not match the selected release policy')
   return { path, policy: installed }
+}
+
+export async function verifyInstallerPreservedApplication({ applicationDirectory, expectedInventory }) {
+  const installed = await inspectApplicationInventory(applicationDirectory)
+  if (canonicalJson(installed.files) !== canonicalJson(expectedInventory?.files)) {
+    throw new Error('Installer packaging changed the receipt-bound application')
+  }
+  return installed
 }
 
 async function main() {
@@ -72,6 +80,7 @@ async function main() {
     const resources = nativeManifest.platform === 'darwin'
       ? resolve(application, 'Singhouse.app', 'Contents', 'Resources') : resolve(application, 'resources')
     await copyFile(receipt, resolve(resources, 'release-receipt.json'))
+    const installerApplicationInventory = await inspectApplicationInventory(application)
     // A prepackaged application already contains the selected files and native
     // resources. Passing those source-copy rules to electron-builder again both
     // reopens the clean payload and triggers invalid config merging in current
@@ -81,6 +90,7 @@ async function main() {
     await build({ config: installerConfig, prepackaged: application, publish: 'never',
       targets: platform.createTarget(undefined, Arch[nativeManifest.arch]) })
     await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
+    await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
   }
   console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
 }
