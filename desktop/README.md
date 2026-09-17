@@ -74,7 +74,10 @@ The default native payload is `desktop/native/`. Packaging creates a determinist
 receipt in `desktop/artifacts/`. The portable header binds the exact recursive
 file inventory and its digest, entry point, target, native assembly, Electron `app.asar`, source
 commit, runtime locks, model policy, database schema history, and core/premium
-pairing. The receipt re-inspects that payload instead of trusting neighboring
+pairing. Both identity derivation and receipt publication verify every native
+`files.json` entry against the packaged file bytes, including Python bytecode.
+Missing, changed, or malformed entries fail packaging; rebuild the assembly
+from clean inputs instead of regenerating its expected hashes. The receipt re-inspects that payload instead of trusting neighboring
 build files and records the modeled application subtree. `npm --prefix desktop
 run package:first-installers` embeds that receipt in the native first-install
 app. On first launch, every modeled file, directory, and internal link is
@@ -436,24 +439,30 @@ the stock desktop does not inherit credentials or enable it automatically.
 npm --prefix desktop test
 python3 -m unittest discover -s desktop -p 'test_backend.py'
 python3 -m unittest discover -s desktop/test -p 'test_*.py'
-python3 desktop/test/native-smoke.py --native desktop/native --copy
+python3 -I -B desktop/test/native-smoke.py --native desktop/native --copy
 ```
 
-Run the native smoke test on the payload's target OS and architecture. It uses
+Run the native smoke test on the payload's target OS and architecture. Always
+pass `-I -B`, including when using the bundled Python as the smoke driver, so
+imports cannot rewrite the assembly's Python caches. The driver rejects a
+missing flag before importing its test dependencies. It uses
 fresh temporary data and checks relocation, authenticated boot, origin/host
 rejection, synthetic prepared-video import and decoding, the library lock, and
 persistent restart. It does not test installation or physical playback.
 
-The packaged application smoke harness currently isolates application storage
-on Linux only. Point it at the unpacked or extracted application's executable:
+The packaged application smoke harness supports Linux and Windows, using a
+temporary user-data directory. Point it at the packaged application's executable:
 
 ```sh
 xvfb-run -a node desktop/test/packaged-smoke.mjs --executable desktop/artifacts/linux-unpacked/Singhouse
 ```
 
+On Windows, run `node desktop/test/packaged-smoke.mjs --executable "C:\path\to\Singhouse.exe"`.
+The same command can test the installed executable after a test installation.
+
 The installed macOS bundle is `Singhouse.app`, with executable
 `Singhouse.app/Contents/MacOS/Singhouse`; Windows installs `Singhouse.exe`.
-The packaged smoke harness above remains Linux-only.
+The packaged smoke harness does not yet support macOS.
 
 Use the actual unpacked directory for your target; omit `xvfb-run -a` when running
 on a graphical Linux desktop. This launches the packaged application, exercises

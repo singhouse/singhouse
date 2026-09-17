@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 
-assert.equal(process.platform, 'linux', 'This harness isolates Linux app storage through XDG_CONFIG_HOME')
+assert.ok(['linux', 'win32'].includes(process.platform), 'This harness supports Linux and Windows packaged applications')
 const option = process.argv.indexOf('--executable')
 assert.ok(option >= 0 && process.argv[option + 1], 'Pass --executable pointing to the packaged application')
 const executablePath = resolve(process.argv[option + 1])
@@ -21,7 +21,7 @@ const wait = milliseconds => new Promise(done => setTimeout(done, milliseconds))
 
 async function launch() {
   // Launch the built executable itself. No source application or demo args.
-  application = await electron.launch({ executablePath, args: [], env, timeout: 60000 })
+  application = await electron.launch({ executablePath, args: [`--user-data-dir=${join(temporary, 'profile')}`], env, timeout: 60000 })
   const identity = await application.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData') }))
   assert.equal(identity.packaged, true)
   const child = relative(temporary, identity.userData)
@@ -56,7 +56,7 @@ async function sandboxChecks(host) {
 
 try {
   const fixture = join(temporary, 'synthetic.mp4')
-  const ffmpeg = join(dirname(executablePath), 'resources/native/ffmpeg/bin/ffmpeg')
+  const ffmpeg = join(dirname(executablePath), 'resources/native/ffmpeg/bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
   execFileSync(ffmpeg, ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
     'testsrc2=size=320x180:rate=25', '-f', 'lavfi', '-i',
     'sine=frequency=220:sample_rate=48000', '-t', '30', '-c:v', 'libx264',

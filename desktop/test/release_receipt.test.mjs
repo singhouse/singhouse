@@ -4,8 +4,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { canonicalJson, deriveReleaseIdentity, sha256Hex, validateInstalledReleaseReceipt } from '../release.mjs'
-import { createPortablePayload, inspectApplicationInventory, inspectPortablePayload, createReleaseReceipt, inspectReleaseReceipt, normalizeAndOrderPortableEntries, verifyPackagingSource } from '../build/release_receipt.mjs'
+import { canonicalJson, deriveReleaseIdentity, loadReleasePolicy, sha256Hex, validateInstalledReleaseReceipt } from '../release.mjs'
+import { createPortablePayload, deriveIdentityFromApplication, inspectApplicationInventory, inspectPortablePayload, createReleaseReceipt, inspectReleaseReceipt, normalizeAndOrderPortableEntries, verifyPackagingSource } from '../build/release_receipt.mjs'
 
 const H = 'c'.repeat(64)
 async function identityFor(root, overrides = {}) {
@@ -192,3 +192,58 @@ test('export packaging fails closed until a separately authenticated manifest ve
   const provenance = { sourceCommit: 'd'.repeat(40), sourceDirty: null, sourceExport: true }
   await assert.rejects(verifyPackagingSource({ repositoryDirectory: '/export', provenance }), /authenticated source manifest.*no verifier/i)
 })
+
+// Refreshing the outer application inventory must never bless stale native
+// hashes: the native assembly remains the source of expected payload bytes.
+for (const corruption of ['changed cache', 'missing backend', 'directory', 'symlink', 'null inventory', 'array inventory', 'empty inventory', 'bad digest', 'traversal', 'absolute path', 'backslash path']) {
+  test(`native inventory rejects ${corruption} during identity and receipt generation`, async () => {
+    const temporary = await mkdtemp(resolve(tmpdir(), 'native-inventory-'))
+    try {
+      const app = resolve(temporary, 'app'); await fixture(app, 'linux')
+      const native = resolve(app, 'resources/native')
+      const contents = { 'backend.py': 'backend', 'models.json': 'models', 'static/index.html': 'frontend', 'python/__pycache__/module.pyc': 'original cache' }
+      const files = {}
+      for (const [path, content] of Object.entries(contents)) {
+        await mkdir(resolve(native, path, '..'), { recursive: true })
+        await writeFile(resolve(native, path), content)
+        files[path] = sha256Hex(content)
+      }
+      const provenance = { sourceCommit: 'd'.repeat(40), sourceDirty: false, sourceExport: false, locks: { 'native.json': H } }
+      await writeFile(resolve(native, 'provenance.json'), JSON.stringify(provenance))
+      async function writeInventory(inventory) {
+        const encoded = JSON.stringify(inventory)
+        await writeFile(resolve(native, 'files.json'), encoded)
+        await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: '1.0.0', runtimeId: sha256Hex(encoded) }))
+        await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: sha256Hex(canonicalJson(inventory)) }))
+      }
+      await writeInventory(files)
+      const derive = () => deriveIdentityFromApplication({ applicationDirectory: app, policy: loadReleasePolicy(), packageLock: { packages: { 'node_modules/electron': { version: '44.3.0' } } } })
+      const validIdentity = await derive()
+      const backend = resolve(native, 'backend.py')
+      if (corruption === 'changed cache') await writeFile(resolve(native, 'python/__pycache__/module.pyc'), 'rewritten cache')
+      if (['missing backend', 'directory', 'symlink'].includes(corruption)) await rm(backend)
+      if (corruption === 'directory') await mkdir(backend)
+      if (corruption === 'symlink') await symlink('models.json', backend)
+      if (corruption === 'null inventory') await writeInventory(null)
+      if (corruption === 'array inventory') await writeInventory([H])
+      if (corruption === 'empty inventory') await writeInventory({})
+      if (corruption === 'bad digest') await writeInventory({ ...files, 'backend.py': 42 })
+      if (corruption === 'traversal') await writeInventory({ ...files, '../app.asar': sha256Hex('asar') })
+      if (corruption === 'absolute path') await writeInventory({ ...files, '/backend.py': files['backend.py'] })
+      if (corruption === 'backslash path') await writeInventory({ ...files, 'static\\index.html': files['static/index.html'] })
+      const error = /Native file inventory mismatch|Invalid native file (?:inventory|digest)|Unsafe portable path/
+      await assert.rejects(derive(), error)
+      const { releaseId, ...components } = validIdentity
+      const { inventoryDigest } = await inspectApplicationInventory(app)
+      const identity = deriveReleaseIdentity({ ...components, applicationInventoryDigest: inventoryDigest })
+      const payload = resolve(temporary, 'application.shapp'), output = resolve(temporary, 'receipt.json')
+      await createPortablePayload({ sourceDirectory: app, output: payload, identity, platform: 'linux', arch: 'x64' })
+      let publicationChecked = false
+      await assert.rejects(createReleaseReceipt({ payload, output, sourceCommit: identity.sourceCommit, sourceDirty: false,
+        electronVersion: identity.electronVersion, nativeRuntimeId: identity.nativeRuntimeId,
+        verifySourceBeforePublish: async () => { publicationChecked = true } }), error)
+      assert.equal(publicationChecked, false)
+      await assert.rejects(readFile(output), /ENOENT/)
+    } finally { await rm(temporary, { recursive: true, force: true }) }
+  })
+}

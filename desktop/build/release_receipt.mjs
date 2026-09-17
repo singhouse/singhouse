@@ -100,6 +100,19 @@ function singleFile(files, predicate, label) {
   return matches[0]
 }
 
+// files.json is the assembly's expected byte inventory, not evidence that the
+// packaged bytes still match it. Check every entry against observed file hashes.
+function verifyNativeInventory(files, records, prefix) {
+  if (!files || typeof files !== 'object' || Array.isArray(files) || !Object.keys(files).length) throw new Error('Invalid native file inventory')
+  const observed = new Map(records.map(record => [record.path, record]))
+  for (const [path, expected] of Object.entries(files)) {
+    safePath(path)
+    if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) throw new Error(`Invalid native file digest: ${path}`)
+    const record = observed.get(`${prefix}${path}`)
+    if (record?.type !== 'file' || record.sha256 !== expected) throw new Error(`Native file inventory mismatch: ${path}`)
+  }
+}
+
 export async function deriveIdentityFromApplication({ applicationDirectory, policy, packageLock }) {
   assertReleasePolicy(policy)
   const root = resolve(applicationDirectory)
@@ -112,6 +125,7 @@ export async function deriveIdentityFromApplication({ applicationDirectory, poli
   const assemblyRecord = singleFile(records, path => path === `${prefix}assembly.json`, 'assembly descriptor')
   const get = async record => JSON.parse(await readFile(resolve(root, record.path), 'utf8'))
   const native = await get(nativeManifest); const files = await get(nativeFilesRecord); const provenance = await get(provenanceRecord); const assembly = await get(assemblyRecord)
+  verifyNativeInventory(files, records, prefix)
   if (assembly.edition !== policy.edition) throw new Error('Release policy edition does not match the packaged assembly')
   if (provenance.sourceDirty !== false || provenance.sourceExport !== false || provenance.sourceCommit !== assembly.sourceCommit && assembly.sourceCommit !== undefined) throw new Error('Release builds require a clean Git checkout')
   if (assembly.payloadDigest !== sha256Hex(canonicalJson(files)) || native.runtimeId !== nativeFilesRecord.sha256) throw new Error('Native assembly identity is inconsistent')
@@ -189,6 +203,7 @@ export async function createReleaseReceipt({ payload, output, sourceCommit, sour
   const files = JSON.parse(portableFileBytes(parsed, nativeFilesRecord.path).toString('utf8'))
   const provenance = JSON.parse(portableFileBytes(parsed, provenanceRecord.path).toString('utf8'))
   const assembly = JSON.parse(portableFileBytes(parsed, assemblyRecord.path).toString('utf8'))
+  verifyNativeInventory(files, parsed.header.files, prefix)
   const staticRecords = Object.entries(files).filter(([path]) => path.startsWith('static/')).map(([path, sha256]) => ({ path, sha256 }))
   const backendRecords = Object.entries(files).filter(([path]) => path === 'backend.py' || /site-packages\/(karaoke_backend|lyricsync)\//.test(path)).map(([path, sha256]) => ({ path, sha256 }))
   const electronRecords = parsed.header.files.filter(record => record.path !== asar.path && !record.path.startsWith(prefix))
