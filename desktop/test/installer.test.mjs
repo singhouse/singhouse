@@ -24,8 +24,12 @@ test('installer rejects stale native admission policy instead of overlaying it',
     for (const policy of ['models.json', 'processing-locks.json']) {
       await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     }
-    const { default: valid } = await import(`${installer}?valid=${Date.now()}`)
-    assert.deepEqual(valid.extraResources, [{ from: native, to: 'native', filter: ['**/*'] }])
+    const { default: valid, releasePolicyPath } = await import(`${installer}?valid=${Date.now()}`)
+    assert.deepEqual(valid.extraResources, [
+      { from: native, to: 'native', filter: ['**/*'] },
+      { from: releasePolicyPath, to: 'release.json' },
+    ])
+    assert.ok(!valid.files.some(file => typeof file === 'object' && file.to === 'release.json'))
     await writeFile(resolve(native, 'processing-locks.json'), '{}\n')
     await assert.rejects(import(`${installer}?stale=${Date.now()}`), /Reassemble the native runtime after changing processing-locks.json/)
     await writeFile(resolve(native, 'processing-locks.json'), await readFile(resolve(desktop, 'processing-locks.json')))
@@ -44,7 +48,7 @@ test('installer rejects stale native admission policy instead of overlaying it',
     process.env.SINGHOUSE_RELEASE_POLICY = premiumPath
     const { default: premiumConfig, releasePolicy } = await import(`${installer}?premium=${Date.now()}`)
     assert.equal(releasePolicy.edition, 'premium')
-    assert.equal(premiumConfig.files.at(-1).from, premiumPath)
+    assert.deepEqual(premiumConfig.extraResources.at(-1), { from: premiumPath, to: 'release.json' })
   } finally {
     if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
     else process.env.KARAOKE_NATIVE_PAYLOAD = previous

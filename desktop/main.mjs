@@ -11,13 +11,14 @@ import { RuntimeManager, ModelCache, processingAttestation } from './runtime_man
 import { HeartSetup, authorizedHeartCaller } from './heart_setup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
-import { runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
+import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
 import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
 const packaged = app.isPackaged
 const nativeDir = resolve(process.resourcesPath, 'native')
+const releasePolicyPath = packaged ? resolve(process.resourcesPath, 'release.json') : resolve(desktopDir, 'release.json')
 let brand = app.getName()
 if (!packaged) {
   brand = (await import(pathToFileURL(resolve(root, 'frontend/src/brand.js')).href)).BRAND_NAME
@@ -152,8 +153,8 @@ async function verifiedFirstInstallerPlatformTrust() {
 async function startManagedBootstrap({ stable = false } = {}) {
   const python = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
   const helper = resolve(nativeDir, 'backend.py')
-  const args = [resolve(desktopDir, 'bootstrap.mjs'), runtime.root, String(process.pid), python, helper]
-  if (stable) args.push('--stable')
+  const args = managedBootstrapArguments({ bootstrapPath: resolve(desktopDir, 'bootstrap.mjs'), stateRoot: runtime.root,
+    parentPid: process.pid, pythonPath: python, helperPath: helper, releasePolicyPath, stable })
   const child = spawn(process.execPath, args, {
     detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   })
@@ -306,7 +307,7 @@ async function applyUpdate() {
             targetRoot: previous.root, target: { platform: previous.platform, arch: previous.arch, entrypoint: previous.entrypoint }, files: {
               'recovery_cli.mjs': resolve(desktopDir, 'recovery_cli.mjs'),
               'recovery_launcher.mjs': resolve(desktopDir, 'recovery_launcher.mjs'),
-              'release.mjs': resolve(desktopDir, 'release.mjs'), 'release.json': resolve(desktopDir, 'release.json'),
+              'release.mjs': resolve(desktopDir, 'release.mjs'), 'release.json': releasePolicyPath,
             }, binding, anchor: recoveryAnchor, ...recoveryKitDurability })
           return { id, manifest }
         } }),
@@ -434,7 +435,7 @@ async function start() {
     const lockPython = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
-    releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'release.json'), 'utf8')))
+    releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
     productRelease = installedReleaseIdentity()
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')

@@ -7,7 +7,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { acquireActivationLock, invokePairedRecovery, launchManaged, runBootstrap, runRecoveryAnchor, runStableBootstrap, superviseManagedTarget, verifyRecoveryAnchor, waitForReady } from '../bootstrap.mjs'
+import { acquireActivationLock, bootstrapContractPath, invokePairedRecovery, launchManaged, managedBootstrapArguments, runBootstrap, runRecoveryAnchor, runStableBootstrap, superviseManagedTarget, verifyRecoveryAnchor, waitForReady } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { atomicJSON, recoveryAnchorRecord } from '../recovery_launcher.mjs'
 import { presentAndCompleteStartup } from '../update_manager.mjs'
@@ -18,6 +18,23 @@ function child() {
 }
 
 const immediateActivation = async () => ({ release: async () => {} })
+
+test('managed bootstrap uses an explicit canonical release policy without environment override', () => {
+  const explicit = resolve('/packaged/resources/release.json')
+  const previous = process.env.SINGHOUSE_RELEASE_POLICY
+  process.env.SINGHOUSE_RELEASE_POLICY = resolve('/caller/controlled/release.json')
+  try {
+    assert.equal(bootstrapContractPath(explicit), explicit)
+    assert.notEqual(bootstrapContractPath(explicit), process.env.SINGHOUSE_RELEASE_POLICY)
+    assert.deepEqual(managedBootstrapArguments({ bootstrapPath: '/app/bootstrap.mjs', stateRoot: '/state', parentPid: 42,
+      pythonPath: '/native/python', helperPath: '/native/backend.py', releasePolicyPath: explicit, stable: true }),
+    ['/app/bootstrap.mjs', '/state', '42', '/native/python', '/native/backend.py', explicit, '--stable'])
+    assert.throws(() => bootstrapContractPath('relative/release.json'), /absolute and canonical/)
+  } finally {
+    if (previous === undefined) delete process.env.SINGHOUSE_RELEASE_POLICY
+    else process.env.SINGHOUSE_RELEASE_POLICY = previous
+  }
+})
 
 async function fixedAnchorFixture(root, stateName = 'state') {
   const stateRoot = join(root, stateName), anchorPath = join(stateRoot, 'recovery-tool', 'anchor.json')
