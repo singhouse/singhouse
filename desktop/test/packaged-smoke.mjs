@@ -51,7 +51,7 @@ async function sandboxChecks(host) {
     bridge: Object.keys(window.karaokeDesktop),
     blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true),
   }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'prepareHeart'], blocked: true })
 }
 
 try {
