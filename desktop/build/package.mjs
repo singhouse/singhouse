@@ -37,9 +37,16 @@ export async function verifyInstallerPreservedApplication({ applicationDirectory
 async function main() {
   const signedRelease = process.argv.includes('--signed-release')
   const manualAzureCli = process.argv.includes('--azure-cli-user')
+  const azureOidc = process.argv.includes('--azure-oidc')
   if (manualAzureCli && !signedRelease) throw new Error('--azure-cli-user requires --signed-release')
+  if (azureOidc && !signedRelease) throw new Error('--azure-oidc requires --signed-release')
   if (signedRelease && !process.argv.includes('--first-installers')) throw new Error('--signed-release requires --first-installers')
   if (manualAzureCli) await verifyAzureCliSession()
+  if (azureOidc) await verifyAzureCliSession({ expectedType: 'servicePrincipal', expected: {
+    subscriptionId: process.env.AZURE_SUBSCRIPTION_ID,
+    tenantId: process.env.AZURE_TENANT_ID,
+    clientId: process.env.AZURE_CLIENT_ID,
+  } })
   const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot }] = await Promise.all([
     import('electron-builder'),
     import('./installer.mjs'),

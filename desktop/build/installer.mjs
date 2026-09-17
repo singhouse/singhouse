@@ -16,6 +16,7 @@ const pkg = JSON.parse(readFileSync(resolve(desktop, 'package.json'), 'utf8'))
 const { BRAND_NAME } = await import(pathToFileURL(resolve(desktop, '../frontend/src/brand.js')))
 const signedRelease = process.argv.includes('--signed-release')
 const manualAzureCli = process.argv.includes('--azure-cli-user')
+const azureOidc = process.argv.includes('--azure-oidc')
 if (manifest.appVersion !== pkg.version || !existsSync(resolve(native, 'backend.py'))) {
   throw new Error('Assemble a matching native runtime before creating an installer')
 }
@@ -41,7 +42,7 @@ export default {
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo' },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null },
-  win: windowsBuildConfiguration({ signedRelease, manualAzureCli }),
+  win: windowsBuildConfiguration({ signedRelease, manualAzureCli, azureOidc }),
   // Nsis7z cannot extract ARM64-filtered blocks produced by the current 7za
   // compressor. The managed Python payload includes ARM launcher templates, so
   // use the ZIP extractor and disable the differential 7z package path.

@@ -27,7 +27,7 @@ test('signed release config fails closed off Windows or without environment cred
   assert.throws(() => windowsBuildConfiguration({ signedRelease: true, env: {}, platform: 'win32' }), /environment credentials.*--azure-cli-user/)
   assert.throws(() => windowsBuildConfiguration({ signedRelease: true, env: { AZURE_TENANT_ID: 'partial' }, platform: 'win32' }), /Partial Azure environment credentials/)
   assert.throws(() => windowsBuildConfiguration({ signedRelease: true, manualAzureCli: true,
-    env: { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_CLIENT_SECRET: 'secret' }, platform: 'win32' }), /either.*or/i)
+    env: { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_CLIENT_SECRET: 'secret' }, platform: 'win32' }), /exactly one/i)
   assert.throws(() => windowsBuildConfiguration({ signedRelease: true, env: {}, platform: 'linux' }), /must be built on Windows/)
 })
 
@@ -69,11 +69,26 @@ function azureCli(result, { code = 0, error = null } = {}) {
 test('manual signing requires an installed and logged-in Azure CLI session', async () => {
   const account = { id: 'subscription', tenantId: 'tenant', user: { name: 'michael@example.test', type: ' User ' } }
   assert.deepEqual(await verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(account) }),
-    { subscriptionId: 'subscription', tenantId: 'tenant' })
+    { subscriptionId: 'subscription', tenantId: 'tenant', principal: 'michael@example.test' })
   await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(null, { code: 1 }) }), /not logged in/)
   await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(null, { error: new Error('ENOENT') }) }), /unavailable/)
-  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli({}) }), /invalid account/)
-  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli({ ...account, user: { type: 'servicePrincipal' } }) }), /invalid account/)
+  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli({}) }), /invalid user signing session/)
+  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli({ ...account, user: { type: 'servicePrincipal' } }) }), /invalid user signing session/)
+})
+
+test('OIDC signing accepts only the azure/login service-principal session and selects AzureCliCredential', async () => {
+  const env = { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_SUBSCRIPTION_ID: 'subscription' }
+  const config = windowsBuildConfiguration({ signedRelease: true, azureOidc: true, env, platform: 'win32' })
+  assert.equal(config.azureSignOptions.ExcludeCredentials,
+    'EnvironmentCredential,WorkloadIdentityCredential,ManagedIdentityCredential,SharedTokenCacheCredential,VisualStudioCredential,VisualStudioCodeCredential,AzurePowerShellCredential,AzureDeveloperCliCredential,InteractiveBrowserCredential')
+  const account = { id: 'subscription', tenantId: 'tenant', user: { name: 'client', type: 'servicePrincipal' } }
+  assert.deepEqual(await verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(account), expectedType: 'servicePrincipal', expected: {
+    subscriptionId: 'subscription', tenantId: 'tenant', clientId: 'client',
+  } }), { subscriptionId: 'subscription', tenantId: 'tenant', principal: 'client' })
+  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli({ ...account, user: { name: 'client', type: 'user' } }), expectedType: 'servicePrincipal' }), /invalid servicePrincipal/)
+  await assert.rejects(verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(account), expectedType: 'servicePrincipal', expected: { clientId: 'other' } }), /invalid servicePrincipal/)
+  assert.throws(() => windowsBuildConfiguration({ signedRelease: true, azureOidc: true, env: {}, platform: 'win32' }), /requires AZURE_TENANT_ID/)
+  assert.throws(() => windowsBuildConfiguration({ signedRelease: true, azureOidc: true, manualAzureCli: true, env, platform: 'win32' }), /exactly one/)
 })
 
 test('Authenticode verifier requires valid publisher and timestamp evidence', async () => {

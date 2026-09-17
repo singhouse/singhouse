@@ -18,21 +18,29 @@ const DEFAULT_AZURE_CREDENTIALS = [
 ]
 const exclusionsExcept = credential => DEFAULT_AZURE_CREDENTIALS.filter(name => name !== credential).join(',')
 
-function authenticationMode({ env, manualAzureCli }) {
+function authenticationMode({ env, manualAzureCli, azureOidc }) {
   const present = REQUIRED_AZURE_ENV.filter(name => typeof env[name] === 'string' && env[name].trim() !== '')
+  if (manualAzureCli && azureOidc) throw new Error('Choose exactly one Azure authentication mode')
+  if (azureOidc) {
+    if (env.AZURE_CLIENT_SECRET) throw new Error('--azure-oidc does not accept AZURE_CLIENT_SECRET')
+    for (const name of ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_SUBSCRIPTION_ID']) {
+      if (typeof env[name] !== 'string' || env[name].trim() === '') throw new Error(`--azure-oidc requires ${name}`)
+    }
+    return 'azure-oidc'
+  }
   if (present.length > 0 && present.length < REQUIRED_AZURE_ENV.length) {
     throw new Error(`Partial Azure environment credentials are not allowed; set all or none of: ${REQUIRED_AZURE_ENV.join(', ')}`)
   }
-  if (manualAzureCli && present.length) throw new Error('Choose either service-principal environment credentials or --azure-cli-user, not both')
+  if ((manualAzureCli || azureOidc) && present.length) throw new Error('Choose exactly one Azure authentication mode')
   if (manualAzureCli) return 'azure-cli-user'
   if (present.length === REQUIRED_AZURE_ENV.length) return 'environment'
-  throw new Error(`Signed Windows release requires complete environment credentials (${REQUIRED_AZURE_ENV.join(', ')}) or --azure-cli-user`)
+  throw new Error(`Signed Windows release requires complete environment credentials (${REQUIRED_AZURE_ENV.join(', ')}), --azure-cli-user, or --azure-oidc`)
 }
 
-export function windowsBuildConfiguration({ signedRelease = false, manualAzureCli = false, env = process.env, platform = process.platform } = {}) {
+export function windowsBuildConfiguration({ signedRelease = false, manualAzureCli = false, azureOidc = false, env = process.env, platform = process.platform } = {}) {
   if (!signedRelease) return { target: ['nsis'], signAndEditExecutable: false, signExecutable: false }
   if (platform !== 'win32') throw new Error('Signed Windows releases must be built on Windows')
-  const mode = authenticationMode({ env, manualAzureCli })
+  const mode = authenticationMode({ env, manualAzureCli, azureOidc })
   return {
     target: ['nsis'],
     signAndEditExecutable: true,
@@ -46,12 +54,12 @@ export function windowsBuildConfiguration({ signedRelease = false, manualAzureCl
       fileDigest: 'SHA256',
       timestampRfc3161: 'http://timestamp.acs.microsoft.com',
       timestampDigest: 'SHA256',
-      ExcludeCredentials: exclusionsExcept(mode === 'azure-cli-user' ? 'AzureCliCredential' : 'EnvironmentCredential'),
+      ExcludeCredentials: exclusionsExcept(mode === 'environment' ? 'EnvironmentCredential' : 'AzureCliCredential'),
     },
   }
 }
 
-export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.platform } = {}) {
+export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.platform, expectedType = 'user', expected = {} } = {}) {
   if (platform !== 'win32') return Promise.reject(new Error('Azure CLI signing session can only be checked on Windows'))
   return new Promise((resolve, reject) => {
     const child = spawnImpl('az.cmd', ['account', 'show', '--output', 'json', '--only-show-errors'], {
@@ -66,9 +74,12 @@ export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.pl
       try {
         const account = JSON.parse(stdout)
         const userType = typeof account.user?.type === 'string' ? account.user.type.trim().toLowerCase() : ''
-        if (typeof account.id !== 'string' || !account.id || typeof account.tenantId !== 'string' || !account.tenantId || userType !== 'user') throw new Error('invalid account')
-        resolve({ subscriptionId: account.id, tenantId: account.tenantId })
-      } catch { reject(new Error('Azure CLI returned invalid account information')) }
+        if (typeof account.id !== 'string' || !account.id || typeof account.tenantId !== 'string' || !account.tenantId || userType !== expectedType.toLowerCase()) throw new Error('invalid account')
+        if (expected.subscriptionId && account.id !== expected.subscriptionId) throw new Error('wrong subscription')
+        if (expected.tenantId && account.tenantId !== expected.tenantId) throw new Error('wrong tenant')
+        if (expected.clientId && account.user?.name !== expected.clientId) throw new Error('wrong client')
+        resolve({ subscriptionId: account.id, tenantId: account.tenantId, principal: account.user.name })
+      } catch { reject(new Error(`Azure CLI returned an invalid ${expectedType} signing session`)) }
     })
   })
 }

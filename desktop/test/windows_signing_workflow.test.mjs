@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+
+const workflowUrl = new URL('../../.github/workflows/desktop-windows-signing.yml', import.meta.url)
+
+test('Windows signing workflow is manual, private, OIDC-only, and verifies before upload', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  assert.match(workflow, /^on:\n  workflow_dispatch:/m)
+  assert.doesNotMatch(workflow, /^  (push|pull_request|release|schedule):/m)
+  assert.match(workflow, /permissions:\n  contents: read\n  id-token: write/)
+  assert.match(workflow, /environment: windows-signing/)
+  assert.match(workflow, /uses: azure\/login@[0-9a-f]{40}/)
+  assert.match(workflow, /--signed-release --azure-oidc/)
+  assert.match(workflow, /profileType -ne 'PublicTrust'/)
+  assert.match(workflow, /accounts\.Count -ne 1/)
+  assert.match(workflow, /accounts\[0\]\.type -ne 'Microsoft\.CodeSigning\/codeSigningAccounts'/)
+  assert.match(workflow, /accounts\[0\]\.name -ne 'singhouse-signing'/)
+  assert.match(workflow, /accountLocation -ne 'centralus'/)
+  assert.match(workflow, /profile\.id\)\.Equals\(\$profileResourceId, \[StringComparison\]::OrdinalIgnoreCase\)/)
+  assert.match(workflow, /profile\.type -ne 'Microsoft\.CodeSigning\/codeSigningAccounts\/certificateProfiles'/)
+  assert.match(workflow, /Get-AuthenticodeSignature/)
+  assert.match(workflow, /Get-FileHash -Algorithm SHA256/)
+  assert.ok(workflow.indexOf('Get-AuthenticodeSignature') < workflow.indexOf('desktop/artifacts/SHA256SUMS'))
+  assert.ok(workflow.indexOf('desktop/artifacts/SHA256SUMS') < workflow.indexOf('actions/upload-artifact'))
+  assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
+  assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
+  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc/)
+})
+
+test('Windows signing documentation binds Azure values to protected environment secrets', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\nenvironment secrets on the protected `windows-signing` environment itself,\nnot as repository or organization secrets/)
+})
+
+test('Windows signing workflow locks project tool versions and does not persist checkout credentials', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  assert.match(workflow, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683/)
+  assert.match(workflow, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/)
+  assert.match(workflow, /actions\/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065/)
+  assert.match(workflow, /azure\/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6/)
+  assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/)
+  assert.match(workflow, /persist-credentials: false/)
+  assert.match(workflow, /node-version: '22'/)
+  assert.match(workflow, /python-version: '3\.12'/)
+  assert.match(workflow, /uv-0\.12\.8-py3-none-win_amd64\.whl/)
+  assert.match(workflow, /53984d68cddd227e6433b70b510d4b47fe82e658f22f4a6ca416b4e373406393/)
+  assert.match(workflow, /pip install --no-deps \$uvWheel/)
+  assert.match(workflow, /npm --prefix desktop ci/)
+  assert.doesNotMatch(workflow, /npm --prefix frontend ci/)
+})

@@ -102,9 +102,40 @@ npm --prefix desktop run package:first-installers -- --signed-release --azure-cl
 
 The manual flag first requires a successful `az account show`, then constrains
 DefaultAzureCredential to the Azure CLI identity. It does not ask for, accept,
-or store the Azure account password. For later unattended CI, omit the manual
-flag and provide a complete service-principal environment credential instead.
-That mode constrains DefaultAzureCredential to EnvironmentCredential:
+or store the Azure account password.
+
+The recommended CI path is the manually dispatched private Windows signing
+workflow. Its job uses the protected `windows-signing` GitHub environment,
+obtains a short-lived service-principal token through GitHub OIDC, and passes
+`--azure-oidc`. No client secret is created or stored. Configure
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as
+environment secrets on the protected `windows-signing` environment itself,
+not as repository or organization secrets. The build verifies that `az account show` is the expected
+service-principal session and constrains DefaultAzureCredential to
+AzureCliCredential. It requires exactly one `singhouse-signing` account in the
+configured subscription, requires its normalized location to be `centralus`,
+then queries its exact `singhouse` profile before building; that profile must
+report `PublicTrust`.
+
+Configure the Entra application as single-tenant. Its GitHub federated
+credential must use issuer `https://token.actions.githubusercontent.com`,
+audience `api://AzureADTokenExchange`, and subject
+`repo:singhouse/singhouse:environment:windows-signing`. In the GitHub
+repository settings, create the `windows-signing` environment, add a required
+reviewer, and restrict its deployment branches to the protected `main` branch.
+These are required setup values, not a claim that the live GitHub or Entra
+settings have been inspected. Do not add access-token or OIDC-token output to
+workflow diagnostics.
+
+The workflow only uploads a private Actions artifact. It does not publish a
+release or download, deploy, or change update metadata. Its checksum inventory
+is generated after signature verification. Every action is referenced by an
+immutable reviewed commit ID.
+
+A client-secret service principal remains available as an operator-controlled
+fallback. Omit both Azure CLI flags and provide the complete environment
+credential. This mode constrains DefaultAzureCredential to
+EnvironmentCredential:
 
 ```powershell
 $env:AZURE_TENANT_ID = '<Microsoft Entra tenant ID>'
@@ -118,7 +149,8 @@ role for account `singhouse-signing`, profile `singhouse`, in Central US. The
 build uses `https://cus.codesigning.azure.net`, SHA-256 file digests, and the
 Microsoft RFC 3161 timestamp service. Credentials are read only from the build
 environment. Signed mode refuses to run off Windows, with partial environment
-credentials, without one complete authentication mode, or without first-installer packaging. It verifies that
+credentials, with mixed authentication modes, without one complete
+authentication mode, or without first-installer packaging. It verifies that
 the packaged application executable and final NSIS installer have a valid timestamped
 signature from the exact Bones Consulting LLC certificate subject before it
 reports success. Electron Builder's NSIS signing path also signs its generated
