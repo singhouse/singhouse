@@ -129,7 +129,6 @@ jobs:
       SIGNING_ACCOUNT: ${{ inputs.account }}
       SIGNING_PROFILE: ${{ inputs.profile }}
       EXPECTED_SUBJECT: ${{ inputs.expected_subject }}
-      PROBE_DIR: ${{ runner.temp }}\signing-probe
     steps:
       - name: Build an unsigned original test program
         id: build
@@ -139,6 +138,8 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:EXPECTED_SUBJECT)) {
             throw 'expected_subject is required when sign_probe is true.'
           }
+          $env:PROBE_DIR = Join-Path $env:RUNNER_TEMP 'signing-probe'
+          "PROBE_DIR=$env:PROBE_DIR" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Path $env:PROBE_DIR | Out-Null
           $source = Join-Path $env:PROBE_DIR 'SigningProbe.cs'
           $exe = Join-Path $env:PROBE_DIR 'SigningProbe.exe'
