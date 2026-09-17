@@ -624,6 +624,48 @@ with tempfile.TemporaryDirectory(prefix="desktop-watch-test-") as temporary:
             if not process.stdin.closed:
                 process.stdin.close()
 
+    def test_parent_watch_keeps_crt_descriptor_available_until_eof(self):
+        script = '''
+import os, runpy, sys, time
+launcher = runpy.run_path(sys.argv[1])
+closed = launcher["watch_parent"](sys.stdin.fileno())
+time.sleep(0.2)
+# Native extensions may duplicate CRT streams during module initialization.
+# This blocks on Windows if the watcher holds stdin's CRT descriptor lock.
+duplicate = os.dup(sys.stdin.fileno())
+os.close(duplicate)
+print("READY", flush=True)
+if not closed.wait(10):
+    raise SystemExit(2)
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", script, str(Path(__file__).with_name("backend.py"))],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ready = threading.Event()
+        lines = []
+
+        def read_ready():
+            lines.append(process.stdout.readline().strip())
+            ready.set()
+
+        reader = threading.Thread(target=read_ready, daemon=True)
+        reader.start()
+        try:
+            self.assertTrue(ready.wait(5), "Parent watcher blocked CRT descriptor access")
+            self.assertEqual(lines, ["READY"])
+            self.assertIsNone(process.poll())
+            process.stdin.close()
+            self.assertEqual(process.wait(timeout=5), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            reader.join(5)
+            process.stdout.close()
+            process.stderr.close()
+            if not process.stdin.closed:
+                process.stdin.close()
+
     def test_inherited_credentials_and_service_settings_are_removed(self):
         with patch.dict(os.environ, {"DATABASE_URL": "postgresql://production",
                                    "KARAOKE_PROVIDERS_DIR": "/private",

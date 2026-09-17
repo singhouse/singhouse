@@ -1067,9 +1067,44 @@ def watch_parent(fd: int, enforce_timeout: bool = False) -> threading.Event:
     """
     closed = threading.Event()
 
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        # Blocking reads on Windows stdin can stall native-extension loading.
+        # Poll the lifetime pipe and consume only available bytes, so no read
+        # holds the pipe or CRT descriptor locked while the parent is idle.
+        handle = msvcrt.get_osfhandle(fd)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                    ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.ReadFile.restype = wintypes.BOOL
+        kernel.PeekNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.PeekNamedPipe.restype = wintypes.BOOL
+        buffer = ctypes.create_string_buffer(4096)
+
+        def read_chunk():
+            count = wintypes.DWORD()
+            if not kernel.PeekNamedPipe(handle, None, 0, None, ctypes.byref(count), None):
+                error = ctypes.get_last_error()
+                if error == 109:  # ERROR_BROKEN_PIPE: the parent closed its end.
+                    return False
+                raise ctypes.WinError(error)
+            if not count.value:
+                closed.wait(0.1)
+                return True
+            if not kernel.ReadFile(handle, buffer, min(len(buffer), count.value), ctypes.byref(count), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return count.value != 0
+    else:
+        def read_chunk():
+            return bool(os.read(fd, 4096))
+
     def read_until_eof():
         try:
-            while os.read(fd, 4096):
+            while read_chunk():
                 pass
         except OSError:
             pass
