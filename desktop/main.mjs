@@ -15,6 +15,7 @@ import { completeActivationHandoff, completeManualRestoreHandoff, confirmRendere
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
 import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
 import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+import { verifyWindowsAuthenticode } from './windows_signing.mjs'
 
 const physicalFs = createRequire(import.meta.url)('original-fs')
 
@@ -117,8 +118,12 @@ async function platformTrust({ root: applicationRoot, manifest }) {
       check.once('error', () => resolveTrust(false)); check.once('exit', code => resolveTrust(code === 0))
     })
   }
-  // WinVerifyTrust integration remains inert until release signing is enabled;
-  // metadata can be staged but executable activation fails closed.
+  if (process.platform === 'win32') {
+    const entrypoint = resolve(applicationRoot, ...manifest.entrypoint.split('/'))
+    const relativeEntrypoint = relative(applicationRoot, entrypoint)
+    if (!relativeEntrypoint || relativeEntrypoint.startsWith(`..${sep}`) || isAbsolute(relativeEntrypoint)) return false
+    return verifyWindowsAuthenticode(entrypoint)
+  }
   return false
 }
 
@@ -135,7 +140,9 @@ async function verifiedFirstInstallerPlatformTrust() {
     const check = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
     check.once('error', () => resolveTrust({ verified: false })); check.once('exit', code => resolveTrust({ verified: code === 0 }))
   })
-  // Windows trust stays fail-closed until the Authenticode verifier is enabled.
+  // The installed application can be verified above, but Windows does not
+  // retain the outer NSIS installer as a durable first-install anchor. Keep
+  // first-installer recovery admission closed until that evidence is modeled.
   return { verified: false }
 }
 

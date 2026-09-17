@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assertReleasePolicy, canonicalJson } from '../release.mjs'
 import { createPortablePayload, createReleaseReceipt, deriveIdentityFromApplication, inspectApplicationInventory, verifyPackagingSource } from './release_receipt.mjs'
+import { verifyAzureCliSession, verifyWindowsAuthenticode } from '../windows_signing.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -34,6 +35,11 @@ export async function verifyInstallerPreservedApplication({ applicationDirectory
 }
 
 async function main() {
+  const signedRelease = process.argv.includes('--signed-release')
+  const manualAzureCli = process.argv.includes('--azure-cli-user')
+  if (manualAzureCli && !signedRelease) throw new Error('--azure-cli-user requires --signed-release')
+  if (signedRelease && !process.argv.includes('--first-installers')) throw new Error('--signed-release requires --first-installers')
+  if (manualAzureCli) await verifyAzureCliSession()
   const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot }] = await Promise.all([
     import('electron-builder'),
     import('./installer.mjs'),
@@ -59,6 +65,10 @@ async function main() {
     return path
   }
   const application = await applicationRoot()
+  if (signedRelease && nativeManifest.platform !== 'win32') throw new Error('--signed-release is supported only for Windows')
+  if (signedRelease && !await verifyWindowsAuthenticode(resolve(application, 'Singhouse.exe'))) {
+    throw new Error('Signed release application failed Authenticode publisher or timestamp verification')
+  }
   await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
   const identity = await deriveIdentityFromApplication({ applicationDirectory: application, policy, packageLock })
   const target = `${nativeManifest.platform}-${nativeManifest.arch}`
@@ -89,6 +99,10 @@ async function main() {
     installerConfig.directories = { output: directories.output }
     await build({ config: installerConfig, prepackaged: application, publish: 'never',
       targets: platform.createTarget(undefined, Arch[nativeManifest.arch]) })
+    if (signedRelease) {
+      const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)
+      if (!await verifyWindowsAuthenticode(installer)) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
+    }
     await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
     await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
   }

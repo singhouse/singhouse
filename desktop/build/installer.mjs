@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertReleasePolicy } from '../release.mjs'
+import { windowsBuildConfiguration } from '../windows_signing.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const sourceRoot = resolve(desktop, '..')
@@ -13,6 +14,8 @@ const manifest = JSON.parse(readFileSync(resolve(native, 'manifest.json'), 'utf8
 const assembly = JSON.parse(readFileSync(resolve(native, 'assembly.json'), 'utf8'))
 const pkg = JSON.parse(readFileSync(resolve(desktop, 'package.json'), 'utf8'))
 const { BRAND_NAME } = await import(pathToFileURL(resolve(desktop, '../frontend/src/brand.js')))
+const signedRelease = process.argv.includes('--signed-release')
+const manualAzureCli = process.argv.includes('--azure-cli-user')
 if (manifest.appVersion !== pkg.version || !existsSync(resolve(native, 'backend.py'))) {
   throw new Error('Assemble a matching native runtime before creating an installer')
 }
@@ -29,7 +32,7 @@ export default {
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
   asar: true,
   npmRebuild: false,
@@ -38,7 +41,7 @@ export default {
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo' },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null },
-  win: { target: ['nsis'], signAndEditExecutable: false },
+  win: windowsBuildConfiguration({ signedRelease, manualAzureCli }),
   // Nsis7z cannot extract ARM64-filtered blocks produced by the current 7za
   // compressor. The managed Python payload includes ARM launcher templates, so
   // use the ZIP extractor and disable the differential 7z package path.

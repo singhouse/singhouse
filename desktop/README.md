@@ -87,8 +87,43 @@ also reads the current Git `HEAD` and `git status --porcelain=v1
 --untracked-files=all`: the checkout must be clean and must exactly match the
 native provenance both before the build and again immediately before publishing
 the immutable receipt. Source exports without `.git` fail closed because no
-separately authenticated export-manifest verifier is configured. Packaging
-never signs or publishes anything. Create macOS artifacts on macOS.
+separately authenticated export-manifest verifier is configured. The default
+packaging command creates an explicitly unsigned private-test build and never
+publishes anything. Create macOS artifacts on macOS.
+
+Windows release signing is an explicit, fail-closed build mode. Run it on
+Windows after assembling the `win32-x64` native payload:
+
+```powershell
+# First manual release: use the Azure user already granted the signer role.
+az login
+npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user
+```
+
+The manual flag first requires a successful `az account show`, then constrains
+DefaultAzureCredential to the Azure CLI identity. It does not ask for, accept,
+or store the Azure account password. For later unattended CI, omit the manual
+flag and provide a complete service-principal environment credential instead.
+That mode constrains DefaultAzureCredential to EnvironmentCredential:
+
+```powershell
+$env:AZURE_TENANT_ID = '<Microsoft Entra tenant ID>'
+$env:AZURE_CLIENT_ID = '<signing application client ID>'
+$env:AZURE_CLIENT_SECRET = '<signing application client secret>'
+npm --prefix desktop run package:first-installers -- --signed-release
+```
+
+The signing identity must have the Artifact Signing Certificate Profile Signer
+role for account `singhouse-signing`, profile `singhouse`, in Central US. The
+build uses `https://cus.codesigning.azure.net`, SHA-256 file digests, and the
+Microsoft RFC 3161 timestamp service. Credentials are read only from the build
+environment. Signed mode refuses to run off Windows, with partial environment
+credentials, without one complete authentication mode, or without first-installer packaging. It verifies that
+the packaged application executable and final NSIS installer have a valid timestamped
+signature from the exact Bones Consulting LLC certificate subject before it
+reports success. Electron Builder's NSIS signing path also signs its generated
+uninstaller. Keep these values in the CI secret store; never add them to this
+repository or an artifact.
 
 Release policy is edition-owned. Core uses the checked-in `release.json`;
 premium packaging must set `SINGHOUSE_RELEASE_POLICY` to its premium policy.
@@ -239,10 +274,14 @@ kind can never hide or reclassify the other.
 
 Linux launches the already-verified executable by descriptor. macOS verifies
 the selected app bundle with `codesign` before launch when that release-policy
-gate is enabled. Windows reserves the equivalent Authenticode gate; it fails
-closed until the qualified native verification hook and signing policy are
-enabled. The checked-in release policy explicitly disables updates and has an
-empty update trust root; its macOS and Windows gates are likewise disabled, so
+gate is enabled. Windows verifies a managed application's timestamped
+Authenticode signature and exact certificate subject before launch when its
+release-policy gate is enabled. First-install recovery admission remains closed
+because Windows does not retain the outer NSIS installer as a durable recovery
+anchor after installation. The checked-in release policy therefore keeps the
+Windows gate disabled; enabling it requires modeling and qualifying that outer
+installer evidence as well. The checked-in policy also disables updates and has
+an empty update trust root; its macOS and Windows gates are likewise disabled, so
 these builds cannot accidentally claim signed
 activation. Cross-platform tests exercise injectable launch/trust primitives.
 Recovery self-verification detects corruption and replacement by accounts that
@@ -258,9 +297,9 @@ Within that boundary, each supported platform uses non-symlink leaf checks,
 exact inventory verification immediately before launch, authenticated update
 metadata, private managed slots, and fail-closed OS-signing policy hooks.
 Current-user ownership and group/world mode enforcement are POSIX guarantees
-only. Windows ACL and Authenticode enforcement remain disabled and fail closed
-until their platform trust hooks are qualified and enabled. Real Windows x64
-and macOS arm64 signing, crash, and clean-machine release qualification remain
+only. Windows ACL and first-install recovery trust enforcement remain disabled
+and fail closed until their platform trust hooks are qualified and enabled. Real Windows x64
+signing, crash, clean-machine, and macOS arm64 qualification remain
 separate release checks.
 
 To use a different payload path, set `KARAOKE_NATIVE_PAYLOAD` for packaging:
