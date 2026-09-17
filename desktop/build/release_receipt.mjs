@@ -53,11 +53,15 @@ function safePath(path) {
   if (typeof path !== 'string' || path.length < 1 || path.length >= 1024 || path.startsWith('/') || path.includes('\\') || !path.split('/').every(part => /^[A-Za-z0-9@._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error(`Unsafe portable path: ${path}`)
   return path
 }
-async function orderedPortableEntries(root) {
-  return (await walk(root)).map(entry => ({
+export function normalizeAndOrderPortableEntries(entries, relativePath, pathSeparator = sep) {
+  if (typeof relativePath !== 'function' || !['/', '\\'].includes(pathSeparator)) throw new Error('Portable path normalization requires a native path separator')
+  return entries.map(entry => ({
     ...entry,
-    portablePath: safePath(relative(root, entry.path).split(sep).join('/')),
+    portablePath: safePath(relativePath(entry).split(pathSeparator).join('/')),
   })).sort((a, b) => Buffer.from(a.portablePath).compare(Buffer.from(b.portablePath)))
+}
+async function orderedPortableEntries(root) {
+  return normalizeAndOrderPortableEntries(await walk(root), entry => relative(root, entry.path))
 }
 async function publishNew(temporary, destination) {
   try {

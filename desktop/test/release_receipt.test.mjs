@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { canonicalJson, deriveReleaseIdentity, sha256Hex, validateInstalledReleaseReceipt } from '../release.mjs'
-import { createPortablePayload, inspectApplicationInventory, inspectPortablePayload, createReleaseReceipt, inspectReleaseReceipt, verifyPackagingSource } from '../build/release_receipt.mjs'
+import { createPortablePayload, inspectApplicationInventory, inspectPortablePayload, createReleaseReceipt, inspectReleaseReceipt, normalizeAndOrderPortableEntries, verifyPackagingSource } from '../build/release_receipt.mjs'
 
 const H = 'c'.repeat(64)
 async function identityFor(root, overrides = {}) {
@@ -67,6 +67,15 @@ test('portable payload permits npm scope names in packaged notice paths', async 
 })
 
 test('portable inventory sorts normalized slash paths rather than Windows source paths', async () => {
+  const windowsEntries = [{ path: 'resources\\app.asar' }, { path: 'resources0' }]
+  assert.deepEqual(
+    normalizeAndOrderPortableEntries(windowsEntries, entry => entry.path, '\\').map(entry => entry.portablePath),
+    ['resources/app.asar', 'resources0'],
+  )
+  assert.throws(
+    () => normalizeAndOrderPortableEntries([{ path: 'resources\\..\\outside' }], entry => entry.path, '\\'),
+    /Unsafe portable path/,
+  )
   const temporary = await mkdtemp(resolve(tmpdir(), 'portable-order-'))
   try {
     const app = resolve(temporary, 'app'); const entrypoint = await fixture(app, 'win32')
@@ -76,11 +85,6 @@ test('portable inventory sorts normalized slash paths rather than Windows source
     const result = await createPortablePayload({ sourceDirectory: app, output, identity, platform: 'win32', arch: 'x64', entrypoint })
     const paths = result.header.files.map(file => file.path)
     assert.ok(paths.indexOf('resources/app.asar') < paths.indexOf('resources0'))
-    assert.deepEqual(
-      ['resources\\app.asar', 'resources0'].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))),
-      ['resources0', 'resources\\app.asar'],
-      'raw Windows separators produce the opposite order',
-    )
     assert.deepEqual(paths, [...paths].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))))
   } finally { await rm(temporary, { recursive: true, force: true }) }
 })
