@@ -1,14 +1,47 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { derivePolicyId } from '../release.mjs'
+import { packagedReleasePolicyPath, verifyPackagedReleasePolicy } from '../build/package.mjs'
 
 const desktop = fileURLToPath(new URL('../', import.meta.url))
 const installer = new URL('../build/installer.mjs', import.meta.url).href
+
+function corePolicy(channel = 'core-private-test') {
+  const policy = { schema: 1, channel, edition: 'core', schemaHistory: 1,
+    minimumReadableSchemaHistory: 1, updatesEnabled: false, signatureThreshold: 1, trustedUpdateKeys: [] }
+  policy.policyId = derivePolicyId(policy)
+  return policy
+}
+
+test('packaging verifies the exact selected core and premium runtime policy', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'packaged-policy-'))
+  try {
+    const core = corePolicy()
+    const windowsPath = packagedReleasePolicyPath(root, 'win32')
+    await mkdir(resolve(windowsPath, '..'), { recursive: true })
+    await assert.rejects(verifyPackagedReleasePolicy({ applicationDirectory: root, platform: 'win32', selectedPolicy: core }), /policy is missing/)
+    await writeFile(windowsPath, '{broken')
+    await assert.rejects(verifyPackagedReleasePolicy({ applicationDirectory: root, platform: 'win32', selectedPolicy: core }), /policy is invalid/)
+    await writeFile(windowsPath, JSON.stringify(core))
+    assert.deepEqual((await verifyPackagedReleasePolicy({ applicationDirectory: root, platform: 'win32', selectedPolicy: core })).policy, core)
+    await writeFile(windowsPath, JSON.stringify(corePolicy('substituted-channel')))
+    await assert.rejects(verifyPackagedReleasePolicy({ applicationDirectory: root, platform: 'win32', selectedPolicy: core }), /does not match/)
+
+    const approvedCorePolicy = corePolicy()
+    const premium = { schema: 1, channel: 'premium-private-test', edition: 'premium', schemaHistory: 1,
+      minimumReadableSchemaHistory: 1, updatesEnabled: false, signatureThreshold: 1, trustedUpdateKeys: [], approvedCorePolicy }
+    premium.policyId = derivePolicyId(premium)
+    const macPath = packagedReleasePolicyPath(root, 'darwin')
+    await mkdir(resolve(macPath, '..'), { recursive: true }); await writeFile(macPath, JSON.stringify(premium))
+    assert.deepEqual((await verifyPackagedReleasePolicy({ applicationDirectory: root, platform: 'darwin', selectedPolicy: premium })).policy, premium)
+    assert.equal(packagedReleasePolicyPath(root, 'linux'), resolve(root, 'resources', 'release.json'))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('installer rejects stale native admission policy instead of overlaying it', async () => {
   const native = await mkdtemp(resolve(tmpdir(), 'installer-policy-'))
