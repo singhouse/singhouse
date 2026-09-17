@@ -538,7 +538,8 @@ def kill_owned_tree():
     os.killpg(os.getpid(), signal.SIGKILL)
 
 
-def windows_durable_replace(source, destination, directories, kernel=None):
+def windows_durable_replace(source, destination, directories, kernel=None, *,
+                            sleep=time.sleep, get_last_error=None, format_error=None):
     """Write-through replacement plus ordinary-user metadata flushes.
 
     ``directories`` is the application-owned subtree, ending at the narrowest
@@ -550,6 +551,8 @@ def windows_durable_replace(source, destination, directories, kernel=None):
     from ctypes import wintypes
     if kernel is None:
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_last_error = get_last_error or getattr(ctypes, "get_last_error", lambda: 0)
+    format_error = format_error or getattr(ctypes, "FormatError", lambda code: "unknown Windows error")
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
@@ -575,8 +578,24 @@ def windows_durable_replace(source, destination, directories, kernel=None):
             if handle is None:
                 raise RuntimeError("Windows could not flush application-owned directory metadata; activation was not performed")
             handles.append(handle)
-        if source != destination and not kernel.MoveFileExW(str(source), str(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
-            raise RuntimeError("Windows write-through runtime replacement failed")
+        if source != destination:
+            # Defender and other scanners can briefly retain a handle after the
+            # final payload close. Retry only Windows errors which describe a
+            # transient access/locking conflict; every other failure remains
+            # fail-closed and the verified staging tree remains available.
+            transient_errors = {5, 32, 33}  # ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION
+            delays = (0.25, 0.5, 1, 2, 4, 8, 8)
+            for attempt in range(len(delays) + 1):
+                if kernel.MoveFileExW(str(source), str(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
+                    break
+                error_code = get_last_error()
+                if error_code not in transient_errors or attempt == len(delays):
+                    detail = format_error(error_code).strip() if error_code else "unknown Windows error"
+                    raise RuntimeError(
+                        f"Windows write-through runtime replacement failed "
+                        f"(error {error_code}: {detail})"
+                    )
+                sleep(delays[attempt])
         if any(not kernel.FlushFileBuffers(handle) for handle in handles):
             raise RuntimeError("Windows could not confirm durable runtime metadata")
     finally:

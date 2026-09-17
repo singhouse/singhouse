@@ -181,6 +181,53 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
         self.assertEqual(kernel.CloseHandle.call_count, 2)
 
+    def test_windows_durable_replace_retries_each_transient_lock_error(self):
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        for error_code in (5, 32, 33):
+            with self.subTest(error_code=error_code):
+                kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                               CloseHandle=Mock(), MoveFileExW=Mock(side_effect=[False, True]))
+                sleep = Mock()
+                backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                                sleep=sleep, get_last_error=lambda: error_code)
+                self.assertEqual(kernel.MoveFileExW.call_count, 2)
+                sleep.assert_called_once_with(0.25)
+
+    def test_windows_durable_replace_stops_when_retry_finds_nontransient_error(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        errors = iter([32, 3])
+        sleep = Mock()
+        with self.assertRaisesRegex(RuntimeError, r"error 3: path not found"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=sleep, get_last_error=lambda: next(errors),
+                                            format_error=lambda code: "path not found")
+        self.assertEqual(kernel.MoveFileExW.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+    def test_windows_durable_replace_exhausts_bounded_transient_retries(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        sleep = Mock()
+        with self.assertRaisesRegex(RuntimeError, r"error 32: sharing violation"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=sleep, get_last_error=lambda: 32,
+                                            format_error=lambda code: "sharing violation")
+        self.assertEqual(kernel.MoveFileExW.call_count, 8)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5, 1, 2, 4, 8, 8])
+
+    def test_windows_durable_replace_reports_nontransient_system_error(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        with self.assertRaisesRegex(RuntimeError, r"error 3: path not found"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=Mock(), get_last_error=lambda: 3,
+                                            format_error=lambda code: "path not found")
+        kernel.MoveFileExW.assert_called_once()
+
     def test_windows_durable_replace_refuses_without_raw_volume_fallback(self):
         invalid = ctypes.c_void_p(-1).value
         kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=invalid),
