@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
@@ -13,6 +14,9 @@ import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleas
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
 import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
+import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+
+const physicalFs = createRequire(import.meta.url)('original-fs')
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
@@ -47,21 +51,6 @@ const blocker = projectorBlocker(powerSaveBlocker)
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function digestRecords(entries) { return hash(canonicalJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))))) }
-function applicationRecords(rootDirectory, current = rootDirectory) {
-  const records = []
-  for (const name of readdirSync(current).sort()) {
-    const path = resolve(current, name), info = lstatSync(path)
-    const relativePath = relative(rootDirectory, path).split(sep).join('/')
-    if (info.isSymbolicLink()) {
-      const raw = readlinkSync(path), target = relative(rootDirectory, resolve(dirname(path), raw)).split(sep).join('/')
-      if (isAbsolute(raw) || target === '..' || target.startsWith('../')) throw new Error('Installed application symlink escapes its bundle')
-      records.push([relativePath, `symlink:${target}`])
-    } else if (info.isDirectory()) { records.push([relativePath, 'directory']); records.push(...applicationRecords(rootDirectory, path)) }
-    else if (info.isFile()) records.push([relativePath, hash(readFileSync(path))])
-    else throw new Error('Installed application contains an unsupported entry')
-  }
-  return records
-}
 function installedReleaseIdentity() {
   const manifest = expectedIdentity
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
@@ -89,8 +78,8 @@ function installedReleaseIdentity() {
     return identity
   }
   const records = process.platform === 'darwin'
-    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...applicationRecords(applicationRoot, bundle)] })()
-    : applicationRecords(applicationRoot)
+    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
+    : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
   if (existsSync(receiptPath)) {
     const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
@@ -105,7 +94,7 @@ function installedReleaseIdentity() {
     if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
     const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
       sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
-      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: hash(readFileSync(app.getAppPath())), frontendDigest: digestRecords(frontend),
+      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs), frontendDigest: digestRecords(frontend),
       backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
       runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
       schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
