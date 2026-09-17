@@ -577,7 +577,15 @@ def windows_durable_replace(source, destination, directories, kernel=None, *,
             handle = acquire(directory, 0x02200000)  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
             if handle is None:
                 raise RuntimeError("Windows could not flush application-owned directory metadata; activation was not performed")
-            handles.append(handle)
+            # Windows can reject a directory-tree rename while a descendant
+            # directory handle is open, even when it shares deletion. Its
+            # contents are already durable after the flush above, so close
+            # source-tree handles before the atomic move. Keep the owning
+            # parent handles open to flush their changed entries afterward.
+            if directory == source or source in directory.parents:
+                kernel.CloseHandle(handle)
+            else:
+                handles.append(handle)
         if source != destination:
             # Defender and other scanners can briefly retain a handle after the
             # final payload close. Retry only Windows errors which describe a

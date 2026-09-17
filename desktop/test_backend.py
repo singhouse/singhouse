@@ -181,6 +181,48 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
         self.assertEqual(kernel.CloseHandle.call_count, 2)
 
+    def test_windows_durable_replace_closes_source_tree_before_move_and_postflushes_parents(self):
+        source, destination = PureWindowsPath("C:/cache/staging/pack"), PureWindowsPath("C:/cache/packs/pack")
+        directories = [source / "nested", source, source.parent, destination.parent, source.parent.parent]
+        events = []
+        handles = iter(range(10, 15))
+
+        def create(path, *_args):
+            handle = next(handles)
+            events.append(("open", path, handle))
+            return handle
+
+        def flush(handle):
+            events.append(("flush", handle))
+            return True
+
+        def close(handle):
+            events.append(("close", handle))
+
+        def move(*_args):
+            events.append(("move",))
+            closed = {event[1] for event in events if event[0] == "close"}
+            self.assertTrue({10, 11}.issubset(closed))
+            self.assertTrue({12, 13, 14}.isdisjoint(closed))
+            return True
+
+        kernel = types.SimpleNamespace(CreateFileW=Mock(side_effect=create), FlushFileBuffers=Mock(side_effect=flush),
+                                       CloseHandle=Mock(side_effect=close), MoveFileExW=Mock(side_effect=move))
+        backend.windows_durable_replace(source, destination, directories, kernel)
+        move_index = events.index(("move",))
+        for handle in (12, 13, 14):
+            self.assertIn(("flush", handle), events[move_index + 1:])
+        self.assertEqual({event[1] for event in events if event[0] == "close"}, {10, 11, 12, 13, 14})
+
+    def test_windows_durable_replace_source_preflush_failure_prevents_move(self):
+        source, destination = PureWindowsPath("C:/cache/staging/pack"), PureWindowsPath("C:/cache/packs/pack")
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=False),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        with self.assertRaisesRegex(RuntimeError, "activation was not performed"):
+            backend.windows_durable_replace(source, destination, [source / "nested", source.parent], kernel)
+        kernel.MoveFileExW.assert_not_called()
+        kernel.CloseHandle.assert_called_once_with(10)
+
     def test_windows_durable_replace_retries_each_transient_lock_error(self):
         source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
         for error_code in (5, 32, 33):
