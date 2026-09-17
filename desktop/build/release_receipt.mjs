@@ -132,7 +132,11 @@ export async function createPortablePayload({ sourceDirectory, output, identity,
     const name = safePath(relative(source, entry.path).split(sep).join('/'))
     if (entry.type === 'file') {
       const bytes = await readFile(entry.path); const info = await stat(entry.path)
-      inventory.push({ type: 'file', path: name, offset, size: bytes.length, sha256: sha256Hex(bytes), mode: info.mode & 0o111 ? 0o755 : 0o644 }); offset += bytes.length
+      // Windows does not carry POSIX executable bits in stat(). The exact
+      // declared application entrypoint is nevertheless executable on that
+      // target; all other file modes remain derived from the source tree.
+      const executable = platform === 'win32' && name === entrypoint || Boolean(info.mode & 0o111)
+      inventory.push({ type: 'file', path: name, offset, size: bytes.length, sha256: sha256Hex(bytes), mode: executable ? 0o755 : 0o644 }); offset += bytes.length
     } else if (entry.type === 'directory') inventory.push({ type: 'directory', path: name, mode: 0o755 })
     else inventory.push({ type: 'symlink', path: name, target: entry.target })
   }

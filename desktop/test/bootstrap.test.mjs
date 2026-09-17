@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { acquireActivationLock, invokePairedRecovery, launchManaged, runBootstrap, runRecoveryAnchor, runStableBootstrap, superviseManagedTarget, verifyRecoveryAnchor, waitForReady } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { atomicJSON, recoveryAnchorRecord } from '../recovery_launcher.mjs'
@@ -65,7 +65,7 @@ test('native activation helper is held until the bootstrap releases its kernel l
       return process
     } })
   assert.equal(invocation.command, '/native/python')
-  assert.deepEqual(invocation.args, ['-I', '-B', '/native/backend.py', '--activation-lock', '/private/state'])
+  assert.deepEqual(invocation.args, ['-I', '-B', '/native/backend.py', '--activation-lock', resolve('/private/state')])
   assert.equal(invocation.process.exitCode, null)
   await held.release()
   assert.equal(invocation.process.exitCode, 0)
