@@ -7,6 +7,16 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 
+async function waitForHost(application) {
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    const host = application.windows().find(window => /^http:\/\/127\.0\.0\.1:\d+\//.test(window.url()))
+    if (host) return host
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  throw new Error('Desktop host did not open after startup')
+}
+
 assert.ok(['linux', 'win32'].includes(process.platform), 'This harness supports Linux and Windows packaged applications')
 const option = process.argv.indexOf('--executable')
 assert.ok(option >= 0 && process.argv[option + 1], 'Pass --executable pointing to the packaged application')
@@ -28,7 +38,7 @@ async function launch() {
   assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Packaged app must use isolated test userData')
   if (userData) assert.equal(identity.userData, userData)
   userData = identity.userData
-  const host = await application.firstWindow({ timeout: 60000 })
+  const host = await waitForHost(application)
   await host.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\//)
   await host.waitForLoadState('domcontentloaded')
   const healthy = await host.evaluate(async () => {
@@ -36,6 +46,8 @@ async function launch() {
     return [health.status, songs.status]
   })
   assert.deepEqual(healthy, [200, 200], 'Packaged session must authenticate itself')
+  const welcome = host.getByRole('button', { name: 'I already have karaoke files →' })
+  if (await welcome.isVisible()) await welcome.click()
   return host
 }
 
@@ -51,7 +63,7 @@ async function sandboxChecks(host) {
     bridge: Object.keys(window.karaokeDesktop),
     blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true),
   }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'prepareHeart'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
 }
 
 try {

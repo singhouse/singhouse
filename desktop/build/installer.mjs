@@ -33,7 +33,7 @@ export default {
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'startup.mjs', 'models.json', 'processing-locks.json', 'processing-catalog.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
   asar: true,
   npmRebuild: false,

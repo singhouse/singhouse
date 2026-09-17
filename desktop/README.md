@@ -617,3 +617,35 @@ separation or transcription models require their own explicit policy and cache.
 the exact shipped inventory. Its optional upstream check verifies release asset
 identities and sizes plus pinned small metadata; it does not retrieve checkpoint
 bytes or establish remote weight equality by metadata alone.
+# Song processing setup
+
+The installed desktop opens a welcome flow with an option to go straight to
+the library. “Set up song processing” reopens it from the library or Processing
+menu. Download consent is separate from choosing local processing. Setup must
+verify a compatible processing runtime, both separation models, and Heart
+together before reporting local processing ready. A saved wizard step is never
+readiness evidence. Verified model files are reused when expanding a cache.
+Cancellation preserves resumable files. Restart is refused while processing,
+installation, playback, or a projector window is active.
+
+This implementation does not yet provide a downloadable runtime catalog or a
+desktop Modal connection. Missing prerequisites appear as unavailable; playback
+remains usable. The advanced manifest installer remains a support tool.
+
+Release builds may supply `desktop/processing-catalog.json` as part of the
+application's verified inventory. The setup engine never accepts a catalog from
+the renderer or saved preferences. Its schema is:
+
+- `schema: 1`, `runtime`: the complete processing manifest accepted by the
+  current application's processing lock policy.
+- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, and
+  `accelerator`, matching that exact runtime. Populate only from actual evidence.
+- `models`: entries with `id` and `terms: [{label, url}]` for every model in the
+  combined installation. Terms URLs are HTTPS source references, not claims
+  about checkpoint licensing.
+
+The catalog must cover Heart, Demucs, and the default second-pass separator.
+Runtime artifacts need retrievable distribution URLs; models retain their
+fixed direct-upstream URLs and hashes. A catalog alone does not establish
+representative memory minima, performance, model quality, or clean-machine
+qualification. Those checks remain necessary before release.

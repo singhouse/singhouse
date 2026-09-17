@@ -676,6 +676,44 @@ export class ModelCache extends RuntimeManager {
   constructor(root, policy, options) { super(root, {}, options); this.policy = policy }
   validate(manifest) { return validateModelManifest(manifest, this.policy) }
 
+  async install(manifest, options = {}) {
+    this.validate(manifest)
+    manifest = structuredClone(manifest)
+    // Growing a verified cache must not retrieve the already installed models
+    // again. Copy from held, hash-checked descriptors; never hard-link writable
+    // staging to the previous known-good pack.
+    const active = await this.active().catch(() => null)
+    const sourceDirectory = active ? await realpath(active.directory) : null
+    const sources = new Map()
+    try {
+      for (const record of manifest.files) {
+        if (!active?.manifest.files.some(file => file.path === record.path && file.sha256 === record.sha256 && file.size === record.size)) continue
+        options.signal?.throwIfAborted()
+        const ancestors = []
+        let path = dirname(join(sourceDirectory, record.path))
+        for (;;) {
+          const info = await lstat(path)
+          if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Installed model source has an unsafe directory')
+          ancestors.push({ path, info })
+          if (dirname(path) === path) break
+          path = dirname(path)
+        }
+        const source = await checkedFile(join(sourceDirectory, record.path), constants.O_RDONLY)
+        sources.set(record.path, source)
+        for (const ancestor of ancestors) {
+          const info = await lstat(ancestor.path)
+          if (!info.isDirectory() || info.isSymbolicLink() || info.ino !== ancestor.info.ino || info.dev !== ancestor.info.dev) {
+            throw new Error('Installed model source changed while opening it')
+          }
+        }
+        if ((await source.stat()).size !== record.size || await fileHash(source, options.signal) !== record.sha256) {
+          throw new Error('Installed model source changed before reuse')
+        }
+      }
+      return await super.install(manifest, { ...options, [offlineSources]: sources })
+    } finally { await Promise.all([...sources.values()].map(source => source.close())) }
+  }
+
   async selectionForRepair() {
     // This is inventory evidence for repair, never readiness or runnable bytes.
     const pointers = await this.readPointers()

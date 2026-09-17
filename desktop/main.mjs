@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain } from 'electron'
+import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { statfs } from 'node:fs/promises'
+import { cpus, totalmem, freemem } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
@@ -9,7 +11,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
-import { HeartSetup, authorizedHeartCaller } from './heart_setup.mjs'
+import { authorizedHeartCaller } from './heart_setup.mjs'
+import { OnboardingSetup } from './onboarding_setup.mjs'
+import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
@@ -38,6 +43,7 @@ let processingProbe
 let installation
 let processingOperation
 let heartSetup
+let onboardingSetup, onboardingState, startupSurface
 let productRelease, releasePolicy, updates, updateOperation, startupHandoff
 let managedReleaseSlot = false
 let releaseState = async () => ({ activeMutations: null, jobs: { nonterminal: null } }), quiesceBackend, resumeBackend
@@ -249,7 +255,7 @@ async function boundaryState() {
   try { state = await releaseState() } catch { state = null }
   return { projectorOpen: Boolean(projector), audible: host?.webContents.isCurrentlyAudible() === true,
     activeJobs: state?.jobs?.nonterminal ?? null,
-    installing: installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation }),
+    installing: Boolean(onboardingSetup?.operation) || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation }),
     backendReady: Boolean(host) && backend?.exitCode === null && backend?.signalCode === null }
 }
 
@@ -381,11 +387,11 @@ function installMenu() {
             message: processingError || 'Processing capabilities', detail })
         } catch (error) { dialog.showErrorBox('Processing readiness', error.message) }
       } },
-      { label: 'Install processing runtime or model cache…', click: () => {
+      { label: 'Advanced: install runtime or model manifest…', click: () => {
         runProcessingOperation('processing or model installation', installProcessing)
       } },
-      { label: 'Set up Heart transcription…', click: () => runProcessingOperation('Heart setup', () => heartSetup?.prepare()) },
-      { label: 'Cancel installation', click: () => { installation?.abort(); heartSetup?.cancel() } },
+      { label: 'Set up song processing…', click: () => host?.webContents.send('setup:open') },
+      { label: 'Cancel installation', click: () => { installation?.abort(); heartSetup?.cancel(); onboardingSetup?.cancel() } },
     ] }] : []),
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'quit' }] },
   ]))
@@ -413,6 +419,11 @@ async function installProcessing() {
 }
 
 async function start() {
+  startupSurface = createStartupSurface({ BrowserWindow, brand: 'Singhouse', onClose: () => app.quit() })
+  await startupSurface.ready
+  if (quitting) return
+  await startupSurface.update('Verifying application files…')
+  if (quitting) return
   if (packaged) {
     const recoveryArguments = process.argv.slice(1)
     if (process.env.SINGHOUSE_RECOVERY_ANCHOR === '1' && recoveryArguments[0] === '--recovery-anchor') {
@@ -493,6 +504,8 @@ async function start() {
     try { activeModels = await modelCache.active() }
     catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
   }
+  await startupSurface.update('Starting your library…')
+  if (quitting) return
   const launch = await launchBackend()
   controlToken = launch.controlToken
   const ses = session.fromPartition(`desktop-${randomUUID()}`, { cache: false })
@@ -517,6 +530,7 @@ async function start() {
     }
   }
   if (!ready) throw new Error('Private backend did not become ready')
+  await startupSurface.update('Opening Singhouse…')
   await fetchJSON('/api/auth/gate', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: launch.origin }, body: JSON.stringify({ password: launch.password }) })
   launch.password = ''
   const me = await fetchJSON('/api/auth/me')
@@ -530,39 +544,65 @@ async function start() {
   }
   host = new BrowserWindow({ title: brand, width: 1440, height: 960, show: false,
     webPreferences: { session: ses, preload: resolve(desktopDir, 'preload.cjs'),
+      additionalArguments: packaged ? ['--singhouse-managed-setup'] : [],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false, webviewTag: false, spellcheck: false } })
   secureContents(host.webContents, launch.origin, true)
-  if (packaged) heartSetup = new HeartSetup({
-    cache: modelCache, policy: modelCache.policy, loadedModels: activeModels,
-    cancelled: () => quitting,
-    progressDone: () => host?.setProgressBar(-1),
-    runtimeReady: async () => (await processingStatus()).runtime?.capabilities?.includes('transcription') === true,
-    consent: async ({ bytes, sources, revision, runtimeReady, repair }) => {
-      const result = await dialog.showMessageBox(host, {
-        type: 'question', title: 'Set up Heart transcription',
-        message: repair ? 'Repair damaged Heart model files?' : 'Install Heart model files for local transcription?',
-        detail: `${bytes.toLocaleString()} bytes (${(bytes / 1024 ** 3).toFixed(2)} GiB), from ${sources.join(', ')}.\nRevision: ${revision}\n\nFiles stay on this computer and can be used offline after setup. Reopening the application is required.\n\n${runtimeReady ? '' : 'A qualified local processing runtime is not currently ready. Installing model files alone does not enable transcription.\n\n'}Choose an existing Heart model folder for offline installation, or retrieve the pinned files from upstream.`,
-        buttons: ['Cancel', 'Retrieve from upstream', 'Use existing folder'], defaultId: 0, cancelId: 0,
-      })
-      return ['cancel', 'upstream', 'directory'][result.response]
-    },
-    chooseDirectory: async () => {
-      const result = await dialog.showOpenDialog(host, { title: 'Select the complete Heart model folder', properties: ['openDirectory'] })
-      return result.canceled ? null : result.filePaths[0]
-    },
-    notify: (message, failed = false) => dialog.showMessageBox(host, {
-      type: failed ? 'error' : 'info', title: 'Heart transcription setup', message,
-    }),
+  if (packaged) {
+    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
+    const catalogPath = resolve(desktopDir, 'processing-catalog.json')
+    // This is shipped application policy, never a renderer-selected URL or file.
+    const catalog = existsSync(catalogPath) ? JSON.parse(readFileSync(catalogPath, 'utf8')) : null
+    onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
+      policy: modelCache.policy, catalog, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      hardware: async () => ({ platform: process.platform, arch: process.arch,
+        cpu: cpus()[0]?.model || 'Unknown', totalMemoryBytes: totalmem(), availableMemoryBytes: freemem(),
+        gpu: await app.getGPUInfo('basic').then(info => info.gpuDevice?.map(device => device.deviceString || device.vendorString || 'Unidentified GPU').join(', ') || 'Unknown').catch(() => 'Unknown'),
+        videoMemoryBytes: null, memoryMinimumBytes: null }),
+      diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
+      load: async () => (await onboardingState.read())?.setup,
+      save: state => onboardingState.save('setup', state) })
+  }
+  const authorizeSetup = event => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Setup is only available in the host window')
+    if (!onboardingSetup) throw new Error('Managed setup is available in the installed desktop application.')
+  }
+  const setupHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeSetup(event); return action(...args) })
+  setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
+  setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
+  setupHandler('setup:preflight', () => onboardingSetup.preflight())
+  setupHandler('setup:status', () => onboardingSetup.getStatus())
+  setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
+  setupHandler('setup:help', topic => {
+    const destinations = { pricing: 'https://modal.com/pricing', guide: 'https://modal.com/docs/guide' }
+    if (!Object.hasOwn(destinations, topic)) throw new Error('Unknown setup help destination')
+    return shell.openExternal(destinations[topic])
   })
+  setupHandler('setup:start', async request => {
+    if (processingOperation || operationGate.active) throw new Error('Another installation or release operation is running.')
+    let accept, reject
+    const accepted = new Promise((resolve, fail) => { accept = resolve; reject = fail })
+    processingOperation = operationGate.run('song processing setup', async () => {
+      try {
+        accept(await onboardingSetup.start({ consent: request?.consent === true, planId: request?.planId }))
+        await onboardingSetup.operation
+      } catch (error) { reject(error) }
+    }).finally(() => { processingOperation = null; host?.setProgressBar(-1) })
+    return accepted
+  })
+  setupHandler('setup:restart', () => operationGate.run('setup restart', () => restartForSetup({
+    activity: boundaryState, quiesce: quiesceBackend, resume: resumeBackend,
+    restart: () => { app.relaunch(); app.quit() },
+  })))
   ipcMain.handle('heart:prepare', async event => {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Heart setup is only available in the host window')
     // Development mode retains its explicitly configured backend environment.
     if (!packaged) return { installed: true, restartRequired: false }
     if ((await processingStatus()).modal?.selected === true) return { installed: true, restartRequired: false }
-    if (processingOperation || operationGate.conflicts('Heart setup')) return { installed: false, restartRequired: false, reason: 'Another installation is running. Retry when it finishes.' }
-    try { return await operationGate.run('Heart setup', () => heartSetup.prepare()) }
-    catch (error) { return { installed: false, restartRequired: false, reason: error.message } }
+    const status = await processingStatus()
+    if (status.transcription?.ready === true && status.separation?.ready === true) return { installed: true, restartRequired: false }
+    host.webContents.send('setup:open')
+    return { installed: false, restartRequired: false, reason: 'Complete song processing setup before trying this action again.' }
   })
   host.webContents.on('did-create-window', child => {
     projector = child
@@ -591,6 +631,7 @@ async function start() {
       }),
       show: () => host.show(), confirm: () => confirmRenderedFrame(host) })
   else { await host.loadURL(launch.origin); host.show() }
+  startupSurface.close()
 }
 
 app.on('before-quit', event => {
@@ -605,10 +646,12 @@ app.on('before-quit', event => {
   quitting = true
   installation?.abort()
   heartSetup?.cancel()
+  onboardingSetup?.cancel()
+  startupSurface?.close()
   blocker.stop()
   projector?.destroy()
   host?.destroy()
-  void Promise.all([stopRuntime(backend, runtime), processingOperation, heartSetup?.operation]).catch(() => {
+  void Promise.all([stopRuntime(backend, runtime), processingOperation, heartSetup?.operation, onboardingSetup?.operation]).catch(() => {
     console.error('Could not complete desktop backend shutdown.')
   }).finally(() => { shutdownComplete = true; app.quit() })
 })
@@ -621,6 +664,7 @@ process.on('exit', () => {
   }
 })
 if (ownsInstance) app.whenReady().then(start).catch(error => {
+  startupSurface?.close()
   dialog.showErrorBox(`${brand} could not start`, error.message)
   app.quit()
 })

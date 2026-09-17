@@ -440,3 +440,23 @@ test('processing path collisions follow the target filesystem', async t => {
     assert.throws(() => validateProcessingManifest(changed, { ...identity, platform }, testTrustedLocks), /file record/)
   }
 })
+
+test('expanding a model cache reuses verified installed weights without another upstream request', async t => {
+  const { root } = await fixture(t)
+  const records = ['old', 'new'].map(name => ({ path: `huggingface/hub/${name}.bin`, size: name.length,
+    sha256: sha(name), revision: 'a'.repeat(40), executable: false,
+    url: `https://huggingface.co/model/resolve/${'a'.repeat(40)}/${name}.bin` }))
+  const policy = { schema: 1, allowedHosts: ['huggingface.co'], models: records.map((record, i) => ({ id: ['old', 'new'][i], files: [record] })) }
+  const requests = []
+  const cache = new ModelCache(join(root, 'reuse-models'), policy, { fetchImpl: async url => {
+    requests.push(String(url))
+    return new Response(String(url).endsWith('/old.bin') ? 'old' : 'new')
+  } })
+  const original = await cache.install({ schema: 1, kind: 'models', models: ['old'], files: [records[0]] })
+  const combined = await cache.install({ schema: 1, kind: 'models', models: ['old', 'new'], files: records })
+  assert.equal(requests.length, 2)
+  assert.equal(requests.filter(url => url.endsWith('/old.bin')).length, 1)
+  assert.deepEqual((await cache.active()).manifest.models, ['old', 'new'])
+  assert.equal(await readFile(join(original.directory, records[0].path), 'utf8'), 'old')
+  assert.notEqual((await stat(join(original.directory, records[0].path))).ino, (await stat(join(combined.directory, records[0].path))).ino)
+})

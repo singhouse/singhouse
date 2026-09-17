@@ -41,6 +41,9 @@
       </div>
 
       <!-- Library content -->
+      <button v-if="desktopSetupAvailable" type="button" class="btn" :title="sidebarCollapsed ? 'Set up song processing' : undefined" @click="onboardingOpen = true">
+        {{ sidebarCollapsed ? '⚙' : 'Set up song processing' }}
+      </button>
       <div v-if="!sidebarCollapsed" class="sidebar__content">
         <SongList />
       </div>
@@ -277,6 +280,7 @@
       />
     </aside>
 
+    <DesktopOnboarding v-if="onboardingOpen" @close="onboardingOpen = false" @add-song="openOnboardingImport" />
     <!-- Upload modal. Lives inside HostShell so AudioPlayer keeps playing
          while the user uploads — opening it does not unmount the player. -->
     <Modal :visible="uploadOpen" size="lg" @close="uploadOpen = false">
@@ -328,6 +332,7 @@ import UploadZone from '@/components/UploadZone.vue'
 import HistoryModal from '@/components/HistoryModal.vue'
 import PlexImportModal from '@/components/PlexImportModal.vue'
 import Modal from '@/components/ui/Modal.vue'
+import DesktopOnboarding from '@/components/DesktopOnboarding.vue'
 import { useHistoryStore } from '@/stores/history'
 
 // Which queue system this build ships. An installed package may register
@@ -683,6 +688,20 @@ function onSongEnded(info) {
 
 const sidebarCollapsed = ref(false)
 const uploadOpen = ref(false)
+const desktopSetupAvailable = window.karaokeDesktop?.managedSetup === true
+const onboardingOpen = ref(false)
+let stopSetupListener
+function openOnboardingImport() { onboardingOpen.value = false; uploadOpen.value = true }
+function showProcessingSetup() { onboardingOpen.value = true }
+onMounted(async () => {
+  if (!desktopSetupAvailable) return
+  stopSetupListener = window.karaokeDesktop.onOpenSetup?.(showProcessingSetup)
+  try {
+    const preferences = await window.karaokeDesktop.getOnboardingState()
+    onboardingOpen.value = preferences.skipped !== true && preferences.step !== 'ready'
+  } catch { /* Development desktop keeps its explicitly configured environment. */ }
+})
+onBeforeUnmount(() => stopSetupListener?.())
 const historyOpen = ref(false)
 const plexOpen = ref(false)
 

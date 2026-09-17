@@ -6,12 +6,22 @@ import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+async function waitForHost(application) {
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    const host = application.windows().find(window => /^http:\/\/127\.0\.0\.1:\d+\//.test(window.url()))
+    if (host) return host
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  throw new Error('Desktop host did not open after startup')
+}
+
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const application = await electron.launch({ args: [desktop, '--demo'], env: process.env })
 let runtime
 try {
   runtime = await application.evaluate(({ app }) => app.getPath('userData').replace(/[\\/]electron$/, ''))
-  const host = await application.firstWindow()
+  const host = await waitForHost(application)
   await host.getByText('Quiet light', { exact: true }).click()
   await host.getByRole('button', { name: 'Play', exact: true }).click()
   await host.getByRole('button', { name: 'Pause', exact: true }).waitFor()
@@ -63,7 +73,7 @@ try {
   await host.locator('button.popout-btn').click()
   await reopened
   const boundary = await host.evaluate(async () => ({ node: typeof require, bridge: Object.keys(window.karaokeDesktop), blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true) }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
   console.log('Native foreground playback, output control, projector reopen and sandbox checks passed.')
 } finally {
   await application.close()
