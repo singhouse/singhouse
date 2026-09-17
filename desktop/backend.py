@@ -727,8 +727,9 @@ def persistent_directory(supplied: Path, wait_seconds: float = 0, *,
     if lock_path.is_symlink():
         raise RuntimeError("Invalid owner lock")
     with lock_path.open("a+b") as lock:
-        lock.seek(0)
-        if not lock.read(1):
+        # Windows byte-range locks deny reads as well as competing locks.
+        # Inspect size without touching the byte another owner may hold.
+        if os.fstat(lock.fileno()).st_size == 0:
             lock.write(b"0")
             lock.flush()
         lock.seek(0)
