@@ -126,6 +126,9 @@ export function verifyWindowsAuthenticode(path, { spawnImpl = spawn, platform = 
     const script = [
       '$ErrorActionPreference = "Stop"',
       '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+      // A PowerShell 7 parent can export its incompatible module search path.
+      // Verification needs only Windows PowerShell's own built-in modules.
+      '$env:PSModulePath = "$PSHOME/Modules"',
       '$signature = Get-AuthenticodeSignature -LiteralPath $env:KARAOKE_SIGNATURE_TARGET',
       '[pscustomobject]@{ Status = [string]$signature.Status; StatusMessage = $signature.StatusMessage; Subject = $signature.SignerCertificate.Subject; TimestampSubject = $signature.TimeStamperCertificate.Subject } | ConvertTo-Json -Compress',
     ].join('; ')

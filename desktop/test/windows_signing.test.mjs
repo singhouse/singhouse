@@ -238,6 +238,7 @@ test('Authenticode verifier keeps path literal and waits for stdout after proces
       const script = Buffer.from(args.at(-1), 'base64').toString('utf16le')
       assert.match(script, /-LiteralPath \$env:KARAOKE_SIGNATURE_TARGET/)
       assert.match(script, /OutputEncoding = \[System.Text.UTF8Encoding\]/)
+      assert.match(script, /\$env:PSModulePath = "\$PSHOME\/Modules"/)
       assert.ok(!script.includes(path))
       assert.ok(!args.includes(path))
       assert.equal(options.env.KARAOKE_SIGNATURE_TARGET, path)
@@ -261,4 +262,39 @@ test('Authenticode rejection diagnostics expose signature evidence without relax
   assert.equal(result, false)
   assert.deepEqual(diagnostics, [{ reason: 'signature-rejected', status: 'Valid', statusMessage: undefined,
     subject: 'CN=Unexpected', timestampSubject: 'CN=Timestamp' }])
+})
+
+
+test('Windows verifier ignores incompatible inherited PowerShell modules', { skip: process.platform !== 'win32' }, async () => {
+  const { mkdir, mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { spawn } = await import('node:child_process')
+  const root = await mkdtemp(join(tmpdir(), 'signature-module-isolation-'))
+  try {
+    const modules = join(root, 'incompatible-modules')
+    for (const [module, command] of [['Microsoft.PowerShell.Security', 'Get-AuthenticodeSignature'],
+      ['Microsoft.PowerShell.Utility', 'ConvertTo-Json']]) {
+      const directory = join(modules, module)
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, `${module}.psd1`),
+        `@{ RootModule = '${module}.psm1'; ModuleVersion = '99.0'; FunctionsToExport = @('${command}') }`)
+      await writeFile(join(directory, `${module}.psm1`),
+        `throw 'Incompatible inherited module must not load'; function ${command} { throw 'Wrong module' }`)
+    }
+    const path = join(root, 'unsigned fixture.ps1')
+    await writeFile(path, '# This unsigned fixture is inspected, never executed.\n')
+    const diagnostics = []
+    assert.equal(await verifyWindowsAuthenticode(path, {
+      onDiagnostic: detail => diagnostics.push(detail),
+      spawnImpl: (command, args, options) => spawn(command, args, {
+        ...options, env: { ...options.env, PSModulePath: modules },
+      }),
+    }), false)
+    // Reaching signature-rejected/NotSigned proves both built-in Security and
+    // Utility loaded and returned JSON. A poisoned import produces process-exit.
+    assert.equal(diagnostics.length, 1)
+    assert.equal(diagnostics[0].reason, 'signature-rejected')
+    assert.equal(diagnostics[0].status, 'NotSigned')
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

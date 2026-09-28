@@ -29,10 +29,9 @@ These are build targets, not certification of every operating-system, audio,
 or display configuration. Asahi Linux compatibility is a separate qualification
 track; an ARM64 artifact alone does not establish Asahi support.
 
-Builds are unsigned. macOS Gatekeeper and Windows SmartScreen may warn or block
-installation; verify the artifact's origin and checksum before using the
-operating system's per-application approval controls. Signing and notarization
-are not provided by these build commands. On Linux, use the archive if the
+Default builds are unsigned; Windows has an explicit signed build mode below.
+macOS Gatekeeper and Windows SmartScreen may warn or block installation; verify the artifact's origin and checksum before using the
+operating system's per-application approval controls. Default build commands do not sign or notarize artifacts. On Linux, use the archive if the
 AppImage cannot run because its host integration requirements are unavailable.
 Do not disable Electron's sandbox to launch a build.
 
