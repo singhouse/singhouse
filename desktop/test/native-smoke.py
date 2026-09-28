@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Exercise an assembled native payload using only bundled runtime resources.
 
-Run with Python: native-smoke.py --native /path/to/native [--copy].
+Run with Python: python3 -I -B native-smoke.py --native /path/to/native [--copy].
 Only generated media and temporary libraries are used. This verifies HTTP media
 delivery, not physical audio output, projector behavior, or OS installation.
 """
+
+import sys
+
+# Check before importing modules that can update caches in the bundled runtime.
+if not sys.flags.isolated or not sys.flags.dont_write_bytecode:
+    raise SystemExit("Native smoke requires Python -I -B to preserve the assembled payload")
 
 import argparse
 import http.cookiejar

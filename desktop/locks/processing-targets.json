@@ -40,7 +40,9 @@
       "platform": "win32",
       "arch": "x64",
       "accelerator": "cpu",
-      "functionalProbe": "rebuild-required"
+      "inputLockSha256": "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb",
+      "sourceCommit": "c0873f8bde08f6296f6632af5ba8e01fbaaa45be",
+      "functionalProbe": "native-passed"
     },
     {
       "platform": "win32",

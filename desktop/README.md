@@ -74,7 +74,10 @@ The default native payload is `desktop/native/`. Packaging creates a determinist
 receipt in `desktop/artifacts/`. The portable header binds the exact recursive
 file inventory and its digest, entry point, target, native assembly, Electron `app.asar`, source
 commit, runtime locks, model policy, database schema history, and core/premium
-pairing. The receipt re-inspects that payload instead of trusting neighboring
+pairing. Both identity derivation and receipt publication verify every native
+`files.json` entry against the packaged file bytes, including Python bytecode.
+Missing, changed, or malformed entries fail packaging; rebuild the assembly
+from clean inputs instead of regenerating its expected hashes. The receipt re-inspects that payload instead of trusting neighboring
 build files and records the modeled application subtree. `npm --prefix desktop
 run package:first-installers` embeds that receipt in the native first-install
 app. On first launch, every modeled file, directory, and internal link is
@@ -84,8 +87,81 @@ also reads the current Git `HEAD` and `git status --porcelain=v1
 --untracked-files=all`: the checkout must be clean and must exactly match the
 native provenance both before the build and again immediately before publishing
 the immutable receipt. Source exports without `.git` fail closed because no
-separately authenticated export-manifest verifier is configured. Packaging
-never signs or publishes anything. Create macOS artifacts on macOS.
+separately authenticated export-manifest verifier is configured. The default
+packaging command creates an explicitly unsigned private-test build and never
+publishes anything. Create macOS artifacts on macOS.
+
+Windows release signing is an explicit, fail-closed build mode. Run it on
+Windows after assembling the `win32-x64` native payload:
+
+```powershell
+# First manual release: use the Azure user already granted the signer role.
+az login
+npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user
+```
+
+The manual flag first requires a successful `az account show`, then constrains
+DefaultAzureCredential to the Azure CLI identity. It does not ask for, accept,
+or store the Azure account password.
+
+The recommended CI path is the manually dispatched private Windows signing
+workflow. Its job uses the `windows-signing` GitHub environment,
+obtains a short-lived service-principal token through GitHub OIDC, and passes
+`--azure-oidc`. No client secret is created or stored. Configure
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as
+environment secrets on the `windows-signing` environment itself,
+not as repository or organization secrets. The build verifies that `az account show` is the expected
+service-principal session and constrains DefaultAzureCredential to
+AzureCliCredential. It requires exactly one `singhouse-signing` account in the
+configured subscription, requires its normalized location to be `centralus`,
+then queries its exact `singhouse` profile before building; that profile must
+report `PublicTrust`.
+
+Configure the Entra application as single-tenant. Its GitHub federated
+credential must use issuer `https://token.actions.githubusercontent.com`,
+audience `api://AzureADTokenExchange`, and the exact subject configured by
+GitHub for this repository's `windows-signing` environment. Repositories using
+immutable owner/repository IDs have a different subject from the default
+repository-name format; inspect the repository OIDC subject configuration before
+creating the federated credential. Do not substitute a name-only subject.
+Restrict deployment branches to `main`. Configure required reviewers and branch
+protection when supported by the account plan, and inspect those settings rather
+than assuming they exist. Do not add access-token or OIDC-token output to
+workflow diagnostics.
+
+The workflow only uploads a private Actions artifact. It does not publish a
+release or download, deploy, or change update metadata. Its checksum inventory
+is generated after signature verification. Every action is referenced by an
+immutable reviewed commit ID.
+
+A client-secret service principal remains available as an operator-controlled
+fallback. Omit both Azure CLI flags and provide the complete environment
+credential. This mode constrains DefaultAzureCredential to
+EnvironmentCredential:
+
+```powershell
+$env:AZURE_TENANT_ID = '<Microsoft Entra tenant ID>'
+$env:AZURE_CLIENT_ID = '<signing application client ID>'
+$env:AZURE_CLIENT_SECRET = '<signing application client secret>'
+npm --prefix desktop run package:first-installers -- --signed-release
+```
+
+The signing identity must have the Artifact Signing Certificate Profile Signer
+role for account `singhouse-signing`, profile `singhouse`, in Central US. The
+build uses `https://cus.codesigning.azure.net`, SHA-256 file digests, and the
+Microsoft RFC 3161 timestamp service. Credentials are read only from the build
+environment. Signed mode refuses to run off Windows, with partial environment
+credentials, with mixed authentication modes, without one complete
+authentication mode, or without first-installer packaging. It verifies that
+the packaged application executable and final NSIS installer have a valid timestamped
+signature from the exact Bones Consulting LLC certificate subject before it
+reports success. Electron Builder's NSIS signing path also signs its generated
+uninstaller. Bundled native dependency executables retain their inventoried
+upstream bytes and any existing signatures. CI installs into a disposable directory and verifies the installed
+application and uninstaller with Authenticode and SignTool before uninstalling
+the candidate. This does not establish browser-download reputation, physical
+playback, or signed update/recovery qualification. Keep these values in the CI secret store; never add them to this
+repository or an artifact.
 
 Release policy is edition-owned. Core uses the checked-in `release.json`;
 premium packaging must set `SINGHOUSE_RELEASE_POLICY` to its premium policy.
@@ -236,10 +312,14 @@ kind can never hide or reclassify the other.
 
 Linux launches the already-verified executable by descriptor. macOS verifies
 the selected app bundle with `codesign` before launch when that release-policy
-gate is enabled. Windows reserves the equivalent Authenticode gate; it fails
-closed until the qualified native verification hook and signing policy are
-enabled. The checked-in release policy explicitly disables updates and has an
-empty update trust root; its macOS and Windows gates are likewise disabled, so
+gate is enabled. Windows verifies a managed application's timestamped
+Authenticode signature and exact certificate subject before launch when its
+release-policy gate is enabled. First-install recovery admission remains closed
+because Windows does not retain the outer NSIS installer as a durable recovery
+anchor after installation. The checked-in release policy therefore keeps the
+Windows gate disabled; enabling it requires modeling and qualifying that outer
+installer evidence as well. The checked-in policy also disables updates and has
+an empty update trust root; its macOS and Windows gates are likewise disabled, so
 these builds cannot accidentally claim signed
 activation. Cross-platform tests exercise injectable launch/trust primitives.
 Recovery self-verification detects corruption and replacement by accounts that
@@ -255,9 +335,9 @@ Within that boundary, each supported platform uses non-symlink leaf checks,
 exact inventory verification immediately before launch, authenticated update
 metadata, private managed slots, and fail-closed OS-signing policy hooks.
 Current-user ownership and group/world mode enforcement are POSIX guarantees
-only. Windows ACL and Authenticode enforcement remain disabled and fail closed
-until their platform trust hooks are qualified and enabled. Real Windows x64
-and macOS arm64 signing, crash, and clean-machine release qualification remain
+only. Windows ACL and first-install recovery trust enforcement remain disabled
+and fail closed until their platform trust hooks are qualified and enabled. Real Windows x64
+signing, crash, clean-machine, and macOS arm64 qualification remain
 separate release checks.
 
 To use a different payload path, set `KARAOKE_NATIVE_PAYLOAD` for packaging:
@@ -436,24 +516,30 @@ the stock desktop does not inherit credentials or enable it automatically.
 npm --prefix desktop test
 python3 -m unittest discover -s desktop -p 'test_backend.py'
 python3 -m unittest discover -s desktop/test -p 'test_*.py'
-python3 desktop/test/native-smoke.py --native desktop/native --copy
+python3 -I -B desktop/test/native-smoke.py --native desktop/native --copy
 ```
 
-Run the native smoke test on the payload's target OS and architecture. It uses
+Run the native smoke test on the payload's target OS and architecture. Always
+pass `-I -B`, including when using the bundled Python as the smoke driver, so
+imports cannot rewrite the assembly's Python caches. The driver rejects a
+missing flag before importing its test dependencies. It uses
 fresh temporary data and checks relocation, authenticated boot, origin/host
 rejection, synthetic prepared-video import and decoding, the library lock, and
 persistent restart. It does not test installation or physical playback.
 
-The packaged application smoke harness currently isolates application storage
-on Linux only. Point it at the unpacked or extracted application's executable:
+The packaged application smoke harness supports Linux and Windows, using a
+temporary user-data directory. Point it at the packaged application's executable:
 
 ```sh
 xvfb-run -a node desktop/test/packaged-smoke.mjs --executable desktop/artifacts/linux-unpacked/Singhouse
 ```
 
+On Windows, run `node desktop/test/packaged-smoke.mjs --executable "C:\path\to\Singhouse.exe"`.
+The same command can test the installed executable after a test installation.
+
 The installed macOS bundle is `Singhouse.app`, with executable
 `Singhouse.app/Contents/MacOS/Singhouse`; Windows installs `Singhouse.exe`.
-The packaged smoke harness above remains Linux-only.
+The packaged smoke harness does not yet support macOS.
 
 Use the actual unpacked directory for your target; omit `xvfb-run -a` when running
 on a graphical Linux desktop. This launches the packaged application, exercises

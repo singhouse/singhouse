@@ -538,7 +538,8 @@ def kill_owned_tree():
     os.killpg(os.getpid(), signal.SIGKILL)
 
 
-def windows_durable_replace(source, destination, directories, kernel=None):
+def windows_durable_replace(source, destination, directories, kernel=None, *,
+                            sleep=time.sleep, get_last_error=None, format_error=None):
     """Write-through replacement plus ordinary-user metadata flushes.
 
     ``directories`` is the application-owned subtree, ending at the narrowest
@@ -550,6 +551,8 @@ def windows_durable_replace(source, destination, directories, kernel=None):
     from ctypes import wintypes
     if kernel is None:
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_last_error = get_last_error or getattr(ctypes, "get_last_error", lambda: 0)
+    format_error = format_error or getattr(ctypes, "FormatError", lambda code: "unknown Windows error")
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
@@ -574,9 +577,33 @@ def windows_durable_replace(source, destination, directories, kernel=None):
             handle = acquire(directory, 0x02200000)  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
             if handle is None:
                 raise RuntimeError("Windows could not flush application-owned directory metadata; activation was not performed")
-            handles.append(handle)
-        if source != destination and not kernel.MoveFileExW(str(source), str(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
-            raise RuntimeError("Windows write-through runtime replacement failed")
+            # Windows can reject a directory-tree rename while a descendant
+            # directory handle is open, even when it shares deletion. Its
+            # contents are already durable after the flush above, so close
+            # source-tree handles before the atomic move. Keep the owning
+            # parent handles open to flush their changed entries afterward.
+            if directory == source or source in directory.parents:
+                kernel.CloseHandle(handle)
+            else:
+                handles.append(handle)
+        if source != destination:
+            # Defender and other scanners can briefly retain a handle after the
+            # final payload close. Retry only Windows errors which describe a
+            # transient access/locking conflict; every other failure remains
+            # fail-closed and the verified staging tree remains available.
+            transient_errors = {5, 32, 33}  # ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION
+            delays = (0.25, 0.5, 1, 2, 4, 8, 8)
+            for attempt in range(len(delays) + 1):
+                if kernel.MoveFileExW(str(source), str(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
+                    break
+                error_code = get_last_error()
+                if error_code not in transient_errors or attempt == len(delays):
+                    detail = format_error(error_code).strip() if error_code else "unknown Windows error"
+                    raise RuntimeError(
+                        f"Windows write-through runtime replacement failed "
+                        f"(error {error_code}: {detail})"
+                    )
+                sleep(delays[attempt])
         if any(not kernel.FlushFileBuffers(handle) for handle in handles):
             raise RuntimeError("Windows could not confirm durable runtime metadata")
     finally:
@@ -727,8 +754,9 @@ def persistent_directory(supplied: Path, wait_seconds: float = 0, *,
     if lock_path.is_symlink():
         raise RuntimeError("Invalid owner lock")
     with lock_path.open("a+b") as lock:
-        lock.seek(0)
-        if not lock.read(1):
+        # Windows byte-range locks deny reads as well as competing locks.
+        # Inspect size without touching the byte another owner may hold.
+        if os.fstat(lock.fileno()).st_size == 0:
             lock.write(b"0")
             lock.flush()
         lock.seek(0)
@@ -1067,9 +1095,44 @@ def watch_parent(fd: int, enforce_timeout: bool = False) -> threading.Event:
     """
     closed = threading.Event()
 
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        # Blocking reads on Windows stdin can stall native-extension loading.
+        # Poll the lifetime pipe and consume only available bytes, so no read
+        # holds the pipe or CRT descriptor locked while the parent is idle.
+        handle = msvcrt.get_osfhandle(fd)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                    ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.ReadFile.restype = wintypes.BOOL
+        kernel.PeekNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.PeekNamedPipe.restype = wintypes.BOOL
+        buffer = ctypes.create_string_buffer(4096)
+
+        def read_chunk():
+            count = wintypes.DWORD()
+            if not kernel.PeekNamedPipe(handle, None, 0, None, ctypes.byref(count), None):
+                error = ctypes.get_last_error()
+                if error == 109:  # ERROR_BROKEN_PIPE: the parent closed its end.
+                    return False
+                raise ctypes.WinError(error)
+            if not count.value:
+                closed.wait(0.1)
+                return True
+            if not kernel.ReadFile(handle, buffer, min(len(buffer), count.value), ctypes.byref(count), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return count.value != 0
+    else:
+        def read_chunk():
+            return bool(os.read(fd, 4096))
+
     def read_until_eof():
         try:
-            while os.read(fd, 4096):
+            while read_chunk():
                 pass
         except OSError:
             pass

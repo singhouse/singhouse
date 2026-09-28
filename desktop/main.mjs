@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
@@ -11,13 +12,18 @@ import { RuntimeManager, ModelCache, processingAttestation } from './runtime_man
 import { HeartSetup, authorizedHeartCaller } from './heart_setup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
-import { runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
+import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
 import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
+import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+import { verifyWindowsAuthenticode } from './windows_signing.mjs'
+
+const physicalFs = createRequire(import.meta.url)('original-fs')
 
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
 const packaged = app.isPackaged
 const nativeDir = resolve(process.resourcesPath, 'native')
+const releasePolicyPath = packaged ? resolve(process.resourcesPath, 'release.json') : resolve(desktopDir, 'release.json')
 let brand = app.getName()
 if (!packaged) {
   brand = (await import(pathToFileURL(resolve(root, 'frontend/src/brand.js')).href)).BRAND_NAME
@@ -46,21 +52,6 @@ const blocker = projectorBlocker(powerSaveBlocker)
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function digestRecords(entries) { return hash(canonicalJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))))) }
-function applicationRecords(rootDirectory, current = rootDirectory) {
-  const records = []
-  for (const name of readdirSync(current).sort()) {
-    const path = resolve(current, name), info = lstatSync(path)
-    const relativePath = relative(rootDirectory, path).split(sep).join('/')
-    if (info.isSymbolicLink()) {
-      const raw = readlinkSync(path), target = relative(rootDirectory, resolve(dirname(path), raw)).split(sep).join('/')
-      if (isAbsolute(raw) || target === '..' || target.startsWith('../')) throw new Error('Installed application symlink escapes its bundle')
-      records.push([relativePath, `symlink:${target}`])
-    } else if (info.isDirectory()) { records.push([relativePath, 'directory']); records.push(...applicationRecords(rootDirectory, path)) }
-    else if (info.isFile()) records.push([relativePath, hash(readFileSync(path))])
-    else throw new Error('Installed application contains an unsupported entry')
-  }
-  return records
-}
 function installedReleaseIdentity() {
   const manifest = expectedIdentity
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
@@ -88,8 +79,8 @@ function installedReleaseIdentity() {
     return identity
   }
   const records = process.platform === 'darwin'
-    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...applicationRecords(applicationRoot, bundle)] })()
-    : applicationRecords(applicationRoot)
+    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
+    : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
   if (existsSync(receiptPath)) {
     const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
@@ -104,7 +95,7 @@ function installedReleaseIdentity() {
     if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
     const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
       sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
-      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: hash(readFileSync(app.getAppPath())), frontendDigest: digestRecords(frontend),
+      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs), frontendDigest: digestRecords(frontend),
       backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
       runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
       schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
@@ -127,8 +118,12 @@ async function platformTrust({ root: applicationRoot, manifest }) {
       check.once('error', () => resolveTrust(false)); check.once('exit', code => resolveTrust(code === 0))
     })
   }
-  // WinVerifyTrust integration remains inert until release signing is enabled;
-  // metadata can be staged but executable activation fails closed.
+  if (process.platform === 'win32') {
+    const entrypoint = resolve(applicationRoot, ...manifest.entrypoint.split('/'))
+    const relativeEntrypoint = relative(applicationRoot, entrypoint)
+    if (!relativeEntrypoint || relativeEntrypoint.startsWith(`..${sep}`) || isAbsolute(relativeEntrypoint)) return false
+    return verifyWindowsAuthenticode(entrypoint)
+  }
   return false
 }
 
@@ -145,15 +140,17 @@ async function verifiedFirstInstallerPlatformTrust() {
     const check = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
     check.once('error', () => resolveTrust({ verified: false })); check.once('exit', code => resolveTrust({ verified: code === 0 }))
   })
-  // Windows trust stays fail-closed until the Authenticode verifier is enabled.
+  // The installed application can be verified above, but Windows does not
+  // retain the outer NSIS installer as a durable first-install anchor. Keep
+  // first-installer recovery admission closed until that evidence is modeled.
   return { verified: false }
 }
 
 async function startManagedBootstrap({ stable = false } = {}) {
   const python = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
   const helper = resolve(nativeDir, 'backend.py')
-  const args = [resolve(desktopDir, 'bootstrap.mjs'), runtime.root, String(process.pid), python, helper]
-  if (stable) args.push('--stable')
+  const args = managedBootstrapArguments({ bootstrapPath: resolve(desktopDir, 'bootstrap.mjs'), stateRoot: runtime.root,
+    parentPid: process.pid, pythonPath: python, helperPath: helper, releasePolicyPath, stable })
   const child = spawn(process.execPath, args, {
     detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   })
@@ -306,7 +303,7 @@ async function applyUpdate() {
             targetRoot: previous.root, target: { platform: previous.platform, arch: previous.arch, entrypoint: previous.entrypoint }, files: {
               'recovery_cli.mjs': resolve(desktopDir, 'recovery_cli.mjs'),
               'recovery_launcher.mjs': resolve(desktopDir, 'recovery_launcher.mjs'),
-              'release.mjs': resolve(desktopDir, 'release.mjs'), 'release.json': resolve(desktopDir, 'release.json'),
+              'release.mjs': resolve(desktopDir, 'release.mjs'), 'release.json': releasePolicyPath,
             }, binding, anchor: recoveryAnchor, ...recoveryKitDurability })
           return { id, manifest }
         } }),
@@ -434,7 +431,7 @@ async function start() {
     const lockPython = resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3')
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
-    releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'release.json'), 'utf8')))
+    releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
     productRelease = installedReleaseIdentity()
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')

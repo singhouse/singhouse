@@ -310,11 +310,18 @@ test('fixed self-test runs before activation and on offline restart; failure and
   })
   const { root, source, manifest } = await fixture(t)
   const manager = new RuntimeManager(join(root, 'processing'), identity)
+  const inheritedUsername = process.env.USERNAME
+  process.env.USERNAME = 'host-identity-must-not-reach-probe'
+  t.after(() => {
+    if (inheritedUsername === undefined) delete process.env.USERNAME
+    else process.env.USERNAME = inheritedUsername
+  })
   const protocol = { schema: 1, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
     lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
     capabilities: manifest.capabilities, hardwareAvailable: true,
     components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])) }
-  const script = `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(protocol)}'\n`
+  const expectedInductorCache = join(manager.root, 'probe-cache', 'torchinductor')
+  const script = `#!/bin/sh\n[ "$TORCHINDUCTOR_CACHE_DIR" = '${expectedInductorCache}' ] || exit 71\n[ -z "\${USERNAME+x}" ] || exit 72\nprintf '%s\\n' '${JSON.stringify(protocol)}'\n`
   await writeFile(source, script)
   manifest.files[0].size = Buffer.byteLength(script)
   manifest.files[0].sha256 = sha(script)

@@ -181,6 +181,95 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(kernel.FlushFileBuffers.call_count, 4)
         self.assertEqual(kernel.CloseHandle.call_count, 2)
 
+    def test_windows_durable_replace_closes_source_tree_before_move_and_postflushes_parents(self):
+        source, destination = PureWindowsPath("C:/cache/staging/pack"), PureWindowsPath("C:/cache/packs/pack")
+        directories = [source / "nested", source, source.parent, destination.parent, source.parent.parent]
+        events = []
+        handles = iter(range(10, 15))
+
+        def create(path, *_args):
+            handle = next(handles)
+            events.append(("open", path, handle))
+            return handle
+
+        def flush(handle):
+            events.append(("flush", handle))
+            return True
+
+        def close(handle):
+            events.append(("close", handle))
+
+        def move(*_args):
+            events.append(("move",))
+            closed = {event[1] for event in events if event[0] == "close"}
+            self.assertTrue({10, 11}.issubset(closed))
+            self.assertTrue({12, 13, 14}.isdisjoint(closed))
+            return True
+
+        kernel = types.SimpleNamespace(CreateFileW=Mock(side_effect=create), FlushFileBuffers=Mock(side_effect=flush),
+                                       CloseHandle=Mock(side_effect=close), MoveFileExW=Mock(side_effect=move))
+        backend.windows_durable_replace(source, destination, directories, kernel)
+        move_index = events.index(("move",))
+        for handle in (12, 13, 14):
+            self.assertIn(("flush", handle), events[move_index + 1:])
+        self.assertEqual({event[1] for event in events if event[0] == "close"}, {10, 11, 12, 13, 14})
+
+    def test_windows_durable_replace_source_preflush_failure_prevents_move(self):
+        source, destination = PureWindowsPath("C:/cache/staging/pack"), PureWindowsPath("C:/cache/packs/pack")
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=False),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=True))
+        with self.assertRaisesRegex(RuntimeError, "activation was not performed"):
+            backend.windows_durable_replace(source, destination, [source / "nested", source.parent], kernel)
+        kernel.MoveFileExW.assert_not_called()
+        kernel.CloseHandle.assert_called_once_with(10)
+
+    def test_windows_durable_replace_retries_each_transient_lock_error(self):
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        for error_code in (5, 32, 33):
+            with self.subTest(error_code=error_code):
+                kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                               CloseHandle=Mock(), MoveFileExW=Mock(side_effect=[False, True]))
+                sleep = Mock()
+                backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                                sleep=sleep, get_last_error=lambda: error_code)
+                self.assertEqual(kernel.MoveFileExW.call_count, 2)
+                sleep.assert_called_once_with(0.25)
+
+    def test_windows_durable_replace_stops_when_retry_finds_nontransient_error(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        errors = iter([32, 3])
+        sleep = Mock()
+        with self.assertRaisesRegex(RuntimeError, r"error 3: path not found"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=sleep, get_last_error=lambda: next(errors),
+                                            format_error=lambda code: "path not found")
+        self.assertEqual(kernel.MoveFileExW.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+    def test_windows_durable_replace_exhausts_bounded_transient_retries(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        sleep = Mock()
+        with self.assertRaisesRegex(RuntimeError, r"error 32: sharing violation"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=sleep, get_last_error=lambda: 32,
+                                            format_error=lambda code: "sharing violation")
+        self.assertEqual(kernel.MoveFileExW.call_count, 8)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5, 1, 2, 4, 8, 8])
+
+    def test_windows_durable_replace_reports_nontransient_system_error(self):
+        kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=10), FlushFileBuffers=Mock(return_value=True),
+                                       CloseHandle=Mock(), MoveFileExW=Mock(return_value=False))
+        source, destination = PureWindowsPath("C:/staging/pack"), PureWindowsPath("C:/packs/pack")
+        with self.assertRaisesRegex(RuntimeError, r"error 3: path not found"):
+            backend.windows_durable_replace(source, destination, [source.parent, destination.parent], kernel,
+                                            sleep=Mock(), get_last_error=lambda: 3,
+                                            format_error=lambda code: "path not found")
+        kernel.MoveFileExW.assert_called_once()
+
     def test_windows_durable_replace_refuses_without_raw_volume_fallback(self):
         invalid = ctypes.c_void_p(-1).value
         kernel = types.SimpleNamespace(CreateFileW=Mock(return_value=invalid),
@@ -619,6 +708,48 @@ with tempfile.TemporaryDirectory(prefix="desktop-watch-test-") as temporary:
             if process.poll() is None:
                 process.kill()
                 process.wait()
+            process.stdout.close()
+            process.stderr.close()
+            if not process.stdin.closed:
+                process.stdin.close()
+
+    def test_parent_watch_keeps_crt_descriptor_available_until_eof(self):
+        script = '''
+import os, runpy, sys, time
+launcher = runpy.run_path(sys.argv[1])
+closed = launcher["watch_parent"](sys.stdin.fileno())
+time.sleep(0.2)
+# Native extensions may duplicate CRT streams during module initialization.
+# This blocks on Windows if the watcher holds stdin's CRT descriptor lock.
+duplicate = os.dup(sys.stdin.fileno())
+os.close(duplicate)
+print("READY", flush=True)
+if not closed.wait(10):
+    raise SystemExit(2)
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", script, str(Path(__file__).with_name("backend.py"))],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ready = threading.Event()
+        lines = []
+
+        def read_ready():
+            lines.append(process.stdout.readline().strip())
+            ready.set()
+
+        reader = threading.Thread(target=read_ready, daemon=True)
+        reader.start()
+        try:
+            self.assertTrue(ready.wait(5), "Parent watcher blocked CRT descriptor access")
+            self.assertEqual(lines, ["READY"])
+            self.assertIsNone(process.poll())
+            process.stdin.close()
+            self.assertEqual(process.wait(timeout=5), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            reader.join(5)
             process.stdout.close()
             process.stderr.close()
             if not process.stdin.closed:

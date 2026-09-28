@@ -328,7 +328,7 @@ export class RuntimeManager {
     await plainDirectory(cache)
     Object.assign(env, { HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1',
       PYTORCH_ENABLE_MPS_FALLBACK: '0', NUMBA_CACHE_DIR: join(cache, 'numba'), HF_HOME: join(cache, 'huggingface'),
-      TORCH_HOME: join(cache, 'torch'), XDG_CACHE_HOME: cache })
+      TORCH_HOME: join(cache, 'torch'), TORCHINDUCTOR_CACHE_DIR: join(cache, 'torchinductor'), XDG_CACHE_HOME: cache })
     const functional = manifest.probe.schema === 2
     timeout ??= functional ? 120000 : 30000
     if (functional) {

@@ -53,6 +53,16 @@ function safePath(path) {
   if (typeof path !== 'string' || path.length < 1 || path.length >= 1024 || path.startsWith('/') || path.includes('\\') || !path.split('/').every(part => /^[A-Za-z0-9@._+() -]+$/.test(part) && part.trim() === part && !['', '.', '..'].includes(part) && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error(`Unsafe portable path: ${path}`)
   return path
 }
+export function normalizeAndOrderPortableEntries(entries, relativePath, pathSeparator = sep) {
+  if (typeof relativePath !== 'function' || !['/', '\\'].includes(pathSeparator)) throw new Error('Portable path normalization requires a native path separator')
+  return entries.map(entry => ({
+    ...entry,
+    portablePath: safePath(relativePath(entry).split(pathSeparator).join('/')),
+  })).sort((a, b) => Buffer.from(a.portablePath).compare(Buffer.from(b.portablePath)))
+}
+async function orderedPortableEntries(root) {
+  return normalizeAndOrderPortableEntries(await walk(root), entry => relative(root, entry.path))
+}
 async function publishNew(temporary, destination) {
   try {
     await link(temporary, destination)
@@ -76,9 +86,9 @@ function receiptInventory(records) {
 }
 export async function inspectApplicationInventory(applicationDirectory) {
   const root = resolve(applicationDirectory)
-  const entries = (await walk(root)).sort((a, b) => Buffer.from(relative(root, a.path)).compare(Buffer.from(relative(root, b.path))))
+  const entries = await orderedPortableEntries(root)
   const records = await Promise.all(entries.map(async entry => ({
-    path: relative(root, entry.path).split(sep).join('/'), type: entry.type,
+    path: entry.portablePath, type: entry.type,
     ...(entry.type === 'file' ? { sha256: sha256Hex(await readFile(entry.path)) } : entry.type === 'symlink' ? { target: entry.target } : {}),
   })))
   const files = receiptInventory(records)
@@ -88,6 +98,19 @@ function singleFile(files, predicate, label) {
   const matches = files.filter(file => predicate(file.path))
   if (matches.length !== 1) throw new Error(`Portable application requires exactly one ${label}`)
   return matches[0]
+}
+
+// files.json is the assembly's expected byte inventory, not evidence that the
+// packaged bytes still match it. Check every entry against observed file hashes.
+function verifyNativeInventory(files, records, prefix) {
+  if (!files || typeof files !== 'object' || Array.isArray(files) || !Object.keys(files).length) throw new Error('Invalid native file inventory')
+  const observed = new Map(records.map(record => [record.path, record]))
+  for (const [path, expected] of Object.entries(files)) {
+    safePath(path)
+    if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) throw new Error(`Invalid native file digest: ${path}`)
+    const record = observed.get(`${prefix}${path}`)
+    if (record?.type !== 'file' || record.sha256 !== expected) throw new Error(`Native file inventory mismatch: ${path}`)
+  }
 }
 
 export async function deriveIdentityFromApplication({ applicationDirectory, policy, packageLock }) {
@@ -102,6 +125,7 @@ export async function deriveIdentityFromApplication({ applicationDirectory, poli
   const assemblyRecord = singleFile(records, path => path === `${prefix}assembly.json`, 'assembly descriptor')
   const get = async record => JSON.parse(await readFile(resolve(root, record.path), 'utf8'))
   const native = await get(nativeManifest); const files = await get(nativeFilesRecord); const provenance = await get(provenanceRecord); const assembly = await get(assemblyRecord)
+  verifyNativeInventory(files, records, prefix)
   if (assembly.edition !== policy.edition) throw new Error('Release policy edition does not match the packaged assembly')
   if (provenance.sourceDirty !== false || provenance.sourceExport !== false || provenance.sourceCommit !== assembly.sourceCommit && assembly.sourceCommit !== undefined) throw new Error('Release builds require a clean Git checkout')
   if (assembly.payloadDigest !== sha256Hex(canonicalJson(files)) || native.runtimeId !== nativeFilesRecord.sha256) throw new Error('Native assembly identity is inconsistent')
@@ -125,11 +149,12 @@ export async function deriveIdentityFromApplication({ applicationDirectory, poli
 export async function createPortablePayload({ sourceDirectory, output, identity, platform, arch, entrypoint = targetEntrypoint(platform) }) {
   assertReleaseIdentity(identity)
   if (!['linux', 'win32', 'darwin'].includes(platform) || !['x64', 'arm64'].includes(arch) || (platform === 'win32' && arch !== 'x64') || (platform === 'darwin' && arch !== 'arm64')) throw new Error('Unsupported portable target')
-  const source = resolve(sourceDirectory); const entries = (await walk(source)).sort((a, b) => Buffer.from(relative(source, a.path)).compare(Buffer.from(relative(source, b.path))))
+  const source = resolve(sourceDirectory)
+  const entries = await orderedPortableEntries(source)
   let offset = 0
   const inventory = []
   for (const entry of entries) {
-    const name = safePath(relative(source, entry.path).split(sep).join('/'))
+    const name = entry.portablePath
     if (entry.type === 'file') {
       const bytes = await readFile(entry.path); const info = await stat(entry.path)
       // Windows does not carry POSIX executable bits in stat(). The exact
@@ -178,6 +203,7 @@ export async function createReleaseReceipt({ payload, output, sourceCommit, sour
   const files = JSON.parse(portableFileBytes(parsed, nativeFilesRecord.path).toString('utf8'))
   const provenance = JSON.parse(portableFileBytes(parsed, provenanceRecord.path).toString('utf8'))
   const assembly = JSON.parse(portableFileBytes(parsed, assemblyRecord.path).toString('utf8'))
+  verifyNativeInventory(files, parsed.header.files, prefix)
   const staticRecords = Object.entries(files).filter(([path]) => path.startsWith('static/')).map(([path, sha256]) => ({ path, sha256 }))
   const backendRecords = Object.entries(files).filter(([path]) => path === 'backend.py' || /site-packages\/(karaoke_backend|lyricsync)\//.test(path)).map(([path, sha256]) => ({ path, sha256 }))
   const electronRecords = parsed.header.files.filter(record => record.path !== asar.path && !record.path.startsWith(prefix))

@@ -486,11 +486,15 @@ async function main(args) {
     await runRecoveryAnchor({ anchorPath: args[1], kitRoot: args[2], recoveryArgs: args.slice(3) })
     return
   }
-  if (args.length < 4 || args.length > 5 || (args[4] && args[4] !== '--stable')) {
-    throw new Error('Usage: bootstrap.mjs <state-root> <parent-pid> <python> <native-helper> [--stable]')
+  if (args.length < 4 || args.length > 6) {
+    throw new Error('Usage: bootstrap.mjs <state-root> <parent-pid> <python> <native-helper> [release-policy] [--stable]')
   }
-  const [stateRoot, parent, pythonPath, helperPath, mode] = args
-  const contract = JSON.parse(await readFile(new URL('./release.json', import.meta.url), 'utf8'))
+  const [stateRoot, parent, pythonPath, helperPath, policyOrMode, finalMode] = args
+  const mode = policyOrMode === '--stable' ? policyOrMode : finalMode
+  if ((mode && mode !== '--stable') || (policyOrMode === '--stable' && finalMode)) {
+    throw new Error('Usage: bootstrap.mjs <state-root> <parent-pid> <python> <native-helper> [release-policy] [--stable]')
+  }
+  const contract = JSON.parse(await readFile(bootstrapContractPath(policyOrMode === '--stable' ? undefined : policyOrMode), 'utf8'))
   const ready = () => new Promise((done, reject) => process.stdout.write('READY\n', error => error ? reject(error) : done()))
   // Platform trust hooks intentionally fail closed until the release contract
   // carries an enabled signing policy. Metadata signatures still authenticate
@@ -512,6 +516,16 @@ async function main(args) {
   }
   const runner = mode === '--stable' ? runStableBootstrap : runBootstrap
   await runner({ stateRoot, parentPid: Number(parent), contract, ready, platformTrust, pythonPath, helperPath })
+}
+
+export function bootstrapContractPath(explicitPath) {
+  const selected = explicitPath === undefined ? fileURLToPath(new URL('./release.json', import.meta.url)) : explicitPath
+  if (!isAbsolute(selected) || resolve(selected) !== selected) throw new Error('Managed launcher release policy path must be absolute and canonical')
+  return selected
+}
+
+export function managedBootstrapArguments({ bootstrapPath, stateRoot, parentPid, pythonPath, helperPath, releasePolicyPath, stable = false }) {
+  return [bootstrapPath, stateRoot, String(parentPid), pythonPath, helperPath, bootstrapContractPath(releasePolicyPath), ...(stable ? ['--stable'] : [])]
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
