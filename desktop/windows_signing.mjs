@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { spawn } from 'node:child_process'
 import { isAbsolute, win32 } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { safePortablePath } from './release.mjs'
 
 export const WINDOWS_SIGNING = Object.freeze({
@@ -37,13 +38,6 @@ export function nativeExecutableSigningExclusions(nativeRoot, files) {
 }
 
 const REQUIRED_AZURE_ENV = ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']
-const DEFAULT_AZURE_CREDENTIALS = [
-  'EnvironmentCredential', 'WorkloadIdentityCredential', 'ManagedIdentityCredential',
-  'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
-  'AzureCliCredential', 'AzurePowerShellCredential', 'AzureDeveloperCliCredential',
-  'InteractiveBrowserCredential',
-]
-const exclusionsExcept = credential => DEFAULT_AZURE_CREDENTIALS.filter(name => name !== credential).join(',')
 
 function authenticationMode({ env, manualAzureCli, azureOidc }) {
   const present = REQUIRED_AZURE_ENV.filter(name => typeof env[name] === 'string' && env[name].trim() !== '')
@@ -64,7 +58,7 @@ function authenticationMode({ env, manualAzureCli, azureOidc }) {
   throw new Error(`Signed Windows release requires complete environment credentials (${REQUIRED_AZURE_ENV.join(', ')}), --azure-cli-user, or --azure-oidc`)
 }
 
-export function windowsBuildConfiguration({ signedRelease = false, manualAzureCli = false, azureOidc = false, env = process.env, platform = process.platform } = {}) {
+export function windowsBuildConfiguration({ signedRelease = false, manualAzureCli = false, azureOidc = false, env = process.env, platform = process.platform, signImpl = signWindowsFile } = {}) {
   if (!signedRelease) return { target: ['nsis'], signAndEditExecutable: false, signExecutable: false }
   if (platform !== 'win32') throw new Error('Signed Windows releases must be built on Windows')
   const mode = authenticationMode({ env, manualAzureCli, azureOidc })
@@ -73,17 +67,30 @@ export function windowsBuildConfiguration({ signedRelease = false, manualAzureCl
     signAndEditExecutable: true,
     signExecutable: true,
     verifyUpdateCodeSignature: true,
-    azureSignOptions: {
+    signtoolOptions: {
       publisherName: WINDOWS_SIGNING.publisherName,
-      endpoint: WINDOWS_SIGNING.endpoint,
-      certificateProfileName: WINDOWS_SIGNING.certificateProfile,
-      codeSigningAccountName: WINDOWS_SIGNING.account,
-      fileDigest: 'SHA256',
-      timestampRfc3161: 'http://timestamp.acs.microsoft.com',
-      timestampDigest: 'SHA256',
-      ExcludeCredentials: exclusionsExcept(mode === 'environment' ? 'EnvironmentCredential' : 'AzureCliCredential'),
+      signingHashAlgorithms: ['sha256'],
+      sign: options => signImpl(options, { credential: mode === 'environment' ? 'EnvironmentCredential' : 'AzureCliCredential' }),
     },
   }
+}
+
+export function signWindowsFile(options, { credential, spawnImpl = spawn, platform = process.platform } = {}) {
+  if (platform !== 'win32') return Promise.reject(new Error('Artifact Signing requires Windows'))
+  if (options.hash !== 'sha256' || options.isNest) return Promise.reject(new Error('Artifact Signing requires one SHA256 signature'))
+  if (!['AzureCliCredential', 'EnvironmentCredential'].includes(credential)) return Promise.reject(new Error('Invalid signing credential mode'))
+  if (typeof options.path !== 'string' || !win32.isAbsolute(options.path)) return Promise.reject(new Error('Signing requires an absolute Windows file path'))
+  const script = fileURLToPath(new URL('./build/sign_windows.ps1', import.meta.url))
+  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script,
+    '-FilePath', options.path, '-Credential', credential,
+    '-Endpoint', WINDOWS_SIGNING.endpoint, '-Account', WINDOWS_SIGNING.account,
+    '-Profile', WINDOWS_SIGNING.certificateProfile, '-ExpectedSubject', WINDOWS_SIGNING.subject]
+  return new Promise((resolve, reject) => {
+    // -File passes typed arguments without constructing PowerShell source code.
+    const child = spawnImpl('pwsh.exe', args, { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] })
+    child.once('error', reject)
+    child.once('close', code => code === 0 ? resolve() : reject(new Error(`Artifact Signing failed with exit code ${code}`)))
+  })
 }
 
 export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.platform, expectedType = 'user', expected = {} } = {}) {

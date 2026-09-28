@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { WINDOWS_SIGNING, nativeExecutableSigningExclusions, verifyAzureCliSession, verifyWindowsAuthenticode, windowsBuildConfiguration } from '../windows_signing.mjs'
+import { WINDOWS_SIGNING, signWindowsFile, nativeExecutableSigningExclusions, verifyAzureCliSession, verifyWindowsAuthenticode, windowsBuildConfiguration } from '../windows_signing.mjs'
 
 test('unsigned private builds explicitly disable Windows signing', () => {
   assert.deepEqual(windowsBuildConfiguration({ platform: 'linux' }), {
@@ -10,17 +10,19 @@ test('unsigned private builds explicitly disable Windows signing', () => {
   })
 })
 
-test('signed release config is pinned to the approved Azure profile and SHA256 RFC3161 signing', () => {
+test('signed release config uses the custom SHA256 signer with environment credential isolation', async () => {
   const env = { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_CLIENT_SECRET: 'secret' }
-  assert.deepEqual(windowsBuildConfiguration({ signedRelease: true, env, platform: 'win32' }), {
-    target: ['nsis'], signAndEditExecutable: true, signExecutable: true, verifyUpdateCodeSignature: true,
-    azureSignOptions: {
-      publisherName: 'Bones Consulting LLC', endpoint: 'https://cus.codesigning.azure.net',
-      certificateProfileName: 'singhouse', codeSigningAccountName: 'singhouse-signing',
-      fileDigest: 'SHA256', timestampRfc3161: 'http://timestamp.acs.microsoft.com', timestampDigest: 'SHA256',
-      ExcludeCredentials: 'WorkloadIdentityCredential,ManagedIdentityCredential,SharedTokenCacheCredential,VisualStudioCredential,VisualStudioCodeCredential,AzureCliCredential,AzurePowerShellCredential,AzureDeveloperCliCredential,InteractiveBrowserCredential',
-    },
-  })
+  let selected
+  const config = windowsBuildConfiguration({ signedRelease: true, env, platform: 'win32',
+    signImpl: async (_options, credentials) => { selected = credentials.credential } })
+  assert.equal(config.azureSignOptions, undefined)
+  assert.equal(config.signAndEditExecutable, true)
+  assert.equal(config.signExecutable, true)
+  assert.equal(config.verifyUpdateCodeSignature, true)
+  assert.equal(config.signtoolOptions.publisherName, WINDOWS_SIGNING.publisherName)
+  assert.deepEqual(config.signtoolOptions.signingHashAlgorithms, ['sha256'])
+  await config.signtoolOptions.sign({})
+  assert.equal(selected, 'EnvironmentCredential')
 })
 
 test('signed release config fails closed off Windows or without environment credentials', () => {
@@ -31,10 +33,15 @@ test('signed release config fails closed off Windows or without environment cred
   assert.throws(() => windowsBuildConfiguration({ signedRelease: true, env: {}, platform: 'linux' }), /must be built on Windows/)
 })
 
-test('manual signing mode selects only AzureCliCredential', () => {
-  const config = windowsBuildConfiguration({ signedRelease: true, manualAzureCli: true, env: {}, platform: 'win32' })
-  assert.equal(config.azureSignOptions.ExcludeCredentials,
-    'EnvironmentCredential,WorkloadIdentityCredential,ManagedIdentityCredential,SharedTokenCacheCredential,VisualStudioCredential,VisualStudioCodeCredential,AzurePowerShellCredential,AzureDeveloperCliCredential,InteractiveBrowserCredential')
+test('manual and OIDC signing modes select only AzureCliCredential', async () => {
+  for (const selection of [{ manualAzureCli: true, env: {} }, { azureOidc: true,
+    env: { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_SUBSCRIPTION_ID: 'subscription' } }]) {
+    let selected
+    const config = windowsBuildConfiguration({ signedRelease: true, platform: 'win32', ...selection,
+      signImpl: async (_options, credentials) => { selected = credentials.credential } })
+    await config.signtoolOptions.sign({})
+    assert.equal(selected, 'AzureCliCredential')
+  }
 })
 
 function signer(result, { code = 0, error = null } = {}) {
@@ -79,8 +86,7 @@ test('manual signing requires an installed and logged-in Azure CLI session', asy
 test('OIDC signing accepts only the azure/login service-principal session and selects AzureCliCredential', async () => {
   const env = { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_SUBSCRIPTION_ID: 'subscription' }
   const config = windowsBuildConfiguration({ signedRelease: true, azureOidc: true, env, platform: 'win32' })
-  assert.equal(config.azureSignOptions.ExcludeCredentials,
-    'EnvironmentCredential,WorkloadIdentityCredential,ManagedIdentityCredential,SharedTokenCacheCredential,VisualStudioCredential,VisualStudioCodeCredential,AzurePowerShellCredential,AzureDeveloperCliCredential,InteractiveBrowserCredential')
+  assert.equal(typeof config.signtoolOptions.sign, 'function')
   const account = { id: 'subscription', tenantId: 'tenant', user: { name: 'client', type: 'servicePrincipal' } }
   assert.deepEqual(await verifyAzureCliSession({ platform: 'win32', spawnImpl: azureCli(account), expectedType: 'servicePrincipal', expected: {
     subscriptionId: 'subscription', tenantId: 'tenant', clientId: 'client',
@@ -147,6 +153,18 @@ test('pinned builder preserves native binaries while signing application and NSI
     if (error.code === 'ERR_MODULE_NOT_FOUND') return t.skip('Requires locked desktop npm dependencies')
     throw error
   }
+  const { WindowsSignToolManager } = await import('app-builder-lib/out/codeSign/windowsSignToolManager.js')
+  const calls = []
+  const signingConfig = windowsBuildConfiguration({ signedRelease: true, azureOidc: true, platform: 'win32',
+    env: { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_SUBSCRIPTION_ID: 'subscription' },
+    signImpl: async (options, credentials) => { calls.push({ hash: options.hash, isNest: options.isNest, ...credentials }) } })
+  const manager = { packager: { appInfo: { type: 'module', productName: 'Fixture', computePackageUrl: async () => null },
+    info: { getWorkspaceRoot: async () => '.' } }, cscInfo: { value: Promise.resolve(null) } }
+  await WindowsSignToolManager.prototype.signFile.call(manager, { path: 'C:\\build\\Fixture.exe', options: signingConfig })
+  assert.deepEqual(calls, [{ hash: 'sha256', isNest: false, credential: 'AzureCliCredential' }])
+  signingConfig.signtoolOptions.sign = async () => { throw new Error('fixture signer failure') }
+  await assert.rejects(WindowsSignToolManager.prototype.signFile.call(manager,
+    { path: 'C:\\build\\Fixture.exe', options: signingConfig }), /fixture signer failure/)
   const digest = 'a'.repeat(64)
   const configuration = windowsBuildConfiguration({ signedRelease: true, azureOidc: true, platform: 'win32',
     env: { AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_ID: 'client', AZURE_SUBSCRIPTION_ID: 'subscription' } })
@@ -168,4 +186,41 @@ test('pinned builder preserves native binaries while signing application and NSI
     assert.equal(packager.shouldSignFile(path, true), true, path)
     assert.equal(packager.shouldSignFile(path.replaceAll('/', '\\'), true), true, path)
   }
+})
+
+
+test('custom signer passes literal file arguments and propagates process failures', async () => {
+  const options = { path: "C:\\test files\\Player's & candidate.exe", hash: 'sha256', isNest: false }
+  for (const credential of ['AzureCliCredential', 'EnvironmentCredential']) {
+    let captured
+    await signWindowsFile(options, { platform: 'win32', credential, spawnImpl: (command, args, spawnOptions) => {
+      captured = { command, args, spawnOptions }
+      const child = new EventEmitter()
+      queueMicrotask(() => child.emit('close', 0))
+      return child
+    } })
+    assert.equal(captured.command, 'pwsh.exe')
+    assert.ok(captured.args.includes('-File'))
+    assert.ok(!captured.args.includes('-Command'))
+    assert.equal(captured.args[captured.args.indexOf('-FilePath') + 1], options.path)
+    assert.equal(captured.args[captured.args.indexOf('-Credential') + 1], credential)
+    assert.equal(captured.args[captured.args.indexOf('-ExpectedSubject') + 1], WINDOWS_SIGNING.subject)
+  }
+  await assert.rejects(signWindowsFile(options, { platform: 'win32', credential: 'AzureCliCredential', spawnImpl: () => {
+    const child = new EventEmitter(); queueMicrotask(() => child.emit('close', 1)); return child
+  } }), /exit code 1/)
+  for (const changes of [{ hash: 'sha1' }, { isNest: true }]) {
+    await assert.rejects(signWindowsFile({ ...options, ...changes }, { platform: 'win32', credential: 'AzureCliCredential' }), /one SHA256/)
+  }
+})
+
+test('packaging failures remain nonzero despite build-tool exit cleanup', async t => {
+  const { spawnSync } = await import('node:child_process')
+  const module = new URL('../build/package.mjs', import.meta.url).href
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { reportPackagingFailure } from ${JSON.stringify(module)}; process.on('exit', () => { process.exitCode = 0 }); reportPackagingFailure(new Error('fixture build failure'));`], { encoding: 'utf8' })
+  if (result.error?.code === 'EPERM') return t.skip('Sandbox denies child-process execution')
+  if (result.error) throw result.error
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture build failure/)
 })

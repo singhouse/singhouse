@@ -92,7 +92,10 @@ packaging command creates an explicitly unsigned private-test build and never
 publishes anything. Create macOS artifacts on macOS.
 
 Windows release signing is an explicit, fail-closed build mode. Run it on
-Windows after assembling the `win32-x64` native payload:
+Windows after assembling the `win32-x64` native payload. Install PowerShell 7
+and the exact signing module first (`Install-Module TrustedSigning
+-RequiredVersion 0.5.3 -Repository PSGallery -Scope CurrentUser`). CI provisions
+and validates that module automatically:
 
 ```powershell
 # First manual release: use the Azure user already granted the signer role.

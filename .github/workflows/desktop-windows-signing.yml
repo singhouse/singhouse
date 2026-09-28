@@ -108,6 +108,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed.' }
           node --test desktop/test/windows_signing.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Windows signing preflight regression failed.' }
+      - name: Provision and validate pinned Artifact Signing module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name TrustedSigning -RequiredVersion 0.5.3 -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
+          & ./desktop/build/sign_windows.ps1 -ValidateOnly
       - name: Assemble signed Windows application and first installer
         shell: pwsh
         run: |
