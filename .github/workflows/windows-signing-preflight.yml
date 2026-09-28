@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: Windows signing preflight and optional probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign_probe:
+        description: Sign and verify one harmless test EXE after the read-only preflight
+        required: false
+        type: boolean
+        default: false
+      expected_subject:
+        description: Exact expected certificate subject (required when sign_probe is true)
+        required: false
+        type: string
+      account:
+        description: Artifact Signing account name
+        required: true
+        type: string
+      profile:
+        description: Public Trust certificate profile name
+        required: true
+        type: string
+      resource_group:
+        description: Resource group (optional; omit only to discover via subscription resource listing)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  preflight:
+    name: Check OIDC and read signing metadata
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: windows-signing
+    timeout-minutes: 10
+    env:
+      AZURE_CORE_OUTPUT: none
+      SIGNING_ACCOUNT: ${{ inputs.account }}
+      SIGNING_PROFILE: ${{ inputs.profile }}
+      SIGNING_RESOURCE_GROUP: ${{ inputs.resource_group }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Validate requested resource names
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SIGNING_ACCOUNT" =~ ^[a-z0-9][a-z0-9-]{1,22}[a-z0-9]$ ]] || { echo '::error::Invalid account name'; exit 1; }
+          [[ "$SIGNING_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9-]{1,98}[A-Za-z0-9]$ ]] || { echo '::error::Invalid profile name'; exit 1; }
+          if [[ -n "$SIGNING_RESOURCE_GROUP" ]]; then
+            [[ "$SIGNING_RESOURCE_GROUP" =~ ^[A-Za-z0-9_.()-]{1,90}$ && "$SIGNING_RESOURCE_GROUP" != *. ]] || { echo '::error::Invalid resource group name'; exit 1; }
+          fi
+          echo 'This preflight job reads Azure metadata only. The optional probe job builds and signs one harmless test EXE when selected.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Authenticate to Azure with GitHub OIDC
+        id: login
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Read Central US account and Public Trust profile
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'GitHub OIDC login: succeeded.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$SIGNING_RESOURCE_GROUP" ]]; then
+            account_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$SIGNING_RESOURCE_GROUP/providers/Microsoft.CodeSigning/codeSigningAccounts/$SIGNING_ACCOUNT"
+          else
+            echo '::notice::Resource group omitted: discovery requires subscription resource-list access. Discovery failure does not establish that signing permission is missing.'
+            accounts=$(az resource list --subscription "$AZURE_SUBSCRIPTION_ID" --resource-type Microsoft.CodeSigning/codeSigningAccounts --name "$SIGNING_ACCOUNT" --output json --only-show-errors)
+            [[ $(jq 'length' <<< "$accounts") == 1 ]] || { echo '::error::Expected exactly one account. Supply its resource group to avoid subscription-wide discovery.'; exit 1; }
+            account_id=$(jq -er '.[0].id' <<< "$accounts")
+          fi
+          account=$(az resource show --ids "$account_id" --output json --only-show-errors)
+          jq -e --arg name "$SIGNING_ACCOUNT" --arg id "$account_id" '
+            (.id | ascii_downcase) == ($id | ascii_downcase) and
+            .name == $name and
+            (.type | ascii_downcase) == "microsoft.codesigning/codesigningaccounts" and
+            (.location | ascii_downcase | gsub(" "; "")) == "centralus"
+          ' <<< "$account" > /dev/null || { echo '::error::Account identity or Central US location mismatch'; exit 1; }
+          profile_id="$account_id/certificateProfiles/$SIGNING_PROFILE"
+          profile=$(az resource show --ids "$profile_id" --output json --only-show-errors)
+          jq -e --arg id "$profile_id" '
+            (.id | ascii_downcase) == ($id | ascii_downcase) and
+            (.type | ascii_downcase) == "microsoft.codesigning/codesigningaccounts/certificateprofiles" and
+            .properties.profileType == "PublicTrust"
+          ' <<< "$profile" > /dev/null || { echo '::error::Exact certificate profile was not verified as PublicTrust'; exit 1; }
+          printf 'PROFILE_RESOURCE_ID=%s\n' "$profile_id" >> "$GITHUB_ENV"
+          echo 'Account metadata: verified Central US. Exact certificate profile: verified PublicTrust.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Regional signing endpoint for this location: https://cus.codesigning.azure.net (data-plane access untested).' >> "$GITHUB_STEP_SUMMARY"
+      - name: Inspect visible role assignments (best effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AZURE_CLIENT_ID is an application/client ID, not a principal object ID.
+          # Resolving it can require directory read permission; do not turn that
+          # failure into a claim about the principal's signing authorization.
+          if roles=$(az role assignment list --assignee "$AZURE_CLIENT_ID" --scope "$PROFILE_RESOURCE_ID" --include-inherited --fill-principal-name false --output json --only-show-errors 2> "$RUNNER_TEMP/role-lookup-error.txt"); then
+            count=$(jq 'length' <<< "$roles")
+            echo "Visible direct/inherited role assignments: $count. This is not a complete effective-permissions evaluation." >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.[] | "Role: " + (.roleDefinitionName // "unresolved role definition") + (if .condition then " (conditional assignment)" else "" end)' <<< "$roles" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning::Role inspection unavailable: directory client-ID resolution or role-assignment read access may be unavailable. This does not establish whether signing is allowed.'
+            echo 'Role assignments: inspection unavailable; signing authorization remains untested.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Record the limits of this result
+        if: always()
+        env:
+          LOGIN_OUTCOME: ${{ steps.login.outcome }}
+          METADATA_OUTCOME: ${{ steps.metadata.outcome }}
+        shell: bash
+        run: |
+          printf '\nOIDC login step: %s. Metadata step: %s.\n' "$LOGIN_OUTCOME" "$METADATA_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          echo 'This preflight job did not test signing or regional data-plane access. A metadata or role-inspection failure does not prove that the Certificate Profile Signer role is missing. The separate optional probe job reports signing evidence.' >> "$GITHUB_STEP_SUMMARY"
+
+  sign-probe:
+    name: Sign and verify one harmless test EXE
+    needs: preflight
+    if: github.ref == 'refs/heads/main' && inputs.sign_probe
+    runs-on: windows-latest
+    environment: windows-signing
+    timeout-minutes: 15
+    env:
+      SIGNING_ACCOUNT: ${{ inputs.account }}
+      SIGNING_PROFILE: ${{ inputs.profile }}
+      EXPECTED_SUBJECT: ${{ inputs.expected_subject }}
+    steps:
+      - name: Build an unsigned original test program
+        id: build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:EXPECTED_SUBJECT)) {
+            throw 'expected_subject is required when sign_probe is true.'
+          }
+          $env:PROBE_DIR = Join-Path $env:RUNNER_TEMP 'signing-probe'
+          "PROBE_DIR=$env:PROBE_DIR" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Path $env:PROBE_DIR | Out-Null
+          $source = Join-Path $env:PROBE_DIR 'SigningProbe.cs'
+          $exe = Join-Path $env:PROBE_DIR 'SigningProbe.exe'
+          @'
+          // SPDX-License-Identifier: AGPL-3.0-only
+          using System;
+          internal static class SigningProbe {
+              private static int Main() {
+                  Console.WriteLine("Signing probe OK");
+                  return 0;
+              }
+          }
+          '@ | Set-Content -LiteralPath $source -Encoding utf8
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (!(Test-Path -LiteralPath $csc)) { throw 'Installed .NET Framework compiler not found.' }
+          & $csc /nologo /target:exe /platform:anycpu /optimize+ "/out:$exe" $source
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+          if ($signature.Status -ne 'NotSigned') { throw 'Probe must initially be unsigned.' }
+          $before = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          "unsigned_sha256=$before" >> $env:GITHUB_OUTPUT
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+      - name: Authenticate to Azure with GitHub OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign only the test EXE
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://cus.codesigning.azure.net
+          signing-account-name: ${{ env.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.SIGNING_PROFILE }}
+          files: ${{ steps.build.outputs.exe }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          timeout: 300
+          cache-dependencies: false
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Verify signature, timestamp, bytes, and execution
+        env:
+          UNSIGNED_SHA256: ${{ steps.build.outputs.unsigned_sha256 }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:PROBE_DIR 'SigningProbe.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+          if ($signature.Status -ne 'Valid') { throw "Authenticode status: $($signature.Status)" }
+          if ($signature.SignerCertificate.Subject -cne $env:EXPECTED_SUBJECT) {
+            throw 'Signer certificate subject does not exactly match expected_subject.'
+          }
+          if ($null -eq $signature.TimeStamperCertificate) { throw 'Timestamp certificate missing.' }
+          $after = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          if ($after -eq $env:UNSIGNED_SHA256) { throw 'Signing did not change the EXE bytes.' }
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signtool = Get-ChildItem -Path "$sdkBin\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if ($null -eq $signtool) { throw 'Installed Windows SDK SignTool not found.' }
+          $verifyOutput = & $signtool.FullName verify /pa /all /v $exe 2>&1
+          $verifyExit = $LASTEXITCODE
+          $verifyOutput | Set-Content -LiteralPath (Join-Path $env:PROBE_DIR 'signtool-verify.txt') -Encoding utf8
+          if ($verifyExit -ne 0) { throw "SignTool verification failed: $verifyExit" }
+          $programOutput = & $exe
+          $programExit = $LASTEXITCODE
+          if ($programExit -ne 0 -or $programOutput -cne 'Signing probe OK') {
+            throw 'Signed test program did not produce the expected harmless output.'
+          }
+          [ordered]@{
+            workflow_sha = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            verified_utc = [DateTime]::UtcNow.ToString('o')
+            endpoint = 'https://cus.codesigning.azure.net'
+            account = $env:SIGNING_ACCOUNT
+            profile = $env:SIGNING_PROFILE
+            unsigned_sha256 = $env:UNSIGNED_SHA256
+            signed_sha256 = $after
+            authenticode_status = $signature.Status.ToString()
+            expected_subject = $env:EXPECTED_SUBJECT
+            signer_subject = $signature.SignerCertificate.Subject
+            signer_thumbprint = $signature.SignerCertificate.Thumbprint
+            timestamp_subject = $signature.TimeStamperCertificate.Subject
+            timestamp_thumbprint = $signature.TimeStamperCertificate.Thumbprint
+            signtool_exit_code = $verifyExit
+            program_exit_code = $programExit
+            program_output = $programOutput
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PROBE_DIR 'evidence.json') -Encoding utf8
+          $checksums = foreach ($name in @('SigningProbe.exe', 'SigningProbe.cs', 'evidence.json', 'signtool-verify.txt')) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $env:PROBE_DIR $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $checksums | Set-Content -LiteralPath (Join-Path $env:PROBE_DIR 'SHA256SUMS') -Encoding ascii
+          'Signed probe verified: exact expected subject, valid Authenticode signature, timestamp present, SignTool /pa /all /v passed, bytes changed, expected output confirmed.' >> $env:GITHUB_STEP_SUMMARY
+          'This signs only an original harmless console EXE. It does not qualify a release installer or establish SmartScreen reputation.' >> $env:GITHUB_STEP_SUMMARY
+      - name: Retain verified probe and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-signing-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PROBE_DIR }}
+          if-no-files-found: error
+          retention-days: 14
