@@ -120,27 +120,34 @@ export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.pl
   })
 }
 
-export function verifyWindowsAuthenticode(path, { spawnImpl = spawn, platform = process.platform, expectedSubject = WINDOWS_SIGNING.subject } = {}) {
+export function verifyWindowsAuthenticode(path, { spawnImpl = spawn, platform = process.platform, expectedSubject = WINDOWS_SIGNING.subject, onDiagnostic = () => {} } = {}) {
   if (platform !== 'win32') return Promise.resolve(false)
   return new Promise(resolve => {
     const script = [
-      'param($Path)',
       '$ErrorActionPreference = "Stop"',
-      '$signature = Get-AuthenticodeSignature -LiteralPath $Path',
+      '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+      '$signature = Get-AuthenticodeSignature -LiteralPath $env:KARAOKE_SIGNATURE_TARGET',
       '[pscustomobject]@{ Status = [string]$signature.Status; StatusMessage = $signature.StatusMessage; Subject = $signature.SignerCertificate.Subject; TimestampSubject = $signature.TimeStamperCertificate.Subject } | ConvertTo-Json -Compress',
     ].join('; ')
-    const child = spawnImpl('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `& { ${script} }`, path], {
+    // The command is constant; paths never enter PowerShell source or its
+    // command-line parser. EncodedCommand itself uses UTF-16LE, stdout UTF-8.
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const child = spawnImpl('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, KARAOKE_SIGNATURE_TARGET: path },
     })
     let stdout = ''
+    child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', data => { stdout += data })
-    child.once('error', () => resolve(false))
-    child.once('exit', code => {
-      if (code !== 0) return resolve(false)
+    child.once('error', error => { onDiagnostic({ reason: 'process-error', code: error.code }); resolve(false) })
+    child.once('close', code => {
+      if (code !== 0) { onDiagnostic({ reason: 'process-exit', code }); return resolve(false) }
       try {
         const result = JSON.parse(stdout)
-        resolve(result.Status === 'Valid' && result.Subject === expectedSubject && typeof result.TimestampSubject === 'string' && result.TimestampSubject.length > 0)
-      } catch { resolve(false) }
+        const valid = result.Status === 'Valid' && result.Subject === expectedSubject && typeof result.TimestampSubject === 'string' && result.TimestampSubject.length > 0
+        if (!valid) onDiagnostic({ reason: 'signature-rejected', status: result.Status, statusMessage: result.StatusMessage, subject: result.Subject, timestampSubject: result.TimestampSubject })
+        resolve(valid)
+      } catch { onDiagnostic({ reason: 'invalid-signature-response' }); resolve(false) }
     })
   })
 }

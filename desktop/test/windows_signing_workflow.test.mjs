@@ -81,3 +81,11 @@ test('Windows signing workflow locks project tool versions and does not persist 
   assert.match(workflow, /npm --prefix desktop ci/)
   assert.doesNotMatch(workflow, /npm --prefix frontend ci/)
 })
+
+
+test('signing module is pinned and its real parameter schema is checked before assembly', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  assert.match(workflow, /Install-Module -Name TrustedSigning -RequiredVersion 0\.5\.3/)
+  assert.match(workflow, /sign_windows\.ps1 -ValidateOnly/)
+  assert.ok(workflow.indexOf('sign_windows.ps1 -ValidateOnly') < workflow.indexOf('python desktop/build/assemble.py'))
+})

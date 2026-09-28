@@ -47,12 +47,13 @@ test('manual and OIDC signing modes select only AzureCliCredential', async () =>
 function signer(result, { code = 0, error = null } = {}) {
   return (command, args, options) => {
     assert.equal(command, 'powershell.exe'); assert.equal(options.windowsHide, true)
-    assert.equal(args.at(-1), 'C:\\Program Files\\Singhouse\\Singhouse.exe')
-    const child = new EventEmitter(); child.stdout = new EventEmitter()
+    assert.equal(options.env.KARAOKE_SIGNATURE_TARGET, 'C:\\Program Files\\Singhouse\\Singhouse.exe')
+    assert.equal(args.at(-2), '-EncodedCommand')
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stdout.setEncoding = () => {}
     queueMicrotask(() => {
       if (result !== null) child.stdout.emit('data', JSON.stringify(result))
       if (error) child.emit('error', error)
-      else child.emit('exit', code)
+      else child.emit('close', code)
     })
     return child
   }
@@ -63,7 +64,7 @@ function azureCli(result, { code = 0, error = null } = {}) {
     assert.equal(command, 'cmd.exe')
     assert.deepEqual(args, ['/d', '/s', '/c', 'az.cmd account show --output json --only-show-errors'])
     assert.equal(options.windowsHide, true)
-    const child = new EventEmitter(); child.stdout = new EventEmitter()
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stdout.setEncoding = () => {}
     queueMicrotask(() => {
       if (result !== null) child.stdout.emit('data', JSON.stringify(result))
       if (error) child.emit('error', error)
@@ -223,4 +224,41 @@ test('packaging failures remain nonzero despite build-tool exit cleanup', async 
   if (result.error) throw result.error
   assert.equal(result.status, 1)
   assert.match(result.stderr, /fixture build failure/)
+})
+
+
+test('Authenticode verifier keeps path literal and waits for stdout after process exit', async () => {
+  const path = "C:\\test files\\Player's & [Łódź]; $(ignored).exe"
+  const subject = 'CN=Łódź fixture'
+  let child
+  const verification = verifyWindowsAuthenticode(path, { platform: 'win32', expectedSubject: subject,
+    spawnImpl: (command, args, options) => {
+      assert.equal(command, 'powershell.exe')
+      assert.equal(args.at(-2), '-EncodedCommand')
+      const script = Buffer.from(args.at(-1), 'base64').toString('utf16le')
+      assert.match(script, /-LiteralPath \$env:KARAOKE_SIGNATURE_TARGET/)
+      assert.match(script, /OutputEncoding = \[System.Text.UTF8Encoding\]/)
+      assert.ok(!script.includes(path))
+      assert.ok(!args.includes(path))
+      assert.equal(options.env.KARAOKE_SIGNATURE_TARGET, path)
+      child = new EventEmitter(); child.stdout = new EventEmitter()
+      child.stdout.setEncoding = encoding => assert.equal(encoding, 'utf8')
+      return child
+    } })
+  // Node's exit event can arrive before all pipe bytes have been delivered.
+  child.emit('exit', 0)
+  child.stdout.emit('data', JSON.stringify({ Status: 'Valid', Subject: subject, TimestampSubject: 'CN=Timestamp' }))
+  child.emit('close', 0)
+  assert.equal(await verification, true)
+})
+
+test('Authenticode rejection diagnostics expose signature evidence without relaxing trust', async () => {
+  const diagnostics = []
+  const result = await verifyWindowsAuthenticode('C:\\Program Files\\Singhouse\\Singhouse.exe', {
+    platform: 'win32', spawnImpl: signer({ Status: 'Valid', Subject: 'CN=Unexpected', TimestampSubject: 'CN=Timestamp' }),
+    onDiagnostic: detail => diagnostics.push(detail),
+  })
+  assert.equal(result, false)
+  assert.deepEqual(diagnostics, [{ reason: 'signature-rejected', status: 'Valid', statusMessage: undefined,
+    subject: 'CN=Unexpected', timestampSubject: 'CN=Timestamp' }])
 })
