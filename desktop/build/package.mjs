@@ -116,6 +116,14 @@ async function main() {
   console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
 }
 
+export function reportPackagingFailure(error) {
+  console.error(error.message)
+  process.exitCode = 1
+  // Some build-tool cleanup handlers overwrite exitCode. Keep a rejected build
+  // unsuccessful after those handlers run, as electron-builder's own CLI does.
+  process.on('exit', () => { process.exitCode = 1 })
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(error => { console.error(error.message); process.exitCode = 1 })
+  main().catch(reportPackagingFailure)
 }
