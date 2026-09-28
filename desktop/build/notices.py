@@ -10,7 +10,7 @@ SHIPPED_BUILD_PACKAGES = {"node_modules/tailwindcss"}
 
 
 def collect(frontend: Path, output: Path):
-    lock = json.loads((frontend / "package-lock.json").read_text())
+    lock = json.loads((frontend / "package-lock.json").read_text(encoding="utf-8"))
     destination = output / "notices/frontend"
     destination.mkdir(parents=True, exist_ok=True)
     inventory = []
@@ -18,7 +18,7 @@ def collect(frontend: Path, output: Path):
         if not relative or (package.get("dev") and relative not in SHIPPED_BUILD_PACKAGES):
             continue
         root = frontend / relative
-        metadata = json.loads((root / "package.json").read_text())
+        metadata = json.loads((root / "package.json").read_text(encoding="utf-8"))
         name = metadata["name"]
         target = destination / name.replace("/", "_")
         texts = [p for p in root.iterdir() if p.is_file()
@@ -33,6 +33,6 @@ def collect(frontend: Path, output: Path):
         inventory.append({"name": name, "version": metadata["version"],
                           "license": metadata.get("license"),
                           "texts": [p.name for p in texts]})
-    (destination / "inventory.json").write_text(json.dumps(inventory, indent=2) + "\n")
+    (destination / "inventory.json").write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(frontend / "node_modules/@fontsource-variable/space-grotesk/LICENSE",
                     output / "static/assets/SpaceGrotesk-LICENSE.txt")
