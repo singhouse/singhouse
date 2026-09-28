@@ -89,9 +89,21 @@ jobs:
           Invoke-WebRequest -Uri 'https://files.pythonhosted.org/packages/d6/f2/3564ae1d1d37b66dc64e6be52f5e5fe00cfce235b6f60d0b708c6caf7588/uv-0.12.8-py3-none-win_amd64.whl' -OutFile $uvWheel
           $uvHash = (Get-FileHash -LiteralPath $uvWheel -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($uvHash -ne '53984d68cddd227e6433b70b510d4b47fe82e658f22f4a6ca416b4e373406393') { throw 'uv wheel SHA-256 mismatch' }
-          py -3.12 -m pip install --no-deps $uvWheel
+          python -m pip install --no-deps --force-reinstall $uvWheel
           if ($LASTEXITCODE -ne 0) { throw 'Locked uv installation failed.' }
-          if ((uv --version) -ne 'uv 0.12.8') { throw 'Unexpected uv version' }
+          $pythonScripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          if ($LASTEXITCODE -ne 0 -or -not $pythonScripts) { throw 'Could not resolve selected Python scripts directory.' }
+          $pythonScripts = $pythonScripts.Trim()
+          $uvExecutable = Join-Path $pythonScripts 'uv.exe'
+          if (-not (Test-Path -LiteralPath $uvExecutable -PathType Leaf)) { throw 'Pinned uv executable is missing from selected Python installation.' }
+          $env:PATH = "$pythonScripts;$env:PATH"
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $pythonScripts
+          $uvVersion = & $uvExecutable --version
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned uv version check failed.' }
+          Write-Host "Selected uv executable: $uvExecutable"
+          Write-Host "Selected uv version: $uvVersion"
+          $uvTokens = ([string]$uvVersion).Trim() -split '\s+'
+          if ($uvTokens.Count -lt 2 -or $uvTokens[0] -cne 'uv' -or $uvTokens[1] -cne '0.12.8') { throw 'Unexpected uv version' }
           npm --prefix desktop ci
           if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed.' }
           node --test desktop/test/windows_signing.test.mjs
@@ -100,7 +112,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          py -3.12 desktop/build/assemble.py --target win32-x64 --output desktop/native
+          python desktop/build/assemble.py --target win32-x64 --output desktop/native
           if ($LASTEXITCODE -ne 0) { throw 'Native assembly failed.' }
           npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc
           if ($LASTEXITCODE -ne 0) { throw 'Signed installer packaging failed.' }
