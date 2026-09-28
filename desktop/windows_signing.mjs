@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { spawn } from 'node:child_process'
+import { isAbsolute, win32 } from 'node:path'
+import { safePortablePath } from './release.mjs'
 
 export const WINDOWS_SIGNING = Object.freeze({
   account: 'singhouse-signing',
@@ -8,6 +10,31 @@ export const WINDOWS_SIGNING = Object.freeze({
   publisherName: 'Bones Consulting LLC',
   subject: 'CN=Bones Consulting LLC, O=Bones Consulting LLC, L=Overland Park, S=Kansas, C=US',
 })
+
+// Native assembly hashes bind redistributed binaries before Electron packaging.
+// Preserve those exact bytes and any upstream signatures; sign our application
+// and NSIS wrappers normally. Match full source paths and native destination
+// paths, never broad executable extensions or basenames.
+export function nativeExecutableSigningExclusions(nativeRoot, files) {
+  if (typeof nativeRoot !== 'string' || !(isAbsolute(nativeRoot) || win32.isAbsolute(nativeRoot))) {
+    throw new Error('Native signing exclusions require an absolute source directory')
+  }
+  if (!files || typeof files !== 'object' || Array.isArray(files) || !Object.keys(files).length) {
+    throw new Error('Invalid native file inventory for signing exclusions')
+  }
+  const exclusions = []
+  const root = nativeRoot.replaceAll('\\', '/').replace(/\/$/, '')
+  for (const [path, digest] of Object.entries(files)) {
+    if (!safePortablePath(path) || typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new Error('Invalid native file inventory for signing exclusions')
+    }
+    if (!path.toLowerCase().endsWith('.exe')) continue
+    for (const suffix of [`${root}/${path}`, `/resources/native/${path}`]) {
+      exclusions.push(`!${suffix}`, `!${suffix.replaceAll('/', '\\')}`)
+    }
+  }
+  return [...new Set(exclusions)]
+}
 
 const REQUIRED_AZURE_ENV = ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']
 const DEFAULT_AZURE_CREDENTIALS = [
@@ -62,7 +89,9 @@ export function windowsBuildConfiguration({ signedRelease = false, manualAzureCl
 export function verifyAzureCliSession({ spawnImpl = spawn, platform = process.platform, expectedType = 'user', expected = {} } = {}) {
   if (platform !== 'win32') return Promise.reject(new Error('Azure CLI signing session can only be checked on Windows'))
   return new Promise((resolve, reject) => {
-    const child = spawnImpl('az.cmd', ['account', 'show', '--output', 'json', '--only-show-errors'], {
+    // Azure CLI is a Windows batch wrapper. Only this fixed command enters cmd;
+    // caller-supplied identity values are compared after JSON parsing.
+    const child = spawnImpl('cmd.exe', ['/d', '/s', '/c', 'az.cmd account show --output json --only-show-errors'], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
     })
     let stdout = '', settled = false

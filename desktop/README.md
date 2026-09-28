@@ -105,11 +105,11 @@ DefaultAzureCredential to the Azure CLI identity. It does not ask for, accept,
 or store the Azure account password.
 
 The recommended CI path is the manually dispatched private Windows signing
-workflow. Its job uses the protected `windows-signing` GitHub environment,
+workflow. Its job uses the `windows-signing` GitHub environment,
 obtains a short-lived service-principal token through GitHub OIDC, and passes
 `--azure-oidc`. No client secret is created or stored. Configure
 `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as
-environment secrets on the protected `windows-signing` environment itself,
+environment secrets on the `windows-signing` environment itself,
 not as repository or organization secrets. The build verifies that `az account show` is the expected
 service-principal session and constrains DefaultAzureCredential to
 AzureCliCredential. It requires exactly one `singhouse-signing` account in the
@@ -119,12 +119,14 @@ report `PublicTrust`.
 
 Configure the Entra application as single-tenant. Its GitHub federated
 credential must use issuer `https://token.actions.githubusercontent.com`,
-audience `api://AzureADTokenExchange`, and subject
-`repo:singhouse/singhouse:environment:windows-signing`. In the GitHub
-repository settings, create the `windows-signing` environment, add a required
-reviewer, and restrict its deployment branches to the protected `main` branch.
-These are required setup values, not a claim that the live GitHub or Entra
-settings have been inspected. Do not add access-token or OIDC-token output to
+audience `api://AzureADTokenExchange`, and the exact subject configured by
+GitHub for this repository's `windows-signing` environment. Repositories using
+immutable owner/repository IDs have a different subject from the default
+repository-name format; inspect the repository OIDC subject configuration before
+creating the federated credential. Do not substitute a name-only subject.
+Restrict deployment branches to `main`. Configure required reviewers and branch
+protection when supported by the account plan, and inspect those settings rather
+than assuming they exist. Do not add access-token or OIDC-token output to
 workflow diagnostics.
 
 The workflow only uploads a private Actions artifact. It does not publish a
@@ -154,7 +156,11 @@ authentication mode, or without first-installer packaging. It verifies that
 the packaged application executable and final NSIS installer have a valid timestamped
 signature from the exact Bones Consulting LLC certificate subject before it
 reports success. Electron Builder's NSIS signing path also signs its generated
-uninstaller. Keep these values in the CI secret store; never add them to this
+uninstaller. Bundled native dependency executables retain their inventoried
+upstream bytes and any existing signatures. CI installs into a disposable directory and verifies the installed
+application and uninstaller with Authenticode and SignTool before uninstalling
+the candidate. This does not establish browser-download reputation, physical
+playback, or signed update/recovery qualification. Keep these values in the CI secret store; never add them to this
 repository or an artifact.
 
 Release policy is edition-owned. Core uses the checked-in `release.json`;

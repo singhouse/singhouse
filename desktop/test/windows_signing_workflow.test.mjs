@@ -50,10 +50,10 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc/)
 })
 
-test('Windows signing documentation binds Azure values to protected environment secrets', async () => {
+test('Windows signing documentation binds Azure values to environment secrets', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   const environment = `windows-${'signing'}`
-  assert.match(readme, new RegExp('`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\\nenvironment secrets on the protected `' + environment + '` environment itself,\\nnot as repository or organization secrets'))
+  assert.match(readme, new RegExp('`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\\nenvironment secrets on the `' + environment + '` environment itself,\\nnot as repository or organization secrets'))
 })
 
 test('Windows signing workflow locks project tool versions and does not persist checkout credentials', async () => {

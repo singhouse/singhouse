@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertReleasePolicy } from '../release.mjs'
-import { windowsBuildConfiguration } from '../windows_signing.mjs'
+import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const sourceRoot = resolve(desktop, '..')
@@ -42,7 +42,11 @@ export default {
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo' },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null },
-  win: windowsBuildConfiguration({ signedRelease, manualAzureCli, azureOidc }),
+  win: {
+    ...windowsBuildConfiguration({ signedRelease, manualAzureCli, azureOidc }),
+    ...(signedRelease ? { signExts: nativeExecutableSigningExclusions(native,
+      JSON.parse(readFileSync(resolve(native, 'files.json'), 'utf8'))) } : {}),
+  },
   // Nsis7z cannot extract ARM64-filtered blocks produced by the current 7za
   // compressor. The managed Python payload includes ARM launcher templates, so
   // use the ZIP extractor and disable the differential 7z package path.
