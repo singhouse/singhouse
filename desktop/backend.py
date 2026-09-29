@@ -611,16 +611,42 @@ def windows_durable_replace(source, destination, directories, kernel=None, *,
             kernel.CloseHandle(handle)
 
 
+def _windows_extended_path(path):
+    """Prefix an absolute Windows path without resolving symbolic links."""
+    if not path.is_absolute():
+        raise RuntimeError("Durable replacement requires absolute non-symlink paths")
+    value = str(path)
+    if value.startswith("\\\\?\\"):
+        return path
+    if value.startswith("\\\\"):
+        value = "\\\\?\\UNC\\" + value[2:]
+    else:
+        value = "\\\\?\\" + value
+    return type(path)(value)
+
+
 def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks: bool = False):
     """Commit a local file/tree only if its bytes and directory entries flush."""
-    if not source.is_absolute() or not destination.is_absolute() or source.is_symlink() or destination.is_symlink():
+    if not source.is_absolute() or not destination.is_absolute():
+        raise RuntimeError("Durable replacement requires absolute non-symlink paths")
+    # Node can create paths beyond MAX_PATH on an ordinary Windows install.
+    # Use extended paths for every subsequent Python and native Win32 operation;
+    # resolving first would erase the symlink boundary we need to check.
+    if os.name == "nt":
+        source = _windows_extended_path(source)
+        destination = _windows_extended_path(destination)
+    if source.is_symlink() or destination.is_symlink():
         raise RuntimeError("Durable replacement requires absolute non-symlink paths")
     directories = set()
     paths = list(source.rglob("*")) if source.is_dir() else []
     paths.append(source)
     source_root = source.resolve(strict=True) if source.is_dir() else None
     for path in paths:
-        if path.is_symlink():
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Cannot inspect runtime payload {path}: {error}") from error
+        if stat.S_ISLNK(info.st_mode):
             if not allow_internal_symlinks or source_root is None:
                 raise RuntimeError("Cannot commit a runtime containing symbolic links")
             target = os.readlink(path)
@@ -633,9 +659,9 @@ def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks:
             if not resolved_target.is_relative_to(source_root):
                 raise RuntimeError("Managed application symlink escapes its release")
             continue
-        if path.is_dir():
+        if stat.S_ISDIR(info.st_mode):
             directories.add(path)
-        elif path.is_file():
+        elif stat.S_ISREG(info.st_mode):
             descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
             try:
                 if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -644,7 +670,7 @@ def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks:
             finally:
                 os.close(descriptor)
         else:
-            raise RuntimeError("Cannot commit a non-regular runtime payload")
+            raise RuntimeError(f"Cannot commit a non-regular runtime payload: {path}")
     # Flush only the application-owned subtree and its narrow common ancestor.
     # The caller creates pending and final paths beneath one private state tree;
     # reaching above this common ancestor would touch unrelated/protected paths.
