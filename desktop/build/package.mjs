@@ -17,6 +17,13 @@ export function packagedReleasePolicyPath(applicationDirectory, platform) {
   throw new Error('Unsupported packaged release policy platform')
 }
 
+export function prepackagedInstallerPath(applicationDirectory, platform) {
+  const application = resolve(applicationDirectory)
+  // electron-builder's macOS prepackaged input is the .app bundle itself;
+  // its Windows and Linux inputs are unpacked application directories.
+  return platform === 'darwin' ? resolve(application, 'Singhouse.app') : application
+}
+
 export async function verifyPackagedReleasePolicy({ applicationDirectory, platform, selectedPolicy }) {
   const expected = assertReleasePolicy(selectedPolicy)
   const path = packagedReleasePolicyPath(applicationDirectory, platform)
@@ -134,9 +141,10 @@ async function main() {
     // electron-builder releases.
     const { files: _files, extraResources: _extraResources, directories, ...installerConfig } = config
     installerConfig.directories = { output: directories.output }
-    await build({ config: installerConfig, prepackaged: application, publish: 'never',
+    const prepackaged = prepackagedInstallerPath(application, nativeManifest.platform)
+    await build({ config: installerConfig, prepackaged, publish: 'never',
       targets: platform.createTarget(signedMacRelease ? 'dmg' : undefined, Arch[nativeManifest.arch]) })
-    if (signedMacRelease) await build({ config: installerConfig, prepackaged: application, publish: 'never',
+    if (signedMacRelease) await build({ config: installerConfig, prepackaged, publish: 'never',
       targets: platform.createTarget('zip', Arch[nativeManifest.arch]) })
     if (signedRelease) {
       const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)

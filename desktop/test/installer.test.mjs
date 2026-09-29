@@ -7,7 +7,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { derivePolicyId } from '../release.mjs'
 import { inspectApplicationInventory } from '../build/release_receipt.mjs'
-import { packagedReleasePolicyPath, verifyInstallerPreservedApplication, verifyPackagedReleasePolicy } from '../build/package.mjs'
+import { packagedReleasePolicyPath, prepackagedInstallerPath, verifyInstallerPreservedApplication, verifyPackagedReleasePolicy } from '../build/package.mjs'
 
 const desktop = fileURLToPath(new URL('../', import.meta.url))
 const installer = new URL('../build/installer.mjs', import.meta.url).href
@@ -18,6 +18,13 @@ function corePolicy(channel = 'core-private-test') {
   policy.policyId = derivePolicyId(policy)
   return policy
 }
+
+test('macOS installer receives the app bundle; Windows and Linux receive unpacked directories', () => {
+  const root = '/tmp/singhouse-artifacts/mac-arm64'
+  assert.equal(prepackagedInstallerPath(root, 'darwin'), resolve(root, 'Singhouse.app'))
+  assert.equal(prepackagedInstallerPath(root, 'win32'), resolve(root))
+  assert.equal(prepackagedInstallerPath(root, 'linux'), resolve(root))
+})
 
 test('packaging verifies the exact selected core and premium runtime policy', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'packaged-policy-'))
