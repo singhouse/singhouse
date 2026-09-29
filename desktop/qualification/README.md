@@ -113,7 +113,26 @@ node desktop/test/packaged-processing-smoke.mjs `
   --download-models --timeout-seconds 3600
 ```
 
-The output directory must not exist; its parent must exist. It retains the
+For an installation interrupted by a host or VM reboot, rerun the same command
+with `--resume` and the original output directory. Resume verifies the exact
+executable, input and runtime-manifest hashes and the original physical isolated
+profile path. It supports interrupted installation only, before any inference
+submission; the profile must still have an empty library. Close the previous
+application first; the packaged application's single-instance ownership is
+required. The original `evidence.json` is preserved unchanged; a unique
+`resume-<UUID>` subdirectory contains the new evidence, model manifest and
+outputs, and links the original evidence and all earlier resume attempts by SHA-256.
+Every prior attempt is checked; malformed evidence or any attempted inference
+blocks resume, even if the library was later emptied. An inference-start marker
+is flushed to disk before submission so an interrupted response cannot be
+silently retried. A prior `running` status
+means no outcome was recorded, never a pass. Runtime reuse requires the current
+backend to admit the exact runtime; otherwise the advanced install route runs
+again. Model installation always runs through the real route, which verifies
+and reuses already downloaded cache files. Restart, readiness, real inference
+and all output assertions still run in full. Retain all attempt directories.
+
+Without `--resume`, the output directory must not exist; its parent must exist. It retains the
 isolated application profile, four playback WAVs, the model manifest and
 `evidence.json`. Keep this directory private: the profile contains normal
 application session state and machine-generated lyrics. The evidence JSON

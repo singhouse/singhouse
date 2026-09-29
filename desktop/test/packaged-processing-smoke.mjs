@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Explicit, real local inference. Run only with licensed evaluation audio.
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -11,6 +11,7 @@ export function parseArguments(args) {
   const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds'])
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]
+    if (flag === '--resume') { assert.ok(!options.resume, 'Duplicate --resume'); options.resume = true; continue }
     if (flag === '--download-models') { options.downloadModels = true; continue }
     if (flag === '--model-folder') throw new Error('The advanced application route has no combined offline model-folder import. Use --download-models explicitly; do not transplant cache pointers.')
     if (!valued.has(flag) || options[flag] !== undefined || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Invalid argument: ${flag}`)
@@ -21,12 +22,60 @@ export function parseArguments(args) {
   const seconds = Number(options['--timeout-seconds'] ?? 3600)
   assert.ok(Number.isInteger(seconds) && seconds >= 60 && seconds <= 14400, 'Timeout must be 60–14400 seconds')
   return { executable: resolve(options['--executable']), manifest: resolve(options['--runtime-manifest']),
-    audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
+    resume: options.resume === true, audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
 }
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const pause = ms => new Promise(resolveWait => setTimeout(resolveWait, ms))
 const MODEL_IDS = ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer']
+
+// Resumption only continues installation in the original empty qualification
+// profile. A submitted inference is never silently adopted or declared passed.
+export function validateResume(output, expected) {
+  const physicalDirectory = path => {
+    assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink(), 'Resume directory must not be a link')
+    assert.equal(resolve(realpathSync(path)).toLowerCase(), resolve(path).toLowerCase(), 'Resume path must be physical')
+  }
+  physicalDirectory(output)
+  const profile = join(output, 'profile')
+  physicalDirectory(profile)
+  function readAttempt(directory) {
+    assert.ok(!existsSync(join(directory, 'inference-started.json')), 'Resume refuses an attempted or ambiguous inference submission')
+    const evidencePath = join(directory, 'evidence.json')
+    assert.ok(lstatSync(evidencePath).isFile() && !lstatSync(evidencePath).isSymbolicLink(), 'Prior evidence must be a regular file')
+    const bytes = readFileSync(evidencePath), prior = JSON.parse(bytes)
+    assert.equal(prior.schema, 1); assert.equal(prior.kind, 'packaged-local-processing-smoke')
+    assert.ok(['running', 'failed'].includes(prior.status), 'Only incomplete qualification evidence can resume')
+    assert.ok(!['inferenceStartedAt', 'songId', 'jobId', 'outputs', 'transcription'].some(key => Object.hasOwn(prior, key)),
+      'Resume supports installation interruptions only; use a new output for inference retries')
+    assert.equal(prior.executableSha256, expected.executableSha256, 'Resume executable changed')
+    assert.equal(prior.runtimeManifestSha256, expected.runtimeManifestSha256, 'Resume runtime manifest changed')
+    assert.equal(prior.input?.sha256, expected.input.sha256, 'Resume audio changed')
+    assert.equal(prior.input?.bytes, expected.input.bytes, 'Resume audio size changed')
+    assert.equal(prior.application?.packaged, true)
+    assert.equal(prior.application?.platform, 'win32')
+    assert.equal(resolve(prior.application.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Prior profile identity does not match isolated profile')
+    return { prior, sha256: hash(bytes) }
+  }
+  const original = readAttempt(output), attempts = []
+  // Every previous resume is relevant, even if the original evidence still
+  // says installation was interrupted and the library was later emptied.
+  for (const name of readdirSync(output).filter(name => name.startsWith('resume-')).sort()) {
+    const directory = join(output, name)
+    physicalDirectory(directory)
+    const attempt = readAttempt(directory)
+    assert.equal(attempt.prior.resume?.priorEvidence, '../evidence.json', 'Resume attempt has invalid lineage')
+    assert.equal(attempt.prior.resume?.priorEvidenceSha256, original.sha256, 'Resume attempt has changed lineage')
+    attempts.push({ evidence: `../${name}/evidence.json`, sha256: attempt.sha256, status: attempt.prior.status })
+  }
+  return { ...original, attempts }
+}
+
+export function reusableRuntime(readiness, manifest) {
+  // The backend exposes runtime only after its normal verified admission.
+  return readiness?.runtime?.id === hash(Buffer.from(JSON.stringify(manifest)))
+    && readiness.runtime.accelerator === manifest.accelerator
+}
 
 export async function run(options) {
   assert.equal(process.platform, 'win32', 'This qualification harness requires the Windows packaged application')
@@ -42,7 +91,7 @@ export async function run(options) {
   const manifestBytes = readFileSync(options.manifest), manifest = JSON.parse(manifestBytes)
   assert.equal(manifest.kind, 'processing')
   // The real app, not this harness, decides whether this lock is trusted.
-  mkdirSync(options.output) // A fresh evidence/profile directory is mandatory.
+  if (!options.resume) mkdirSync(options.output) // Never adopt an existing output implicitly.
   const profile = join(options.output, 'profile')
   const started = Date.now(), deadline = started + options.timeoutMs
   const evidence = { schema: 1, kind: 'packaged-local-processing-smoke', startedAt: new Date(started).toISOString(),
@@ -52,7 +101,20 @@ export async function run(options) {
     consent: { modelRetrieval: true, localInference: true }, timingsMs: {}, transitions: [],
     limitations: ['Not corpus accuracy or listening evidence', 'Not physical output or show qualification',
       'No representative RAM/VRAM measurement', 'Does not qualify a release catalog'] }
-  const save = () => writeFileSync(join(options.output, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
+  let artifactDirectory = options.output
+  let resumed
+  if (options.resume) {
+    resumed = validateResume(options.output, evidence)
+    // Each attempt has separate evidence and outputs; original bytes stay intact.
+    artifactDirectory = join(options.output, `resume-${randomUUID()}`)
+    mkdirSync(artifactDirectory)
+    evidence.resume = { priorEvidence: '../evidence.json', priorEvidenceSha256: resumed.sha256,
+      priorAttempts: resumed.attempts, priorStatus: resumed.prior.status, classification: resumed.prior.status === 'running'
+        ? 'Prior attempt ended without a recorded outcome; interruption is not a pass'
+        : 'Prior attempt failed; this is a new qualification attempt' }
+    evidence.application = resumed.prior.application
+  }
+  const save = () => writeFileSync(join(artifactDirectory, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
   save()
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     /^(PATH|Path|SystemRoot|SYSTEMROOT|WINDIR|windir|COMSPEC|ComSpec|PATHEXT|TEMP|TMP|TMPDIR|USERPROFILE|APPDATA|LOCALAPPDATA|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u.test(key)))
@@ -74,14 +136,30 @@ export async function run(options) {
   async function close() {
     if (!application) return
     const owned = application; application = null
-    let timer
+    const child = owned.process()
+    let timer, onExit
+    const exited = child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise(resolveExit => { onExit = resolveExit; child.once('exit', onExit) })
     try {
-      await Promise.race([owned.close(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Application close timed out')), 30000) })])
-    } catch {
-      const pid = owned.process().pid
-      if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 15000, stdio: 'ignore' })
-      else owned.process().kill('SIGKILL')
-    } finally { clearTimeout(timer) }
+      await Promise.race([(async () => { await owned.close(); await exited })(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Application close timed out')), 30000) })])
+      assert.equal(child.exitCode, 0, 'Owned application exited unsuccessfully')
+      assert.equal(child.signalCode, null, 'Owned application exited by signal')
+    } catch (error) {
+      // Force only the still-running owned process. Cleanup cannot turn an
+      // unsuccessful or timed-out normal shutdown into qualification evidence.
+      if (child.exitCode === null && child.signalCode === null) {
+        evidence.forcedShutdown = true
+        try {
+          assert.equal(child.kill('SIGKILL'), true, 'Owned application forced cleanup did not send a signal')
+        } catch { evidence.shutdownCleanupError = 'Owned application forced cleanup failed' }
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+      if (onExit) child.removeListener('exit', onExit)
+    }
   }
   async function launch() {
     const { _electron: electron } = await import('playwright')
@@ -91,8 +169,10 @@ export async function run(options) {
       args: [`--user-data-dir=${profile}`], env, timeout: Math.min(300000, remaining()) })
     remaining() // Assign ownership first so an expired deadline still closes it.
     const identity = await bounded(application.evaluate(({ app }) => ({ packaged: app.isPackaged,
-      userData: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch })))
+      ownsInstance: app.hasSingleInstanceLock(), userData: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch })))
     assert.equal(identity.packaged, true)
+    assert.equal(identity.ownsInstance, true, 'Qualification profile is already in use')
+    assert.equal(resolve(identity.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Application selected a different profile')
     const child = relative(options.output, identity.userData)
     assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Application profile escaped the isolated directory')
     if (evidence.application) assert.equal(evidence.application.userData, identity.userData)
@@ -150,7 +230,10 @@ export async function run(options) {
     assert.equal(songs.total, 0, 'Qualification profile must have an empty library')
     const featurePolicy = await api('/api/features')
     assert.equal(featurePolicy.lyrics_lookup.enabled, false, 'External lyric lookup must be disabled')
-    await install(options.manifest, 'processing')
+    const initialReadiness = await api('/api/features/processing')
+    evidence.initialReadiness = initialReadiness
+    evidence.runtimeReused = Boolean(resumed && reusableRuntime(initialReadiness, manifest)); save()
+    if (!evidence.runtimeReused) await install(options.manifest, 'processing')
     const policyEncoded = await bounded(application.evaluate(({ app }) => {
       const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
       return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
@@ -159,8 +242,17 @@ export async function run(options) {
     const policy = JSON.parse(policyBytes.toString('utf8'))
     const entries = MODEL_IDS.map(id => { const matches = policy.models.filter(entry => entry.id === id); assert.equal(matches.length, 1); return matches[0] })
     const modelManifest = { schema: 1, kind: 'models', models: MODEL_IDS, files: entries.flatMap(entry => entry.files) }
-    const modelPath = join(options.output, 'model-manifest.json')
+    const modelPath = join(artifactDirectory, 'model-manifest.json')
     const modelManifestBytes = Buffer.from(`${JSON.stringify(modelManifest, null, 2)}\n`)
+    if (resumed) {
+      if (resumed.prior.modelPolicySha256) assert.equal(hash(policyBytes), resumed.prior.modelPolicySha256, 'Packaged model policy changed')
+      if (resumed.prior.modelManifestSha256) assert.equal(hash(modelManifestBytes), resumed.prior.modelManifestSha256, 'Model manifest changed')
+      const oldModelPath = join(options.output, 'model-manifest.json')
+      if (existsSync(oldModelPath)) {
+        assert.ok(lstatSync(oldModelPath).isFile() && !lstatSync(oldModelPath).isSymbolicLink(), 'Prior model manifest must be a regular file')
+        assert.equal(hash(readFileSync(oldModelPath)), hash(modelManifestBytes), 'Prior model manifest changed')
+      }
+    }
     writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
     evidence.modelPolicySha256 = hash(policyBytes)
     evidence.modelManifestSha256 = hash(modelManifestBytes)
@@ -173,6 +265,12 @@ export async function run(options) {
     assert.equal(readiness.runtime.accelerator, manifest.accelerator)
     assert.equal(readiness.runtime.id, hash(Buffer.from(JSON.stringify(manifest))), 'Application selected a different processing runtime')
     const inferenceStarted = Date.now()
+    // Persist before POST: a crash after server acceptance but before its reply
+    // must never make a later resume treat the profile as installation-only.
+    evidence.inferenceStartedAt = new Date(inferenceStarted).toISOString()
+    writeFileSync(join(artifactDirectory, 'inference-started.json'),
+      `${JSON.stringify({ startedAt: evidence.inferenceStartedAt })}\n`, { flag: 'wx', flush: true })
+    save()
     const submitted = await bounded(host.evaluate(async ({ bytes, filename }) => {
       const data = Uint8Array.from(atob(bytes), value => value.charCodeAt(0)), form = new FormData()
       form.append('file', new Blob([data], { type: 'application/octet-stream' }), filename)
@@ -214,7 +312,7 @@ export async function run(options) {
         let binary = ''; for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode(...bytes.subarray(i, i + 32768))
         return btoa(binary)
       }, url), 35000)
-      const bytes = Buffer.from(encoded, 'base64'), path = join(options.output, `${role}.wav`)
+      const bytes = Buffer.from(encoded, 'base64'), path = join(artifactDirectory, `${role}.wav`)
       writeFileSync(path, bytes, { flag: 'wx' })
       const probe = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'stream=codec_name,sample_rate,channels,duration_ts,time_base:format=duration', '-of', 'json', path], { timeout: Math.min(30000, remaining()), encoding: 'utf8' }))
       execFileSync(ffmpeg, ['-nostdin', '-v', 'error', '-i', path, '-f', 'null', '-'], { timeout: Math.min(60000, remaining()), stdio: 'pipe' })
@@ -237,7 +335,7 @@ export async function run(options) {
     catch (error) { evidence.status = 'failed'; evidence.shutdownError = 'Owned application shutdown failed'; throw error }
     finally { evidence.finishedAt = new Date().toISOString(); evidence.timingsMs.total = Date.now() - started; save() }
   }
-  console.log(`Real local processing smoke passed. Evidence: ${join(options.output, 'evidence.json')}`)
+  console.log(`Real local processing smoke passed. Evidence: ${join(artifactDirectory, 'evidence.json')}`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
