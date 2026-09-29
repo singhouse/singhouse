@@ -141,13 +141,13 @@ export class OnboardingSetup {
   selection(active) {
     if (this.catalogError) throw new Error(this.catalogError)
     const catalog = this.catalog
-    if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Complete local setup is unavailable: this release has no authenticated processing installation catalog.')
+    if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
     if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
         || q.runtimeLockSha256 !== runtime.provenance.lockSha256
         || ['platform', 'arch', 'accelerator'].some(key => q[key] !== runtime[key])) {
-      throw new Error('Complete local setup is unavailable: the processing bundle has no matching complete qualification.')
+      throw new Error('Local song processing is not available in this version yet. Its processing tools still need to pass the required checks.')
     }
     const ids = [...new Set([...(active?.manifest.models || []), ...LOCAL_MODEL_IDS])]
     const entries = ids.map(id => {
@@ -155,7 +155,7 @@ export class OnboardingSetup {
       const terms = catalog.models?.find(model => model.id === id)?.terms
       if (!entry || !Array.isArray(terms) || !terms.length || terms.some(term => {
         try { return !term.label?.trim() || new URL(term.url).protocol !== 'https:' } catch { return true }
-      })) throw new Error(`Complete local setup is unavailable: authenticated source and terms information is missing for ${id}.`)
+      })) throw new Error(`Local setup cannot continue because source and terms information is missing for ${id}.`)
       return { ...entry, terms }
     })
     const models = this.cache.validate({ schema: 1, kind: 'models', models: ids, files: entries.flatMap(entry => entry.files) })

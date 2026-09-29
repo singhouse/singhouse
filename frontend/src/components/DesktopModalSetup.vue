@@ -51,7 +51,7 @@ function save() {
     pendingChange.value = true
     notice.value = status.value?.releaseSupported
       ? 'Configuration saved. No audio was uploaded. Restart to apply your connection and permissions.'
-      : 'Configuration saved for later. This release does not yet include a qualified Modal deployment contract.'
+      : 'Settings saved for later, but they are not active. Cloud song processing is not available in this version yet.'
   }, 'Configuration could not be saved. Enter your credentials again and retry.')
 }
 function check() {
@@ -61,7 +61,7 @@ function check() {
     const value = await props.bridge.checkModalConnection()
     if (value?.schema !== 1) throw new Error('Invalid response')
     result.value = { accessChecked: value.accessChecked === true, compatible: value.compatible === true }
-  }, 'Connection metadata could not be checked. Review the saved account and deployment, then retry.')
+  }, 'The saved connection could not be checked. Review the saved account and deployment, then retry.')
 }
 function forget() {
   clearSecrets()
@@ -119,7 +119,7 @@ onBeforeUnmount(clearSecrets)
       </li>
       <li>
         <h2>Save and check your connection</h2>
-        <p>Saving and checking only stores configuration and checks account and deployment metadata. Neither action uploads audio or starts processing.</p>
+        <p>Saving stores your settings. Checking confirms access to your account and looks for the required functions in your deployment. Neither action uploads audio or starts processing.</p>
         <p v-if="status?.configured">
           Credentials are stored on this computer. Checks use that saved configuration. To replace it, enter both token fields and save again.
         </p>
@@ -217,7 +217,7 @@ onBeforeUnmount(clearSecrets)
       role="status"
     >
       <h2>Your Modal connection is ready</h2>
-      <p>The application is using your saved account, permissions and qualified deployment.</p>
+      <p>The application is using your saved account, permissions and cloud deployment.</p>
       <button
         type="button"
         class="primary"
@@ -232,8 +232,8 @@ onBeforeUnmount(clearSecrets)
       role="status"
     >
       <h2>{{ result.accessChecked ? 'Account access verified' : 'Account access not verified' }}</h2>
-      <p>{{ result.compatible && result.accessChecked ? 'Deployment metadata is compatible. Processing is not yet qualified.' : 'Deployment compatibility has not been established. Review your deployment settings and guide.' }}</p>
-      <p>This check does not enable processing. A metadata check does not verify model quality, successful song processing, or cloud costs.</p>
+      <p>{{ result.compatible && result.accessChecked ? 'The connection looks compatible. Song processing has not been tested by this check.' : 'The check could not confirm that your cloud deployment supports this app. Review your settings and the deployment guide.' }}</p>
+      <p>This check does not enable processing. It does not process a song, check the results, or measure cloud costs.</p>
     </div>
     <p
       v-if="notice"

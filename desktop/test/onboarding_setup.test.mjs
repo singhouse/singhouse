@@ -34,12 +34,12 @@ async function start(setup, planId) { await setup.start({ consent: true, planId 
 
 test('missing release catalog and qualification fail closed without retrieving any bytes', async () => {
   const { setup, calls } = fixture({ catalog: null })
-  assert.match((await setup.preflight()).reason, /authenticated.*catalog/)
+  assert.match((await setup.preflight()).reason, /Local song processing is not available in this version yet/)
   assert.equal((await start(setup)).state, 'error')
   assert.deepEqual(calls, [])
   const second = fixture()
   second.setup.catalog.qualification.passed = false
-  assert.match((await second.setup.preflight()).reason, /qualification/)
+  assert.match((await second.setup.preflight()).reason, /processing tools still need to pass the required checks/)
 })
 test('preflight covers all components, storage, source and terms before explicit consent', async () => {
   const { setup, calls } = fixture()
