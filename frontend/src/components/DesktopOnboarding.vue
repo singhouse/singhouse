@@ -244,12 +244,12 @@ onUnmounted(() => clearInterval(poll))
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div><div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.diskFreeBytes) }}</dd></div>
         </dl>
         <details>
-          <summary>Already downloaded the models?</summary>
+          <summary>Have a complete model folder?</summary>
           <p v-if="plan?.modelSource === 'offline'">
-            Models will be read from your selected folder and verified. Missing files will not be downloaded automatically. The processing runtime may still need downloading.
+            Models will be read from your selected folder and verified. Missing files will stop setup. The processing runtime may still need to be retrieved separately.
           </p>
           <p v-else>
-            Choose a complete model folder to use files you already have. Singhouse will verify each file before installing it.
+            Choose a complete model folder to use files you already have. {{ BRAND_NAME }} will verify each file before installing it.
           </p>
           <button
             class="text-button"
@@ -264,7 +264,7 @@ onUnmounted(() => clearInterval(poll))
             :disabled="busy"
             @click="setup.chooseModelSource('upstream')"
           >
-            Download models instead
+            Use upstream model sources
           </button>
         </details>
         <p

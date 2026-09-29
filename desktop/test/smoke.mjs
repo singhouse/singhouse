@@ -73,7 +73,7 @@ try {
   await host.locator('button.popout-btn').click()
   await reopened
   const boundary = await host.evaluate(async () => ({ node: typeof require, bridge: Object.keys(window.karaokeDesktop), blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true) }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'chooseModelSource', 'getModalStatus', 'saveModalConfig', 'checkModalConnection', 'forgetModalConfig', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
   console.log('Native foreground playback, output control, projector reopen and sandbox checks passed.')
 } finally {
   await application.close()

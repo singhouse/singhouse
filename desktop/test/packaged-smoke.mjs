@@ -47,7 +47,21 @@ async function launch() {
   })
   assert.deepEqual(healthy, [200, 200], 'Packaged session must authenticate itself')
   const welcome = host.getByRole('button', { name: 'I already have karaoke files →' })
-  if (await welcome.isVisible()) await welcome.click()
+  if (await welcome.isVisible()) {
+    await host.getByRole('button', { name: 'Get started →' }).click()
+    await host.getByRole('heading', { name: /Where should we/ }).waitFor()
+    const facts = await host.evaluate(() => window.karaokeDesktop.preflightSetup())
+    assert.equal(facts.hardware.platform, process.platform)
+    assert.ok(facts.hardware.totalMemoryBytes > 0)
+    assert.equal(facts.ready, false, 'Clean profile cannot already have local processing')
+    await host.getByRole('button', { name: /My Modal account/ }).click()
+    await host.getByRole('button', { name: 'Continue →', exact: true }).click()
+    await host.getByRole('heading', { name: 'Save and check your connection' }).waitFor()
+    assert.equal(await host.getByRole('button', { name: 'Check saved connection' }).isEnabled(), false)
+    assert.equal(await host.locator('input[name="tokenSecret"]').inputValue(), '')
+    // Never enter credentials or call Modal during a packaged smoke test.
+    await host.locator('button.library').click()
+  }
   return host
 }
 
@@ -63,7 +77,7 @@ async function sandboxChecks(host) {
     bridge: Object.keys(window.karaokeDesktop),
     blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true),
   }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'chooseModelSource', 'getModalStatus', 'saveModalConfig', 'checkModalConnection', 'forgetModalConfig', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
 }
 
 try {
