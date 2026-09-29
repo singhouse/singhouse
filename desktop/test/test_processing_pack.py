@@ -42,6 +42,20 @@ class ProcessingPackTests(unittest.TestCase):
         self.assertEqual(json.loads(manifest["provenance"]["inputLock"]), self.lock)
         self.assertIn("lyricsync.transcription.heart", manifest["probe"]["modules"])
 
+    def test_crlf_lock_bytes_survive_embedding_and_packaging(self):
+        raw = (json.dumps(self.lock, indent=2) + "\n").replace("\n", "\r\n").encode("utf-8")
+        self.assertIn(b"\r\n", raw)
+        self.lock_path.write_bytes(raw)
+        manifest = builder.assemble(self.payload, self.lock_path, self.root / "output")
+        retained = json.loads((self.root / "output/manifest.json").read_text())
+        expected_digest = hashlib.sha256(raw).hexdigest()
+        for value in (manifest, retained):
+            embedded = value["provenance"]["inputLock"].encode("utf-8")
+            self.assertEqual(embedded, raw)
+            self.assertEqual(hashlib.sha256(embedded).hexdigest(), expected_digest)
+            self.assertEqual(value["provenance"]["lockSha256"], expected_digest)
+        self.assertEqual((self.root / "output/input-lock.json").read_bytes(), raw)
+
     def test_assembled_manifest_is_accepted_by_runtime_consumer(self):
         manifest = self.assemble()
         module = (Path(__file__).parents[1] / "runtime_manager.mjs").as_uri()
