@@ -94,20 +94,55 @@ export async function sealSignedMacApplication({ applicationDirectory, policy, p
   } finally { await rm(work, { recursive: true, force: true }) }
 }
 
-export async function notarizeAndStaple(path, selection, run = execFile) {
-  const work = await mkdtemp(join(tmpdir(), 'singhouse-mac-notary-'))
+export async function notarizeAndStaple(path, selection, run = execFile, report = console.log) {
+  const target = path.endsWith('.app') ? 'application' : 'disk image'
+  let work, stage = 'preparation', accepted = false, submissionId
+  const readResult = stdout => {
+    let result
+    try { result = JSON.parse(stdout) } catch { return undefined }
+    if (!result || typeof result !== 'object') return undefined
+    // Only display recognized status values and a validated ID. Neither command
+    // errors nor arbitrary Apple response fields belong in the build log.
+    const status = ['Accepted', 'Invalid', 'Rejected', 'In Progress'].includes(result.status) ? result.status : 'unknown'
+    submissionId = typeof result.id === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(result.id) ? result.id : undefined
+    report(`Apple notarization status for ${target}: ${status}; submission ID: ${submissionId || 'unavailable'}.`)
+    return { status, id: submissionId }
+  }
   try {
+    work = await mkdtemp(join(tmpdir(), 'singhouse-mac-notary-'))
     let submission = path
     if (path.endsWith('.app')) {
       submission = join(work, `${basename(path)}.zip`)
       await run('/usr/bin/ditto', ['-c', '-k', '--keepParent', path, submission])
     }
-    const { stdout } = await run('/usr/bin/xcrun', ['notarytool', 'submit', submission, '--keychain-profile', selection.keychainProfile, '--wait', '--output-format', 'json'], { maxBuffer: 1024 * 1024 })
-    const result = JSON.parse(stdout)
-    if (result.status !== 'Accepted' || !/^[0-9a-f-]{36}$/i.test(result.id || '')) throw new Error(`Apple notarization was not accepted: ${result.status || 'unknown'}`)
+    stage = 'submission'
+    report(`Submitting ${target} to Apple for notarization; waiting for Apple's result.`)
+    let stdout
+    try {
+      ({ stdout } = await run('/usr/bin/xcrun', ['notarytool', 'submit', submission, '--keychain-profile', selection.keychainProfile, '--wait', '--output-format', 'json'], { maxBuffer: 1024 * 1024 }))
+    } catch (error) {
+      readResult(error?.stdout)
+      throw new Error('Notary submission command failed')
+    }
+    const result = readResult(stdout)
+    if (result?.status !== 'Accepted' || !result.id) throw new Error('Notary acceptance was not verified')
+    accepted = true
+    stage = 'stapling'
+    report(`Stapling Apple's notarization ticket to ${target}.`)
     await run('/usr/bin/xcrun', ['stapler', 'staple', path])
+    report(`Notarization ticket stapled to ${target}.`)
+    stage = 'ticket validation'
     await run('/usr/bin/xcrun', ['stapler', 'validate', path])
-  } finally { await rm(work, { recursive: true, force: true }) }
+    report(`Notarization ticket validation succeeded for ${target}; submission ID: ${submissionId}.`)
+  } catch {
+    const message = accepted
+      ? `Apple notarization Accepted for ${target} (submission ID: ${submissionId}), but ${stage} failed.`
+      : `Apple notarization failed during ${stage} for ${target}; acceptance was not verified${submissionId ? ` (submission ID: ${submissionId})` : ''}.`
+    report(message)
+    // Do not attach the subprocess error: its message/stdout/stderr may include
+    // command arguments, keychain profile names, or other sensitive output.
+    throw new Error(message)
+  } finally { if (work) await rm(work, { recursive: true, force: true }) }
 }
 
 export async function signMacDiskImage(path, selection, run = execFile) {

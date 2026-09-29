@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { canonicalJson } from '../release.mjs'
 import { developerIdRequirement, inspectInstalledLaunchBoundary, inspectSignedMacMarker, isMachO, MAC_RELEASE_CERT_SHA1, macSigningSelection, signedMacMarker, verifyDeveloperId, verifySignedMacApplication, verifySigningCertificate } from '../macos_signing.mjs'
 import { assertPackagingMode, sha256File } from '../build/package.mjs'
-import { appRelativeInventory, macExecutableModes, nativeInventoryMemberNames, verifyMacExecutableModes } from '../build/sign_macos.mjs'
+import { appRelativeInventory, macExecutableModes, nativeInventoryMemberNames, notarizeAndStaple, verifyMacExecutableModes } from '../build/sign_macos.mjs'
 
 const environment = {
   SINGHOUSE_MAC_TEAM_ID: '25Y7U443K6',
@@ -186,4 +186,66 @@ test('certificate selection requires the exact SHA-1 and common name', async () 
   const selected = macSigningSelection(environment)
   await verifySigningCertificate(selected, async () => ({ stdout: `  1) ${selected.fingerprint} "${selected.identity}"\n` }))
   await assert.rejects(verifySigningCertificate(selected, async () => ({ stdout: `  1) ${selected.fingerprint} "Apple Development: MICHAEL ALAN JONES (25Y7U443K6)"\n` })), /unavailable/)
+})
+
+const notaryId = '12345678-1234-1234-1234-123456789abc'
+
+test('notarization reports submission, Apple status and ID, and stapling validation in order', async () => {
+  for (const path of ['/tmp/Singhouse.app', '/tmp/Singhouse.dmg']) {
+    const events = []
+    await notarizeAndStaple(path, macSigningSelection(environment), async (_command, args) => {
+      events.push(args[0])
+      return { stdout: JSON.stringify({ status: 'Accepted', id: notaryId }) }
+    }, message => events.push(message))
+    assert.equal(events.includes('-c'), path.endsWith('.app'))
+    assert.match(events.find(event => event.startsWith('Submitting ')), /waiting for Apple's result/)
+    assert.ok(events.findIndex(event => event.startsWith('Submitting ')) < events.indexOf('notarytool'))
+    assert.match(events.find(event => event.startsWith('Apple notarization status')), new RegExp(`Accepted; submission ID: ${notaryId}`))
+    assert.ok(events.findIndex(event => event.startsWith('Notarization ticket stapled')) > events.indexOf('stapler'))
+    assert.match(events.at(-1), /ticket validation succeeded/)
+  }
+})
+
+test('notarization fails closed and reports sanitized failures before acceptance', async () => {
+  for (const response of [
+    'invalid JSON secret-value', 'null',
+    JSON.stringify({ status: 'Invalid', id: notaryId }),
+    JSON.stringify({ status: 'Accepted', id: 'secret-value' }),
+    JSON.stringify({ status: 'Accepted', id: '-'.repeat(36) }),
+    JSON.stringify({ status: 'secret-value', id: notaryId }),
+  ]) {
+    const messages = [], calls = []
+    await assert.rejects(notarizeAndStaple('/tmp/Singhouse.dmg', macSigningSelection(environment), async (_command, args) => {
+      calls.push(args)
+      return { stdout: response }
+    }, message => messages.push(message)), /acceptance was not verified/)
+    assert.equal(calls.length, 1)
+    assert.match(messages.at(-1), /failed during submission/)
+    assert.doesNotMatch(messages.join(' '), /secret-value|private-release|validation succeeded/)
+  }
+})
+
+test('notarization command failures expose no subprocess details and keep acceptance context', async () => {
+  for (const failure of ['prepare', 'submit', 'staple', 'validate']) {
+    const messages = []
+    const run = async (_command, args) => {
+      if ((failure === 'prepare' && args[0] === '-c') || args[1] === failure) {
+        const error = new Error('secret-value private-release')
+        error.stderr = 'secret-value'
+        if (failure === 'submit') error.stdout = JSON.stringify({ status: 'Invalid', id: notaryId, message: 'secret-value' })
+        throw error
+      }
+      return { stdout: JSON.stringify({ status: 'Accepted', id: notaryId }) }
+    }
+    await assert.rejects(notarizeAndStaple('/tmp/Singhouse.app', macSigningSelection(environment), run, message => messages.push(message)), error => {
+      assert.doesNotMatch(error.stack, /secret-value|private-release/)
+      assert.equal(error.cause, undefined)
+      assert.match(error.message, failure === 'staple' || failure === 'validate' ? /Accepted.*but .*failed/ : /acceptance was not verified/)
+      return true
+    })
+    assert.doesNotMatch(messages.join(' '), /secret-value|private-release|validation succeeded/)
+    if (failure === 'submit') assert.ok(messages.some(message => message.includes(`Invalid; submission ID: ${notaryId}`)))
+    if (failure === 'staple') assert.match(messages.at(-1), /but stapling failed/)
+    if (failure === 'validate') assert.match(messages.at(-1), /but ticket validation failed/)
+  }
 })
