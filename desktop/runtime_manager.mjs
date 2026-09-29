@@ -562,14 +562,27 @@ export class RuntimeManager {
     const allowed = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
     const present = await inventory(directory)
     if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Runtime file inventory does not match its manifest')
-    for (const file of manifest.files) {
-      let ancestor = directory
-      for (const part of file.path.split('/').slice(0, -1)) {
-        ancestor = join(ancestor, part)
-        if (!(await lstat(ancestor)).isDirectory() || (await lstat(ancestor)).isSymbolicLink()) throw new Error('Invalid runtime directory')
+    // Bound both open descriptors and streaming hash buffers. Every file still
+    // checks its ancestors independently; nothing is cached across verifications.
+    let next = 0, failure
+    const worker = async () => {
+      while (!failure && next < manifest.files.length) {
+        const file = manifest.files[next++]
+        try {
+          let ancestor = directory
+          for (const part of file.path.split('/').slice(0, -1)) {
+            ancestor = join(ancestor, part)
+            const info = await lstat(ancestor)
+            if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid runtime directory')
+          }
+          if (!await matches(join(directory, file.path), file)) throw new Error('Installed runtime verification failed')
+        } catch (error) { failure ??= error }
       }
-      if (!await matches(join(directory, file.path), file)) throw new Error('Installed runtime verification failed')
     }
+    // Workers catch failures so all in-flight checks close their handles before
+    // rejection (and before active() can try a different runtime).
+    await Promise.all(Array.from({ length: Math.min(4, manifest.files.length) }, worker))
+    if (failure) throw failure
     return { id, directory, manifest }
   }
 

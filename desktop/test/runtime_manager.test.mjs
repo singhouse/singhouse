@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -460,4 +460,92 @@ test('expanding a model cache reuses verified installed weights without another 
   assert.deepEqual((await cache.active()).manifest.models, ['old', 'new'])
   assert.equal(await readFile(join(original.directory, records[0].path), 'utf8'), 'old')
   assert.notEqual((await stat(join(original.directory, records[0].path))).ino, (await stat(join(combined.directory, records[0].path))).ino)
+})
+
+
+test('verification bounds hashing and drains in-flight checks before rejecting corruption', async t => {
+  const { manifest, manager } = await fixture(t)
+  for (let i = 0; i < 10; i++) manifest.files.push({ ...manifest.files[1], path: `lib/dependencies/file-${i}` })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  // Same-size corruption must reach the hash check, regardless of worker order.
+  for (const record of manifest.files) await writeFile(join(installed.directory, record.path), 'x'.repeat(record.size))
+  const handle = await open(join(installed.directory, manifest.python), 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStream = prototype.createReadStream
+  let started = 0, finished = 0, settled = false, firstFinished
+  const drainedFirst = new Promise(resolve => { firstFinished = resolve })
+  let firstWave
+  const ready = new Promise(resolve => { firstWave = resolve })
+  const releases = []
+  t.mock.method(prototype, 'createReadStream', function (options) {
+    const stream = nativeStream.call(this, options)
+    const index = started++
+    const gate = new Promise(resolve => releases.push(resolve))
+    if (started === 4) firstWave()
+    return (async function* () {
+      try { await gate; yield* stream }
+      finally { finished++; if (index === 0) firstFinished() }
+    })()
+  })
+  const verification = manager.verify(installed.id)
+  const rejection = assert.rejects(verification, /verification failed/)
+  verification.then(() => { settled = true }, () => { settled = true })
+  // A deadline makes a regression to serial checks fail instead of hanging.
+  await Promise.race([ready, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error('Four hash workers did not start')), 5000)
+    timer.unref()
+    ready.then(() => clearTimeout(timer))
+  })])
+  try {
+    assert.equal(started, 4)
+    releases[0]()
+    await drainedFirst
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(settled, false, 'A failed worker must wait for the other checks')
+    assert.equal(started, 4, 'A failed worker must not queue more files')
+  } finally { for (const release of releases) release() }
+  await rejection
+  assert.equal(finished, started)
+  assert.equal(started, 4)
+})
+
+test('verification rejects an opened file replaced before its path identity check', async t => {
+  const { manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  const path = join(installed.directory, manifest.python)
+  const original = await stat(path)
+  const handle = await open(path, 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStat = prototype.stat
+  let swapped = false
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const info = await nativeStat.apply(this, args)
+    if (!swapped && info.ino === original.ino && info.dev === original.dev) {
+      swapped = true
+      await rename(path, path + '.moved')
+      await writeFile(path, 'fixture python')
+    }
+    return info
+  })
+  await assert.rejects(manager.verify(installed.id), /changed while opening/)
+  assert.equal(swapped, true)
+})
+
+test('verification preserves long nested paths, detects subsequent corruption and unexpected files', async t => {
+  const { manifest, manager } = await fixture(t)
+  const deep = Array.from({ length: 10 }, (_, i) => `dependency-layer-${i}`).join('/') + '/NOTICE.long-path'
+  manifest.files.push({ ...manifest.files[1], path: deep })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  const path = join(installed.directory, deep)
+  assert.ok(path.length > 260)
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  await writeFile(path, 'bad notice')
+  await assert.rejects(manager.verify(installed.id), /verification failed/)
+  await writeFile(path, 'MIT notice')
+  await writeFile(join(installed.directory, 'unexpected'), 'extra')
+  await assert.rejects(manager.verify(installed.id), /inventory/)
 })
