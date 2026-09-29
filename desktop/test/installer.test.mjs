@@ -119,6 +119,9 @@ test('installer rejects stale native admission policy instead of overlaying it',
   process.env.KARAOKE_NATIVE_PAYLOAD = native
   try {
     const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
+    assert.equal(pkg.author, 'Bones Consulting LLC')
+    assert.equal(pkg.description, 'Singhouse is a self-hosted karaoke suite for your own music library.')
+    assert.equal(pkg.desktopName, 'org.karaoke.desktop.desktop')
     await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: pkg.version }))
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
@@ -138,6 +141,8 @@ test('installer rejects stale native admission policy instead of overlaying it',
     assert.equal(valid.nsis.differentialPackage, false)
     assert.equal(valid.nsis.packElevateHelper, false)
     assert.equal(valid.linux.icon, resolve(icons, 'linux'))
+    assert.equal(valid.appId, pkg.desktopName.slice(0, -'.desktop'.length))
+    assert.equal(valid.linux.syncDesktopName, true)
     assert.equal(valid.mac.icon, resolve(icons, 'singhouse.icns'))
     assert.equal(valid.dmg.icon, valid.mac.icon)
     assert.equal(valid.win.icon, resolve(icons, 'singhouse.ico'))

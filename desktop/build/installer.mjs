@@ -41,7 +41,7 @@ export default {
   // Builds are private test artifacts; publication is a separate operation.
   publish: null,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
-  linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux') },
+  linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null, icon: resolve(icons, 'singhouse.icns') },
   dmg: { icon: resolve(icons, 'singhouse.icns') },
   win: {
