@@ -14,7 +14,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const navigation = () => ({ generation: navigationGeneration, step: step.value, choice: choice.value })
   const currentNavigation = snapshot => snapshot.generation === navigationGeneration
     && snapshot.step === step.value && snapshot.choice === choice.value
-  const localAvailable = computed(() => plan.value?.available !== false)
+  const localAvailable = computed(() => plan.value?.available === true)
   const canStart = computed(() => plan.value?.available === true && !!plan.value?.planId && !busy.value)
 
   async function persist(skipped = false) {
@@ -48,6 +48,11 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     plan.value = next
     if (next?.restartRequired) step.value = 'restart'
     else if (next?.ready) applyLocalReady()
+  }
+  async function preflight() {
+    // A failed refresh must not leave an earlier consent plan actionable.
+    plan.value = null
+    return bridge.preflightSetup()
   }
   async function applyModalStatus() {
     if (choice.value !== 'modal' || !bridge.getModalStatus
@@ -84,7 +89,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       // Readiness always comes from the runtime, never from saved navigation.
       if (['ready', 'restart', 'progress'].includes(step.value)) step.value = choice.value === 'modal' ? 'modal' : 'choose'
       applyStatus(live)
-      if (['choose', 'consent', 'error'].includes(step.value)) applyPlan(await bridge.preflightSetup())
+      if (['choose', 'consent', 'error'].includes(step.value)) applyPlan(await preflight())
       await applyModalStatus()
     })
   }
@@ -93,7 +98,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       step.value = 'choose'
       // An explicit request to choose a route must remain on the choice
       // screen even when the local runtime is already usable.
-      plan.value = await bridge.preflightSetup()
+      plan.value = await preflight()
       if (status.value?.state === 'running' || status.value?.state === 'restart-required') applyStatus(status.value)
       if (!localAvailable.value) choice.value = 'modal'
       await persist()
@@ -102,7 +107,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function continueChoice() {
     return guarded(async () => {
       if (choice.value === 'local') {
-        applyPlan(await bridge.preflightSetup())
+        applyPlan(await preflight())
         if (['ready', 'restart'].includes(step.value)) { await persist(); return }
         if (!localAvailable.value) return
       }

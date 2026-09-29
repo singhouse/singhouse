@@ -18,6 +18,11 @@ const progress = computed(() => {
 })
 const transferBytes = computed(() => {
   const files = plan.value?.components
+  const downloads = files?.filter(file => file.sourceMode !== 'offline')
+  return downloads && downloads.every(file => Number.isFinite(file.bytes)) ? downloads.reduce((total, file) => total + file.bytes, 0) : null
+})
+const localCopyBytes = computed(() => {
+  const files = plan.value?.components?.filter(file => file.sourceMode === 'offline')
   return files?.length && files.every(file => Number.isFinite(file.bytes)) ? files.reduce((total, file) => total + file.bytes, 0) : null
 })
 const hardwareDetails = computed(() => {
@@ -189,6 +194,14 @@ onUnmounted(() => clearInterval(poll))
           >
             Continue →
           </button>
+          <button
+            v-if="!localAvailable"
+            class="text-button"
+            :disabled="busy"
+            @click="setup.chooseProcessing"
+          >
+            Check local setup again
+          </button>
         </div>
         <details>
           <summary>Computer details and processing estimates</summary>
@@ -241,7 +254,11 @@ onUnmounted(() => clearInterval(poll))
           Install the processing tools and models for separation and timed lyrics. Files are retrieved from the sources below only when you choose to set up.
         </p>
         <dl class="facts">
-          <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div><div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.diskFreeBytes) }}</dd></div>
+          <div><dt>Download size</dt><dd>{{ size(transferBytes) }}</dd></div>
+          <div v-if="localCopyBytes !== null">
+            <dt>Local model files</dt><dd>{{ size(localCopyBytes) }}</dd>
+          </div>
+          <div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.diskFreeBytes) }}</dd></div>
         </dl>
         <details>
           <summary>Have a complete model folder?</summary>

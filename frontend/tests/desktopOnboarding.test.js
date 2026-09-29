@@ -190,11 +190,62 @@ describe('desktop setup consent and recovery', () => {
     expect(await setup.chooseProcessing()).toBe(false)
     expect(setup.error.value).toBe('Disk check failed')
     expect(setup.busy.value).toBe(false)
+    expect(setup.localAvailable.value).toBe(false)
     expect(await setup.skip()).toBe(true)
+  })
+  it('invalidates a previous consent plan when a new preflight fails', async () => {
+    const desktop = bridge()
+    const setup = useDesktopOnboarding(desktop)
+    expect(setup.localAvailable.value).toBe(false)
+    await setup.chooseProcessing()
+    await setup.continueChoice()
+    expect(setup.canStart.value).toBe(true)
+    desktop.preflightSetup.mockRejectedValueOnce(new Error('Hardware check failed'))
+    expect(await setup.continueChoice()).toBe(false)
+    expect(setup.canStart.value).toBe(false)
+    expect(await setup.start()).toBe(false)
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    await setup.continueChoice()
+    expect(setup.canStart.value).toBe(true)
   })
 })
 
 describe('desktop setup screens', () => {
+  it('offers a retry after failed preflight without recommending local setup', async () => {
+    const desktop = bridge({ preflightSetup: vi.fn().mockRejectedValueOnce(new Error('Hardware check failed'))
+      .mockResolvedValue({ available: true, planId: 'retry' }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.choice').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('Hardware check failed')
+    expect(wrapper.text()).not.toContain('Recommended')
+    await wrapper.findAll('button').find(button => button.text() === 'Check local setup again').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.choice').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+  it('separates offline model copies from downloads without reducing disk requirements', async () => {
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+      preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'offline', modelSource: 'offline',
+        diskRequiredBytes: 10 * 1024 ** 3, components: [
+          { label: 'Runtime', sourceMode: 'catalog', bytes: 1024 ** 3 },
+          { label: 'Models', sourceMode: 'offline', bytes: 4 * 1024 ** 3 },
+        ] }),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    const facts = Object.fromEntries(wrapper.findAll('.facts > div').map(row => [row.find('dt').text(), row.find('dd').text()]))
+    expect(facts['Download size']).toBe('1.0 GiB')
+    expect(facts['Local model files']).toBe('4.0 GiB')
+    expect(facts['Space needed']).toBe('10.0 GiB')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('keeps both cards visible and explains unavailable local setup', async () => {
     const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: false, reason: 'A qualified runtime is unavailable.' }) })
     globalThis.window.karaokeDesktop = desktop
