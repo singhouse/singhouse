@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+
+const startupLogo = readFileSync(new URL('./startup-logo.svg', import.meta.url), 'utf8')
 
 const escapeHTML = value => String(value).replace(/[&<>"']/g, character => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -10,18 +13,15 @@ function documentURL(brand, message) {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHTML(brand)}</title>
 <style>
-:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101116; color: #f7f5ff; }
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #141821; color: #F7E7C8; --brand-ink: #141821; --brand-cherry: #E23E57; --brand-cream: #F7E7C8; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
 main { width: min(82vw, 360px); }
-.mark { display: flex; align-items: center; gap: 5px; height: 44px; margin-bottom: 26px; }
-.mark i { display: block; width: 7px; height: 22px; border-radius: 8px; background: #b9a2ff; }
-.mark i:nth-child(2), .mark i:nth-child(4) { height: 34px; }
-.mark i:nth-child(3) { height: 44px; background: #ddceff; }
-h1 { font-size: 31px; font-weight: 650; letter-spacing: -.7px; margin: 0 0 10px; overflow-wrap: anywhere; }
-.intro { margin: 0 0 30px; color: #b6b1c5; font-size: 14px; }
-.status { border-top: 1px solid #34303f; padding-top: 19px; min-height: 40px; color: #e5dff1; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
-</style></head><body><main><div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-<h1>${escapeHTML(brand)}</h1><p class="intro">Getting your library ready.</p>
+.mark { width: min(100%, 300px); margin: 0 auto 22px; }
+.brand-logo { display: block; width: 100%; height: auto; }
+.intro { margin: 0 0 25px; color: #F7E7C8; font-size: 14px; text-align: center; }
+.status { border-top: 1px solid #3b4353; padding-top: 19px; min-height: 40px; color: #b8c0ce; font-size: 13px; line-height: 1.6; text-align: center; overflow-wrap: anywhere; }
+</style></head><body><main><div class="mark" role="img" aria-label="${escapeHTML(brand)}">${startupLogo}</div>
+<p class="intro">Getting your library ready.</p>
 <p class="status" role="status" aria-live="polite">${escapeHTML(message)}</p></main></body></html>`
   return `data:text/html;charset=utf-8,${encodeURIComponent(document)}`
 }
@@ -30,7 +30,7 @@ h1 { font-size: 31px; font-weight: 650; letter-spacing: -.7px; margin: 0 0 10px;
 export function createStartupSurface({ BrowserWindow, brand = 'Singhouse', onClose = () => {} }) {
   const window = new BrowserWindow({
     title: brand, width: 480, height: 380, show: true,
-    backgroundColor: '#101116', resizable: false, maximizable: false,
+    backgroundColor: '#141821', resizable: false, maximizable: false,
     autoHideMenuBar: true,
     webPreferences: {
       partition: `startup-${randomUUID()}`, sandbox: true, contextIsolation: true,
