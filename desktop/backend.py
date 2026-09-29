@@ -855,6 +855,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
            "NUMBA_CACHE_DIR": str(runtime / "cache/numba"),
            "HF_HOME": str(runtime / "cache/huggingface"),
            "TORCH_HOME": str(runtime / "cache/torch"),
+           "TORCHINDUCTOR_CACHE_DIR": str(runtime / "cache/torchinductor"),
            "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
 
     def verify(directory: Path, store: str, kind: str):

@@ -8,9 +8,10 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend import _windows_extended_path, processing_environment
+from backend import _windows_extended_path, isolated_environment, processing_environment
 
 
 class ProcessingEnvironmentTests(unittest.TestCase):
@@ -72,6 +73,18 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         self.assertEqual(os.path.abspath(env["KARAOKE_PROCESSING_PYTHON"]), self.probe["pythonPath"])
         if os.name == "nt":
             self.assertTrue(env["KARAOKE_PROCESSING_PYTHON"].startswith("\\\\?\\"))
+
+    def test_production_cache_is_app_owned_without_ambient_username(self):
+        with patch.dict(os.environ, {"TORCHINDUCTOR_CACHE_DIR": str(self.root / "hostile-cache"),
+                                     "USERNAME": "ambient-user"}):
+            env = isolated_environment(self.runtime, "http://127.0.0.1:1234", "fixture",
+                                       disposable=False)
+            env.update(self.admit())
+        expected = self.native(self.runtime) / "cache/torchinductor"
+        self.assertEqual(env["TORCHINDUCTOR_CACHE_DIR"], str(expected))
+        self.assertNotIn("USERNAME", env)
+        if os.name == "nt":
+            self.assertTrue(env["TORCHINDUCTOR_CACHE_DIR"].startswith("\\\\?\\"))
 
     def test_changed_attestation_path_does_not_admit_workers(self):
         env = self.admit(pythonPath=str(self.processing / "other.exe"))
