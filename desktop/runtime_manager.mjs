@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
-import { mkdir, mkdtemp, open, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
@@ -342,7 +342,10 @@ export class RuntimeManager {
       }
       env.PATH = this.nativeBin
     }
-    const source = functional ? await checkedRead(new URL('./processing_probe.py', import.meta.url)) : PROBE
+    // This fixed source belongs to the integrity-checked application package.
+    // Electron's ASAR entries have virtual identities that differ from the
+    // extracted descriptors used by open(); read through its archive-aware API.
+    const source = functional ? await readFile(new URL('./processing_probe.py', import.meta.url), 'utf8') : PROBE
     signal?.throwIfAborted()
     return new Promise((resolveProbe, reject) => {
       const child = spawn(join(active.directory, manifest.python), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
