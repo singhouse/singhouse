@@ -25,6 +25,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-FileHash -Algorithm SHA256/)
   assert.ok(workflow.indexOf('Get-AuthenticodeSignature') < workflow.indexOf('desktop/artifacts/SHA256SUMS'))
   assert.ok(workflow.indexOf('desktop/artifacts/SHA256SUMS') < workflow.indexOf('actions/upload-artifact'))
+  assert.match(workflow, /path: desktop\/artifacts\/\n\s+include-hidden-files: true/)
   assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
   assert.match(workflow, /import \{ WINDOWS_SIGNING \}/)
   assert.match(workflow, /import \{ BRAND_NAME \}/)
