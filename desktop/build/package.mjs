@@ -73,7 +73,7 @@ async function main() {
   }
   const application = await applicationRoot()
   if (signedRelease && nativeManifest.platform !== 'win32') throw new Error('--signed-release is supported only for Windows')
-  if (signedRelease && !await verifyWindowsAuthenticode(resolve(application, 'Singhouse.exe'))) {
+  if (signedRelease && !await verifyWindowsAuthenticode(resolve(application, 'Singhouse.exe'), { onDiagnostic: detail => console.error('Application signature verification:', JSON.stringify(detail)) })) {
     throw new Error('Signed release application failed Authenticode publisher or timestamp verification')
   }
   await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
@@ -108,7 +108,7 @@ async function main() {
       targets: platform.createTarget(undefined, Arch[nativeManifest.arch]) })
     if (signedRelease) {
       const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)
-      if (!await verifyWindowsAuthenticode(installer)) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
+      if (!await verifyWindowsAuthenticode(installer, { onDiagnostic: detail => console.error('Installer signature verification:', JSON.stringify(detail)) })) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
     }
     await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
     await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
@@ -116,6 +116,14 @@ async function main() {
   console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
 }
 
+export function reportPackagingFailure(error) {
+  console.error(error.message)
+  process.exitCode = 1
+  // Some build-tool cleanup handlers overwrite exitCode. Keep a rejected build
+  // unsuccessful after those handlers run, as electron-builder's own CLI does.
+  process.on('exit', () => { process.exitCode = 1 })
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(error => { console.error(error.message); process.exitCode = 1 })
+  main().catch(reportPackagingFailure)
 }

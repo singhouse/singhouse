@@ -42,7 +42,9 @@ jobs:
       - name: Runtime activation, interruption, and upstream model cache
         run: node --test desktop/test/*.test.mjs
       - name: Locked processing pack fixtures
-        run: python -m unittest discover -s desktop/test -p test_processing_pack.py
+        run: |
+          python -m unittest discover -s desktop/test -p test_processing_pack.py
+          python -m unittest discover -s desktop/test -p test_notices.py
       - name: Desktop backend isolation and readiness attestation
         run: python -m unittest discover -s desktop -p test_backend.py
 

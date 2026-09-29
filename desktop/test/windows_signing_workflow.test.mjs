@@ -25,6 +25,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-FileHash -Algorithm SHA256/)
   assert.ok(workflow.indexOf('Get-AuthenticodeSignature') < workflow.indexOf('desktop/artifacts/SHA256SUMS'))
   assert.ok(workflow.indexOf('desktop/artifacts/SHA256SUMS') < workflow.indexOf('actions/upload-artifact'))
+  assert.match(workflow, /path: desktop\/artifacts\/\n\s+include-hidden-files: true/)
   assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
   assert.match(workflow, /import \{ WINDOWS_SIGNING \}/)
   assert.match(workflow, /import \{ BRAND_NAME \}/)
@@ -50,10 +51,10 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc/)
 })
 
-test('Windows signing documentation binds Azure values to protected environment secrets', async () => {
+test('Windows signing documentation binds Azure values to environment secrets', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   const environment = `windows-${'signing'}`
-  assert.match(readme, new RegExp('`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\\nenvironment secrets on the protected `' + environment + '` environment itself,\\nnot as repository or organization secrets'))
+  assert.match(readme, new RegExp('`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as\\nenvironment secrets on the `' + environment + '` environment itself,\\nnot as repository or organization secrets'))
 })
 
 test('Windows signing workflow locks project tool versions and does not persist checkout credentials', async () => {
@@ -68,7 +69,24 @@ test('Windows signing workflow locks project tool versions and does not persist 
   assert.match(workflow, /python-version: '3\.12'/)
   assert.match(workflow, /uv-0\.12\.8-py3-none-win_amd64\.whl/)
   assert.match(workflow, /53984d68cddd227e6433b70b510d4b47fe82e658f22f4a6ca416b4e373406393/)
-  assert.match(workflow, /pip install --no-deps \$uvWheel/)
+  assert.match(workflow, /python -m pip install --no-deps --force-reinstall \$uvWheel/)
+  assert.match(workflow, /sysconfig\.get_path\('scripts'\)/)
+  assert.match(workflow, /\$uvExecutable = Join-Path \$pythonScripts 'uv\.exe'/)
+  assert.match(workflow, /\$env:PATH = "\$pythonScripts;\$env:PATH"/)
+  assert.match(workflow, /Add-Content -LiteralPath \$env:GITHUB_PATH -Value \$pythonScripts/)
+  assert.match(workflow, /\$uvVersion = & \$uvExecutable --version/)
+  assert.match(workflow, /\$uvTokens\[1\] -cne '0\.12\.8'/)
+  assert.doesNotMatch(workflow, /if \(\(uv --version\) -ne/)
+  assert.doesNotMatch(workflow, /py -3\.12/)
+  assert.match(workflow, /python desktop\/build\/assemble\.py/)
   assert.match(workflow, /npm --prefix desktop ci/)
   assert.doesNotMatch(workflow, /npm --prefix frontend ci/)
+})
+
+
+test('signing module is pinned and its real parameter schema is checked before assembly', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  assert.match(workflow, /Install-Module -Name TrustedSigning -RequiredVersion 0\.5\.3/)
+  assert.match(workflow, /sign_windows\.ps1 -ValidateOnly/)
+  assert.ok(workflow.indexOf('sign_windows.ps1 -ValidateOnly') < workflow.indexOf('python desktop/build/assemble.py'))
 })
