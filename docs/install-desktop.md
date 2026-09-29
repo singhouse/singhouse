@@ -25,9 +25,8 @@ On Windows, in PowerShell:
 Get-FileHash -Algorithm SHA256 C:\path\to\download
 ```
 
-The first release installers are **unsigned**. Windows and macOS can therefore
-warn about or block a downloaded installer. Signed installers are planned
-after the applicable Microsoft and Apple verification work is complete. A
+The release notes identify whether each installer is signed. An unsigned
+Windows or macOS installer can warn or be blocked. A
 checksum confirms the bytes match the published candidate; it does not replace
 platform code signing.
 

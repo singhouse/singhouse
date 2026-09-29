@@ -16,6 +16,7 @@ import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bo
 import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
 import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
+import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
 
 const physicalFs = createRequire(import.meta.url)('original-fs')
 
@@ -52,7 +53,7 @@ const blocker = projectorBlocker(powerSaveBlocker)
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function digestRecords(entries) { return hash(canonicalJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))))) }
-function installedReleaseIdentity() {
+async function installedReleaseIdentity() {
   const manifest = expectedIdentity
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
   if (hash(filesBytes) !== manifest.runtimeId) throw new Error('Installed native inventory identity mismatch')
@@ -70,9 +71,11 @@ function installedReleaseIdentity() {
   const backendFiles = Object.entries(files).filter(([name]) => name === 'backend.py' || /site-packages\/(karaoke_backend|lyricsync)\//.test(name))
   if (!frontend.length || !backendFiles.length || !files['models.json']) throw new Error('Installed release evidence is incomplete')
   const applicationRoot = process.platform === 'darwin' ? resolve(process.resourcesPath, '../../..') : resolve(process.resourcesPath, '..')
-  const portableManifest = resolve(applicationRoot, 'portable.json')
-  if (existsSync(portableManifest)) {
-    const portable = JSON.parse(readFileSync(portableManifest, 'utf8'))
+  const { marker: signedMarker, portableBytes } = await inspectInstalledLaunchBoundary({
+    platform: process.platform, resourcesPath: process.resourcesPath, applicationRoot,
+  })
+  if (portableBytes !== null) {
+    const portable = JSON.parse(portableBytes)
     const identity = assertReleaseIdentity(portable.identity)
     if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed managed release belongs to a different edition policy')
     managedReleaseSlot = true
@@ -82,6 +85,24 @@ function installedReleaseIdentity() {
     ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
     : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
+  if (signedMarker) {
+    if (existsSync(receiptPath)) throw new Error('Signed macOS application must keep its release receipt outside the sealed bundle')
+    const observed = records.map(([path, value]) => value === 'directory' ? { path, type: 'directory' }
+      : value.startsWith('symlink:') ? { path, type: 'symlink', target: value.slice('symlink:'.length) }
+        : { path, type: 'file', sha256: value })
+    const inventoryDigest = hash(canonicalJson(observed))
+    const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
+    const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
+    const electronRecords = records.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
+    if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
+    return deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
+      sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
+      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs),
+      frontendDigest: digestRecords(frontend), backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
+      runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
+      schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes), applicationInventoryDigest: inventoryDigest,
+      ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
+  }
   if (existsSync(receiptPath)) {
     const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
     if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
@@ -432,7 +453,7 @@ async function start() {
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
     releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
-    productRelease = installedReleaseIdentity()
+    productRelease = await installedReleaseIdentity()
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')
       if (managedReleaseSlot) recoveryAnchor = readRecoveryAnchor(anchorPath)

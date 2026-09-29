@@ -90,6 +90,44 @@ separately authenticated export-manifest verifier is configured. The default
 packaging command creates an explicitly unsigned private-test build and never
 publishes anything. Create macOS artifacts on macOS.
 
+For a private Developer ID macOS candidate, create the intended team's
+Developer ID Application certificate and store notarization credentials in the
+local keychain with `xcrun notarytool store-credentials`. The signing command
+requires an exact publisher, Team ID, certificate SHA-1, certificate common
+name, and keychain profile. The initial publisher, Team ID, and certificate SHA-1 are
+pinned in source; certificate renewal or a team change requires a reviewed
+source change. Keep the app-specific
+password out of the source tree.
+
+```sh
+export SINGHOUSE_MAC_PUBLISHER='MICHAEL ALAN JONES'
+export SINGHOUSE_MAC_TEAM_ID='25Y7U443K6'
+export SINGHOUSE_MAC_IDENTITY='Developer ID Application: MICHAEL ALAN JONES (25Y7U443K6)'
+export SINGHOUSE_MAC_CERT_SHA1='55FEEAA93960DD9E278519CA68338BACFC2A3617'
+export SINGHOUSE_MAC_NOTARY_PROFILE='singhouse-notary'
+npm --prefix desktop run package:first-installers -- --signed-macos-release
+```
+
+The command verifies the assembled native payload, signs its Mach-O code with
+hardened runtime and secure timestamps, refreshes native file hashes and
+runtime identity, then signs and notarizes the application. It derives the
+portable identity from the complete stapled application and writes the
+immutable `.shapp.receipt.json` beside it. A constant marker sealed in the
+app replaces the unsigned installer's embedded receipt. The app verifies the
+Developer ID requirement, exact Team ID and certificate authority on first
+launch before deriving its installed identity from the complete bundle. The
+signed first installer rejects adjacent managed-slot metadata; signed macOS
+managed-slot admission needs a separate authenticated design. The
+command then builds, signs, notarizes, and staples a DMG; it also builds a ZIP
+of the same stapled app. It compares both containers' extracted applications,
+including executable permissions, with the portable application and writes
+final DMG and ZIP checksums.
+The bundle check authenticates the installed candidate against its pinned
+signer; downloaded-artifact checksums and Gatekeeper remain the boundary for a
+coherent replacement of the entire application.
+Any failed check aborts the build. This path needs a macOS runner and an active
+notary profile; it has not produced a release artifact until those checks pass.
+
 Windows release signing is an explicit, fail-closed build mode. Run it on
 Windows after assembling the `win32-x64` native payload. Install PowerShell 7
 and the exact signing module first (`Install-Module TrustedSigning
