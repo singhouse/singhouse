@@ -64,7 +64,8 @@ test('Developer ID verification checks anchored team, exact authority, and times
   await verifyDeveloperId('/tmp/Singhouse.app', selected, run)
   await verifyDeveloperId('/tmp/Singhouse.app', selected, run, { deep: true })
   assert.ok(calls[0][1].includes('-R'))
-  assert.ok(calls[0][1].includes(developerIdRequirement(selected.teamId)))
+  assert.equal(calls[0][1][calls[0][1].indexOf('-R') + 1], `=${developerIdRequirement(selected.teamId)}`)
+  assert.equal(calls[2][1][calls[2][1].indexOf('-R') + 1], `=${developerIdRequirement(selected.teamId)}`)
   assert.ok(calls[2][1].includes('--deep'))
   await assert.rejects(verifyDeveloperId('/tmp/Singhouse.app', selected,
     async (_command, args) => args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=none\n` } : { stdout: '' }), /timestamp/)
@@ -103,7 +104,7 @@ test('full application verification deeply checks outer app and pins nested code
     })
     assert.ok(calls[0].includes('--deep'))
     assert.ok(calls.at(-1).includes(resolve(root, 'nested.dylib')))
-    assert.ok(calls.at(-1).includes(developerIdRequirement(selected.teamId)))
+    assert.equal(calls.at(-1)[calls.at(-1).indexOf('-R') + 1], `=${developerIdRequirement(selected.teamId)}`)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

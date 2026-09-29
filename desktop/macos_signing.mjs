@@ -87,7 +87,7 @@ export async function isMachO(path) {
 
 export async function verifyDeveloperId(path, selection, run = execFile, { deep = false } = {}) {
   const requirement = developerIdRequirement(selection.teamId)
-  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), '--strict', '--verbose=2', '-R', requirement, path])
+  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), '--strict', '--verbose=2', '-R', `=${requirement}`, path])
   const { stderr = '', stdout = '' } = await run('/usr/bin/codesign', ['--display', '--verbose=4', path])
   const details = `${stdout}\n${stderr}`
   if (!details.split('\n').includes(`TeamIdentifier=${selection.teamId}`) ||
@@ -116,7 +116,7 @@ export async function verifySignedMacApplication(bundle, selection, run = execFi
   await walk(bundle)
   const requirement = developerIdRequirement(selection.teamId)
   for (const path of nested) {
-    await run('/usr/bin/codesign', ['--verify', '--strict', '-R', requirement, path])
+    await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${requirement}`, path])
   }
   return true
 }
