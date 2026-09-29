@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
@@ -377,6 +377,7 @@ test('functional protocol enables only declared capabilities and rejects missing
   assert.equal(result.capabilitiesReady, true)
   assert.deepEqual(result.verifiedCapabilities, manifest.capabilities)
   const attested = processingAttestation(installed, result)
+  assert.equal(attested.pythonPath, toNamespacedPath(join(installed.directory, manifest.python)))
   assert.equal(attested.probeSchema, 2)
   assert.deepEqual(attested.checks, protocol.checks)
   for (const patch of [{ checks: { ...protocol.checks, transcription: false } },

@@ -837,6 +837,13 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                            model_policy: dict | None = None,
                            trusted_locks: list[str] | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
+    # Keep inventory access, parent containment, attestation equality, and the
+    # interpreter paths inherited by managed workers in one Windows namespace.
+    # Do not resolve here: that would hide symbolic links from verification.
+    if os.name == "nt":
+        runtime = _windows_extended_path(runtime)
+        processing = _windows_extended_path(processing) if processing is not None else None
+        models = _windows_extended_path(models) if models is not None else None
     env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { mkdir, mkdtemp, open, readFile, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
-import { dirname, join, resolve, isAbsolute } from 'node:path'
+import { dirname, join, resolve, isAbsolute, toNamespacedPath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
 
@@ -348,8 +348,8 @@ export class RuntimeManager {
     const source = functional ? await readFile(new URL('./processing_probe.py', import.meta.url), 'utf8') : PROBE
     signal?.throwIfAborted()
     return new Promise((resolveProbe, reject) => {
-      const child = spawn(join(active.directory, manifest.python), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
-        { cwd: active.directory, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
+      const child = spawn(toNamespacedPath(join(active.directory, manifest.python)), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
+        { cwd: toNamespacedPath(active.directory), env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
       if (process.platform !== 'win32') watchOwnedGroup(child)
       let output = '', failure
       const stop = error => { failure = error; try { forceChild(child) } catch (cleanup) { failure = cleanup } }
@@ -626,7 +626,7 @@ export function processingAttestation(active, probeResult) {
   }
   return {
     runtimeManifestId: active.id,
-    pythonPath: join(active.directory, manifest.python),
+    pythonPath: toNamespacedPath(join(active.directory, manifest.python)),
     pythonSha256: pythonRecord.sha256,
     probePassed: true,
     accelerator: probeResult.accelerator,
