@@ -146,6 +146,7 @@ jobs:
         with:
           name: windows-signed-${{ github.sha }}
           path: desktop/artifacts/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
