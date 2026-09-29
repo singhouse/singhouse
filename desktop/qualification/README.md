@@ -132,6 +132,16 @@ again. Model installation always runs through the real route, which verifies
 and reuses already downloaded cache files. Restart, readiness, real inference
 and all output assertions still run in full. Retain all attempt directories.
 
+To qualify an explicit application upgrade using that retained setup, add
+`--upgrade-from-executable-sha256 <64-hex-original-executable-hash>` with
+`--resume` and the new executable. The hash must match the original evidence
+and differ from the current executable. Earlier attempts must belong to the
+original or explicitly recorded current candidate; other candidates are
+rejected. Each new attempt records both executable hashes and identifies the
+run as upgrade qualification with retained setup, not clean-install proof.
+All input, runtime, profile, model verification and inference guards still
+apply. Ordinary `--resume` continues to require the exact original executable.
+
 Without `--resume`, the output directory must not exist; its parent must exist. It retains the
 isolated application profile, four playback WAVs, the model manifest and
 `evidence.json`. Keep this directory private: the profile contains normal

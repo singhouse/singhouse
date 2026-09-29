@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url'
 
 export function parseArguments(args) {
-  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds'])
+  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256'])
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]
     if (flag === '--resume') { assert.ok(!options.resume, 'Duplicate --resume'); options.resume = true; continue }
@@ -19,10 +19,15 @@ export function parseArguments(args) {
   }
   for (const key of ['--executable', '--runtime-manifest', '--audio', '--output']) assert.ok(options[key], `Missing ${key}`)
   assert.ok(options.downloadModels, 'Explicit --download-models consent is required to retrieve the three model sets from policy-defined upstreams')
+  const upgradeFrom = options['--upgrade-from-executable-sha256']
+  if (upgradeFrom !== undefined) {
+    assert.ok(options.resume, 'Executable upgrade requires --resume')
+    assert.match(upgradeFrom, /^[a-fA-F0-9]{64}$/, 'Upgrade prior executable SHA-256 must be 64 hex characters')
+  }
   const seconds = Number(options['--timeout-seconds'] ?? 3600)
   assert.ok(Number.isInteger(seconds) && seconds >= 60 && seconds <= 14400, 'Timeout must be 60–14400 seconds')
   return { executable: resolve(options['--executable']), manifest: resolve(options['--runtime-manifest']),
-    resume: options.resume === true, audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
+    resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase(), audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
 }
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -31,7 +36,11 @@ const MODEL_IDS = ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer']
 
 // Resumption only continues installation in the original empty qualification
 // profile. A submitted inference is never silently adopted or declared passed.
-export function validateResume(output, expected) {
+export function validateResume(output, expected, upgradeFromExecutableSha256) {
+  if (upgradeFromExecutableSha256 !== undefined) {
+    assert.match(upgradeFromExecutableSha256, /^[a-f0-9]{64}$/, 'Invalid upgrade prior executable SHA-256')
+    assert.notEqual(upgradeFromExecutableSha256, expected.executableSha256, 'Executable upgrade must change the candidate')
+  }
   const physicalDirectory = path => {
     assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink(), 'Resume directory must not be a link')
     assert.equal(resolve(realpathSync(path)).toLowerCase(), resolve(path).toLowerCase(), 'Resume path must be physical')
@@ -48,7 +57,9 @@ export function validateResume(output, expected) {
     assert.ok(['running', 'failed'].includes(prior.status), 'Only incomplete qualification evidence can resume')
     assert.ok(!['inferenceStartedAt', 'songId', 'jobId', 'outputs', 'transcription'].some(key => Object.hasOwn(prior, key)),
       'Resume supports installation interruptions only; use a new output for inference retries')
-    assert.equal(prior.executableSha256, expected.executableSha256, 'Resume executable changed')
+    assert.ok(prior.executableSha256 === expected.executableSha256
+      || (upgradeFromExecutableSha256 !== undefined && prior.executableSha256 === upgradeFromExecutableSha256),
+    'Resume executable changed outside the explicit upgrade lineage')
     assert.equal(prior.runtimeManifestSha256, expected.runtimeManifestSha256, 'Resume runtime manifest changed')
     assert.equal(prior.input?.sha256, expected.input.sha256, 'Resume audio changed')
     assert.equal(prior.input?.bytes, expected.input.bytes, 'Resume audio size changed')
@@ -58,6 +69,13 @@ export function validateResume(output, expected) {
     return { prior, sha256: hash(bytes) }
   }
   const original = readAttempt(output), attempts = []
+  assert.equal(original.prior.executableSha256, upgradeFromExecutableSha256 ?? expected.executableSha256,
+    'Upgrade prior executable SHA-256 does not match original evidence')
+  assert.ok(!Object.hasOwn(original.prior, 'upgrade'), 'Original evidence cannot be an upgrade attempt')
+  const upgrade = upgradeFromExecutableSha256 === undefined ? undefined : {
+    fromExecutableSha256: upgradeFromExecutableSha256, toExecutableSha256: expected.executableSha256,
+    qualification: 'Application upgrade with retained setup; not clean-install proof' }
+
   // Every previous resume is relevant, even if the original evidence still
   // says installation was interrupted and the library was later emptied.
   for (const name of readdirSync(output).filter(name => name.startsWith('resume-')).sort()) {
@@ -66,9 +84,14 @@ export function validateResume(output, expected) {
     const attempt = readAttempt(directory)
     assert.equal(attempt.prior.resume?.priorEvidence, '../evidence.json', 'Resume attempt has invalid lineage')
     assert.equal(attempt.prior.resume?.priorEvidenceSha256, original.sha256, 'Resume attempt has changed lineage')
+    if (upgrade && attempt.prior.executableSha256 === expected.executableSha256) {
+      assert.deepEqual(attempt.prior.upgrade, upgrade, 'Resume attempt lacks explicit matching upgrade lineage')
+    } else {
+      assert.ok(!Object.hasOwn(attempt.prior, 'upgrade'), 'Resume attempt has unexpected upgrade lineage')
+    }
     attempts.push({ evidence: `../${name}/evidence.json`, sha256: attempt.sha256, status: attempt.prior.status })
   }
-  return { ...original, attempts }
+  return { ...original, attempts, upgrade }
 }
 
 export function reusableRuntime(readiness, manifest) {
@@ -78,6 +101,7 @@ export function reusableRuntime(readiness, manifest) {
 }
 
 export async function run(options) {
+  assert.ok(!options.upgradeFromExecutableSha256 || options.resume, 'Executable upgrade requires --resume')
   assert.equal(process.platform, 'win32', 'This qualification harness requires the Windows packaged application')
   assert.ok(statSync(options.executable).isFile(), 'Packaged executable is required')
   const nativeBin = join(dirname(options.executable), 'resources', 'native', 'ffmpeg', 'bin')
@@ -104,7 +128,7 @@ export async function run(options) {
   let artifactDirectory = options.output
   let resumed
   if (options.resume) {
-    resumed = validateResume(options.output, evidence)
+    resumed = validateResume(options.output, evidence, options.upgradeFromExecutableSha256)
     // Each attempt has separate evidence and outputs; original bytes stay intact.
     artifactDirectory = join(options.output, `resume-${randomUUID()}`)
     mkdirSync(artifactDirectory)
@@ -112,6 +136,10 @@ export async function run(options) {
       priorAttempts: resumed.attempts, priorStatus: resumed.prior.status, classification: resumed.prior.status === 'running'
         ? 'Prior attempt ended without a recorded outcome; interruption is not a pass'
         : 'Prior attempt failed; this is a new qualification attempt' }
+    if (resumed.upgrade) {
+      evidence.upgrade = resumed.upgrade
+      evidence.limitations.push(resumed.upgrade.qualification)
+    }
     evidence.application = resumed.prior.application
   }
   const save = () => writeFileSync(join(artifactDirectory, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)

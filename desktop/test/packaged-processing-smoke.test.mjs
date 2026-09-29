@@ -100,3 +100,42 @@ test('durable inference intent blocks retries even with no job or song response'
   writeFileSync(join(directory, 'inference-started.json'), '{}', { flag: 'wx', flush: true })
   assert.throws(() => validateResume(f.output, f.expected), /ambiguous inference/)
 })
+
+test('executable upgrade requires explicit resume and a full original hash', () => {
+  const flag = '--upgrade-from-executable-sha256', digest = 'a'.repeat(64)
+  assert.throws(() => parseArguments([...args, flag, digest]), /requires --resume/)
+  assert.throws(() => parseArguments([...args, '--resume', flag, 'abc']), /64 hex/)
+  assert.equal(parseArguments([...args, '--resume', flag, digest.toUpperCase()]).upgradeFromExecutableSha256, digest)
+})
+
+test('explicit upgrade preserves original evidence and binds original and current hashes', t => {
+  const f = fixture(t), original = readFileSync(join(f.output, 'evidence.json'))
+  const current = { ...f.expected, executableSha256: 'd'.repeat(64) }
+  assert.throws(() => validateResume(f.output, current), /executable changed/)
+  const result = validateResume(f.output, current, f.expected.executableSha256)
+  assert.deepEqual(result.upgrade, { fromExecutableSha256: f.expected.executableSha256,
+    toExecutableSha256: current.executableSha256,
+    qualification: 'Application upgrade with retained setup; not clean-install proof' })
+  assert.deepEqual(readFileSync(join(f.output, 'evidence.json')), original)
+  assert.throws(() => validateResume(f.output, f.expected, f.expected.executableSha256), /must change/)
+  assert.throws(() => validateResume(f.output, current, 'e'.repeat(64)), /executable changed|does not match/)
+})
+
+test('upgrade retries require every prior candidate to have explicit matching lineage', t => {
+  const f = fixture(t), current = { ...f.expected, executableSha256: 'd'.repeat(64) }
+  const result = validateResume(f.output, current, f.expected.executableSha256)
+  const directory = join(f.output, 'resume-first'); mkdirSync(directory)
+  const attempt = { ...f.prior, resume: { priorEvidence: '../evidence.json', priorEvidenceSha256: result.sha256 } }
+  const save = () => writeFileSync(join(directory, 'evidence.json'), JSON.stringify(attempt))
+  save(); assert.equal(validateResume(f.output, current, f.expected.executableSha256).attempts.length, 1)
+  attempt.executableSha256 = current.executableSha256; save()
+  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /matching upgrade lineage/)
+  attempt.upgrade = result.upgrade; save()
+  assert.equal(validateResume(f.output, current, f.expected.executableSha256).attempts.length, 1)
+  attempt.upgrade = { ...result.upgrade, fromExecutableSha256: 'e'.repeat(64) }; save()
+  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /matching upgrade lineage/)
+  attempt.executableSha256 = 'e'.repeat(64); save()
+  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /executable changed/)
+  attempt.executableSha256 = current.executableSha256; attempt.upgrade = result.upgrade; attempt.inferenceStartedAt = 'recorded'; save()
+  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /installation interruptions only/)
+})
