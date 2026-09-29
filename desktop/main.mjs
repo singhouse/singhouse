@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
-import { cpus, totalmem, freemem } from 'node:os'
+import { collectHardware } from './hardware_inventory.mjs'
+import { validateSetupCatalog } from './setup_catalog.mjs'
+import { ModalCredentials } from './modal_credentials.mjs'
+import { checkModalConnection } from './modal_connection.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
@@ -43,7 +46,7 @@ let processingProbe
 let installation
 let processingOperation
 let heartSetup
-let onboardingSetup, onboardingState, startupSurface
+let onboardingSetup, onboardingState, startupSurface, modalCredentials, modalCheck, modalCheckController
 let productRelease, releasePolicy, updates, updateOperation, startupHandoff
 let managedReleaseSlot = false
 let releaseState = async () => ({ activeMutations: null, jobs: { nonterminal: null } }), quiesceBackend, resumeBackend
@@ -550,15 +553,20 @@ async function start() {
   secureContents(host.webContents, launch.origin, true)
   if (packaged) {
     onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
+    modalCredentials = new ModalCredentials({ path: resolve(runtime.root, 'modal-config.enc'), safeStorage })
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
-    const catalog = existsSync(catalogPath) ? JSON.parse(readFileSync(catalogPath, 'utf8')) : null
+    let catalog = null, catalogError
+    try {
+      if (existsSync(catalogPath)) catalog = validateSetupCatalog(JSON.parse(readFileSync(catalogPath, 'utf8')), {
+        identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
+      })
+    } catch {
+      catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.'
+    }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
-      hardware: async () => ({ platform: process.platform, arch: process.arch,
-        cpu: cpus()[0]?.model || 'Unknown', totalMemoryBytes: totalmem(), availableMemoryBytes: freemem(),
-        gpu: await app.getGPUInfo('basic').then(info => info.gpuDevice?.map(device => device.deviceString || device.vendorString || 'Unidentified GPU').join(', ') || 'Unknown').catch(() => 'Unknown'),
-        videoMemoryBytes: null, memoryMinimumBytes: null }),
+      policy: modelCache.policy, catalog, catalogError, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
       diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,
       save: state => onboardingState.save('setup', state) })
@@ -571,10 +579,46 @@ async function start() {
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
   setupHandler('setup:preflight', () => onboardingSetup.preflight())
+  setupHandler('setup:model-source', async mode => {
+    if (!['offline', 'upstream'].includes(mode)) throw new Error('Unknown model source')
+    if (processingOperation || operationGate.active) throw new Error('Wait for the current installation to finish or cancel it.')
+    if (mode === 'upstream') onboardingSetup.setOfflineModelsDirectory(null)
+    else {
+      const selected = await dialog.showOpenDialog(host, {
+        title: 'Choose a complete model folder', properties: ['openDirectory'],
+      })
+      if (!selected.canceled && selected.filePaths.length === 1) onboardingSetup.setOfflineModelsDirectory(selected.filePaths[0])
+    }
+    return onboardingSetup.preflight()
+  })
   setupHandler('setup:status', () => onboardingSetup.getStatus())
   setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
+  setupHandler('setup:modal-status', () => modalCredentials.status())
+  setupHandler('setup:modal-save', config => {
+    if (modalCheck) throw new Error('Wait for the connection check to finish.')
+    return modalCredentials.save(config)
+  })
+  setupHandler('setup:modal-forget', () => {
+    if (modalCheck) throw new Error('Wait for the connection check to finish.')
+    return modalCredentials.forget()
+  })
+  setupHandler('setup:modal-check', async () => {
+    if (modalCheck) return modalCheck
+    modalCheckController = new AbortController()
+    modalCheck = (async () => {
+      const configuration = await modalCredentials.readForBackend()
+      const contractPath = resolve(nativeDir, 'modal-contract.json')
+      return checkModalConnection({ configuration, signal: modalCheckController.signal,
+        python: resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3'),
+        helper: resolve(nativeDir, 'modal_check.py'),
+        contract: existsSync(contractPath) ? contractPath : undefined,
+      })
+    })().finally(() => { modalCheck = null; modalCheckController = null })
+    return modalCheck
+  })
   setupHandler('setup:help', topic => {
-    const destinations = { pricing: 'https://modal.com/pricing', guide: 'https://modal.com/docs/guide' }
+    const destinations = { pricing: 'https://modal.com/pricing', guide: 'https://modal.com/docs/guide',
+      account: 'https://modal.com/signup', deployment: 'https://github.com/singhouse/singhouse/blob/main/docs/modal.md' }
     if (!Object.hasOwn(destinations, topic)) throw new Error('Unknown setup help destination')
     return shell.openExternal(destinations[topic])
   })
@@ -598,7 +642,6 @@ async function start() {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Heart setup is only available in the host window')
     // Development mode retains its explicitly configured backend environment.
     if (!packaged) return { installed: true, restartRequired: false }
-    if ((await processingStatus()).modal?.selected === true) return { installed: true, restartRequired: false }
     const status = await processingStatus()
     if (status.transcription?.ready === true && status.separation?.ready === true) return { installed: true, restartRequired: false }
     host.webContents.send('setup:open')
@@ -647,6 +690,7 @@ app.on('before-quit', event => {
   installation?.abort()
   heartSetup?.cancel()
   onboardingSetup?.cancel()
+  modalCheckController?.abort()
   startupSurface?.close()
   blocker.stop()
   projector?.destroy()

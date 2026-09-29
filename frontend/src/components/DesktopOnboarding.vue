@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import DesktopModalSetup from './DesktopModalSetup.vue'
 import { BRAND_NAME } from '../brand'
 import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 
@@ -18,6 +19,24 @@ const progress = computed(() => {
 const transferBytes = computed(() => {
   const files = plan.value?.components
   return files?.length && files.every(file => Number.isFinite(file.bytes)) ? files.reduce((total, file) => total + file.bytes, 0) : null
+})
+const hardwareDetails = computed(() => {
+  const hardware = plan.value?.hardware
+  if (!hardware) return []
+  const platforms = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
+  const details = [
+    ['Operating system', [platforms[hardware.platform] || hardware.platform, hardware.arch].filter(Boolean).join(' · ') || 'Unknown'],
+    ['Processor', hardware.cpu || 'Unknown'],
+    ['Logical processors', hardware.cpuCount || 'Unknown'],
+    [hardware.unifiedMemory ? 'Unified memory' : 'Memory', size(hardware.totalMemoryBytes)],
+    ['Currently available memory', size(hardware.availableMemoryBytes)],
+    ['Graphics', hardware.gpu || 'Unknown'],
+  ]
+  if (hardware.unifiedMemory) details.push(['Graphics memory', 'Shared with unified memory'])
+  else if (hardware.gpuDevices?.length) {
+    for (const device of hardware.gpuDevices) details.push([`${device.name} dedicated memory`, size(device.dedicatedMemoryBytes)])
+  } else details.push(['Dedicated graphics memory', size(hardware.videoMemoryBytes)])
+  return details
 })
 function size(bytes) {
   if (!Number.isFinite(bytes)) return 'Not yet known'
@@ -175,10 +194,10 @@ onUnmounted(() => clearInterval(poll))
           <summary>Computer details and processing estimates</summary>
           <template v-if="plan?.hardware">
             <p
-              v-for="(value, key) in plan.hardware"
-              :key="key"
+              v-for="[label, value] in hardwareDetails"
+              :key="label"
             >
-              {{ humanLabel(key) }}: {{ describe(value) }}
+              {{ label }}: {{ value }}
             </p>
           </template>
           <p v-else>
@@ -191,7 +210,20 @@ onUnmounted(() => clearInterval(poll))
             >
               <dt>{{ phase }}</dt><dd>Not yet measured on this hardware</dd>
             </div>
-          </dl><p>Processing estimates are not yet qualified for this computer. No speed or memory recommendation is assumed.</p>
+          </dl><p>Processing times have not yet been measured on this computer.</p>
+          <template v-if="plan?.memoryRequirements?.evidenceAvailable">
+            <p>Measured memory requirement, including headroom: {{ size(plan.memoryRequirements.ramBytes) }} RAM<span v-if="plan.memoryRequirements.dedicatedVideoMemoryBytes"> and {{ size(plan.memoryRequirements.dedicatedVideoMemoryBytes) }} dedicated graphics memory</span>.</p>
+            <p>{{ plan.memoryQualification?.reason }}</p>
+            <p
+              v-for="warning in plan.memoryQualification?.warnings || []"
+              :key="warning"
+            >
+              {{ warning }}
+            </p>
+          </template>
+          <p v-else>
+            No measured memory recommendation is available for this release target.
+          </p>
         </details>
       </template>
 
@@ -211,6 +243,30 @@ onUnmounted(() => clearInterval(poll))
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div><div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.diskFreeBytes) }}</dd></div>
         </dl>
+        <details>
+          <summary>Already downloaded the models?</summary>
+          <p v-if="plan?.modelSource === 'offline'">
+            Models will be read from your selected folder and verified. Missing files will not be downloaded automatically. The processing runtime may still need downloading.
+          </p>
+          <p v-else>
+            Choose a complete model folder to use files you already have. Singhouse will verify each file before installing it.
+          </p>
+          <button
+            class="text-button"
+            :disabled="busy"
+            @click="setup.chooseModelSource('offline')"
+          >
+            Choose model folder…
+          </button>
+          <button
+            v-if="plan?.modelSource === 'offline'"
+            class="text-button"
+            :disabled="busy"
+            @click="setup.chooseModelSource('upstream')"
+          >
+            Download models instead
+          </button>
+        </details>
         <p
           v-if="!localAvailable"
           class="alert"
@@ -270,26 +326,7 @@ onUnmounted(() => clearInterval(poll))
         <p class="lead">
           Modal processing uses cloud resources in your own account. Audio needed for processing leaves this computer for your deployment.
         </p>
-        <div class="panel">
-          <h2>Desktop connection is not available yet</h2><p>This desktop app cannot currently authorize and verify a Modal deployment. Choosing this option does not connect an account or enable cloud processing.</p><p>You can keep playing existing karaoke files and return to setup later.</p>
-        </div>
-        <div class="actions">
-          <button
-            class="text-button"
-            :disabled="busy"
-            @click="setup.openHelp('pricing')"
-          >
-            Review current Modal pricing ↗
-          </button>
-          <button
-            class="text-button"
-            :disabled="busy"
-            @click="setup.openHelp('guide')"
-          >
-            Read Modal’s account and deployment guide ↗
-          </button>
-        </div>
-        <details><summary>What you will need</summary><ol><li>Your own Modal account and current pricing reviewed directly with Modal.</li><li>A compatible {{ BRAND_NAME }} processing deployment in that account.</li><li>A supported connection and verification flow before any processing begins.</li></ol></details>
+        <DesktopModalSetup />
         <div class="actions">
           <button
             class="text-button"

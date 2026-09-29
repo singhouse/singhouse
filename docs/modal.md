@@ -5,11 +5,16 @@ jobs to a Modal app that you deploy and pay for in your own account. This path
 is optional and off by default. Singhouse does not provide a shared Modal
 deployment, receive the audio, or manage your Modal account.
 
-The current packaged desktop does not include the Modal client or expose its
-credentials and settings to the isolated backend. The instructions below apply
-only when you run the backend from a source checkout with the `modal` extra.
-Desktop support remains pending; exporting these variables before opening the
-desktop app does not enable Modal processing.
+Desktop setup can save credentials using operating-system encryption and check
+account/deployment metadata without uploading audio or invoking processing.
+This check distinguishes account access from deployment compatibility; it does
+not qualify inference or enable cloud processing. A missing desktop deployment
+contract is reported as unverified. Exporting environment variables before
+opening the desktop app does not enable Modal processing.
+
+The deployment and processing instructions below apply to a source checkout
+with the `modal` extra. The source deployment is not yet a qualified desktop
+deployment. Do not deploy it solely to clear a desktop setup warning.
 
 Deploying builds a remote image and can create billable work. Review Modal's
 current pricing and account limits before running a deploy or a job. The setup

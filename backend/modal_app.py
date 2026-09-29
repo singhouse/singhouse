@@ -143,31 +143,6 @@ def _run_demucs(audio_path, model_name: str, device: str, scratch):
     return stems
 
 
-def _silent_wav_bytes(reference_wav) -> bytes:
-    """Silent WAV matching a reference's params (for the pass-2 fallback)."""
-    import io
-    import wave
-
-    try:
-        with wave.open(str(reference_wav), "rb") as ref:
-            params = ref.getparams()
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as out:
-            out.setparams(params)
-            out.writeframes(b"\x00" * (params.nframes * params.sampwidth * params.nchannels))
-        return buf.getvalue()
-    except Exception:
-        sample_rate, num_samples = 44100, 44100 * 10
-        data_size = num_samples * 2
-        return (
-            b"RIFF" + (36 + data_size).to_bytes(4, "little") + b"WAVE" + b"fmt "
-            + (16).to_bytes(4, "little") + (1).to_bytes(2, "little") + (1).to_bytes(2, "little")
-            + sample_rate.to_bytes(4, "little") + (sample_rate * 2).to_bytes(4, "little")
-            + (2).to_bytes(2, "little") + (16).to_bytes(2, "little") + b"data"
-            + data_size.to_bytes(4, "little") + b"\x00" * data_size
-        )
-
-
 @app.function(image=image, gpu=GPU, timeout=1800)
 def separate_remote(
     audio_bytes: bytes,
@@ -186,11 +161,10 @@ def separate_remote(
     Returns raw stems as bytes (the dispatcher mixes instrumental/karaoke and
     normalizes to 16-bit locally, via modal_worker._mix_and_finalize):
 
-        {"ok": True, "pass2": "ok"|"fallback",
+        {"ok": True, "pass2": "ok",
          "drums": b, "bass": b, "other": b,
          "lead_vocals": b, "backing_vocals": b}
     """
-    import shutil
     import subprocess
     import tempfile
     from pathlib import Path
@@ -198,70 +172,67 @@ def separate_remote(
     import torch
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    work = Path(tempfile.mkdtemp(prefix="sep_"))
-
-    # Normalize any input container (mp3/m4a/flac/wav) to 44.1k WAV so
-    # soundfile can read it (matches demucs's own ffmpeg-backed loading).
-    raw_in = work / (filename or "input")
-    raw_in.write_bytes(audio_bytes)
-    audio_path = work / "input.wav"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_in),
-         "-ar", "44100", "-ac", "2", str(audio_path)],
-        check=True, capture_output=True,
-    )
-
-    # ---- Pass 1: demucs ----
-    stems = _run_demucs(audio_path, demucs_model, device, work)
-    vocals_src = stems.get("vocals")
-    if not vocals_src or not vocals_src.exists():
-        return {"ok": False, "error": "vocals stem not produced"}
-
-    out: dict = {"ok": True, "pass2": "ok"}
-    for stem in ("drums", "bass", "other"):
-        src = stems.get(stem)
-        if src and src.exists():
-            out[stem] = src.read_bytes()
-
-    # ---- Pass 2: karaoke lead/backing split (non-fatal) ----
-    pass2_model = karaoke_model or KARAOKE_MODEL
-    karaoke_out = work / "_karaoke_out"
-    karaoke_out.mkdir(parents=True, exist_ok=True)
-    try:
-        from audio_separator.separator import Separator
-
-        sep = Separator(
-            model_file_dir=AS_MODEL_DIR,
-            output_dir=str(karaoke_out),
-            output_format="WAV",
-        )
-        sep.load_model(model_filename=pass2_model)
-        sep.separate(str(vocals_src))
-    except Exception as exc:  # pass 2 is non-fatal — full vocals as lead
-        out["lead_vocals"] = vocals_src.read_bytes()
-        out["backing_vocals"] = _silent_wav_bytes(vocals_src)
-        out["pass2"] = "fallback"
-        out["pass2_error"] = str(exc)[:300]
-    else:
-        # audio-separator: "(Vocals)" = lead, "(Instrumental)" = backing.
-        lead = backing = None
-        for f in karaoke_out.iterdir():
-            name = f.name.lower()
-            if "(vocals)" in name or "_vocals_" in name:
-                lead = f
-            elif "(instrumental)" in name or "_instrumental_" in name:
-                backing = f
-        if lead is None or backing is None:
-            outputs = sorted(karaoke_out.glob("*.wav"))
-            if len(outputs) >= 2:
-                lead, backing = outputs[-1], outputs[0]
-        out["lead_vocals"] = lead.read_bytes() if lead else vocals_src.read_bytes()
-        out["backing_vocals"] = (
-            backing.read_bytes() if backing else _silent_wav_bytes(vocals_src)
+    with tempfile.TemporaryDirectory(prefix="sep_") as scratch:
+        work = Path(scratch)
+        # Keep the upload separate from ffmpeg's output even for input.wav.
+        raw_in = work / ("source" + Path(filename or "input").suffix)
+        raw_in.write_bytes(audio_bytes)
+        audio_path = work / "input.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_in),
+             "-ar", "44100", "-ac", "2", str(audio_path)],
+            check=True, capture_output=True,
         )
 
-    shutil.rmtree(work, ignore_errors=True)
-    return out
+        stems = _run_demucs(audio_path, demucs_model, device, work)
+        required = ("vocals", "drums", "bass", "other")
+        for name in required:
+            src = stems.get(name)
+            if src is None or not src.is_file() or src.stat().st_size == 0:
+                return {"ok": False, "error": f"{name} stem not produced"}
+
+        karaoke_out = work / "_karaoke_out"
+        karaoke_out.mkdir()
+        try:
+            from audio_separator.separator import Separator
+
+            sep = Separator(
+                model_file_dir=AS_MODEL_DIR,
+                output_dir=str(karaoke_out),
+                output_format="WAV",
+            )
+            sep.load_model(model_filename=karaoke_model or KARAOKE_MODEL)
+            sep.separate(str(stems["vocals"]))
+        except Exception as exc:
+            return {"ok": False, "error": f"Pass-2 separation failed: {str(exc)[:300]}"}
+
+        # Never guess roles from lexical order or substitute unsplit vocals.
+        roles = {"lead_vocals": [], "backing_vocals": []}
+        for path in karaoke_out.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".wav":
+                continue
+            name = path.name.lower()
+            # The input basename can itself contain `_vocals_` (Demucs's
+            # demucs_vocals.wav). Explicit separator role labels take priority
+            # over those inherited words; two explicit roles remain ambiguous.
+            lead = "(vocals)" in name
+            backing = "(instrumental)" in name
+            if not lead and not backing:
+                lead = "_vocals_" in name
+                backing = "_instrumental_" in name
+            if lead and backing:
+                return {"ok": False, "error": "Ambiguous Pass-2 stem roles"}
+            if lead:
+                roles["lead_vocals"].append(path)
+            if backing:
+                roles["backing_vocals"].append(path)
+        for role, paths in roles.items():
+            if len(paths) != 1 or paths[0].stat().st_size == 0:
+                return {"ok": False, "error": f"Missing or ambiguous Pass-2 {role}"}
+        out = {"ok": True, "pass2": "ok"}
+        out.update({name: stems[name].read_bytes() for name in ("drums", "bass", "other")})
+        out.update({role: paths[0].read_bytes() for role, paths in roles.items()})
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +256,9 @@ def transcribe_remote(
 
     Returns: {"segments": [...], "language", "transcriber": "heart", "full_text"}
     """
+    if vad_segments == []:
+        return {"segments": [], "language": language, "transcriber": "heart", "full_text": ""}
+
     import tempfile
     from pathlib import Path
 
@@ -330,7 +304,7 @@ def transcribe_remote(
     full_text_parts: list[str] = []
     words: list[dict] = []
 
-    if vad_segments:
+    if vad_segments is not None:
         import librosa
         import numpy as np
 
@@ -340,10 +314,14 @@ def transcribe_remote(
             slice_audio = audio[s_idx:e_idx].astype(np.float32)
             if len(slice_audio) < sr * 0.1:
                 continue
+            seg_kwargs = dict(generate_kwargs)
+            seg_kwargs["max_new_tokens"] = max(
+                8, min(440, int((float(seg_end) - float(seg_start)) * 12) + 8)
+            )
             seg_result = pipe(
                 {"array": slice_audio, "sampling_rate": sr},
                 return_timestamps="word",
-                generate_kwargs=generate_kwargs,
+                generate_kwargs=seg_kwargs,
             )
             full_text_parts.append(seg_result.get("text", "").strip())
             for c in seg_result.get("chunks", []):

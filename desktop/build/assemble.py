@@ -243,6 +243,9 @@ def main():
     shutil.copytree(ROOT / "frontend/dist", output / "static", ignore=shutil.ignore_patterns("*.map"))
     collect_notices(ROOT / "frontend", output)
     shutil.copyfile(DESKTOP / "backend.py", output / "backend.py")
+    shutil.copyfile(DESKTOP / "modal_check.py", output / "modal_check.py")
+    if (DESKTOP / "modal-contract.json").is_file():
+        shutil.copyfile(DESKTOP / "modal-contract.json", output / "modal-contract.json")
     # Backend admission reads these beside backend.py. Include them in the
     # native inventory so direct native boot and installer boot use one policy.
     for policy in ("models.json", "processing-locks.json"):

@@ -628,9 +628,31 @@ readiness evidence. Verified model files are reused when expanding a cache.
 Cancellation preserves resumable files. Restart is refused while processing,
 installation, playback, or a projector window is active.
 
-This implementation does not yet provide a downloadable runtime catalog or a
-desktop Modal connection. Missing prerequisites appear as unavailable; playback
-remains usable. The advanced manifest installer remains a support tool.
+Release artifacts must supply a qualified runtime catalog before automatic
+local setup becomes available. Playback remains usable without it. The advanced
+manifest installer remains a support tool. A complete local model folder may
+be selected in setup: its layout and sizes are inspected before consent, then
+its contents are verified during cancellable installation. Missing or changed
+files never trigger a silent model download. The separate processing runtime
+may still require downloading; this is shown in the installation plan.
+
+Hardware details report observations rather than inferred processing support.
+Unknown graphics memory remains unknown, and Apple silicon unified memory is
+not labeled dedicated VRAM. Optional release-owned memory evidence supplies
+separate RAM/VRAM recommendations, measured peaks plus 25% headroom. Fresh
+installation is blocked when required capacity cannot be verified or is too
+small. Low currently available RAM produces a warning; prepared-media playback
+remains available.
+
+Desktop Modal setup saves credentials with operating-system encryption and
+performs a bounded, explicit metadata check using the pinned client. No audio
+upload, function invocation, deployment, or resource creation occurs in that
+check. Account access and protocol compatibility are separate from inference
+qualification. Cloud processing remains disabled pending a qualified deployment
+contract and backend integration. Credentials are never returned to the UI or
+passed as process arguments. Linux requires a supported system keyring; no
+plaintext fallback exists. Forgetting local credentials works even when the
+keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
 Release builds may supply `desktop/processing-catalog.json` as part of the
 application's verified inventory. The setup engine never accepts a catalog from
@@ -638,7 +660,7 @@ the renderer or saved preferences. Its schema is:
 
 - `schema: 1`, `runtime`: the complete processing manifest accepted by the
   current application's processing lock policy.
-- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, and
+- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, `evidenceReference`, and
   `accelerator`, matching that exact runtime. Populate only from actual evidence.
 - `models`: entries with `id` and `terms: [{label, url}]` for every model in the
   combined installation. Terms URLs are HTTPS source references, not claims
@@ -649,3 +671,21 @@ Runtime artifacts need retrievable distribution URLs; models retain their
 fixed direct-upstream URLs and hashes. A catalog alone does not establish
 representative memory minima, performance, model quality, or clean-machine
 qualification. Those checks remain necessary before release.
+
+Prepare the catalog with `node desktop/build/setup_catalog.mjs --runtime
+runtime.json --qualification qualification.json --terms terms.json --identity
+identity.json --output desktop/processing-catalog.json`. Inputs are explicit;
+the tool never manufactures qualification. `--memory memory.json` adds measured
+memory evidence. Production catalogs reject local runtime URLs. The explicit
+`--private-test-local-sources` option is only for validating private test inputs;
+the application does not accept those as a production download catalog.
+
+An optional release-owned `desktop/modal-contract.json` is copied into the
+verified native payload. Its schema is `1`, with an opaque `protocolReference`,
+the full `protocolSha256`, `requiredTags` containing both values, and `functions`
+mapping separation to `separate_<protocolSha256>` and transcription to
+`transcribe_<protocolSha256>`. The metadata checker resolves these exact names
+at the user-selected deployment version. Current app tags alone cannot certify
+an older function version. This is a declared protocol check, not evidence of
+model quality or successful inference; no passing contract is supplied by
+default.

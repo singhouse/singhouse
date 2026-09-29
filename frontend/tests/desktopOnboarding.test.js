@@ -104,7 +104,7 @@ describe('desktop setup screens', () => {
     expect(cards[1].attributes('aria-pressed')).toBe('true')
     await wrapper.find('.primary').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('Desktop connection is not available yet')
+    expect(wrapper.text()).toContain('Save and check your connection')
     expect(desktop.startSetup).not.toHaveBeenCalled()
     await wrapper.find('.library').trigger('click')
     await flushPromises()

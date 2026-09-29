@@ -536,30 +536,31 @@ async def _ensure_s16(path: Path) -> None:
     decode, leaving the channel inaudible even though the file is valid. 16-bit
     s16le is universally playable. PCM s16→s16 is a no-op (we skip it via probe).
     """
-    if not path.exists():
-        return
+    if not path.is_file() or path.stat().st_size == 0:
+        raise StemSeparationError(f"Missing vocal stem: {path.name}")
+    tmp = path.with_suffix(".s16.wav")
     try:
         probe = await _await_subprocess(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=sample_fmt", "-of", "csv=p=0", str(path)], 30
         )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            raise StemSeparationError(f"Could not inspect vocal stem: {path.name}")
         if probe.stdout.strip() == "s16":
             return
-    except Exception:
-        pass  # probe failed → fall through and transcode defensively
-    tmp = path.with_suffix(".s16.wav")
-    try:
-        res = await _await_subprocess(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-         "-acodec", "pcm_s16le", str(tmp)], 300)
-    except StemSeparationError as exc:
-        logger.warning("Could not normalize %s to 16-bit: %s", path, exc)
         tmp.unlink(missing_ok=True)
-        return
-    if res.returncode == 0 and tmp.exists():
+        res = await _await_subprocess(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+             "-acodec", "pcm_s16le", str(tmp)], timeout=300,
+        )
+        if res.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+            raise StemSeparationError(f"Could not normalize {path.name} to 16-bit")
         tmp.replace(path)
-    else:
-        logger.warning("Could not normalize %s to 16-bit: %s", path, res.stderr[-300:])
+    except StemSeparationError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StemSeparationError(f"Vocal normalization failed: {path.name}") from exc
+    finally:
         tmp.unlink(missing_ok=True)
 
 
@@ -613,6 +614,10 @@ async def _mix_and_finalize(
 ) -> dict[str, Path]:
     """Mix the instrumental (drums+bass+other) and karaoke (instrumental+backing)
     tracks with ffmpeg. Shared by the local and Modal separation paths."""
+    required = [drums_src, bass_src, other_src,
+                stems_dir / "lead_vocals.wav", stems_dir / "backing_vocals.wav"]
+    if any(p is None or not p.is_file() or p.stat().st_size == 0 for p in required):
+        raise StemSeparationError("Cannot mix incomplete separation stems")
     # Guarantee browser-playable vocal stems (audio-separator may emit 32-bit).
     for stem in (stems_dir / "lead_vocals.wav", stems_dir / "backing_vocals.wav"):
         normalized = _ensure_s16(stem)
@@ -638,15 +643,11 @@ async def _mix_and_finalize(
             "-acodec", "pcm_s16le",
             str(instrumental_path),
         ]
-        try:
-            mix_result = await _await_subprocess(mix_cmd, timeout=120)
-        except StemSeparationError as exc:
-            logger.warning("Instrumental mix failed: %s", exc)
-            mix_result = None
-        if mix_result is not None and mix_result.returncode != 0:
-            logger.warning("Instrumental mix failed: %s", mix_result.stderr[:500])
-    elif len(parts) == 1:
-        shutil.copy2(parts[0], instrumental_path)
+        mix_result = await _await_subprocess(mix_cmd, timeout=120)
+        if mix_result.returncode != 0:
+            raise StemSeparationError(f"Instrumental mix failed: {mix_result.stderr[:500]}")
+    if not instrumental_path.is_file() or instrumental_path.stat().st_size == 0:
+        raise StemSeparationError("Instrumental mix produced no audio")
 
     await progress("mixing", 85, "Instrumental ready")
 
@@ -654,11 +655,17 @@ async def _mix_and_finalize(
     # Mix karaoke (instrumental + backing vocals)
     # ---------------------------------------------------------------
     await progress("mixing", 87, "Mixing karaoke track (instrumental + backing)...")
-    await mix_karaoke(
+    karaoke_ok = await mix_karaoke(
         instrumental_path,
         stems_dir / "backing_vocals.wav",
         stems_dir / "karaoke.wav",
     )
+
+    if not karaoke_ok:
+        raise StemSeparationError("Karaoke mix failed")
+    karaoke_path = stems_dir / "karaoke.wav"
+    if not karaoke_path.is_file() or karaoke_path.stat().st_size == 0:
+        raise StemSeparationError("Karaoke mix produced no audio")
 
     await progress("mixing", 95, "Karaoke track ready")
     await progress("done", 100, "All stems ready")

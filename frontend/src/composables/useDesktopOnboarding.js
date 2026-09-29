@@ -85,10 +85,16 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function cancel() {
     return guarded(async () => { applyStatus(await bridge.cancelSetup()); await persist() })
   }
+  async function chooseModelSource(mode) {
+    return guarded(async () => {
+      applyPlan(await bridge.chooseModelSource(mode))
+      await persist()
+    })
+  }
   async function openHelp(topic) { return guarded(() => bridge.openSetupHelp(topic)) }
   async function restart() { return guarded(() => bridge.restartApp()) }
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
   return { step, choice, plan, status, busy, error, localAvailable, canStart,
-    initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp }
+    initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource }
 }

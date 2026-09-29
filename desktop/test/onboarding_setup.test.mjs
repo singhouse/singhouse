@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -132,4 +135,192 @@ test('cancellation remains authoritative when a final probe resolves after abort
   runtime.probe = async (...args) => { setup.cancel(); return probe(...args) }
   const plan = await setup.preflight()
   assert.equal((await start(setup, plan.planId)).state, 'cancelled')
+})
+
+async function offlineFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'onboarding-offline-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const result = fixture()
+  for (const model of result.setup.policy.models) {
+    const content = Buffer.alloc(10, model.id.length)
+    model.files[0].sha256 = createHash('sha256').update(content).digest('hex')
+    await writeFile(join(directory, model.id), content)
+  }
+  result.setup.setOfflineModelsDirectory(directory)
+  result.cache.installFromDirectory = async (manifest, selected, options) => {
+    assert.equal(selected, directory)
+    assert.equal(options.prefix, '')
+    assert.ok(options.signal instanceof AbortSignal)
+    result.calls.push('offline-models')
+    result.cache.value = { id: hash(manifest), manifest }
+  }
+  return { ...result, directory }
+}
+
+test('offline preflight validates real files and discloses runtime transfer without exposing paths', async t => {
+  const { setup, calls, directory } = await offlineFixture(t)
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.modelSource, 'offline')
+  assert.equal(plan.runtimeTransferRequired, true)
+  assert.equal(plan.components.filter(item => item.sourceMode === 'offline').length, 3)
+  assert.equal(JSON.stringify(plan).includes(directory), false)
+  assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'offline-models'])
+  await rm(directory, { recursive: true })
+  assert.equal((await setup.preflight()).available, true, 'verified installation does not require source folder')
+})
+
+test('offline setup verifies corruption before downloads; preflight rejects missing and linked files', async t => {
+  const { setup, directory, calls } = await offlineFixture(t)
+  const file = join(directory, LOCAL_MODEL_IDS[0])
+  await writeFile(file, Buffer.alloc(10, 99))
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true, 'chooser checks size, cancellable install checks content')
+  assert.match((await start(setup, plan.planId)).message, /checksums/)
+  await rm(file)
+  assert.equal((await setup.preflight()).available, false)
+  await symlink(join(directory, LOCAL_MODEL_IDS[1]), file)
+  assert.equal((await setup.preflight()).available, false)
+  assert.deepEqual(calls, [])
+})
+
+test('changing offline source invalidates consent and errors omit private paths', async t => {
+  const { setup, directory, cache, calls } = await offlineFixture(t)
+  const plan = await setup.preflight()
+  setup.setOfflineModelsDirectory(null)
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+  setup.setOfflineModelsDirectory(directory)
+  cache.installFromDirectory = async () => { throw new Error(`secret path ${directory}`) }
+  const status = await start(setup, (await setup.preflight()).planId)
+  assert.equal(status.state, 'error')
+  assert.match(status.message, /no model downloads/)
+  assert.equal(JSON.stringify(status).includes(directory), false)
+  assert.deepEqual(calls, ['runtime'])
+})
+
+test('offline setup locks source selection and cancellation reaches folder installer', async t => {
+  const { setup, cache } = await offlineFixture(t)
+  let entered
+  const started = new Promise(resolve => { entered = resolve })
+  cache.installFromDirectory = async (_, __, { signal }) => {
+    entered()
+    await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+  }
+  await setup.start({ consent: true, planId: (await setup.preflight()).planId })
+  const operation = setup.operation
+  assert.throws(() => setup.setOfflineModelsDirectory(null), /current setup/)
+  await started
+  setup.cancel()
+  await operation
+  assert.equal((await setup.getStatus()).state, 'cancelled')
+})
+
+const GiB = 1024 ** 3
+function measuredMemory(setup, { vram = false } = {}) {
+  const measure = measuredPeakBytes => ({ measuredPeakBytes, evidenceReference: 'measured-fixture',
+    representativeHardware: { verified: true, description: 'Test measurement host' } })
+  setup.catalog.memory = { runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu',
+    ram: measure(8 * GiB), ...(vram ? { vram: measure(4 * GiB) } : {}) }
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 16 * GiB,
+    availableMemoryBytes: 12 * GiB, unifiedMemory: false })
+}
+
+test('RAM requirements derive only from matching measured peak plus 25 percent and block insufficient RAM', async () => {
+  const { setup, calls } = fixture()
+  measuredMemory(setup)
+  let plan = await setup.preflight()
+  assert.equal(plan.memoryRequirements.ramBytes, 10 * GiB)
+  assert.equal(plan.memoryQualification.status, 'meets-measured-requirements')
+  assert.equal(plan.available, true)
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 9 * GiB })
+  plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.equal(plan.memoryQualification.status, 'insufficient')
+  assert.match(plan.reason, /total RAM/)
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+})
+
+test('unknown measured RAM or dedicated VRAM fails honest verification', async () => {
+  const { setup } = fixture()
+  measuredMemory(setup)
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64' })
+  assert.match((await setup.preflight()).reason, /Total RAM could not be verified/)
+  measuredMemory(setup, { vram: true })
+  const plan = await setup.preflight()
+  assert.equal(plan.memoryRequirements.dedicatedVideoMemoryBytes, 5 * GiB)
+  assert.equal(plan.memoryQualification.status, 'unknown')
+  assert.equal(plan.available, false)
+  assert.match(plan.reason, /Dedicated video memory could not be verified/)
+})
+
+test('VRAM does not sum adapters or count unified RAM as dedicated memory', async () => {
+  const { setup } = fixture()
+  measuredMemory(setup, { vram: true })
+  const hardware = { platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB,
+    videoMemoryBytes: 8 * GiB, gpuDevices: [{ dedicatedMemoryBytes: 4 * GiB }, { dedicatedMemoryBytes: 4 * GiB }] }
+  setup.hardware = async () => hardware
+  assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
+  hardware.gpuDevices[1].dedicatedMemoryBytes = 5 * GiB
+  assert.equal((await setup.preflight()).available, true)
+  hardware.unifiedMemory = true
+  const plan = await setup.preflight()
+  assert.equal(plan.memoryRequirements.unifiedMemory, true)
+  assert.equal(plan.available, false)
+  assert.match(plan.reason, /Unified system memory/)
+})
+
+test('low available RAM warns without blocking installation on sufficient total RAM', async () => {
+  const { setup } = fixture()
+  measuredMemory(setup)
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 16 * GiB, availableMemoryBytes: GiB })
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.memoryQualification.warnings.length, 1)
+  assert.match(plan.memoryQualification.warnings[0], /Close other applications/)
+})
+
+test('missing evidence stays unknown and mismatched evidence cannot supply a requirement', async () => {
+  const { setup } = fixture()
+  let plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.memoryRequirements.ramBytes, null)
+  assert.equal(plan.memoryRequirements.evidenceAvailable, false)
+  assert.equal(plan.memoryQualification.status, 'unknown')
+  measuredMemory(setup)
+  setup.catalog.memory.runtimeLockSha256 = 'different'
+  plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.equal(plan.memoryRequirements.ramBytes, null)
+  assert.match(plan.reason, /do not match/)
+  measuredMemory(setup)
+  setup.hardware = async () => ({ platform: 'darwin', arch: 'arm64', totalMemoryBytes: 64 * GiB })
+  assert.equal((await setup.preflight()).available, false)
+})
+
+test('installed playback readiness remains usable while memory qualification is explicit', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  measuredMemory(setup)
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: GiB })
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, true)
+  assert.equal(plan.available, true)
+  assert.equal(plan.memoryQualification.status, 'insufficient')
+})
+
+test('offline installation retains measured memory qualification and blocks before installs', async t => {
+  const { setup, calls } = await offlineFixture(t)
+  measuredMemory(setup)
+  let plan = await setup.preflight()
+  assert.equal(plan.modelSource, 'offline')
+  assert.equal(plan.available, true)
+  setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: GiB })
+  plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
 })
