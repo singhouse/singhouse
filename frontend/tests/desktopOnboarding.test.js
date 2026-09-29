@@ -80,6 +80,111 @@ describe('desktop setup consent and recovery', () => {
     expect(setup.step.value).toBe('ready')
     expect(desktop.startSetup).not.toHaveBeenCalled()
   })
+  it('keeps explicit route choice available after local installation is ready', async () => {
+    const desktop = bridge({
+      getSetupStatus: vi.fn().mockResolvedValue({ state: 'ready' }),
+      preflightSetup: vi.fn().mockResolvedValue({ available: true, ready: true, planId: 'installed' }),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    await setup.chooseProcessing()
+    expect(setup.plan.value.ready).toBe(true)
+    expect(setup.step.value).toBe('choose')
+    await setup.refresh()
+    expect(setup.step.value).toBe('choose')
+    setup.choice.value = 'modal'
+    await setup.continueChoice()
+    expect(setup.step.value).toBe('modal')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+  })
+  it.each(['ready', 'modal', 'choose'])('does not inherit local readiness when reopening Modal from %s', async savedStep => {
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: savedStep, choice: 'modal' }),
+      getSetupStatus: vi.fn().mockResolvedValue({ state: 'ready' }),
+      preflightSetup: vi.fn().mockResolvedValue({ available: true, ready: true }),
+      getModalStatus: vi.fn().mockResolvedValue({ active: false }),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    await setup.initialize()
+    expect(setup.step.value).toBe(savedStep === 'choose' ? 'choose' : 'modal')
+    await setup.refresh()
+    expect(setup.step.value).not.toBe('ready')
+    expect(desktop.getModalStatus).toHaveBeenCalledTimes(savedStep === 'choose' ? 1 : 2)
+  })
+  it('uses confirmed backend Modal activation for Modal readiness', async () => {
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'modal', choice: 'modal' }),
+      getSetupStatus: vi.fn().mockResolvedValue({ state: 'ready' }),
+      getModalStatus: vi.fn().mockResolvedValue({ active: true }),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    await setup.initialize()
+    expect(setup.step.value).toBe('ready')
+    await setup.refresh()
+    expect(setup.step.value).toBe('ready')
+    desktop.getModalStatus.mockResolvedValue({ active: false })
+    await setup.refresh()
+    expect(setup.step.value).toBe('modal')
+  })
+  it('preserves running and restart lifecycle with Modal selected without claiming local readiness afterward', async () => {
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'modal', choice: 'modal' }),
+      getSetupStatus: vi.fn().mockResolvedValue({ state: 'running' }),
+      getModalStatus: vi.fn().mockResolvedValue({ active: true }),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    await setup.initialize()
+    expect(setup.step.value).toBe('progress')
+    expect(desktop.getModalStatus).not.toHaveBeenCalled()
+    await setup.chooseProcessing()
+    expect(setup.step.value).toBe('progress')
+    desktop.getSetupStatus.mockResolvedValue({ state: 'restart-required' })
+    await setup.refresh()
+    expect(setup.step.value).toBe('restart')
+    desktop.getModalStatus.mockResolvedValue({ active: false })
+    desktop.getSetupStatus.mockResolvedValue({ state: 'ready' })
+    await setup.refresh()
+    expect(setup.step.value).toBe('modal')
+  })
+  it('ignores a pending Modal response after a newer route selection', async () => {
+    let resolveModal
+    const desktop = bridge({
+      getModalStatus: vi.fn(() => new Promise(resolve => { resolveModal = resolve })),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    setup.choice.value = 'modal'
+    setup.step.value = 'modal'
+    const pending = setup.refresh()
+    await flushPromises()
+    await setup.chooseProcessing()
+    expect(setup.step.value).toBe('choose')
+    resolveModal({ active: true })
+    await pending
+    expect(setup.step.value).toBe('choose')
+  })
+  it('ignores pending local readiness after a newer explicit route selection', async () => {
+    let resolveStatus
+    const desktop = bridge({ getSetupStatus: vi.fn(() => new Promise(resolve => { resolveStatus = resolve })) })
+    const setup = useDesktopOnboarding(desktop)
+    setup.step.value = 'progress'
+    const pending = setup.refresh()
+    await setup.chooseProcessing()
+    resolveStatus({ state: 'ready' })
+    await pending
+    expect(setup.step.value).toBe('choose')
+  })
+  it('ignores a pending Modal response when the selected route changes directly', async () => {
+    let resolveModal
+    const desktop = bridge({ getModalStatus: vi.fn(() => new Promise(resolve => { resolveModal = resolve })) })
+    const setup = useDesktopOnboarding(desktop)
+    setup.choice.value = 'modal'
+    setup.step.value = 'modal'
+    const pending = setup.refresh()
+    await flushPromises()
+    setup.choice.value = 'local'
+    resolveModal({ active: true })
+    await pending
+    expect(setup.step.value).toBe('modal')
+  })
   it('shows bridge failures while leaving navigation available', async () => {
     const setup = useDesktopOnboarding(bridge({ preflightSetup: vi.fn().mockRejectedValue(new Error('Disk check failed')) }))
     expect(await setup.chooseProcessing()).toBe(false)

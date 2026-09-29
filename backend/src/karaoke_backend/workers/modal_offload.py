@@ -36,10 +36,27 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 APP_NAME = os.getenv("KARAOKE_MODAL_APP", "karaoke-gpu").strip()
 _ENABLED = os.getenv("KARAOKE_MODAL", "").strip().lower() in ("1", "true", "yes", "on")
+_DESKTOP = None
+
+
+def configure_desktop(descriptor):
+    """Set once during private bootstrap, before workers or requests start.
+
+    The bootstrap validates the release contract, consent and remote metadata.
+    This method is not an HTTP/settings API and never persists credentials.
+    """
+    global _DESKTOP, APP_NAME
+    if _DESKTOP is not None:
+        raise RuntimeError("Desktop processing was already configured")
+    if descriptor.get("enabled") is True:
+        APP_NAME = descriptor["config"]["app"]
+    _DESKTOP = descriptor
 
 
 def is_enabled() -> bool:
     """True when Modal offload is configured (and the SDK imports)."""
+    if _DESKTOP is not None:
+        return _DESKTOP.get("enabled") is True
     if not _ENABLED:
         return False
     try:
@@ -52,6 +69,11 @@ def is_enabled() -> bool:
 
 def readiness() -> dict[str, object]:
     """Describe user-owned Modal configuration without substituting for it."""
+    if _DESKTOP is not None:
+        status = _DESKTOP["publicStatus"]
+        return {**status, "desktop_qualified": _DESKTOP.get("enabled") is True,
+                "sdk_available": _DESKTOP.get("enabled") is True,
+                "credentials_configured": status.get("configured") is True}
     configured = _ENABLED
     sdk_available = False
     if configured:
@@ -82,6 +104,17 @@ def readiness() -> dict[str, object]:
 def _lookup(fn_name: str):
     """Resolve a deployed Modal function handle by app + function name."""
     import modal
+
+    if _DESKTOP is not None:
+        if _DESKTOP.get("enabled") is not True:
+            raise RuntimeError("User-owned Modal processing is not ready")
+        config = _DESKTOP["config"]
+        role = {"separate_remote": "separation", "transcribe_remote": "transcription"}.get(fn_name)
+        if role is None:
+            raise RuntimeError("Unsupported desktop processing function")
+        client = modal.Client.from_credentials(config["tokenId"], config["tokenSecret"])
+        return modal.Function.from_name(config["app"], _DESKTOP["functions"][role],
+                                        environment_name=config["environment"], version=config["version"], client=client)
 
     return modal.Function.from_name(APP_NAME, fn_name)
 

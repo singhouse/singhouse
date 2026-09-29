@@ -53,20 +53,25 @@ function memoryAssessment(catalog, runtime, hardware) {
     qualification.reason = 'This computer has less total RAM than the measured requirement plus 25% headroom.'
     return { ...result, blocked: true }
   }
+  const cudaTarget = memory.accelerator === 'cuda'
+  const adapters = cudaTarget ? hardware.cudaDevices : hardware.gpuDevices
+  if (cudaTarget && (!Array.isArray(adapters) || adapters.length !== 1 || hardware.unifiedMemory === true)) {
+    qualification.reason = 'Dedicated video memory could not be verified for an unambiguous CUDA device. The processing device is unknown; other adapters and Unified system memory cannot establish its VRAM capacity.'
+    return { ...result, blocked: true }
+  }
   if (memory.vram) {
-    // Multiple adapters cannot pool their memory for this workflow. A unified
-    // memory observation supplies no measurement of dedicated video memory.
-    const adapters = Array.isArray(hardware.gpuDevices)
-      ? hardware.gpuDevices.map(device => observed(device?.dedicatedMemoryBytes)).filter(value => value !== null)
-      : [observed(hardware.videoMemoryBytes)].filter(value => value !== null)
-    const dedicated = hardware.unifiedMemory === true || !adapters.length ? null : Math.max(...adapters)
+    // Neither display adapters nor the largest of several CUDA cards identify
+    // the device the worker will use. Require one observed device in the
+    // relevant driver inventory; never substitute a summed/maximum flat value.
+    const dedicated = hardware.unifiedMemory === true || !Array.isArray(adapters) || adapters.length !== 1
+      ? null : observed(adapters[0]?.dedicatedMemoryBytes)
     if (dedicated === null) {
       qualification.reason = 'Dedicated video memory could not be verified. Unified system memory does not establish dedicated VRAM capacity.'
       return { ...result, blocked: true }
     }
     if (dedicated < memory.vram.recommendedBytes) {
       qualification.status = 'insufficient'
-      qualification.reason = 'No observed GPU has enough dedicated video memory for the measured requirement plus 25% headroom.'
+      qualification.reason = 'The observed processing GPU has less dedicated video memory than the measured requirement plus 25% headroom.'
       return { ...result, blocked: true }
     }
   }

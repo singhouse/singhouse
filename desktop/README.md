@@ -657,8 +657,11 @@ performs a bounded, explicit metadata check using the pinned client. No audio
 upload, function invocation, deployment, or resource creation occurs in that
 check. Account access and protocol compatibility are separate from inference
 qualification. Cloud processing remains disabled pending a qualified deployment
-contract and backend integration. Credentials are never returned to the UI or
-passed as process arguments. Linux requires a supported system keyring; no
+contract. The backend integration passes consented settings over a private
+startup pipe and pins the selected account, environment, and function version.
+Connection changes require a guarded restart; saving settings does not activate
+them. Credentials are never returned to the UI or passed as process arguments
+or environment variables. Linux requires a supported system keyring; no
 plaintext fallback exists. Forgetting local credentials works even when the
 keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
@@ -697,3 +700,9 @@ at the user-selected deployment version. Current app tags alone cannot certify
 an older function version. This is a declared protocol check, not evidence of
 model quality or successful inference; no passing contract is supplied by
 default.
+
+To enable desktop routing, the release-owned Modal contract also requires
+`qualification: {passed: true, protocolSha256, evidenceReference}`, backed by
+actual inference qualification of that protocol. Consent for both uploads and
+resource usage and a successful startup metadata check are also required.
+Without these, local playback remains available and cloud processing stays off.

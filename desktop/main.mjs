@@ -47,6 +47,7 @@ let installation
 let processingOperation
 let heartSetup
 let onboardingSetup, onboardingState, startupSurface, modalCredentials, modalCheck, modalCheckController
+let modalLoadedFingerprint = null
 let productRelease, releasePolicy, updates, updateOperation, startupHandoff
 let managedReleaseSlot = false
 let releaseState = async () => ({ activeMutations: null, jobs: { nonterminal: null } }), quiesceBackend, resumeBackend
@@ -166,7 +167,7 @@ async function startManagedBootstrap({ stable = false } = {}) {
   await waitForReady(child); child.stdout.destroy(); child.unref()
 }
 
-function launchBackend() {
+async function launchBackend() {
   if (packaged) expectedIdentity = validateManifest(JSON.parse(readFileSync(resolve(nativeDir, 'manifest.json'), 'utf8')), app.getVersion(), process.platform, process.arch)
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
@@ -174,8 +175,22 @@ function launchBackend() {
   if (activeProcessing) args.push('--processing', activeProcessing.directory)
   if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
   if (activeModels) args.push('--models', activeModels.directory)
+  let privateModal = null
+  if (packaged) {
+    args.push('--desktop-config-stdin')
+    const preferences = onboardingPreferences((await onboardingState.read())?.preferences)
+    if (preferences.choice === 'modal') {
+      try { privateModal = await modalCredentials.readForBackend() } catch { /* Playback still starts when a keyring is unavailable. */ }
+    }
+    modalLoadedFingerprint = privateModal ? createHash('sha256').update(JSON.stringify(privateModal)).digest('hex') : null
+  }
   if (!packaged && process.argv.includes('--demo')) args.push('--demo')
   backend = spawn(python, args, { cwd: packaged ? nativeDir : desktopDir, env: childEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: packaged && process.platform !== 'win32' })
+  if (packaged) {
+    backend.stdin.on('error', () => {})
+    backend.stdin.write(JSON.stringify({ schema: 1, modal: privateModal }) + '\n')
+    privateModal = null
+  }
   if (packaged && process.platform !== 'win32') watchOwnedGroup(backend)
   // stdout is a private one-line credential channel. Never forward it to logs.
   backend.stderr.on('data', data => process.stderr.write(data))
@@ -509,6 +524,10 @@ async function start() {
   }
   await startupSurface.update('Starting your library…')
   if (quitting) return
+  if (packaged) {
+    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
+    modalCredentials = new ModalCredentials({ path: resolve(runtime.root, 'modal-config.enc'), safeStorage })
+  }
   const launch = await launchBackend()
   controlToken = launch.controlToken
   const ses = session.fromPartition(`desktop-${randomUUID()}`, { cache: false })
@@ -552,8 +571,6 @@ async function start() {
       backgroundThrottling: false, webviewTag: false, spellcheck: false } })
   secureContents(host.webContents, launch.origin, true)
   if (packaged) {
-    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
-    modalCredentials = new ModalCredentials({ path: resolve(runtime.root, 'modal-config.enc'), safeStorage })
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
     let catalog = null, catalogError
@@ -593,14 +610,26 @@ async function start() {
   })
   setupHandler('setup:status', () => onboardingSetup.getStatus())
   setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
-  setupHandler('setup:modal-status', () => modalCredentials.status())
+  setupHandler('setup:modal-status', async () => {
+    const status = await modalCredentials.status()
+    let matchesLoaded = false
+    if (status.configured) {
+      try {
+        const config = await modalCredentials.readForBackend()
+        matchesLoaded = createHash('sha256').update(JSON.stringify(config)).digest('hex') === modalLoadedFingerprint
+      } catch { /* Unavailable credentials cannot establish current readiness. */ }
+    }
+    const modal = (await processingStatus()).modal
+    return { ...status, active: matchesLoaded && modal?.ready === true,
+      releaseSupported: modal?.releaseSupported === true }
+  })
   setupHandler('setup:modal-save', config => {
     if (modalCheck) throw new Error('Wait for the connection check to finish.')
     return modalCredentials.save(config)
   })
-  setupHandler('setup:modal-forget', () => {
+  setupHandler('setup:modal-forget', async () => {
     if (modalCheck) throw new Error('Wait for the connection check to finish.')
-    return modalCredentials.forget()
+    return { ...await modalCredentials.forget(), releaseSupported: (await processingStatus()).modal?.releaseSupported === true }
   })
   setupHandler('setup:modal-check', async () => {
     if (modalCheck) return modalCheck

@@ -3,11 +3,13 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 const props = defineProps({ bridge: { type: Object, default: () => window.karaokeDesktop } })
+const emit = defineEmits(['ready', 'restart'])
 const status = ref(null)
 const result = ref(null)
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
+const pendingChange = ref(false)
 const form = reactive({ app: '', environment: 'main', version: 1, tokenId: '', tokenSecret: '', uploads: false, usage: false })
 const valid = computed(() => form.app.trim() && form.environment.trim() && Number.isSafeInteger(Number(form.version))
   && Number(form.version) > 0 && form.tokenId.trim() && form.tokenSecret.trim())
@@ -46,7 +48,10 @@ function save() {
     try { await props.bridge.saveModalConfig(config) }
     finally { config.tokenId = ''; config.tokenSecret = '' }
     await refresh()
-    notice.value = 'Configuration saved. No audio was uploaded and processing remains disabled.'
+    pendingChange.value = true
+    notice.value = status.value?.releaseSupported
+      ? 'Configuration saved. No audio was uploaded. Restart to apply your connection and permissions.'
+      : 'Configuration saved for later. This release does not yet include a qualified Modal deployment contract.'
   }, 'Configuration could not be saved. Enter your credentials again and retry.')
 }
 function check() {
@@ -63,9 +68,10 @@ function forget() {
   result.value = null
   return action(async () => {
     status.value = await props.bridge.forgetModalConfig()
+    pendingChange.value = true
     form.uploads = false
     form.usage = false
-    notice.value = 'Local credentials removed. The remote token and any running jobs are unchanged.'
+    notice.value = 'Local credentials removed. Reopen the application to stop using the previous connection. The remote token and any running jobs are unchanged.'
   }, 'Local credentials could not be removed. Retry before leaving this computer.')
 }
 function help(topic) {
@@ -202,17 +208,32 @@ onBeforeUnmount(clearSecrets)
             Forget local credentials
           </button>
         </div>
-        <p>Forgetting removes credentials stored by this app. It does not revoke your remote token or stop running jobs.</p>
+        <p>Connection changes take effect after restarting. Forgetting removes credentials stored by this app. It does not revoke your remote token or stop running jobs.</p>
       </li>
     </ol>
     <div
-      v-if="result"
+      v-if="status?.active"
+      class="result"
+      role="status"
+    >
+      <h2>Your Modal connection is ready</h2>
+      <p>The application is using your saved account, permissions and qualified deployment.</p>
+      <button
+        type="button"
+        class="primary"
+        @click="emit('ready')"
+      >
+        Continue →
+      </button>
+    </div>
+    <div
+      v-else-if="result"
       class="result"
       role="status"
     >
       <h2>{{ result.accessChecked ? 'Account access verified' : 'Account access not verified' }}</h2>
       <p>{{ result.compatible && result.accessChecked ? 'Deployment metadata is compatible. Processing is not yet qualified.' : 'Deployment compatibility has not been established. Review your deployment settings and guide.' }}</p>
-      <p>Processing remains disabled. A metadata check does not verify model quality, successful song processing, or cloud costs.</p>
+      <p>This check does not enable processing. A metadata check does not verify model quality, successful song processing, or cloud costs.</p>
     </div>
     <p
       v-if="notice"
@@ -228,8 +249,16 @@ onBeforeUnmount(clearSecrets)
       {{ error }}
     </p>
     <p class="quiet">
-      You can continue using your library while cloud processing remains unavailable.
+      You can continue using your library while setting up cloud processing.
     </p>
+    <button
+      v-if="(status?.configured || pendingChange) && status?.releaseSupported && !status?.active"
+      type="button"
+      :disabled="busy"
+      @click="emit('restart')"
+    >
+      Restart to apply saved settings
+    </button>
   </section>
 </template>
 

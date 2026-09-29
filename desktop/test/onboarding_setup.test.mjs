@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
+import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 function fixture(overrides = {}) {
   const calls = [], saved = []
@@ -52,6 +53,20 @@ test('preflight covers all components, storage, source and terms before explicit
   assert.deepEqual(calls, [])
   assert.equal((await start(setup, 'stale')).state, 'error')
   assert.deepEqual(calls, [])
+})
+
+test('CUDA device presence alone does not establish dedicated VRAM or override unified memory', async () => {
+  const { setup } = fixture()
+  measuredMemory(setup, { vram: true, accelerator: 'cuda' })
+  for (const extra of [
+    { cudaDevices: [{ name: 'NVIDIA GPU', dedicatedMemoryBytes: null }] },
+    { cudaDevices: [{ name: 'NVIDIA GPU', dedicatedMemoryBytes: 24 * GiB }], unifiedMemory: true },
+  ]) {
+    setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB, ...extra })
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.memoryQualification.status, 'unknown')
+  }
 })
 test('low disk and missing weight terms block the complete setup', async () => {
   const { setup } = fixture({ diskFree: async () => 1 })
@@ -218,10 +233,12 @@ test('offline setup locks source selection and cancellation reaches folder insta
 })
 
 const GiB = 1024 ** 3
-function measuredMemory(setup, { vram = false } = {}) {
+function measuredMemory(setup, { vram = false, accelerator = 'cpu' } = {}) {
   const measure = measuredPeakBytes => ({ measuredPeakBytes, evidenceReference: 'measured-fixture',
     representativeHardware: { verified: true, description: 'Test measurement host' } })
-  setup.catalog.memory = { runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu',
+  setup.catalog.runtime.accelerator = accelerator
+  setup.catalog.qualification.accelerator = accelerator
+  setup.catalog.memory = { runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator,
     ram: measure(8 * GiB), ...(vram ? { vram: measure(4 * GiB) } : {}) }
   setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 16 * GiB,
     availableMemoryBytes: 12 * GiB, unifiedMemory: false })
@@ -262,8 +279,10 @@ test('VRAM does not sum adapters or count unified RAM as dedicated memory', asyn
   const hardware = { platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB,
     videoMemoryBytes: 8 * GiB, gpuDevices: [{ dedicatedMemoryBytes: 4 * GiB }, { dedicatedMemoryBytes: 4 * GiB }] }
   setup.hardware = async () => hardware
-  assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
+  assert.equal((await setup.preflight()).memoryQualification.status, 'unknown')
   hardware.gpuDevices[1].dedicatedMemoryBytes = 5 * GiB
+  assert.equal((await setup.preflight()).available, false)
+  hardware.gpuDevices.shift()
   assert.equal((await setup.preflight()).available, true)
   hardware.unifiedMemory = true
   const plan = await setup.preflight()
@@ -322,5 +341,40 @@ test('offline installation retains measured memory qualification and blocks befo
   plan = await setup.preflight()
   assert.equal(plan.available, false)
   await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
+})
+
+test('CUDA memory uses its single observed NVIDIA device, never a larger mixed display adapter', async () => {
+  const { setup } = fixture()
+  measuredMemory(setup, { vram: true, accelerator: 'cuda' })
+  const inventory = async output => collectHardware({
+    processAdapter: { platform: 'linux', arch: 'x64' },
+    osAdapter: { cpus: () => [], totalmem: () => 64 * GiB, freemem: () => 32 * GiB },
+    getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA GPU' }] }),
+    runCommand: async () => output,
+  })
+  const observed = await inventory('NVIDIA GPU, 4096\n')
+  observed.gpuDevices[0].dedicatedMemoryBytes = 24 * GiB
+  observed.videoMemoryBytes = 24 * GiB
+  setup.hardware = async () => observed
+  assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
+  setup.hardware = async () => inventory('NVIDIA GPU, 8192\n')
+  assert.equal((await setup.preflight()).memoryQualification.status, 'meets-measured-requirements')
+})
+
+test('CUDA memory stays unknown for missing, generic-only, or ambiguous CUDA device selection', async () => {
+  const { setup, calls } = fixture()
+  measuredMemory(setup, { vram: true, accelerator: 'cuda' })
+  const sufficient = { name: 'NVIDIA GPU', dedicatedMemoryBytes: 24 * GiB }
+  for (const cudaDevices of [undefined, [], [sufficient, sufficient],
+    [{ name: 'small', dedicatedMemoryBytes: GiB }, sufficient]]) {
+    setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB,
+      gpuDevices: [sufficient], videoMemoryBytes: 48 * GiB, cudaDevices })
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.memoryQualification.status, 'unknown')
+    assert.match(plan.reason, /unambiguous CUDA device/)
+    assert.equal((await start(setup, plan.planId)).state, 'error')
+  }
   assert.deepEqual(calls, [])
 })

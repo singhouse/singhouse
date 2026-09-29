@@ -115,9 +115,10 @@ def _processing_readiness() -> dict[str, Any]:
         and "transcription" in capabilities and model_set_ready("transcription", manifest)
     )
     modal_detail = modal_offload.readiness()
-    # Configuration discovery is local-only; readiness would require a remote
-    # call, which this endpoint must never make or spend money on.
-    modal_ready = False
+    # Source configuration alone is not readiness. Packaged bootstrap may supply
+    # a qualified release contract + consent + checked metadata before workers
+    # start. This endpoint remains observational and performs no remote calls.
+    modal_ready = modal_detail.get("desktop_qualified") is True
     runtime = None
     if local_python:
         runtime = {"id": manifest["runtimeManifestId"], "accelerator": manifest["accelerator"],
@@ -144,7 +145,8 @@ def _processing_readiness() -> dict[str, Any]:
             modal_ready,
             "user-owned Modal is configured but remotely unverified"
             if modal_detail["configured"] else "user-owned Modal is not configured",
-        ), "configured": modal_detail["configured"], "selected": modal_offload.is_enabled()},
+        ), "configured": modal_detail["configured"], "selected": modal_offload.is_enabled(),
+            "releaseSupported": modal_detail.get("releaseSupported") is True},
         "runtime": runtime,
     }
 

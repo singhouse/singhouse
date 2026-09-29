@@ -67,12 +67,15 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
       { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT, shell: false, windowsHide: true, killSignal: 'SIGKILL' })) : null,
   ])
   const gpuDevices = electronDevices(gpuInfo)
-  for (const detected of nvidiaDevices(nvidiaOutput)) {
+  // Keep the NVIDIA driver inventory separate from Chromium's display list.
+  // Display names (and other vendors' VRAM) do not establish a CUDA device.
+  const cudaDevices = nvidiaDevices(nvidiaOutput)
+  for (const detected of cudaDevices) {
     // A model name alone cannot identify repeated physical devices; consume each
     // unmatched Electron record once and keep distinct adapters distinct.
     const existing = gpuDevices.find(device => device.dedicatedMemoryBytes === null && device.name.toLowerCase() === detected.name.toLowerCase())
     if (existing) existing.dedicatedMemoryBytes = detected.dedicatedMemoryBytes
-    else gpuDevices.push(detected)
+    else gpuDevices.push({ ...detected })
   }
   return {
     platform, arch,
@@ -82,6 +85,7 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
     availableMemoryBytes: bytes(safely(() => osAdapter.freemem())),
     gpu: gpuDevices.map(device => device.name).join(', ') || 'Unknown',
     gpuDevices,
+    cudaDevices,
     videoMemoryBytes: !unifiedMemory && gpuDevices.length === 1 ? gpuDevices[0].dedicatedMemoryBytes : null,
     unifiedMemory,
     memoryMinimumBytes: null,

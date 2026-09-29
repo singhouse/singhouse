@@ -82,3 +82,20 @@ test('unresponsive injected providers cannot indefinitely block onboarding', asy
   assert.equal(result.gpu, 'Unknown')
   assert.equal(result.videoMemoryBytes, null)
 })
+
+test('CUDA inventory comes from NVIDIA driver results, not generic display names', async () => {
+  const getGPUInfo = async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA Test GPU' }] })
+  const noDriver = await collectHardware({ ...base, getGPUInfo })
+  assert.deepEqual(noDriver.cudaDevices, [])
+  const detected = await collectHardware({ ...base, getGPUInfo, runCommand: async () => 'NVIDIA Test GPU, 4096\n' })
+  assert.equal(detected.gpuDevices.length, 2)
+  assert.deepEqual(detected.cudaDevices, [{ name: 'NVIDIA Test GPU', dedicatedMemoryBytes: 4 * 1024 ** 3 }])
+  assert.equal(detected.videoMemoryBytes, null)
+})
+
+test('multiple NVIDIA cards remain distinct CUDA observations with no chosen adapter', async () => {
+  const result = await collectHardware({ ...base,
+    runCommand: async () => 'NVIDIA Small, 4096\nNVIDIA Large, 24576\n' })
+  assert.deepEqual(result.cudaDevices.map(device => device.dedicatedMemoryBytes), [4 * 1024 ** 3, 24 * 1024 ** 3])
+  assert.equal(result.videoMemoryBytes, null)
+})

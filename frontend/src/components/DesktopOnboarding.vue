@@ -326,7 +326,7 @@ onUnmounted(() => clearInterval(poll))
         <p class="lead">
           Modal processing uses cloud resources in your own account. Audio needed for processing leaves this computer for your deployment.
         </p>
-        <DesktopModalSetup />
+        <DesktopModalSetup @ready="step = 'ready'" @restart="setup.restart" />
         <div class="actions">
           <button
             class="text-button"
@@ -437,7 +437,7 @@ onUnmounted(() => clearInterval(poll))
           Let’s add your first song.
         </h1>
         <p class="lead">
-          Local song processing is ready. Add audio from your library, then review and edit its lyrics before your show.
+          {{ choice === 'modal' ? 'Your Modal connection is ready.' : 'Local song processing is ready.' }} Add audio from your library, then review and edit its lyrics before your show.
         </p>
         <div
           class="ready-mark"
