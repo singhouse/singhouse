@@ -10,6 +10,7 @@ import { macSigningSelection, verifySignedMacApplication } from '../macos_signin
 import { appRelativeInventory, macExecutableModes, sealSignedMacApplication, notarizeAndStaple, signMacDiskImage, verifyMacDiskImageApplication, verifyMacZipApplication } from './sign_macos.mjs'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
@@ -103,6 +104,9 @@ async function main() {
     return images[0]
   }
   if (completeLinuxInstaller) {
+    if ((config.toolsets?.appimage ?? '0.0.0') !== '0.0.0') throw new Error('AppImage library provenance requires the pinned legacy toolset')
+    if (nativeManifest.arch === 'x64') await createAppImageSourceBundle({ inputDirectory: process.env.SINGHOUSE_APPIMAGE_SOURCE_INPUTS,
+      output: resolve(output, 'Singhouse-appimage-12.0.1-library-sources.tar') })
     const unpacked = resolve(output, nativeManifest.arch === 'arm64' ? 'linux-arm64-unpacked' : 'linux-unpacked')
     try {
       await lstat(unpacked)
@@ -138,6 +142,8 @@ async function main() {
       const { getAppImageTools } = await import('app-builder-lib/out/toolsets/linux.js')
       const tools = await getAppImageTools(config.toolsets?.appimage ?? '0.0.0', arch)
       appImagePreparation = await prepareAppImageApplication({ applicationDirectory: application, runtime: tools.runtime, buildImage })
+      await verifyAppImageNotices({ applicationDirectory: application, arch: nativeManifest.arch, toolset: config.toolsets?.appimage ?? '0.0.0',
+        builderVersion: packageLock.packages['node_modules/app-builder-lib'].version })
       console.log(`AppImage complete-layout preparation: ${appImagePreparation.unsquashfsVersion}`)
       await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: 'linux', selectedPolicy: policy })
     }

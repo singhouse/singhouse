@@ -1,0 +1,267 @@
+{
+  "schema": 1,
+  "builder": {
+    "tag": "appimage-12.0.1",
+    "commit": "57839c6516289c0412c1b0887a6718d71e1ac5c2",
+    "archiveSha256": "d12ff7eb8f1d1ec4652ca5237a7fbdca33acc0c758045636feca62dc6ecb8ec4",
+    "sourceUrl": "https://github.com/electron-userland/electron-builder-binaries/tree/57839c6516289c0412c1b0887a6718d71e1ac5c2",
+    "electronBuilderVersion": "26.15.3",
+    "toolset": "0.0.0"
+  },
+  "arch": "x64",
+  "libraries": [
+    {
+      "path": "usr/lib/libgconf-2.so.4",
+      "sha256": "ba977334112bb81f6457ee4aad833c6d5f1ff731c718073cd50777d613b23185",
+      "buildId": "ac0a2bc11dc7505e276c0327b1c1897a997ba02c",
+      "source": "gconf",
+      "version": "3.2.6-0ubuntu2",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/g/gconf/libgconf-2-4_3.2.6-0ubuntu2_amd64.deb",
+      "binaryPackageSha256": "952e3f4ed08461e2f95f38b54c66f6a84a6a393a4580e0a64ce9fe84db5b5530",
+      "licenseEvidence": "Exact binary-package copyright grants LGPL version 2 or later; full upstream COPYING retained."
+    },
+    {
+      "path": "usr/lib/libnotify.so.4",
+      "sha256": "8f42294247a886c5a94b2a0ce1c0b65e953616d7efe8da664b3826cdeae47948",
+      "buildId": "bc29207f80a6b64aec329dd8397df57672ee132e",
+      "source": "libnotify",
+      "version": "0.7.6-1ubuntu3",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/libn/libnotify/libnotify4_0.7.6-1ubuntu3_amd64.deb",
+      "binaryPackageSha256": "c663fc5c7d35e8ff8a08b9ad57f7c121262e22424f8b87da494ce55a9fcd8e9a",
+      "licenseEvidence": "Exact binary-package copyright grants LGPL version 2.1 or later; full upstream COPYING retained."
+    },
+    {
+      "path": "usr/lib/libappindicator.so.1",
+      "sha256": "033b8803f20b98e8cd56fc8e75e3a71a552f75c0cff9bd0937f3ddd6ee5d2145",
+      "buildId": "3952e6e8393caf73029e13d642c28e822ee50521",
+      "source": "libappindicator",
+      "version": "12.10.1+13.10.20130920-0ubuntu4",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/liba/libappindicator/libappindicator1_12.10.1+13.10.20130920-0ubuntu4_amd64.deb",
+      "binaryPackageSha256": "2993735f38a5eecb6b2f68af99dabaa32d9c44ff16c4c9c5d8e95a07e9e78cd5",
+      "licenseEvidence": "Mixed source licenses. Package copyright default GPL v3 with specified LGPL v2.1 files. Actual app-indicator.c/h and enum templates permit LGPL v3 and/or v2.1; generate-id.c/h and dbus-shared.h specify GPL v3. src/Makefile.am includes generate-id.c in libappindicator_la_SOURCES; exact Debian diff only changes compiler warning flags in this Makefile. Preserve all notices and GPL-3 plus LGPL-2.1/3 texts; do not present this binary as unqualified LGPL-only."
+    },
+    {
+      "path": "usr/lib/libindicator.so.7",
+      "sha256": "3b61ae3424c4800975c1806245a2d286f6e1fc49cd9350913075c27a95f3c7a0",
+      "buildId": "089a982c5c6194888bb10d378a2f29f719bcddef",
+      "source": "libindicator",
+      "version": "12.10.2+14.04.20140402-0ubuntu1",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libindicator/libindicator7_12.10.2+14.04.20140402-0ubuntu1_amd64.deb",
+      "binaryPackageSha256": "3b8ca09d67c91f076d2880694e0e7a896e01d6d96c1f8b29526ba497dc905b31",
+      "licenseEvidence": "Exact package copyright and library source headers specify GNU GPL version 3.0; full COPYING retained."
+    },
+    {
+      "path": "usr/lib/libXtst.so.6",
+      "sha256": "38f9ccb12d2c477aad85db6279afc334d9f250f613884c188ace7232b83e9b68",
+      "buildId": "0403493a3501094414e75b977548928a413d8146",
+      "source": "libxtst",
+      "version": "2:1.2.2-1",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxtst/libxtst6_1.2.2-1_amd64.deb",
+      "binaryPackageSha256": "00410a73214c7b8a92c28731404c6e3a95d0dca08c142ec0bf6a0f9c15591aad",
+      "licenseEvidence": "Retain full exact multi-author permissive notices; no inferred SPDX simplification."
+    },
+    {
+      "path": "usr/lib/libXss.so.1",
+      "sha256": "270fe6e4d430118793d01cac5c6081d0ea9e244cfcf510475bc779bef21b754a",
+      "buildId": "82c0e3569eb993bf2c2e2bb8379b1564fe28eebf",
+      "source": "libxss",
+      "version": "1:1.2.2-1",
+      "binaryPackageUrl": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxss/libxss1_1.2.2-1_amd64.deb",
+      "binaryPackageSha256": "759a4a9e185c76172efc48184398d377279e870a57e1ae17fe97a21067dda479",
+      "licenseEvidence": "Retain full exact X Consortium/XFree86 permissive notices; no inferred SPDX simplification."
+    }
+  ],
+  "notices": [
+    {
+      "path": "NOTICE.txt",
+      "sha256": "8f60c5509801892ceff545e4b22e7a460264290247634881909d7a500e81ec44"
+    },
+    {
+      "path": "builder/appImage-packages-ia32.sh",
+      "sha256": "01cdf4a80d268586cd8bb571992bfdfad2efb9b892a0989c21dd2c3f1746bb7c"
+    },
+    {
+      "path": "builder/appImage-packages-x64.sh",
+      "sha256": "78284348b6823362e4158a551b2ddcafad3a61dac7f25e7874444e6c364c161e"
+    },
+    {
+      "path": "copyright/gconf.txt",
+      "sha256": "2b3bf476b11bc6405fa1d58c8d83c1b3fea4f26f56bd486bc63c6a6b91eb4353"
+    },
+    {
+      "path": "copyright/libappindicator.txt",
+      "sha256": "518f65dcd8b7a81d83c5e9dcdad5635b3d18e3e529a85ae53af0090a94ab508d"
+    },
+    {
+      "path": "copyright/libindicator.txt",
+      "sha256": "2ff451abf91d34acfb35b943fa62d2b49053ae28aa6232dd6f8eddcacebb4b6b"
+    },
+    {
+      "path": "copyright/libnotify.txt",
+      "sha256": "5456597d0b556f4c0aadeaefc793358115c3a7a56ab87a9846e2366344d7549d"
+    },
+    {
+      "path": "copyright/libxss.txt",
+      "sha256": "6b822bc28b9b4dfddac70104ebb55d1116da3aede42065d80168ba732ef46502"
+    },
+    {
+      "path": "copyright/libxtst.txt",
+      "sha256": "59144e3e7b8aba9ac57639834b42f3cbc95f782cf0f116b16d4747f0f841f9aa"
+    },
+    {
+      "path": "licenses/gconf/COPYING",
+      "sha256": "94b03f1a60a7fd5007149530626a895a6ef5a8b9342abfd56860c5f3956f5d23"
+    },
+    {
+      "path": "licenses/libappindicator/COPYING",
+      "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+    },
+    {
+      "path": "licenses/libappindicator/COPYING.LGPL.2.1",
+      "sha256": "a9bdde5616ecdd1e980b44f360600ee8783b1f99b8cc83a2beb163a0a390e861"
+    },
+    {
+      "path": "licenses/libindicator/COPYING",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    {
+      "path": "licenses/libnotify/COPYING",
+      "sha256": "a190dc9c8043755d90f8b0a75fa66b9e42d4af4c980bf5ddc633f0124db3cee7"
+    },
+    {
+      "path": "licenses/libxss/COPYING",
+      "sha256": "5cf3e16f5dd753a4c0853e8227134ab65f5562d9ef89b1a2d7681f5c8ac9feb5"
+    },
+    {
+      "path": "licenses/libxtst/COPYING",
+      "sha256": "940190489c7a0e5ae3d83fc4fcbd79e0cd1b765bf1a4efd408293c1ee0332ceb"
+    }
+  ],
+  "sources": [
+    {
+      "path": "sources/gconf_3.2.6-0ubuntu2.debian.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gconf/gconf_3.2.6-0ubuntu2.debian.tar.gz",
+      "sha256": "7ef4d5a3d4149c6707d645cc1f57189a48da87c41ebc235a6d51a62653ac38de",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/gconf_3.2.6-0ubuntu2.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gconf/gconf_3.2.6-0ubuntu2.dsc",
+      "sha256": "f82088533828540a3b1ca97f58b87568003eca1cdc3a1f5b1d83b0b91161715e",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/gconf_3.2.6.orig.tar.xz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gconf/gconf_3.2.6.orig.tar.xz",
+      "sha256": "1912b91803ab09a5eed34d364bf09fe3a2a9c96751fde03a4e0cfa51a04d784c",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libappindicator_12.10.1+13.10.20130920-0ubuntu4.diff.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/liba/libappindicator/libappindicator_12.10.1+13.10.20130920-0ubuntu4.diff.gz",
+      "sha256": "eba447e640f1df6537b55c5c94703f4faf6ba365fefe15730a29f6578d75a14e",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libappindicator_12.10.1+13.10.20130920-0ubuntu4.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/liba/libappindicator/libappindicator_12.10.1+13.10.20130920-0ubuntu4.dsc",
+      "sha256": "5a9510dbdc1f643df058686e881b93570dd0e70688c927077a8c0b9f1812cdc9",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/libappindicator_12.10.1+13.10.20130920.orig.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/liba/libappindicator/libappindicator_12.10.1+13.10.20130920.orig.tar.gz",
+      "sha256": "0b93526101c07cce65a3d8dc3d43e77e06780ce023ab82605e32c8babc139a2c",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libindicator_12.10.2+14.04.20140402-0ubuntu1.diff.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libindicator/libindicator_12.10.2+14.04.20140402-0ubuntu1.diff.gz",
+      "sha256": "7ab838d01ad7f5213e6ab3bc9fe60d1be83a360976c88d30e9ae66a3881bf775",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libindicator_12.10.2+14.04.20140402-0ubuntu1.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libindicator/libindicator_12.10.2+14.04.20140402-0ubuntu1.dsc",
+      "sha256": "68d6d1b6a3f9177e8306a1aeb3cb1bcb0d1c86a06ee18c8dcbbaff90140b8866",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/libindicator_12.10.2+14.04.20140402.orig.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libindicator/libindicator_12.10.2+14.04.20140402.orig.tar.gz",
+      "sha256": "89390bb92d7b2324f4c7396d7a15da37e2943d4f55d86ba6284fc0ce60223a67",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libnotify_0.7.6-1ubuntu3.debian.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libn/libnotify/libnotify_0.7.6-1ubuntu3.debian.tar.gz",
+      "sha256": "fcf89036400453d43c3181aecccea1bb51c8ae1304a84bccbb6951918d6bfdfa",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libnotify_0.7.6-1ubuntu3.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libn/libnotify/libnotify_0.7.6-1ubuntu3.dsc",
+      "sha256": "75fded2321055566ffda8a045cbd97e078994f70f743f3c266c9916192314607",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/libnotify_0.7.6.orig.tar.xz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libn/libnotify/libnotify_0.7.6.orig.tar.xz",
+      "sha256": "0ef61ca400d30e28217979bfa0e73a7406b19c32dd76150654ec5b2bdf47d837",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libxss_1.2.2-1.diff.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxss/libxss_1.2.2-1.diff.gz",
+      "sha256": "fcc9c125f3af01da27f6cee798410a7907a63802f5c6360f972e12b1ff59e6c1",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libxss_1.2.2-1.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxss/libxss_1.2.2-1.dsc",
+      "sha256": "22379490d80d7661c793f0f016a5e12255fdb53a0b2b58b6fe14afa805fcac3f",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/libxss_1.2.2.orig.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxss/libxss_1.2.2.orig.tar.gz",
+      "sha256": "e12ba814d44f7b58534c0d8521e2d4574f7bf2787da405de4341c3b9f4cc8d96",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libxtst_1.2.2-1.diff.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxtst/libxtst_1.2.2-1.diff.gz",
+      "sha256": "3f1ae4cee26b1d93d037610bb7397f324eb293a0520e2be5f5bd822c115cd639",
+      "matchesDsc": true
+    },
+    {
+      "path": "sources/libxtst_1.2.2-1.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxtst/libxtst_1.2.2-1.dsc",
+      "sha256": "92507fe81ab453ee4e9de52e3b638e33429f74f175ea496c310bffb8434e4b4d",
+      "signatureVerified": false
+    },
+    {
+      "path": "sources/libxtst_1.2.2.orig.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxtst/libxtst_1.2.2.orig.tar.gz",
+      "sha256": "221838960c7b9058cd6795c1c3ee8e25bae1c68106be314bc3036a4f26be0e6c",
+      "matchesDsc": true
+    }
+  ],
+  "targets": {
+    "x64": {
+      "libraries": [
+        "usr/lib/libgconf-2.so.4",
+        "usr/lib/libnotify.so.4",
+        "usr/lib/libappindicator.so.1",
+        "usr/lib/libindicator.so.7",
+        "usr/lib/libXtst.so.6",
+        "usr/lib/libXss.so.1"
+      ]
+    },
+    "arm64": {
+      "libraries": [],
+      "evidence": "app-builder-lib 26.15.3 buildLegacyFuse2AppImage copies runtimeLibraries only for x64 and ia32; ARM64 adds no libraries with toolset 0.0.0. The completed application must contain no usr/lib entries.",
+      "sourceUrl": "https://github.com/electron-userland/electron-builder/blob/v26.15.3/packages/app-builder-lib/src/targets/appimage/appImageUtil.ts"
+    }
+  }
+}

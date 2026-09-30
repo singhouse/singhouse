@@ -66,3 +66,21 @@ do not establish a complete corresponding-source delivery. Platform code
 signing and native qualification are separate release checks. This inventory
 makes no license assertion for model weights or later optional processing
 environments.
+
+Linux x64 AppImage first installers additionally carry six pinned builder
+libraries. Their exact binary/package/source identities and full copyright and
+license texts are retained in `third-party/appimage/` and installed as
+`resources/third-party/appimage/` before release receipt creation. Packaging
+rejects changed, absent, or unclassified libraries under `usr/lib`, and missing
+or altered notices. `libappindicator` has mixed LGPL-2.1/3 and GPL-3 source files,
+including GPL-3 `generate-id.c` in the library source list; it is not described as
+unqualified LGPL-only. Preserve the complete component notices.
+
+First-installer packaging also creates the separate deterministic
+`Singhouse-appimage-12.0.1-library-sources.tar` and its SHA256 sidecar. The TAR
+contains exact source DSC records, upstream originals, Debian changes, the
+pinned builder extraction scripts, notices, inventory, and internal checksums.
+DSC signatures have not been verified; source hashes are locked and were checked
+against those records. Building this local artifact does not publish it or
+establish public source availability. Source delivery and any other applicable
+redistribution obligations remain release checks.

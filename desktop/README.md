@@ -785,3 +785,30 @@ To enable desktop routing, the release-owned Modal contract also requires
 actual inference qualification of that protocol. Consent for both uploads and
 resource usage and a successful startup metadata check are also required.
 Without these, local playback remains available and cloud processing stays off.
+
+### AppImage library notices and source inputs
+
+Linux x64 first-installer packaging requires `SINGHOUSE_APPIMAGE_SOURCE_INPUTS`
+to name a prepared local input directory. For each entry in
+`third-party/appimage/inventory.json` under `sources`, retrieve its exact public
+`url`, save it under its relative `path` inside that directory, and verify its
+`sha256`. Keep all 18 files: six DSC records plus upstream original archives and
+Debian changes. Packaging performs these checks again and never downloads or
+installs source inputs automatically. DSC signatures are explicitly unverified;
+a matching hash is not described as signature verification.
+
+Run `SINGHOUSE_APPIMAGE_SOURCE_INPUTS=/absolute/prepared-inputs npm run package:first-installers`
+from `desktop/` with the other required native build inputs prepared. The build
+copies exact notices into the application, checks the completed AppImage library
+bytes before creating a receipt, and writes a deterministic uncompressed
+`artifacts/Singhouse-appimage-12.0.1-library-sources.tar` plus `.sha256`. The archive
+has fixed file order, timestamps, ownership and modes and includes an internal
+`SHA256SUMS`. Existing artifact names are never overwritten. Preserve the source
+artifact alongside the installer for release review; this command does not
+publish either artifact or promise a public source-download location.
+
+The pinned legacy toolset adds these six libraries only for Linux x64. For
+ARM64 it adds none: packaging checks an explicit empty library inventory,
+rejects unexpected `usr/lib` entries, and does not require the x64 source inputs.
+Other AppImage toolsets require a new verified inventory before use. Run
+`node --test test/appimage_notices.test.mjs` for notice and source-artifact checks.
