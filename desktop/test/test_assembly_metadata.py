@@ -159,14 +159,22 @@ class AssemblyMetadataTests(unittest.TestCase):
         from test_windows_launcher import pe_fixture
         first, base, manifest = self.windows_fixture('one')
         second, _, _ = self.windows_fixture('two')
+        staged = []
         def update(path, resources, api):
+            self.assertIn(path.parent.parent, (first[0].resolve(), second[0].resolve()))
+            self.assertEqual(path.parent, path.parent.resolve())
+            staged.append(path.parent)
             path.write_bytes(pe_fixture(manifest | {(10, key, 0): data for key, data in resources.items()}, timestamp=123))
         results = []
         with patch.object(launcher, 'BASE_SHA256', launcher.digest(base.read_bytes())), \
-             patch.object(launcher, 'WindowsResourceAPI'), patch.object(launcher, 'write_resources', update):
+             patch.object(launcher, 'WindowsResourceAPI'), patch.object(launcher, 'write_resources', update), \
+             patch.object(tempfile, 'tempdir', str(self.base / 'unusable ambient TMP')):
             for fixture in (first, second):
                 results.append(normalize_installation(fixture[0], fixture[1], fixture[4], 'win32-x64',
                                                      [fixture[3]], windows_launcher_base=base))
+                self.assertTrue(staged)
+                self.assertTrue(all(not directory.exists() for directory in staged))
+                self.assertEqual(list(fixture[0].glob('normalized-launchers-*')), [])
                 self.verify_record(fixture[1], fixture[2])
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0]['consoleLaunchers']['count'], 1)
@@ -177,13 +185,24 @@ class AssemblyMetadataTests(unittest.TestCase):
     def test_windows_failure_does_not_apply_metadata_or_launcher_edits(self):
         import windows_launcher as launcher
         fixture, base, _ = self.windows_fixture('failure')
-        before = {p: p.read_bytes() for p in fixture[1].rglob('*') if p.is_file()}
+        before = {p: p.read_bytes() for p in fixture[0].rglob('*') if p.is_file()}
+        staged = []
+        def fail_after_staging(**kwargs):
+            output = kwargs['output']
+            self.assertEqual(output.parent.parent, fixture[0].resolve())
+            staged.append(output.parent)
+            output.write_bytes(b'partial staged output')
+            raise ValueError('invalid launcher')
         with patch.object(launcher, 'WindowsResourceAPI'), \
-             patch.object(launcher, 'relocate_launcher', side_effect=ValueError('invalid launcher')):
+             patch.object(launcher, 'relocate_launcher', side_effect=fail_after_staging), \
+             patch.object(tempfile, 'tempdir', str(self.base / 'unusable ambient TMP')):
             with self.assertRaisesRegex(ValueError, 'invalid launcher'):
                 normalize_installation(fixture[0], fixture[1], fixture[4], 'win32-x64',
                                        [fixture[3]], windows_launcher_base=base)
-        self.assertEqual(before, {p: p.read_bytes() for p in fixture[1].rglob('*') if p.is_file()})
+        self.assertEqual(before, {p: p.read_bytes() for p in fixture[0].rglob('*') if p.is_file()})
+        self.assertTrue(staged)
+        self.assertTrue(all(not directory.exists() for directory in staged))
+        self.assertEqual(list(fixture[0].glob('normalized-launchers-*')), [])
 
     def test_windows_target_rejects_cross_host_and_requires_native_api(self):
         with patch('assemble.host_target', return_value='linux-x64'):
