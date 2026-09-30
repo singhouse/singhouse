@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url'
 
 export function parseArguments(args) {
-  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256'])
+  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256', '--retained-profile', '--expected-source-commit'])
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]
     if (flag === '--resume') { assert.ok(!options.resume, 'Duplicate --resume'); options.resume = true; continue }
@@ -18,7 +18,14 @@ export function parseArguments(args) {
     options[flag] = args[++i]
   }
   for (const key of ['--executable', '--runtime-manifest', '--audio', '--output']) assert.ok(options[key], `Missing ${key}`)
-  assert.ok(options.downloadModels, 'Explicit --download-models consent is required to retrieve the three model sets from policy-defined upstreams')
+  const retainedProfile = options['--retained-profile'], expectedSourceCommit = options['--expected-source-commit']
+  if (retainedProfile) {
+    assert.ok(!options.resume && !options.downloadModels && !options['--upgrade-from-executable-sha256'], 'Retained setup excludes resume, upgrades and model retrieval')
+    assert.match(expectedSourceCommit ?? '', /^[a-fA-F0-9]{40}$/, 'Retained setup requires a full expected source commit')
+  } else {
+    assert.ok(!expectedSourceCommit, 'Expected source commit requires retained setup')
+    assert.ok(options.downloadModels, 'Explicit --download-models consent is required to retrieve the three model sets from policy-defined upstreams')
+  }
   const upgradeFrom = options['--upgrade-from-executable-sha256']
   if (upgradeFrom !== undefined) {
     assert.ok(options.resume, 'Executable upgrade requires --resume')
@@ -27,6 +34,7 @@ export function parseArguments(args) {
   const seconds = Number(options['--timeout-seconds'] ?? 3600)
   assert.ok(Number.isInteger(seconds) && seconds >= 60 && seconds <= 14400, 'Timeout must be 60–14400 seconds')
   return { executable: resolve(options['--executable']), manifest: resolve(options['--runtime-manifest']),
+    retainedProfile: retainedProfile ? resolve(retainedProfile) : undefined, expectedSourceCommit: expectedSourceCommit?.toLowerCase(),
     resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase(), audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
 }
 
@@ -100,6 +108,80 @@ export function reusableRuntime(readiness, manifest) {
     && readiness.runtime.accelerator === manifest.accelerator
 }
 
+export function validateRetainedCandidate(executable, expectedSourceCommit) {
+  assert.match(expectedSourceCommit ?? '', /^[a-f0-9]{40}$/, 'Expected full source identity required')
+  const resources = join(dirname(executable), 'resources'), records = {}
+  for (const [name, path] of Object.entries({ provenance: join(resources, 'native', 'provenance.json'),
+    nativeManifest: join(resources, 'native', 'manifest.json'), receipt: join(resources, 'release-receipt.json') })) {
+    const bytes = readFileSync(path)
+    records[name] = { value: JSON.parse(bytes), sha256: hash(bytes) }
+  }
+  assert.equal(records.provenance.value.sourceCommit, expectedSourceCommit, 'Native source identity changed')
+  assert.equal(records.provenance.value.sourceDirty, false, 'Native source must be clean')
+  assert.equal(records.provenance.value.sourceExport, false, 'Native source must have committed provenance')
+  assert.equal(records.receipt.value.identity.sourceCommit, expectedSourceCommit, 'Release source identity changed')
+  assert.equal(records.receipt.value.identity.nativeRuntimeId, records.nativeManifest.value.runtimeId, 'Native release identity changed')
+  return { sourceCommit: expectedSourceCommit, provenanceSha256: records.provenance.sha256,
+    nativeManifestSha256: records.nativeManifest.sha256, receiptSha256: records.receipt.sha256,
+    identity: records.receipt.value.identity, applicationArchiveSha256: hash(readFileSync(join(resources, 'app.asar'))) }
+}
+
+export function validateRetainedProfile(profile, output) {
+  const info = lstatSync(profile)
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Retained profile must be a physical directory')
+  assert.equal(realpathSync(profile).toLowerCase(), resolve(profile).toLowerCase(), 'Retained profile must be physical')
+  assert.equal(realpathSync(dirname(output)).toLowerCase(), resolve(dirname(output)).toLowerCase(), 'Evidence parent must be physical')
+  for (const [parent, child] of [[profile, output], [output, profile]]) {
+    const path = relative(parent, child)
+    assert.ok(path && (path === '..' || path.startsWith('../') || path.startsWith('..\\') || isAbsolute(path)),
+      'Retained profile and evidence must be separate directories')
+  }
+}
+
+export function validateFreshSubmission(submitted, priorSongs, priorJobs) {
+  assert.ok(Number.isInteger(submitted.song_id) && submitted.song_id > 0, 'New song identity required')
+  assert.ok(typeof submitted.job_id === 'string' && submitted.job_id.length > 0, 'New job identity required')
+  assert.ok(!priorSongs.includes(submitted.song_id), 'Submission reused an existing song')
+  assert.ok(!priorJobs.includes(submitted.job_id), 'Submission reused an existing job')
+}
+
+// Immutable mode prevents SQLite from creating or modifying DB/WAL/SHM files.
+// Refuse a nonempty WAL rather than silently omitting uncheckpointed records.
+export function retainedDatabaseSnapshot(python, database, requireQuiescent = false) {
+  const script = `import hashlib,json,pathlib,sqlite3,sys
+path=pathlib.Path(sys.argv[1]).resolve(strict=True)
+wal=pathlib.Path(str(path)+'-wal')
+def no_wal():
+ if wal.exists() and wal.stat().st_size: raise RuntimeError('Retained database has a nonempty WAL; stop without checkpointing')
+no_wal()
+before=path.read_bytes()
+connection=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+connection.row_factory=sqlite3.Row
+result={}
+try:
+ for table,terminal in [('songs',('ready','failed')),('jobs',('done','failed'))]:
+  rows=[dict(row) for row in connection.execute('SELECT * FROM '+table+' ORDER BY id')]
+  if sys.argv[2]=='true' and any(row.get('status') not in terminal for row in rows):
+   raise RuntimeError('Retained database has nonterminal '+table+'; application must not launch')
+  result[table]=[{'id':row['id'],'sha256':hashlib.sha256(json.dumps(row,sort_keys=True,separators=(',',':')).encode()).hexdigest()} for row in rows]
+finally: connection.close()
+no_wal()
+if path.read_bytes()!=before: raise RuntimeError('Retained database changed during read-only snapshot')
+print(json.dumps(result))`
+  return JSON.parse(execFileSync(python, ['-I', '-B', '-c', script, database, String(requireQuiescent)],
+    { encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 }))
+}
+
+export function auditRetainedDatabase(baseline, current) {
+  for (const table of ['songs', 'jobs']) {
+    for (const prior of baseline[table]) {
+      const observed = current[table].find(row => row.id === prior.id)
+      assert.deepEqual(observed, prior, `Retained ${table} row changed or disappeared`)
+    }
+  }
+  return { status: 'passed', songs: baseline.songs.length, jobs: baseline.jobs.length }
+}
+
 export async function run(options) {
   assert.ok(!options.upgradeFromExecutableSha256 || options.resume, 'Executable upgrade requires --resume')
   assert.equal(process.platform, 'win32', 'This qualification harness requires the Windows packaged application')
@@ -115,16 +197,26 @@ export async function run(options) {
   const manifestBytes = readFileSync(options.manifest), manifest = JSON.parse(manifestBytes)
   assert.equal(manifest.kind, 'processing')
   // The real app, not this harness, decides whether this lock is trusted.
+  const profile = options.retainedProfile ?? join(options.output, 'profile')
+  if (options.retainedProfile) {
+    assert.ok(!options.resume && !options.upgradeFromExecutableSha256, 'Retained setup cannot resume')
+    validateRetainedProfile(profile, options.output)
+  }
   if (!options.resume) mkdirSync(options.output) // Never adopt an existing output implicitly.
-  const profile = join(options.output, 'profile')
   const started = Date.now(), deadline = started + options.timeoutMs
   const evidence = { schema: 1, kind: 'packaged-local-processing-smoke', startedAt: new Date(started).toISOString(),
     status: 'running', input: { sha256: hash(input), bytes: input.length, durationSeconds: inputDuration },
     executableSha256: hash(readFileSync(options.executable)),
     runtimeManifestSha256: hash(manifestBytes), runtimeLockSha256: manifest.provenance?.lockSha256,
-    consent: { modelRetrieval: true, localInference: true }, timingsMs: {}, transitions: [],
+    consent: { modelRetrieval: !options.retainedProfile, localInference: true }, timingsMs: {}, transitions: [],
     limitations: ['Not corpus accuracy or listening evidence', 'Not physical output or show qualification',
       'No representative RAM/VRAM measurement', 'Does not qualify a release catalog'] }
+  evidence.harnessSha256 = hash(readFileSync(new URL(import.meta.url)))
+  if (options.retainedProfile) {
+    evidence.release = validateRetainedCandidate(options.executable, options.expectedSourceCommit)
+    evidence.retainedSetup = { profile, qualification: 'Fresh local inference with retained setup; not installation proof' }
+    evidence.limitations.push(evidence.retainedSetup.qualification)
+  }
   let artifactDirectory = options.output
   let resumed
   if (options.resume) {
@@ -147,7 +239,9 @@ export async function run(options) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     /^(PATH|Path|SystemRoot|SYSTEMROOT|WINDIR|windir|COMSPEC|ComSpec|PATHEXT|TEMP|TMP|TMPDIR|USERPROFILE|APPDATA|LOCALAPPDATA|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u.test(key)))
   env.XDG_CONFIG_HOME = options.output
-  let application, host
+  let application, host, databaseBaseline
+  const nativePython = join(dirname(options.executable), 'resources', 'native', 'python', 'python.exe')
+  const database = join(profile, 'backend', 'desktop.db')
   const remaining = () => { const value = deadline - Date.now(); assert.ok(value > 0, 'Total processing smoke deadline exceeded'); return value }
   const bounded = async (operation, milliseconds = remaining()) => {
     let timer
@@ -203,8 +297,10 @@ export async function run(options) {
     assert.deepEqual(identity.sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
     assert.equal(identity.ownsInstance, true, 'Qualification profile is already in use')
     assert.equal(resolve(identity.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Application selected a different profile')
-    const child = relative(options.output, identity.userData)
-    assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Application profile escaped the isolated directory')
+    if (!options.retainedProfile) {
+      const child = relative(options.output, identity.userData)
+      assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Application profile escaped the isolated directory')
+    }
     if (evidence.application) assert.equal(evidence.application.userData, identity.userData)
     evidence.application = identity
     const launchDeadline = Date.now() + Math.min(300000, remaining())
@@ -262,15 +358,41 @@ export async function run(options) {
     evidence.timingsMs[`${kind}Installation`] = Date.now() - installationStarted; save()
   }
   try {
+    if (options.retainedProfile) {
+      databaseBaseline = retainedDatabaseSnapshot(nativePython, database, true)
+      evidence.retainedSetup.databaseBaseline = databaseBaseline
+      save()
+    }
     await launch()
-    const songs = await api('/api/songs')
-    assert.equal(songs.total, 0, 'Qualification profile must have an empty library')
+    const songs = await api('/api/songs?page_size=500')
+    const priorSongs = [], priorJobs = [], retainedRecords = []
+    const priorStemIds = options.retainedProfile && existsSync(join(profile, 'backend', 'stems'))
+      ? readdirSync(join(profile, 'backend', 'stems')) : []
+    if (options.retainedProfile) {
+      assert.equal(songs.songs.length, songs.total, 'Retained qualification requires at most 500 songs')
+      for (const summary of songs.songs) {
+        const record = await api(`/api/songs/${summary.id}`)
+        assert.ok(['ready', 'failed'].includes(record.status), 'Retained profile has an unfinished song')
+        priorSongs.push(record.id)
+        if (record.job_id) {
+          const job = await api(`/api/jobs/${encodeURIComponent(record.job_id)}`)
+          assert.ok(['done', 'failed'].includes(job.status), 'Retained profile has an active job')
+          priorJobs.push(record.job_id)
+          retainedRecords.push({ songId: record.id, jobId: record.job_id, job, song: record })
+        } else retainedRecords.push({ songId: record.id, jobId: record.job_id, song: record })
+      }
+      evidence.retainedSetup.priorSongs = priorSongs
+      evidence.retainedSetup.priorJobs = priorJobs
+      evidence.retainedSetup.priorRecordsSha256 = hash(Buffer.from(JSON.stringify(retainedRecords)))
+      save()
+    } else assert.equal(songs.total, 0, 'Qualification profile must have an empty library')
     const featurePolicy = await api('/api/features')
     assert.equal(featurePolicy.lyrics_lookup.enabled, false, 'External lyric lookup must be disabled')
     const initialReadiness = await api('/api/features/processing')
     evidence.initialReadiness = initialReadiness
-    evidence.runtimeReused = Boolean(resumed && reusableRuntime(initialReadiness, manifest)); save()
-    if (!evidence.runtimeReused) await install(options.manifest, 'processing')
+    evidence.runtimeReused = Boolean((resumed || options.retainedProfile) && reusableRuntime(initialReadiness, manifest)); save()
+    if (options.retainedProfile) assert.ok(evidence.runtimeReused, 'Retained runtime must be admitted without installation')
+    else if (!evidence.runtimeReused) await install(options.manifest, 'processing')
     const policyEncoded = await bounded(application.evaluate(({ app }) => {
       const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
       return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
@@ -293,8 +415,10 @@ export async function run(options) {
     writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
     evidence.modelPolicySha256 = hash(policyBytes)
     evidence.modelManifestSha256 = hash(modelManifestBytes)
-    await install(modelPath, 'models')
-    await close(); await launch()
+    if (!options.retainedProfile) {
+      await install(modelPath, 'models')
+      await close(); await launch()
+    }
     const readiness = await api('/api/features/processing')
     evidence.readiness = readiness
     assert.equal(readiness.separation.ready, true); assert.equal(readiness.transcription.ready, true)
@@ -318,7 +442,10 @@ export async function run(options) {
       if (response.status !== 202) throw new Error(`Audio upload returned ${response.status}`)
       return response.json()
     }, { bytes: input.toString('base64'), filename: basename(options.audio) }), 65000)
+    validateFreshSubmission(submitted, priorSongs, priorJobs)
+    assert.ok(!priorStemIds.includes(String(submitted.song_id)), 'Submission reused existing stem storage')
     evidence.songId = submitted.song_id; evidence.jobId = submitted.job_id
+    save()
     let job, previous
     while (true) {
       remaining(); job = await api(`/api/jobs/${encodeURIComponent(submitted.job_id)}`)
@@ -362,16 +489,37 @@ export async function run(options) {
     assert.ok(Math.abs(Number(evidence.outputs.lead_vocals.probe.format.duration) - inputDuration) <= 0.1, 'Processing truncated or extended the input duration')
     for (const item of Object.values(evidence.outputs)) assert.deepEqual(item.probe.streams[0], reference, 'Output stems are not aligned')
     assert.ok(evidence.transcription.lastWordEnd <= Number(evidence.outputs.lead_vocals.probe.format.duration) + 0.5, 'Word timing exceeds audio duration')
+    if (options.retainedProfile) {
+      for (const prior of retainedRecords) {
+        const record = await api(`/api/songs/${prior.songId}`)
+        assert.deepEqual(record, prior.song, 'Retained song changed')
+        if (prior.jobId) assert.deepEqual(await api(`/api/jobs/${encodeURIComponent(prior.jobId)}`), prior.job, 'Retained job changed')
+      }
+      assert.ok(evidence.transitions.some(item => item.phase === 'separating'), 'Fresh separation phase was not observed')
+      evidence.retainedSetup.priorRecordsPreserved = true
+    }
     evidence.status = 'passed'
   } catch (error) {
     evidence.status = 'failed'; evidence.error = error.message
-    if (application) await bounded(application.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items.find(item => item.label === 'Cancel installation')?.click()), 5000).catch(() => {})
+    if (application && !options.retainedProfile) await bounded(application.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items.find(item => item.label === 'Cancel installation')?.click()), 5000).catch(() => {})
     throw error
   } finally {
     try { await close() }
     catch (error) { evidence.status = 'failed'; evidence.shutdownError = 'Owned application shutdown failed'; throw error }
-    finally { evidence.finishedAt = new Date().toISOString(); evidence.timingsMs.total = Date.now() - started; save() }
+    finally {
+      if (databaseBaseline) {
+        try {
+          evidence.retainedSetup.preservationAudit = auditRetainedDatabase(databaseBaseline,
+            retainedDatabaseSnapshot(nativePython, database))
+        } catch (error) {
+          evidence.status = 'failed'
+          evidence.retainedSetup.preservationAudit = { status: 'failed', error: error.message }
+        }
+      }
+      evidence.finishedAt = new Date().toISOString(); evidence.timingsMs.total = Date.now() - started; save()
+    }
   }
+  assert.equal(evidence.status, 'passed', 'Processing qualification failed; inspect evidence.json')
   console.log(`Real local processing smoke passed. Evidence: ${join(artifactDirectory, 'evidence.json')}`)
 }
 
