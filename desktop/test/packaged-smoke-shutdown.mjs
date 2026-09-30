@@ -3,16 +3,39 @@
 import { execFile } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
+import assert from 'node:assert/strict'
+import { isAbsolute } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { forceChild } from '../lifecycle.mjs'
 const exec = promisify(execFile)
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
-export async function processTable() {
-  if (process.platform === 'win32') {
+export function parseDarwinProcessTable(stdout) {
+  const rows = JSON.parse(stdout), seen = new Set()
+  assert.ok(Array.isArray(rows) && rows.length > 0, 'Empty or invalid macOS process observation')
+  for (const row of rows) {
+    assert.ok(row && Number.isSafeInteger(row.pid) && row.pid > 0
+      && Number.isSafeInteger(row.parent) && row.parent >= 0 && row.parent !== row.pid
+      && typeof row.birth === 'string' && /^[1-9][0-9]*$/.test(row.birth)
+      && !seen.has(row.pid), 'Malformed macOS process identity')
+    seen.add(row.pid)
+  }
+  return rows
+}
+
+export async function processTable({ platform = process.platform, python, execImpl = exec } = {}) {
+  if (platform === 'darwin') {
+    assert.ok(typeof python === 'string' && isAbsolute(python), 'macOS observation requires the explicit bundled Python path')
+    const { stdout } = await execImpl(python, ['-I', '-B', fileURLToPath(new URL('./packaged-smoke-processes.py', import.meta.url))],
+      { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+    return parseDarwinProcessTable(stdout)
+  }
+  if (platform === 'win32') {
     const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       'ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,@{n="birth";e={$_.CreationDate.ToUniversalTime().Ticks.ToString()}})'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
     return JSON.parse(stdout).map(row => ({ pid: row.ProcessId, parent: row.ParentProcessId, birth: row.birth }))
   }
+  assert.equal(platform, 'linux', 'Unsupported process observation platform')
   return readdirSync('/proc').filter(name => /^\d+$/.test(name)).flatMap(name => {
     try {
       const stat = readFileSync(`/proc/${name}/stat`, 'utf8')

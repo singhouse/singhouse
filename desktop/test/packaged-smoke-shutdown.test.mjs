@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { closePackagedApplication, collectOwned, processTable } from './packaged-smoke-shutdown.mjs'
+import { fileURLToPath } from 'node:url'
+import { closePackagedApplication, collectOwned, processTable, parseDarwinProcessTable } from './packaged-smoke-shutdown.mjs'
 
 const root = { pid: 10, parent: 1, birth: '100' }
 const backend = { pid: 11, parent: 10, birth: '101' }
@@ -78,4 +79,109 @@ test('Linux forced cleanup stops its real retained child without reporting succe
     child.stdout.destroy()
     child.unref()
   }
+})
+
+
+test('macOS process observation uses explicit bundled Python with bounded isolated invocation', async () => {
+  const python = '/Applications/Test App.app/Contents/Resources/native/python/bin/python3'
+  let called = false
+  const rows = await processTable({ platform: 'darwin', python, execImpl: async (file, args, options) => {
+    called = true; assert.equal(file, python); assert.deepEqual(args.slice(0, 2), ['-I', '-B'])
+    assert.ok(args[2].endsWith('/packaged-smoke-processes.py')); assert.equal(options.timeout, 5000)
+    return { stdout: JSON.stringify([{ pid: 10, parent: 1, birth: '1790000000123456' }]) }
+  } })
+  assert.equal(called, true); assert.equal(rows[0].birth, '1790000000123456')
+  await assert.rejects(processTable({ platform: 'darwin' }), /explicit bundled Python/)
+  await assert.rejects(processTable({ platform: 'darwin', python, execImpl: async () => { throw new Error('inspection denied') } }), /inspection denied/)
+})
+
+test('macOS observation fails closed on malformed, empty and reused-PID ambiguity', () => {
+  for (const value of [{}, [], [{ pid: 10, parent: 1, birth: 100 }], [{ pid: 10, parent: 1, birth: 'bad' }],
+    [{ pid: 10, parent: 10, birth: '100' }], [root, root]]) {
+    assert.throws(() => parseDarwinProcessTable(JSON.stringify(value)))
+  }
+  const sameSecond = [{ pid: 10, parent: 1, birth: '1790000000123457' }]
+  assert.deepEqual(collectOwned(sameSecond, [{ pid: 10, parent: 1, birth: '1790000000123456' }]), [])
+})
+
+test('macOS ABI observer handles process exit but refuses denied and truncated observations', () => {
+  // Only fake libproc calls execute here; the helper never loads Darwin libraries.
+  const script = `import importlib.util,sys,ctypes,errno
+spec=importlib.util.spec_from_file_location('observer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.os.geteuid=lambda:501
+class Fake:
+ mode='normal'
+ def proc_listpids(self,kind,uid,buffer,size):
+  assert kind==4 and uid==m.os.geteuid()
+  if self.mode=='unaligned':return 7
+  if buffer is None: return 8
+  if self.mode=='truncated': return size
+  buffer[0]=10;buffer[1]=11;return 8
+ def proc_pidinfo(self,pid,flavor,arg,pointer,size):
+  assert flavor==3 and size==136
+  if pid==11:
+   ctypes.set_errno(errno.EPERM if self.mode=='denied' else errno.ESRCH);return 0
+  info=pointer._obj;info.uid=m.os.geteuid();info.pid=pid;info.parent=1;info.seconds=1790000000;info.microseconds=123456
+  if self.mode=='malformed':info.microseconds=1000000
+  if self.mode=='wrong_uid':info.uid+=1
+  return size
+f=Fake();assert m.snapshot(f)==[{'pid':10,'parent':1,'birth':'1790000000123456'}]
+for mode in ['denied','truncated','malformed','unaligned','wrong_uid']:
+ f.mode=mode
+ try:m.snapshot(f)
+ except RuntimeError:pass
+ else:raise AssertionError('accepted '+mode)
+`
+  const python = process.env.KARAOKE_DESKTOP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+  execFileSync(python, ['-I', '-B', '-c', script, fileURLToPath(new URL('./packaged-smoke-processes.py', import.meta.url))], { timeout: 10000 })
+})
+
+test('native macOS observer identifies its real child and preserves a stable birth value',
+  { skip: process.platform !== 'darwin' || !process.env.KARAOKE_DESKTOP_PYTHON, timeout: 10000 }, async () => {
+    const python = process.env.KARAOKE_DESKTOP_PYTHON
+    const child = spawn(process.execPath, ['-e', "console.log('ready'); setTimeout(() => {}, 6000)"], { stdio: ['ignore', 'pipe', 'ignore'] })
+    try {
+      await once(child.stdout, 'data', { signal: AbortSignal.timeout(2000) })
+      const first = (await processTable({ python })).find(row => row.pid === child.pid)
+      const second = (await processTable({ python })).find(row => row.pid === child.pid)
+      assert.equal(first.parent, process.pid); assert.equal(first.birth, second.birth)
+      child.kill('SIGTERM')
+      await once(child, 'exit', { signal: AbortSignal.timeout(2000) })
+      assert.ok(!(await processTable({ python })).some(row => row.pid === child.pid && row.birth === first.birth))
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      child.stdout.destroy(); child.unref()
+    }
+  })
+
+
+test('macOS own-UID observer validates UID and never treats permission denial as exit', () => {
+  const script = `import importlib.util,sys,ctypes,errno
+spec=importlib.util.spec_from_file_location('observer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+class Fake:
+ def proc_listpids(self,kind,uid,buffer,size):
+  assert kind==4 and uid==501
+  if buffer is None:return 4
+  buffer[0]=10;return 4
+ def proc_pidinfo(self,pid,flavor,arg,pointer,size):
+  ctypes.set_errno(errno.EPERM);return 0
+m.os.geteuid=lambda:501
+try:m.snapshot(Fake())
+except RuntimeError as e:assert 'Cannot inspect' in str(e)
+else:raise AssertionError('accepted same-UID permission denial')
+for uid in [-1,4294967296,True,'501',1.5]:
+ try:m.list_pids(Fake(),uid)
+ except RuntimeError:pass
+ else:raise AssertionError('accepted invalid UID')
+class Drift(Fake):
+ def proc_pidinfo(self,pid,flavor,arg,pointer,size):
+  info=pointer._obj;info.uid=501;info.pid=pid;info.parent=1;info.seconds=1790000000
+  m.os.geteuid=lambda:502
+  return size
+try:m.snapshot(Drift())
+except RuntimeError as e:assert 'UID changed' in str(e)
+else:raise AssertionError('accepted observer UID drift')
+`
+  const python = process.env.KARAOKE_DESKTOP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+  execFileSync(python, ['-I', '-B', '-c', script, fileURLToPath(new URL('./packaged-smoke-processes.py', import.meta.url))], { timeout: 10000 })
 })
