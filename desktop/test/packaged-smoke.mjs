@@ -4,11 +4,12 @@
 import { _electron as electron } from 'playwright'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, existsSync, appendFileSync, statSync, accessSync, constants } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, appendFileSync, statSync, accessSync, constants, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
+import { join, resolve, relative, isAbsolute } from 'node:path'
 
-import { closePackagedApplication } from './packaged-smoke-shutdown.mjs'
+import { closePackagedApplication, processTable } from './packaged-smoke-shutdown.mjs'
+import { packagedResources } from './packaged-smoke-paths.mjs'
 
 async function waitForHost(application) {
   const deadline = Date.now() + 60000
@@ -20,7 +21,7 @@ async function waitForHost(application) {
   throw new Error('Desktop host did not open after startup')
 }
 
-assert.ok(['linux', 'win32'].includes(process.platform), 'This harness supports Linux and Windows packaged applications')
+assert.ok(['linux', 'win32', 'darwin'].includes(process.platform), 'This harness supports Linux, Windows and macOS packaged applications')
 const options = new Map()
 for (let index = 2; index < process.argv.length; index += 2) {
   const name = process.argv[index], value = process.argv[index + 1]
@@ -31,13 +32,15 @@ for (let index = 2; index < process.argv.length; index += 2) {
 }
 assert.ok(options.has('--executable'), 'Pass --executable pointing to the packaged application')
 const executablePath = resolve(options.get('--executable'))
+const resources = packagedResources(executablePath)
+const observationPython = join(resources, 'native', 'python', 'bin', 'python3')
 const fixtureFfmpeg = options.get('--fixture-ffmpeg')
 if (fixtureFfmpeg !== undefined) {
   assert.ok(isAbsolute(fixtureFfmpeg), '--fixture-ffmpeg must be an absolute path')
   assert.ok(statSync(fixtureFfmpeg).isFile(), '--fixture-ffmpeg must name an existing regular executable file')
   accessSync(fixtureFfmpeg, constants.X_OK)
 }
-const temporary = mkdtempSync(join(tmpdir(), 'singhouse-packaged-smoke-'))
+const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'singhouse-packaged-smoke-')))
 const env = { ...process.env, XDG_CONFIG_HOME: temporary }
 delete env.KARAOKE_DESKTOP_PYTHON
 delete env.ELECTRON_RUN_AS_NODE
@@ -49,7 +52,8 @@ async function shutdown() {
   diagnostic({ event: 'shutdown-windows', urls: owned.windows().map(window => window.url()) })
   // Consume this handle once; cleanup on failure must not retry an unbounded close.
   application = null
-  await closePackagedApplication(owned, { report: diagnostic })
+  await closePackagedApplication(owned, { report: diagnostic,
+    table: () => processTable({ python: observationPython }) })
 }
 const title = 'Original packaged smoke'
 const wait = milliseconds => new Promise(done => setTimeout(done, milliseconds))
@@ -121,7 +125,7 @@ try {
   // An external encoder generates only the synthetic input. It is not evidence
   // that the image includes or authenticates that encoder; import still uses
   // the packaged backend and its own admitted runtime.
-  const ffmpeg = fixtureFfmpeg ?? join(dirname(executablePath), 'resources/native/ffmpeg/bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+  const ffmpeg = fixtureFfmpeg ?? join(resources, 'native', 'ffmpeg', 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
   diagnostic({ event: 'fixture-encoder', path: ffmpeg, external: fixtureFfmpeg !== undefined })
   execFileSync(ffmpeg, ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
     'testsrc2=size=320x180:rate=25', '-f', 'lavfi', '-i',
