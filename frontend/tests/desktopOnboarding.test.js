@@ -240,7 +240,7 @@ describe('desktop setup screens', () => {
     const wrapper = mount(DesktopOnboarding)
     await flushPromises()
     const facts = Object.fromEntries(wrapper.findAll('.facts > div').map(row => [row.find('dt').text(), row.find('dd').text()]))
-    expect(facts['Download size']).toBe('1.0 GiB')
+    expect(facts['Transfer size']).toBe('1.0 GiB')
     expect(facts['Local model files']).toBe('4.0 GiB')
     expect(facts['Space needed']).toBe('10.0 GiB')
     expect(desktop.startSetup).not.toHaveBeenCalled()
