@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { copyFile, readFile, stat } from 'node:fs/promises'
+import { copyFile, readFile, stat, lstat, mkdir } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assertReleasePolicy, canonicalJson } from '../release.mjs'
@@ -9,6 +10,7 @@ import { macSigningSelection, verifySignedMacApplication } from '../macos_signin
 import { appRelativeInventory, macExecutableModes, sealSignedMacApplication, notarizeAndStaple, signMacDiskImage, verifyMacDiskImageApplication, verifyMacZipApplication } from './sign_macos.mjs'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -89,6 +91,24 @@ async function main() {
   if (signedMacRelease && nativeManifest.platform !== 'darwin') throw new Error('--signed-macos-release requires a macOS native assembly')
 
   const output = resolve(config.directories.output)
+  const completeLinuxInstaller = nativeManifest.platform === 'linux' && process.argv.includes('--first-installers')
+  const { files: _files, extraResources: _extraResources, directories, ...installerConfig } = config
+  installerConfig.directories = { output: directories.output }
+  const arch = Arch[nativeManifest.arch]
+  const buildImage = async (applicationDirectory, outputDirectory) => {
+    const artifacts = await build({ config: { ...installerConfig, directories: { output: outputDirectory } },
+      prepackaged: applicationDirectory, publish: 'never', targets: platform.createTarget('AppImage', arch) })
+    const images = artifacts.filter(path => path.endsWith('.AppImage'))
+    if (images.length !== 1 || resolve(images[0], '..') !== resolve(outputDirectory)) throw new Error('Expected exactly one AppImage in its owned output directory')
+    return images[0]
+  }
+  if (completeLinuxInstaller) {
+    const unpacked = resolve(output, nativeManifest.arch === 'arm64' ? 'linux-arm64-unpacked' : 'linux-unpacked')
+    try {
+      await lstat(unpacked)
+      throw new Error('Linux first-installer packaging requires a fresh unpacked output directory; preserve or remove the prior build explicitly')
+    } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
   await build({ config: { ...config, publish: null }, publish: 'never', targets: platform.createTarget('dir', Arch[nativeManifest.arch]) })
   async function applicationRoot() {
     const name = nativeManifest.platform === 'darwin' ? 'mac-arm64'
@@ -99,74 +119,100 @@ async function main() {
     return path
   }
   const application = await applicationRoot()
-  if (signedRelease && nativeManifest.platform !== 'win32') throw new Error('--signed-release is supported only for Windows')
-  if (signedRelease && !await verifyWindowsAuthenticode(resolve(application, 'Singhouse.exe'), { onDiagnostic: detail => console.error('Application signature verification:', JSON.stringify(detail)) })) {
-    throw new Error('Signed release application failed Authenticode publisher or timestamp verification')
-  }
-  await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
-  let signedNativeRuntimeId = nativeManifest.runtimeId
-  if (signedMacRelease) {
-    const sealed = await sealSignedMacApplication({ applicationDirectory: application, policy, packageLock, selection: macSelection })
-    signedNativeRuntimeId = sealed.manifest.runtimeId
-    await notarizeAndStaple(sealed.app, macSelection)
-    await verifySignedMacApplication(sealed.app, macSelection)
-    await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: 'darwin', selectedPolicy: policy })
-  }
-  const identity = await deriveIdentityFromApplication({ applicationDirectory: application, policy, packageLock })
-  const target = `${nativeManifest.platform}-${nativeManifest.arch}`
-  const payload = resolve(output, `Singhouse-${identity.appVersion}-${target}.shapp`)
-  const receipt = `${payload}.receipt.json`
-  await createPortablePayload({ sourceDirectory: application, output: payload, identity, platform: nativeManifest.platform, arch: nativeManifest.arch })
-  await createReleaseReceipt({
-    payload, output: receipt, sourceCommit: provenance.sourceCommit, sourceDirty: provenance.sourceDirty,
-    electronVersion: identity.electronVersion, nativeRuntimeId: signedNativeRuntimeId,
-    // Re-read exact HEAD plus the complete tracked/untracked status after the
-    // Electron build and payload construction, immediately before publishing
-    // the immutable receipt.
-    verifySourceBeforePublish: () => verifyPackagingSource({ repositoryDirectory: sourceRoot, provenance }),
-  })
-
-  // Native installers remain first-install surfaces. Signing and publication are
-  // explicit release gates and are intentionally absent from this build command.
-  if (process.argv.includes('--first-installers')) {
-    const resources = nativeManifest.platform === 'darwin'
-      ? resolve(application, 'Singhouse.app', 'Contents', 'Resources') : resolve(application, 'resources')
-    if (!signedMacRelease) await copyFile(receipt, resolve(resources, 'release-receipt.json'))
-    const installerApplicationInventory = await inspectApplicationInventory(application)
-    const macModes = signedMacRelease ? await macExecutableModes(resolve(application, 'Singhouse.app'),
-      appRelativeInventory(installerApplicationInventory.files)) : null
-    // A prepackaged application already contains the selected files and native
-    // resources. Passing those source-copy rules to electron-builder again both
-    // reopens the clean payload and triggers invalid config merging in current
-    // electron-builder releases.
-    const { files: _files, extraResources: _extraResources, directories, ...installerConfig } = config
-    installerConfig.directories = { output: directories.output }
-    const prepackaged = prepackagedInstallerPath(application, nativeManifest.platform)
-    await build({ config: installerConfig, prepackaged, publish: 'never',
-      targets: platform.createTarget(signedMacRelease ? 'dmg' : undefined, Arch[nativeManifest.arch]) })
-    if (signedMacRelease) await build({ config: installerConfig, prepackaged, publish: 'never',
-      targets: platform.createTarget('zip', Arch[nativeManifest.arch]) })
-    if (signedRelease) {
-      const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)
-      if (!await verifyWindowsAuthenticode(installer, { onDiagnostic: detail => console.error('Installer signature verification:', JSON.stringify(detail)) })) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
+  let appImagePreparation
+  try {
+    if (signedRelease && nativeManifest.platform !== 'win32') throw new Error('--signed-release is supported only for Windows')
+    if (signedRelease && !await verifyWindowsAuthenticode(resolve(application, 'Singhouse.exe'), { onDiagnostic: detail => console.error('Application signature verification:', JSON.stringify(detail)) })) {
+      throw new Error('Signed release application failed Authenticode publisher or timestamp verification')
     }
     await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
-    await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
+    let signedNativeRuntimeId = nativeManifest.runtimeId
     if (signedMacRelease) {
-      const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.dmg`)
-      const zip = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.zip`)
-      await signMacDiskImage(installer, macSelection)
-      await verifyMacDiskImageApplication(installer, installerApplicationInventory, macModes, macSelection)
-      await verifyMacZipApplication(zip, installerApplicationInventory, macModes, macSelection)
-      // A checksum is published only after notarization and stapling have
-      // finalized the disk image. It is an immutable sidecar, like the receipt.
-      for (const artifact of [installer, zip]) {
-        const digest = await sha256File(artifact)
-        await writeImmutableFile(`${artifact}.sha256`, `${digest}  ${artifact.split('/').at(-1)}\n`)
+      const sealed = await sealSignedMacApplication({ applicationDirectory: application, policy, packageLock, selection: macSelection })
+      signedNativeRuntimeId = sealed.manifest.runtimeId
+      await notarizeAndStaple(sealed.app, macSelection)
+      await verifySignedMacApplication(sealed.app, macSelection)
+      await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: 'darwin', selectedPolicy: policy })
+    }
+    if (completeLinuxInstaller) {
+      const { getAppImageTools } = await import('app-builder-lib/out/toolsets/linux.js')
+      const tools = await getAppImageTools(config.toolsets?.appimage ?? '0.0.0', arch)
+      appImagePreparation = await prepareAppImageApplication({ applicationDirectory: application, runtime: tools.runtime, buildImage })
+      console.log(`AppImage complete-layout preparation: ${appImagePreparation.unsquashfsVersion}`)
+      await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: 'linux', selectedPolicy: policy })
+    }
+    const identity = await deriveIdentityFromApplication({ applicationDirectory: application, policy, packageLock })
+    const target = `${nativeManifest.platform}-${nativeManifest.arch}`
+    const payload = resolve(output, `Singhouse-${identity.appVersion}-${target}.shapp`)
+    const receipt = `${payload}.receipt.json`
+    await createPortablePayload({ sourceDirectory: application, output: payload, identity, platform: nativeManifest.platform, arch: nativeManifest.arch })
+    await createReleaseReceipt({
+      payload, output: receipt, sourceCommit: provenance.sourceCommit, sourceDirty: provenance.sourceDirty,
+      electronVersion: identity.electronVersion, nativeRuntimeId: signedNativeRuntimeId,
+      // Re-read exact HEAD plus the complete tracked/untracked status after the
+      // Electron build and payload construction, immediately before publishing
+      // the immutable receipt.
+      verifySourceBeforePublish: () => verifyPackagingSource({ repositoryDirectory: sourceRoot, provenance }),
+    })
+
+    // Native installers remain first-install surfaces. Signing and publication are
+    // explicit release gates and are intentionally absent from this build command.
+    if (process.argv.includes('--first-installers')) {
+      const resources = nativeManifest.platform === 'darwin'
+        ? resolve(application, 'Singhouse.app', 'Contents', 'Resources') : resolve(application, 'resources')
+      if (!signedMacRelease) await copyFile(receipt, resolve(resources, 'release-receipt.json'))
+      const installerApplicationInventory = await inspectApplicationInventory(application)
+      const macModes = signedMacRelease ? await macExecutableModes(resolve(application, 'Singhouse.app'),
+        appRelativeInventory(installerApplicationInventory.files)) : null
+      // A prepackaged application already contains the selected files and native
+      // resources. Passing those source-copy rules to electron-builder again both
+      // reopens the clean payload and triggers invalid config merging in current
+      // electron-builder releases.
+      const prepackaged = prepackagedInstallerPath(application, nativeManifest.platform)
+      if (appImagePreparation) {
+        const expected = await appImageSnapshot(application)
+        await copyFile(receipt, resolve(appImagePreparation.lean, 'resources/release-receipt.json'), constants.COPYFILE_EXCL)
+        const finalOutput = resolve(appImagePreparation.work, 'final')
+        await mkdir(finalOutput)
+        const image = await buildImage(appImagePreparation.lean, finalOutput)
+        await verifyAppImageApplication({ image, runtime: appImagePreparation.runtime, expected })
+        const archiveOutput = resolve(appImagePreparation.work, 'archive')
+        await mkdir(archiveOutput)
+        const archives = await build({ config: { ...installerConfig, directories: { output: archiveOutput } },
+          prepackaged, publish: 'never', targets: platform.createTarget('tar.gz', arch) })
+        if (archives.length !== 1 || !archives[0].endsWith('.tar.gz') || resolve(archives[0], '..') !== archiveOutput) throw new Error('Expected one archive in its owned output directory')
+        assertAppImageSnapshot(await appImageSnapshot(application), expected)
+        await verifyPackagingSource({ repositoryDirectory: sourceRoot, provenance })
+        await publishAppImageArtifact(image, output)
+        await publishAppImageArtifact(archives[0], output)
+      } else {
+        await build({ config: installerConfig, prepackaged, publish: 'never',
+          targets: platform.createTarget(signedMacRelease ? 'dmg' : undefined, Arch[nativeManifest.arch]) })
+      }
+      if (signedMacRelease) await build({ config: installerConfig, prepackaged, publish: 'never',
+        targets: platform.createTarget('zip', Arch[nativeManifest.arch]) })
+      if (signedRelease) {
+        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)
+        if (!await verifyWindowsAuthenticode(installer, { onDiagnostic: detail => console.error('Installer signature verification:', JSON.stringify(detail)) })) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
+      }
+      await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
+      await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
+      if (signedMacRelease) {
+        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.dmg`)
+        const zip = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.zip`)
+        await signMacDiskImage(installer, macSelection)
+        await verifyMacDiskImageApplication(installer, installerApplicationInventory, macModes, macSelection)
+        await verifyMacZipApplication(zip, installerApplicationInventory, macModes, macSelection)
+        // A checksum is published only after notarization and stapling have
+        // finalized the disk image. It is an immutable sidecar, like the receipt.
+        for (const artifact of [installer, zip]) {
+          const digest = await sha256File(artifact)
+          await writeImmutableFile(`${artifact}.sha256`, `${digest}  ${artifact.split('/').at(-1)}\n`)
+        }
       }
     }
-  }
-  console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
+    console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
+  } finally { await appImagePreparation?.cleanup() }
 }
 
 export function reportPackagingFailure(error) {
