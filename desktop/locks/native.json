@@ -94,6 +94,34 @@
       "ffmpegReadme": {
         "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/win32-x64.README",
         "sha256": "a636a7183c58006351acbaf35303c0ed85c6e1320fd4e80de453ba6157de6311"
+      },
+      "consoleLauncher": {
+        "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/crates/uv-trampoline-builder/trampolines/uv-trampoline-x86_64-console.exe",
+        "sha256": "0447a4febf43fdd958e4236129d6050b1dad64c124c43355d557542b3229cae8",
+        "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9",
+        "uvVersion": "0.12.8",
+        "notices": {
+          "uv-LICENSE-MIT": {
+            "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/LICENSE-MIT",
+            "sha256": "860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58176c",
+            "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9"
+          },
+          "uv-LICENSE-APACHE": {
+            "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/LICENSE-APACHE",
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+            "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9"
+          },
+          "uv-trampoline-Cargo.toml": {
+            "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/crates/uv-trampoline/Cargo.toml",
+            "sha256": "5ccce023d3abe6777cb5e5be1eabf91793e19e1681811baf41bd086d84f78c04",
+            "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9"
+          },
+          "uv-trampoline-README.md": {
+            "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/crates/uv-trampoline/README.md",
+            "sha256": "4726ed8fe09ce62c1ebee979ddf8c812b437529fac2a5613c71dd6fefb27546f",
+            "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9"
+          }
+        }
       }
     }
   }

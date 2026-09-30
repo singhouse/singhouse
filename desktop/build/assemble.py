@@ -162,7 +162,9 @@ def install_dependencies(output, cache, lock, target, env, upstream_omissions):
         run("uv", "pip", "install", *selection, "--require-hashes", "--no-build-isolation",
             "-r", LOCKS / "base.txt", env=env)
         run("uv", "pip", "install", *selection, "--no-deps", *artifacts, env=env)
-        normalization = normalize_installation(output, destination, host_python, target, artifacts, upstream_omissions)
+        launcher_base = fetch(lock["targets"][target]["consoleLauncher"], cache) if target == "win32-x64" else None
+        normalization = normalize_installation(output, destination, host_python, target, artifacts,
+                                              upstream_omissions, windows_launcher_base=launcher_base)
     if target == host:
         run("uv", "pip", "check", "--python", python_path(output, target), env=env)
     return artifacts, host_input, normalization
@@ -201,6 +203,30 @@ def source_provenance(source_commit=None):
     return {"sourceCommit": source_commit.lower(), "sourceDirty": None, "sourceExport": True}
 
 
+def copy_launcher_notices(inputs, notices):
+    records = inputs.get("consoleLauncher", {}).get("notices", {})
+    if "consoleLauncher" in inputs and not records:
+        raise ValueError("Pinned Windows launcher notices are missing")
+    sources = []
+    for name, record in sorted(records.items()):
+        if not re.fullmatch(r"uv-[A-Za-z0-9_.-]+", name):
+            raise ValueError("Invalid launcher notice filename")
+        source = DESKTOP / "licenses" / name
+        if source.is_symlink() or not source.is_file() or digest(source) != record["sha256"]:
+            raise ValueError("Pinned Windows launcher notice checksum mismatch")
+        sources.append((source, notices / name))
+    for source, destination in sources:
+        shutil.copyfile(source, destination)
+
+
+def validate_assembly_target(target):
+    if target.startswith("win32-"):
+        if target != "win32-x64" or host_target() != "win32-x64":
+            raise SystemExit("Windows x64 assembly requires a native Windows x64 host")
+        from windows_launcher import WindowsResourceAPI
+        WindowsResourceAPI()  # Check required APIs before any fetch/output/build.
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DESKTOP / "native")
@@ -210,6 +236,8 @@ def main():
     parser.add_argument("--edition", choices=("core", "premium"), default="core")
     parser.add_argument("--paired-core-release-id", help="Exact core release ID required by a premium assembly")
     args = parser.parse_args()
+    target = args.target or host_target()
+    validate_assembly_target(target)
     source_info = source_provenance(args.source_commit)
     output, cache = args.output.resolve(), args.cache.resolve()
     if output.exists():
@@ -217,7 +245,6 @@ def main():
     lock = json.loads((LOCKS / "native.json").read_text())
     if subprocess.check_output(["uv", "--version"], text=True).split()[1] != lock["uvVersion"]:
         raise SystemExit(f"Build requires uv {lock['uvVersion']}")
-    target = args.target or host_target()
     cross = target != host_target()
     inputs = lock["targets"][target]
     cache.mkdir(parents=True, exist_ok=True)
@@ -238,6 +265,7 @@ def main():
     ffbin.mkdir(parents=True)
     notices = output / "notices"
     notices.mkdir()
+    copy_launcher_notices(inputs, notices)
     versions = {}
     for name in ("ffmpeg", "ffprobe"):
         executable = ffbin / (name + (".exe" if target.startswith("win32-") else ""))

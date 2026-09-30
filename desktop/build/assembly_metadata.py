@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import tempfile
 import zipfile
 
 # ZIP's earliest representable timestamp; independent of checkout/build time.
@@ -84,14 +85,21 @@ def relocatable_script(data: bytes, host_python: Path, relative_python: str) -> 
 
 
 def normalize_installation(output: Path, destination: Path, host_python: Path,
-                           target: str, artifacts: list[Path], upstream_omissions=None) -> dict:
+                           target: str, artifacts: list[Path], upstream_omissions=None,
+                           windows_launcher_base: Path | None = None) -> dict:
     """Plan/validate all edits, then update files and their owning RECORDs.
 
-    Windows launchers are deliberately unchanged pending native qualification.
     Source commit and exact local-wheel hashes remain in provenance.json.
     """
+    if target.startswith("win32-"):
+        from windows_launcher import WindowsResourceAPI
+        if target != "win32-x64" or windows_launcher_base is None:
+            raise ValueError("Windows normalization requires the pinned x64 console base")
+        WindowsResourceAPI()  # Fail before planning or applying installation edits.
     output = output.resolve()
     destination = destination.resolve()
+    if target.startswith("win32-") and destination != output / "python/Lib/site-packages":
+        raise ValueError("Unexpected Windows site-packages layout for relative launcher")
     changes: dict[Path, bytes | None] = {}
     local_origins = {}
     for artifact in artifacts:
@@ -160,7 +168,34 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
             changes[path.resolve()] = None
         records.append((record.resolve(), paths))
 
-    if not target.startswith('win32-'):
+    windows_provenance = None
+    if target.startswith('win32-'):
+        from windows_launcher import (BASE_SHA256, UV_COMMIT, digest, expected_body,
+                                      relocate_launcher)
+        entries = {}
+        # The helper publishes separate validated outputs; all installed files
+        # remain untouched until every launcher and complete RECORD plan passes.
+        with tempfile.TemporaryDirectory(prefix='normalized-launchers-') as temporary:
+            for script in sorted((destination / 'bin').glob('*')):
+                path = checked_path(script.relative_to(destination).as_posix())
+                if path not in owned:
+                    raise ValueError("Installed launcher is missing from RECORD")
+                transformed = Path(temporary) / script.name
+                details = relocate_launcher(site_packages=destination, name=script.name,
+                                            installing_python=str(host_python),
+                                            base_path=windows_launcher_base, output=transformed)
+                changes[path] = transformed.read_bytes()
+                # Original PE hashes include disposable interpreter paths. The
+                # preserved callable body, pinned base and exact input wheels
+                # provide stable source provenance instead of those temp bytes.
+                entries[script.relative_to(destination).as_posix()] = {
+                    key: details[key] for key in ('entrypoint', 'record', 'outputSha256', 'python')}
+                entries[script.relative_to(destination).as_posix()]['bodySha256'] = digest(
+                    expected_body(details['entrypoint']))
+        windows_provenance = {'normalizer': 'uv-0.12.8-win64-console-v1',
+                              'uvCommit': UV_COMMIT, 'baseSha256': BASE_SHA256,
+                              'count': len(entries), 'entries': entries}
+    else:
         bundled_python = output / 'python/bin/python3'
         for script in sorted((destination / 'bin').glob('*')):
             path = checked_path(script.relative_to(destination).as_posix())
@@ -193,4 +228,4 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
             'upstreamOmittedBytecode': omitted,
             'localWheelOrigins': 'sourceCommit and wheels in provenance.json',
             'installerCacheMetadata': 'removed; RECORD updated',
-            'consoleLaunchers': 'unchanged-windows' if target.startswith('win32-') else 'relative-bundled-python'}
+            'consoleLaunchers': windows_provenance if windows_provenance is not None else 'relative-bundled-python'}
