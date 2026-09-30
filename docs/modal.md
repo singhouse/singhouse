@@ -22,8 +22,8 @@ below does not require changing Singhouse's local-processing configuration.
 
 ## Install and authenticate the CLI
 
-Create a Python environment for the deploy tool, install the backend's Modal
-extra, and authenticate the CLI with your Modal account:
+Use Python 3.12 or newer to create an environment for the deploy tool, install
+the backend's Modal extra, and authenticate the CLI with your Modal account:
 
 ```sh
 python3 -m venv .venv-modal
