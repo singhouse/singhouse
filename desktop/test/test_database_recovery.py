@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path, PureWindowsPath
 import sqlite3
+import shutil
 import tempfile
 import types
 import unittest
@@ -10,13 +11,68 @@ from unittest.mock import Mock
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend import (backup_sqlite_database, desktop_database_backup,
+from backend import (_windows_extended_path, backup_sqlite_database, desktop_database_backup,
                      desktop_database_plan, desktop_database_restore, desktop_database_unowned,
                      durable_replace, persistent_directory, restore_sqlite_database, sqlite_database_plan,
                      windows_durable_replace)
 
 
 class DatabaseRecoveryTests(unittest.TestCase):
+    def test_windows_extended_paths_preserve_drives_unc_and_existing_prefixes(self):
+        cases = [
+            ("C:/FixtureData/runtime/payload", "\\\\?\\C:\\FixtureData\\runtime\\payload"),
+            ("//server/share/runtime/payload", "\\\\?\\UNC\\server\\share\\runtime\\payload"),
+            ("\\\\?\\C:\\runtime\\payload", "\\\\?\\C:\\runtime\\payload"),
+            ("\\\\?\\UNC\\server\\share\\payload", "\\\\?\\UNC\\server\\share\\payload"),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(str(_windows_extended_path(PureWindowsPath(original))), expected)
+        for relative in ("runtime/payload", "C:runtime/payload", "/runtime/payload"):
+            with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, "absolute"):
+                _windows_extended_path(PureWindowsPath(relative))
+
+    def test_durability_refuses_relative_paths_and_reports_missing_payload_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with self.assertRaisesRegex(RuntimeError, "absolute"):
+                durable_replace(Path("relative"), root / "destination")
+            with self.assertRaisesRegex(RuntimeError, "Cannot inspect runtime payload.*missing") as raised:
+                durable_replace(root / "missing", root / "destination")
+            self.assertIsInstance(raised.exception.__cause__, FileNotFoundError)
+            self.assertFalse((root / "destination").exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires native Windows filesystem and durability APIs")
+    def test_windows_durability_commits_tree_with_paths_beyond_max_path(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        extended_root = _windows_extended_path(root)
+        try:
+            source, destination = root / "staging", root / "installed"
+            relative = Path(*(["nested-" + "x" * 53] * 5)) / "payload.bin"
+            payload = _windows_extended_path(source / relative)
+            self.assertGreater(len(str(source / relative)), 300)
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"long-path runtime payload")
+            self.assertEqual(durable_replace(source, destination), {"schema": 1, "durable": True})
+            self.assertFalse(source.exists())
+            self.assertEqual(_windows_extended_path(destination / relative).read_bytes(),
+                             b"long-path runtime payload")
+        finally:
+            shutil.rmtree(extended_root)
+
+    @unittest.skipIf(os.name == "nt", "ordinary Windows test users cannot create symlinks")
+    def test_durability_rejects_source_and_destination_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            payload, link = root / "payload", root / "link"
+            payload.write_bytes(b"preserved")
+            link.symlink_to(payload)
+            for source, destination in ((link, root / "new"), (payload, link)):
+                with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "non-symlink"):
+                    durable_replace(source, destination)
+            self.assertEqual(payload.read_bytes(), b"preserved")
+            self.assertTrue(link.is_symlink())
+
     def make_database(self, path, value="before"):
         with sqlite3.connect(path) as connection:
             connection.execute("PRAGMA journal_mode=WAL")

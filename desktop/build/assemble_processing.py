@@ -53,7 +53,11 @@ def relative(value):
 
 def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None = None):
     """Copy precisely the lock inventory; reject missing, extra, or changed bytes."""
-    lock = json.loads(lock_path.read_text())
+    # Hash, embed, and retain one exact byte snapshot. Text-mode reads normalize
+    # CRLF on Windows and would invalidate the embedded lock's trusted digest.
+    lock_bytes = lock_path.read_bytes()
+    lock_text = lock_bytes.decode("utf-8")
+    lock = json.loads(lock_text)
     payload = payload.resolve(strict=True)
     if output.exists():
         raise ValueError("Output exists; choose a fresh output directory")
@@ -137,8 +141,8 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
     (output / "blobs").mkdir(parents=True)
     manifest = {key: lock[key] for key in ("appVersion", "backendVersion", "lyricsyncVersion", "pythonVersion", "platform", "arch", "accelerator", "python", "capabilities", "models", "modelCapabilities", "excludedPackages")}
     manifest.update(schema=1, kind="processing", provenance={
-        "sourceCommit": lock["sourceCommit"], "lockSha256": digest(lock_path),
-        "inputLock": lock_path.read_text(),
+        "sourceCommit": lock["sourceCommit"], "lockSha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "inputLock": lock_text,
         "packages": packages, "qualification": "UNTESTED: native execution and hardware qualification required",
     })
     modules = sorted({module for capability in capabilities for module in required_modules[capability]})
@@ -152,7 +156,7 @@ def assemble(payload: Path, lock_path: Path, output: Path, base_url: str | None 
         shutil.copyfile(payload / record["path"], output / "blobs" / record["sha256"])
         manifest["files"].append({**record, "url": base_url + record["sha256"]})
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    shutil.copyfile(lock_path, output / "input-lock.json")
+    (output / "input-lock.json").write_bytes(lock_bytes)
     return manifest
 
 

@@ -33,7 +33,20 @@ Default builds are unsigned; Windows has an explicit signed build mode below.
 macOS Gatekeeper and Windows SmartScreen may warn or block installation; verify the artifact's origin and checksum before using the
 operating system's per-application approval controls. Default build commands do not sign or notarize artifacts. On Linux, use the archive if the
 AppImage cannot run because its host integration requirements are unavailable.
-Do not disable Electron's sandbox to launch a build.
+Do not disable Electron's sandbox to launch a build. The AppImage launcher
+requires sandboxing and refuses bypass arguments. If Electron reports unavailable
+sandbox facilities, launch stops; it does not retry without protection or change
+host settings. The archive also requires a working Electron sandbox.
+
+The Linux application includes its own `AppRun` through `linux.extraFiles`, before
+release inventory and receipt creation. With the pinned electron-builder version,
+the AppImage staging step copies that launcher over the generated launcher; the
+AppImage desktop entry uses an explicit empty argument list. Packaging tests check
+both staging paths so an upstream change cannot silently restore an unsafe fallback.
+With desktop build dependencies installed, run
+`SINGHOUSE_REQUIRE_BUILDER_TESTS=1 node --test test/appimage.test.mjs` from `desktop/`
+as part of Linux packaging qualification. Without those dependencies the staging
+test reports a skip; dependency-free launcher tests still run on Linux.
 
 The application stores its database, uploads, stems, cache, and `settings.json`
 under `backend/` in Electron's per-user application-data directory, outside the
@@ -89,6 +102,44 @@ the immutable receipt. Source exports without `.git` fail closed because no
 separately authenticated export-manifest verifier is configured. The default
 packaging command creates an explicitly unsigned private-test build and never
 publishes anything. Create macOS artifacts on macOS.
+
+For a private Developer ID macOS candidate, create the intended team's
+Developer ID Application certificate and store notarization credentials in the
+local keychain with `xcrun notarytool store-credentials`. The signing command
+requires an exact publisher, Team ID, certificate SHA-1, certificate common
+name, and keychain profile. The initial publisher, Team ID, and certificate SHA-1 are
+pinned in source; certificate renewal or a team change requires a reviewed
+source change. Keep the app-specific
+password out of the source tree.
+
+```sh
+export SINGHOUSE_MAC_PUBLISHER='MICHAEL ALAN JONES'
+export SINGHOUSE_MAC_TEAM_ID='25Y7U443K6'
+export SINGHOUSE_MAC_IDENTITY='Developer ID Application: MICHAEL ALAN JONES (25Y7U443K6)'
+export SINGHOUSE_MAC_CERT_SHA1='55FEEAA93960DD9E278519CA68338BACFC2A3617'
+export SINGHOUSE_MAC_NOTARY_PROFILE='singhouse-notary'
+npm --prefix desktop run package:first-installers -- --signed-macos-release
+```
+
+The command verifies the assembled native payload, signs its Mach-O code with
+hardened runtime and secure timestamps, refreshes native file hashes and
+runtime identity, then signs and notarizes the application. It derives the
+portable identity from the complete stapled application and writes the
+immutable `.shapp.receipt.json` beside it. A constant marker sealed in the
+app replaces the unsigned installer's embedded receipt. The app verifies the
+Developer ID requirement, exact Team ID and certificate authority on first
+launch before deriving its installed identity from the complete bundle. The
+signed first installer rejects adjacent managed-slot metadata; signed macOS
+managed-slot admission needs a separate authenticated design. The
+command then builds, signs, notarizes, and staples a DMG; it also builds a ZIP
+of the same stapled app. It compares both containers' extracted applications,
+including executable permissions, with the portable application and writes
+final DMG and ZIP checksums.
+The bundle check authenticates the installed candidate against its pinned
+signer; downloaded-artifact checksums and Gatekeeper remain the boundary for a
+coherent replacement of the entire application.
+Any failed check aborts the build. This path needs a macOS runner and an active
+notary profile; it has not produced a release artifact until those checks pass.
 
 Windows release signing is an explicit, fail-closed build mode. Run it on
 Windows after assembling the `win32-x64` native payload. Install PowerShell 7
@@ -625,3 +676,84 @@ separation or transcription models require their own explicit policy and cache.
 the exact shipped inventory. Its optional upstream check verifies release asset
 identities and sizes plus pinned small metadata; it does not retrieve checkpoint
 bytes or establish remote weight equality by metadata alone.
+# Song processing setup
+
+The installed desktop opens a welcome flow with an option to go straight to
+the library. “Set up song processing” reopens it from the library or Processing
+menu. Download consent is separate from choosing local processing. Setup must
+verify a compatible processing runtime, both separation models, and Heart
+together before reporting local processing ready. A saved wizard step is never
+readiness evidence. Verified model files are reused when expanding a cache.
+Cancellation preserves resumable files. Restart is refused while processing,
+installation, playback, or a projector window is active.
+
+Release artifacts must supply a qualified runtime catalog before automatic
+local setup becomes available. Playback remains usable without it. The advanced
+manifest installer remains a support tool. A complete local model folder may
+be selected in setup: its layout and sizes are inspected before consent, then
+its contents are verified during cancellable installation. Missing or changed
+files never trigger a silent model download. The separate processing runtime
+may still require downloading; this is shown in the installation plan.
+
+Hardware details report observations rather than inferred processing support.
+Unknown graphics memory remains unknown, and Apple silicon unified memory is
+not labeled dedicated VRAM. Optional release-owned memory evidence supplies
+separate RAM/VRAM recommendations, measured peaks plus 25% headroom. Fresh
+installation is blocked when required capacity cannot be verified or is too
+small. Low currently available RAM produces a warning; prepared-media playback
+remains available.
+
+Desktop Modal setup saves credentials with operating-system encryption and
+performs a bounded, explicit metadata check using the pinned client. No audio
+upload, function invocation, deployment, or resource creation occurs in that
+check. Account access and protocol compatibility are separate from inference
+qualification. Cloud processing remains disabled pending a qualified deployment
+contract. The backend integration passes consented settings over a private
+startup pipe and pins the selected account, environment, and function version.
+Connection changes require a guarded restart; saving settings does not activate
+them. Credentials are never returned to the UI or passed as process arguments
+or environment variables. Linux requires a supported system keyring; no
+plaintext fallback exists. Forgetting local credentials works even when the
+keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
+
+Release builds may supply `desktop/processing-catalog.json` as part of the
+application's verified inventory. The setup engine never accepts a catalog from
+the renderer or saved preferences. Its schema is:
+
+- `schema: 1`, `runtime`: the complete processing manifest accepted by the
+  current application's processing lock policy.
+- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, `evidenceReference`, and
+  `accelerator`, matching that exact runtime. Populate only from actual evidence.
+- `models`: entries with `id` and `terms: [{label, url}]` for every model in the
+  combined installation. Terms URLs are HTTPS source references, not claims
+  about checkpoint licensing.
+
+The catalog must cover Heart, Demucs, and the default second-pass separator.
+Runtime artifacts need retrievable distribution URLs; models retain their
+fixed direct-upstream URLs and hashes. A catalog alone does not establish
+representative memory minima, performance, model quality, or clean-machine
+qualification. Those checks remain necessary before release.
+
+Prepare the catalog with `node desktop/build/setup_catalog.mjs --runtime
+runtime.json --qualification qualification.json --terms terms.json --identity
+identity.json --output desktop/processing-catalog.json`. Inputs are explicit;
+the tool never manufactures qualification. `--memory memory.json` adds measured
+memory evidence. Production catalogs reject local runtime URLs. The explicit
+`--private-test-local-sources` option is only for validating private test inputs;
+the application does not accept those as a production download catalog.
+
+An optional release-owned `desktop/modal-contract.json` is copied into the
+verified native payload. Its schema is `1`, with an opaque `protocolReference`,
+the full `protocolSha256`, `requiredTags` containing both values, and `functions`
+mapping separation to `separate_<protocolSha256>` and transcription to
+`transcribe_<protocolSha256>`. The metadata checker resolves these exact names
+at the user-selected deployment version. Current app tags alone cannot certify
+an older function version. This is a declared protocol check, not evidence of
+model quality or successful inference; no passing contract is supplied by
+default.
+
+To enable desktop routing, the release-owned Modal contract also requires
+`qualification: {passed: true, protocolSha256, evidenceReference}`, backed by
+actual inference qualification of that protocol. Consent for both uploads and
+resource usage and a successful startup metadata check are also required.
+Without these, local playback remains available and cloud processing stays off.

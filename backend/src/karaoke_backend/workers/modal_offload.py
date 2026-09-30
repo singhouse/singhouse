@@ -36,10 +36,27 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 APP_NAME = os.getenv("KARAOKE_MODAL_APP", "karaoke-gpu").strip()
 _ENABLED = os.getenv("KARAOKE_MODAL", "").strip().lower() in ("1", "true", "yes", "on")
+_DESKTOP = None
+
+
+def configure_desktop(descriptor):
+    """Set once during private bootstrap, before workers or requests start.
+
+    The bootstrap validates the release contract, consent and remote metadata.
+    This method is not an HTTP/settings API and never persists credentials.
+    """
+    global _DESKTOP, APP_NAME
+    if _DESKTOP is not None:
+        raise RuntimeError("Desktop processing was already configured")
+    if descriptor.get("enabled") is True:
+        APP_NAME = descriptor["config"]["app"]
+    _DESKTOP = descriptor
 
 
 def is_enabled() -> bool:
     """True when Modal offload is configured (and the SDK imports)."""
+    if _DESKTOP is not None:
+        return _DESKTOP.get("enabled") is True
     if not _ENABLED:
         return False
     try:
@@ -52,6 +69,11 @@ def is_enabled() -> bool:
 
 def readiness() -> dict[str, object]:
     """Describe user-owned Modal configuration without substituting for it."""
+    if _DESKTOP is not None:
+        status = _DESKTOP["publicStatus"]
+        return {**status, "desktop_qualified": _DESKTOP.get("enabled") is True,
+                "sdk_available": _DESKTOP.get("enabled") is True,
+                "credentials_configured": status.get("configured") is True}
     configured = _ENABLED
     sdk_available = False
     if configured:
@@ -83,7 +105,71 @@ def _lookup(fn_name: str):
     """Resolve a deployed Modal function handle by app + function name."""
     import modal
 
+    if _DESKTOP is not None:
+        if _DESKTOP.get("enabled") is not True:
+            raise RuntimeError("User-owned Modal processing is not ready")
+        config = _DESKTOP["config"]
+        role = {"separate_remote": "separation", "transcribe_remote": "transcription"}.get(fn_name)
+        if role is None:
+            raise RuntimeError("Unsupported desktop processing function")
+        client = modal.Client.from_credentials(config["tokenId"], config["tokenSecret"])
+        return modal.Function.from_name(config["app"], _DESKTOP["functions"][role],
+                                        environment_name=config["environment"], version=config["version"], client=client)
+
     return modal.Function.from_name(APP_NAME, fn_name)
+
+
+def _wav_layout(data: bytes) -> tuple[int, int, int]:
+    """Validate complete uncompressed RIFF WAV and return rate/channels/frames.
+
+    Demucs emits IEEE float; separator models may emit integer PCM. The
+    standard wave module does not support IEEE float on all supported Python
+    versions, so inspect bounded RIFF chunks directly without an ML dependency.
+    """
+    import struct
+
+    def invalid():
+        raise RuntimeError("Modal separation returned an invalid or truncated WAV stem")
+
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        invalid()
+    if struct.unpack_from("<I", data, 4)[0] + 8 != len(data):
+        invalid()
+    position, fmt, payload = 12, None, None
+    while position < len(data):
+        if position + 8 > len(data):
+            invalid()
+        tag, size = struct.unpack_from("<4sI", data, position)
+        start = position + 8
+        end = start + size
+        if end > len(data):
+            invalid()
+        if tag == b"fmt ":
+            if fmt is not None or size < 16:
+                invalid()
+            fmt = data[start:end]
+        elif tag == b"data":
+            if payload is not None:
+                invalid()
+            payload = size
+        position = end + (size % 2)
+    if position != len(data) or fmt is None or not payload:
+        invalid()
+    codec, channels, rate, byte_rate, block, bits = struct.unpack_from("<HHIIHH", fmt)
+    if codec == 0xFFFE:
+        if len(fmt) < 40 or struct.unpack_from("<H", fmt, 16)[0] < 22:
+            invalid()
+        guid = fmt[24:40]
+        if guid[4:] != bytes.fromhex("00001000800000aa00389b71"):
+            invalid()
+        codec = int.from_bytes(guid[:4], "little")
+    if codec not in (1, 3) or channels < 1 or rate < 1:
+        invalid()
+    if bits not in ((8, 16, 24, 32) if codec == 1 else (32, 64)):
+        invalid()
+    if block != channels * (bits // 8) or byte_rate != rate * block or payload % block:
+        invalid()
+    return rate, channels, payload // block
 
 
 # --------------------------------------------------------------------------- #
@@ -104,40 +190,66 @@ def modal_separate(
     ``stems_dir/_remote_raw``, and returns those three local paths so the caller
     can run the instrumental/karaoke ffmpeg mixes locally.
     """
-    stems_dir.mkdir(parents=True, exist_ok=True)
-    raw_dir = stems_dir / "_remote_raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
     audio_bytes = audio_path.read_bytes()
     logger.info("Running Modal separation (app=%s, %d bytes in)", APP_NAME, len(audio_bytes))
 
     fn = _lookup("separate_remote")
-    # The Pass-2 model is sent ONLY when the operator picked a non-default one.
-    # `separate_remote` grew that parameter in this repo, but the deployed Modal
-    # app is a separate artifact that only changes on `modal deploy` — so a
-    # stock separation must keep the exact three-argument call an older
-    # deployment understands, and a pick against a stale deployment degrades to
-    # the baked-in model with a loud warning instead of failing the job.
+    # An explicit model selection must never silently use a different model.
     extra = {"karaoke_model": karaoke_model} if karaoke_model else {}
-    # A configured model is part of the requested result.  A stale deployment
-    # must fail loudly rather than silently run its baked-in substitute.
     result = fn.remote(audio_bytes, audio_path.name, demucs_model, **extra)
 
-    if not result.get("ok"):
-        raise RuntimeError(f"Modal separation error: {result.get('error')}")
-    logger.info("Modal separation status: pass2=%s", result.get("pass2"))
-    if result.get("pass2") == "fallback":
-        logger.warning("Modal pass-2 fell back: %s", result.get("pass2_error"))
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        detail = result.get("error") if isinstance(result, dict) else "invalid response"
+        raise RuntimeError(f"Modal separation error: {detail}")
+    if result.get("pass2") != "ok":
+        raise RuntimeError("Modal separation did not complete the lead/backing split")
+    required = ("lead_vocals", "backing_vocals", "drums", "bass", "other")
+    for name in required:
+        if not isinstance(result.get(name), bytes) or not result[name]:
+            raise RuntimeError(f"Modal separation missing or invalid {name} stem")
 
-    # lead/backing → stems_dir; drums/bass/other → raw_dir for mixing.
-    for name in ("lead_vocals", "backing_vocals"):
-        data = result.get(name)
-        if data:
-            (stems_dir / f"{name}.wav").write_bytes(data)
-    for name in ("drums", "bass", "other"):
-        data = result.get(name)
-        if data:
-            (raw_dir / f"{name}.wav").write_bytes(data)
+    layouts = [_wav_layout(result[name]) for name in required]
+    if len(set(layouts)) != 1:
+        raise RuntimeError("Modal separation stems have mismatched audio layouts")
+
+    # Validate the entire response before touching existing artifacts. Stage all
+    # bytes first, and roll back caught publication failures. This does not
+    # promise a power-loss-atomic transaction across multiple files.
+    import tempfile
+
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = stems_dir / "_remote_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".modal-", dir=stems_dir) as scratch:
+        staged = Path(scratch)
+        for name in required:
+            (staged / f"{name}.wav").write_bytes(result[name])
+        import shutil
+
+        targets = {
+            name: (stems_dir if name in ("lead_vocals", "backing_vocals") else raw_dir)
+            / f"{name}.wav" for name in required
+        }
+        backups = {}
+        for name, target in targets.items():
+            if target.exists():
+                if not target.is_file():
+                    raise RuntimeError(f"Modal stem target is not a file: {target.name}")
+                backup = staged / f"{name}.previous"
+                shutil.copy2(target, backup)
+                backups[name] = backup
+        published = []
+        try:
+            for name, target in targets.items():
+                (staged / f"{name}.wav").replace(target)
+                published.append(name)
+        except BaseException:
+            for name in reversed(published):
+                if name in backups:
+                    backups[name].replace(targets[name])
+                else:
+                    targets[name].unlink()
+            raise
 
     return {
         "drums": raw_dir / "drums.wav",
@@ -192,6 +304,9 @@ class ModalHeartTranscriber:
                 "ModalHeartTranscriber: VAD produced %d segments (%.1fs audio)",
                 len(vad_segments), len(samples) / sr,
             )
+
+        if vad_segments == []:
+            return TranscriptionResult(segments=[], language=language or "en", full_text="")
 
         audio_bytes = Path(audio_path).read_bytes()
         logger.info("Running Modal HeartTranscriptor (app=%s)", APP_NAME)

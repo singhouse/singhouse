@@ -611,16 +611,42 @@ def windows_durable_replace(source, destination, directories, kernel=None, *,
             kernel.CloseHandle(handle)
 
 
+def _windows_extended_path(path):
+    """Prefix an absolute Windows path without resolving symbolic links."""
+    if not path.is_absolute():
+        raise RuntimeError("Durable replacement requires absolute non-symlink paths")
+    value = str(path)
+    if value.startswith("\\\\?\\"):
+        return path
+    if value.startswith("\\\\"):
+        value = "\\\\?\\UNC\\" + value[2:]
+    else:
+        value = "\\\\?\\" + value
+    return type(path)(value)
+
+
 def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks: bool = False):
     """Commit a local file/tree only if its bytes and directory entries flush."""
-    if not source.is_absolute() or not destination.is_absolute() or source.is_symlink() or destination.is_symlink():
+    if not source.is_absolute() or not destination.is_absolute():
+        raise RuntimeError("Durable replacement requires absolute non-symlink paths")
+    # Node can create paths beyond MAX_PATH on an ordinary Windows install.
+    # Use extended paths for every subsequent Python and native Win32 operation;
+    # resolving first would erase the symlink boundary we need to check.
+    if os.name == "nt":
+        source = _windows_extended_path(source)
+        destination = _windows_extended_path(destination)
+    if source.is_symlink() or destination.is_symlink():
         raise RuntimeError("Durable replacement requires absolute non-symlink paths")
     directories = set()
     paths = list(source.rglob("*")) if source.is_dir() else []
     paths.append(source)
     source_root = source.resolve(strict=True) if source.is_dir() else None
     for path in paths:
-        if path.is_symlink():
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Cannot inspect runtime payload {path}: {error}") from error
+        if stat.S_ISLNK(info.st_mode):
             if not allow_internal_symlinks or source_root is None:
                 raise RuntimeError("Cannot commit a runtime containing symbolic links")
             target = os.readlink(path)
@@ -633,9 +659,9 @@ def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks:
             if not resolved_target.is_relative_to(source_root):
                 raise RuntimeError("Managed application symlink escapes its release")
             continue
-        if path.is_dir():
+        if stat.S_ISDIR(info.st_mode):
             directories.add(path)
-        elif path.is_file():
+        elif stat.S_ISREG(info.st_mode):
             descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
             try:
                 if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -644,7 +670,7 @@ def durable_replace(source: Path, destination: Path, *, allow_internal_symlinks:
             finally:
                 os.close(descriptor)
         else:
-            raise RuntimeError("Cannot commit a non-regular runtime payload")
+            raise RuntimeError(f"Cannot commit a non-regular runtime payload: {path}")
     # Flush only the application-owned subtree and its narrow common ancestor.
     # The caller creates pending and final paths beneath one private state tree;
     # reaching above this common ancestor would touch unrelated/protected paths.
@@ -811,6 +837,13 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                            model_policy: dict | None = None,
                            trusted_locks: list[str] | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
+    # Keep inventory access, parent containment, attestation equality, and the
+    # interpreter paths inherited by managed workers in one Windows namespace.
+    # Do not resolve here: that would hide symbolic links from verification.
+    if os.name == "nt":
+        runtime = _windows_extended_path(runtime)
+        processing = _windows_extended_path(processing) if processing is not None else None
+        models = _windows_extended_path(models) if models is not None else None
     env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
@@ -822,6 +855,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
            "NUMBA_CACHE_DIR": str(runtime / "cache/numba"),
            "HF_HOME": str(runtime / "cache/huggingface"),
            "TORCH_HOME": str(runtime / "cache/torch"),
+           "TORCHINDUCTOR_CACHE_DIR": str(runtime / "cache/torchinductor"),
            "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
 
     def verify(directory: Path, store: str, kind: str):
@@ -1207,10 +1241,22 @@ def runtime_directory(supplied: Path | None = None):
 
 
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
-        processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None) -> None:
+        processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
+        desktop_config_stdin: bool = False) -> None:
     tree_job = own_process_tree() if native else None
-    parent_closed = watch_parent(sys.stdin.fileno(), enforce_timeout=True) if native else None
     identity = validate_native(native) if native else None
+    private_modal = None
+    if desktop_config_stdin:
+        if not native:
+            raise RuntimeError("Private setup configuration requires a native application")
+        # The native inventory was verified before importing these fixed helpers.
+        sys.path.insert(0, str(native))
+        try:
+            from private_config import read_private_config
+            private_modal = read_private_config(sys.stdin.fileno())
+        finally:
+            sys.path.pop(0)
+    parent_closed = watch_parent(sys.stdin.fileno(), enforce_timeout=True) if native else None
     if native and (demo or runtime_path is None):
         raise RuntimeError("Packaged mode requires persistent data and cannot use demo mode")
     if not native:
@@ -1238,6 +1284,38 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe))
             os.environ.clear()
             os.environ.update(environment)
+            if native:
+                # Never consult a developer's ambient Modal profile or endpoint.
+                os.environ["MODAL_CONFIG_PATH"] = os.devnull
+                sys.path.insert(0, str(native))
+                try:
+                    from modal_runtime import prepare_modal_runtime
+                    contract_path = native / "modal-contract.json"
+                    try:
+                        contract = json.loads(contract_path.read_text()) if contract_path.is_file() else None
+                    except (OSError, ValueError):
+                        contract = None
+                    # SDK import/auth output must not enter the private launch
+                    # handshake or application logs. No requests/workers exist yet.
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    saved_output = [os.dup(1), os.dup(2)]
+                    try:
+                        with open(os.devnull, "w") as sink:
+                            os.dup2(sink.fileno(), 1)
+                            os.dup2(sink.fileno(), 2)
+                            descriptor = prepare_modal_runtime(private_modal, contract)
+                            sys.stdout.flush()
+                            sys.stderr.flush()
+                    finally:
+                        for target, saved in zip((1, 2), saved_output):
+                            os.dup2(saved, target)
+                            os.close(saved)
+                    from karaoke_backend.workers.modal_offload import configure_desktop
+                    configure_desktop(descriptor)
+                    private_modal = None
+                finally:
+                    sys.path.pop(0)
             if not native:
                 shutil.copytree(root / "frontend/dist", runtime / "static", ignore=shutil.ignore_patterns("*.map"))
             os.chdir(runtime)
@@ -1374,6 +1452,7 @@ if __name__ == "__main__":
     parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
+    parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
         if args.durable_replace:
@@ -1404,7 +1483,7 @@ if __name__ == "__main__":
                 raise RuntimeError("Invalid recovery arguments")
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
-            run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe)
+            run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

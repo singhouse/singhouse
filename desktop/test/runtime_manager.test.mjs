@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
@@ -377,6 +377,7 @@ test('functional protocol enables only declared capabilities and rejects missing
   assert.equal(result.capabilitiesReady, true)
   assert.deepEqual(result.verifiedCapabilities, manifest.capabilities)
   const attested = processingAttestation(installed, result)
+  assert.equal(attested.pythonPath, toNamespacedPath(join(installed.directory, manifest.python)))
   assert.equal(attested.probeSchema, 2)
   assert.deepEqual(attested.checks, protocol.checks)
   for (const patch of [{ checks: { ...protocol.checks, transcription: false } },
@@ -439,4 +440,112 @@ test('processing path collisions follow the target filesystem', async t => {
     bindProvenance(changed)
     assert.throws(() => validateProcessingManifest(changed, { ...identity, platform }, testTrustedLocks), /file record/)
   }
+})
+
+test('expanding a model cache reuses verified installed weights without another upstream request', async t => {
+  const { root } = await fixture(t)
+  const records = ['old', 'new'].map(name => ({ path: `huggingface/hub/${name}.bin`, size: name.length,
+    sha256: sha(name), revision: 'a'.repeat(40), executable: false,
+    url: `https://huggingface.co/model/resolve/${'a'.repeat(40)}/${name}.bin` }))
+  const policy = { schema: 1, allowedHosts: ['huggingface.co'], models: records.map((record, i) => ({ id: ['old', 'new'][i], files: [record] })) }
+  const requests = []
+  const cache = new ModelCache(join(root, 'reuse-models'), policy, { fetchImpl: async url => {
+    requests.push(String(url))
+    return new Response(String(url).endsWith('/old.bin') ? 'old' : 'new')
+  } })
+  const original = await cache.install({ schema: 1, kind: 'models', models: ['old'], files: [records[0]] })
+  const combined = await cache.install({ schema: 1, kind: 'models', models: ['old', 'new'], files: records })
+  assert.equal(requests.length, 2)
+  assert.equal(requests.filter(url => url.endsWith('/old.bin')).length, 1)
+  assert.deepEqual((await cache.active()).manifest.models, ['old', 'new'])
+  assert.equal(await readFile(join(original.directory, records[0].path), 'utf8'), 'old')
+  assert.notEqual((await stat(join(original.directory, records[0].path))).ino, (await stat(join(combined.directory, records[0].path))).ino)
+})
+
+
+test('verification bounds hashing and drains in-flight checks before rejecting corruption', async t => {
+  const { manifest, manager } = await fixture(t)
+  for (let i = 0; i < 10; i++) manifest.files.push({ ...manifest.files[1], path: `lib/dependencies/file-${i}` })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  // Same-size corruption must reach the hash check, regardless of worker order.
+  for (const record of manifest.files) await writeFile(join(installed.directory, record.path), 'x'.repeat(record.size))
+  const handle = await open(join(installed.directory, manifest.python), 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStream = prototype.createReadStream
+  let started = 0, finished = 0, settled = false, firstFinished
+  const drainedFirst = new Promise(resolve => { firstFinished = resolve })
+  let firstWave
+  const ready = new Promise(resolve => { firstWave = resolve })
+  const releases = []
+  t.mock.method(prototype, 'createReadStream', function (options) {
+    const stream = nativeStream.call(this, options)
+    const index = started++
+    const gate = new Promise(resolve => releases.push(resolve))
+    if (started === 4) firstWave()
+    return (async function* () {
+      try { await gate; yield* stream }
+      finally { finished++; if (index === 0) firstFinished() }
+    })()
+  })
+  const verification = manager.verify(installed.id)
+  const rejection = assert.rejects(verification, /verification failed/)
+  verification.then(() => { settled = true }, () => { settled = true })
+  // A deadline makes a regression to serial checks fail instead of hanging.
+  await Promise.race([ready, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error('Four hash workers did not start')), 5000)
+    timer.unref()
+    ready.then(() => clearTimeout(timer))
+  })])
+  try {
+    assert.equal(started, 4)
+    releases[0]()
+    await drainedFirst
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(settled, false, 'A failed worker must wait for the other checks')
+    assert.equal(started, 4, 'A failed worker must not queue more files')
+  } finally { for (const release of releases) release() }
+  await rejection
+  assert.equal(finished, started)
+  assert.equal(started, 4)
+})
+
+test('verification rejects an opened file replaced before its path identity check', async t => {
+  const { manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  const path = join(installed.directory, manifest.python)
+  const original = await stat(path)
+  const handle = await open(path, 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStat = prototype.stat
+  let swapped = false
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const info = await nativeStat.apply(this, args)
+    if (!swapped && info.ino === original.ino && info.dev === original.dev) {
+      swapped = true
+      await rename(path, path + '.moved')
+      await writeFile(path, 'fixture python')
+    }
+    return info
+  })
+  await assert.rejects(manager.verify(installed.id), /changed while opening/)
+  assert.equal(swapped, true)
+})
+
+test('verification preserves long nested paths, detects subsequent corruption and unexpected files', async t => {
+  const { manifest, manager } = await fixture(t)
+  const deep = Array.from({ length: 10 }, (_, i) => `dependency-layer-${i}`).join('/') + '/NOTICE.long-path'
+  manifest.files.push({ ...manifest.files[1], path: deep })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  const path = join(installed.directory, deep)
+  assert.ok(path.length > 260)
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  await writeFile(path, 'bad notice')
+  await assert.rejects(manager.verify(installed.id), /verification failed/)
+  await writeFile(path, 'MIT notice')
+  await writeFile(join(installed.directory, 'unexpected'), 'extra')
+  await assert.rejects(manager.verify(installed.id), /inventory/)
 })

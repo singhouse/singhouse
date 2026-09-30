@@ -3,9 +3,21 @@
 import { _electron as electron } from 'playwright'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
+
+import { closePackagedApplication } from './packaged-smoke-shutdown.mjs'
+
+async function waitForHost(application) {
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    const host = application.windows().find(window => /^http:\/\/127\.0\.0\.1:\d+\//.test(window.url()))
+    if (host) return host
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  throw new Error('Desktop host did not open after startup')
+}
 
 assert.ok(['linux', 'win32'].includes(process.platform), 'This harness supports Linux and Windows packaged applications')
 const option = process.argv.indexOf('--executable')
@@ -15,20 +27,38 @@ const temporary = mkdtempSync(join(tmpdir(), 'singhouse-packaged-smoke-'))
 const env = { ...process.env, XDG_CONFIG_HOME: temporary }
 delete env.KARAOKE_DESKTOP_PYTHON
 delete env.ELECTRON_RUN_AS_NODE
-let application, userData, settings, songId
+let application, userData, settings, songId, failed
+let collectingLogs = true
+const diagnostic = (entry) => appendFileSync(join(temporary, 'smoke-diagnostics.jsonl'), `${JSON.stringify(entry)}\n`)
+async function shutdown() {
+  const owned = application
+  diagnostic({ event: 'shutdown-windows', urls: owned.windows().map(window => window.url()) })
+  // Consume this handle once; cleanup on failure must not retry an unbounded close.
+  application = null
+  await closePackagedApplication(owned, { report: diagnostic })
+}
 const title = 'Original packaged smoke'
 const wait = milliseconds => new Promise(done => setTimeout(done, milliseconds))
 
 async function launch() {
   // Launch the built executable itself. No source application or demo args.
   application = await electron.launch({ executablePath, args: [`--user-data-dir=${join(temporary, 'profile')}`], env, timeout: 60000 })
+  let logBytes = 0
+  for (const [name, stream] of [['stdout', application.process().stdout], ['stderr', application.process().stderr]]) {
+    stream?.on('data', data => {
+      if (!collectingLogs || logBytes >= 1024 * 1024) return
+      const text = data.toString().slice(0, 1024 * 1024 - logBytes)
+      logBytes += text.length
+      diagnostic({ event: name, text })
+    })
+  }
   const identity = await application.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData') }))
   assert.equal(identity.packaged, true)
   const child = relative(temporary, identity.userData)
   assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Packaged app must use isolated test userData')
   if (userData) assert.equal(identity.userData, userData)
   userData = identity.userData
-  const host = await application.firstWindow({ timeout: 60000 })
+  const host = await waitForHost(application)
   await host.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\//)
   await host.waitForLoadState('domcontentloaded')
   const healthy = await host.evaluate(async () => {
@@ -36,6 +66,22 @@ async function launch() {
     return [health.status, songs.status]
   })
   assert.deepEqual(healthy, [200, 200], 'Packaged session must authenticate itself')
+  const welcome = host.getByRole('button', { name: 'I already have karaoke files →' })
+  if (await welcome.isVisible()) {
+    await host.getByRole('button', { name: 'Get started →' }).click()
+    await host.getByRole('heading', { name: /Where should we/ }).waitFor()
+    const facts = await host.evaluate(() => window.karaokeDesktop.preflightSetup())
+    assert.equal(facts.hardware.platform, process.platform)
+    assert.ok(facts.hardware.totalMemoryBytes > 0)
+    assert.equal(facts.ready, false, 'Clean profile cannot already have local processing')
+    await host.getByRole('button', { name: /My Modal account/ }).click()
+    await host.getByRole('button', { name: 'Continue →', exact: true }).click()
+    await host.getByRole('heading', { name: 'Save and check your connection' }).waitFor()
+    assert.equal(await host.getByRole('button', { name: 'Check saved connection' }).isEnabled(), false)
+    assert.equal(await host.locator('input[name="tokenSecret"]').inputValue(), '')
+    // Never enter credentials or call Modal during a packaged smoke test.
+    await host.locator('button.library').click()
+  }
   return host
 }
 
@@ -51,7 +97,7 @@ async function sandboxChecks(host) {
     bridge: Object.keys(window.karaokeDesktop),
     blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true),
   }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'prepareHeart'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'chooseModelSource', 'getModalStatus', 'saveModalConfig', 'checkModalConnection', 'forgetModalConfig', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
 }
 
 try {
@@ -97,8 +143,7 @@ try {
   assert.ok(after > before, 'Packaged projector video must advance during playback')
   await sandboxChecks(host)
   assert.equal((await application.windows()).length, 2)
-  await application.close()
-  application = null
+  await shutdown()
   assert.ok(existsSync(join(userData, 'backend/desktop.db')), 'Normal shutdown must preserve the library')
   const restoredHost = await launch()
   assert.deepEqual(readFileSync(join(userData, 'backend/settings.json')), settings)
@@ -109,15 +154,23 @@ try {
   }, songId)
   assert.deepEqual(restored, { id: songId, status: 'ready', videoStatus: 200 })
   await sandboxChecks(restoredHost)
-  console.log('PASS: packaged executable, isolated storage, synthetic video import/playback/projector, sandbox, persistent relaunch. Physical audio and external displays remain unverified.')
+  await shutdown()
 } catch (error) {
-  if (application) {
-    for (const window of application.windows()) {
-      console.error('Window diagnostic:', window.url(), await window.locator('body').innerText().catch(() => 'unavailable'))
-    }
-  }
-  throw error
+  failed = error
+  diagnostic({ event: 'failure', error: error.stack ?? String(error) })
+  console.error(error)
 } finally {
-  if (application) await application.close()
-  rmSync(temporary, { recursive: true, force: true })
+  if (application) {
+    try { await shutdown() }
+    catch (error) { failed ??= error; console.error(error) }
+  }
+  if (failed) console.error(`FAIL: packaged smoke; diagnostics and isolated profile retained at ${temporary}`)
+  else {
+    collectingLogs = false
+    rmSync(temporary, { recursive: true, force: true })
+    console.log('PASS: packaged executable, isolated storage, synthetic video import/playback/projector, sandbox, persistent relaunch, both clean shutdowns. Physical audio and external displays remain unverified.')
+  }
 }
+// A failed Playwright close can retain transport handles. Owned process cleanup
+// has already run; do not let those handles hide the failure indefinitely.
+if (failed) process.exit(1)

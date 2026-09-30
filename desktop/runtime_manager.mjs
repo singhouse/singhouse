@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
-import { mkdir, mkdtemp, open, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
-import { dirname, join, resolve, isAbsolute } from 'node:path'
+import { mkdir, mkdtemp, open, readFile, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
+import { dirname, join, resolve, isAbsolute, toNamespacedPath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
 
@@ -342,11 +342,14 @@ export class RuntimeManager {
       }
       env.PATH = this.nativeBin
     }
-    const source = functional ? await checkedRead(new URL('./processing_probe.py', import.meta.url)) : PROBE
+    // This fixed source belongs to the integrity-checked application package.
+    // Electron's ASAR entries have virtual identities that differ from the
+    // extracted descriptors used by open(); read through its archive-aware API.
+    const source = functional ? await readFile(new URL('./processing_probe.py', import.meta.url), 'utf8') : PROBE
     signal?.throwIfAborted()
     return new Promise((resolveProbe, reject) => {
-      const child = spawn(join(active.directory, manifest.python), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
-        { cwd: active.directory, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
+      const child = spawn(toNamespacedPath(join(active.directory, manifest.python)), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
+        { cwd: toNamespacedPath(active.directory), env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
       if (process.platform !== 'win32') watchOwnedGroup(child)
       let output = '', failure
       const stop = error => { failure = error; try { forceChild(child) } catch (cleanup) { failure = cleanup } }
@@ -559,14 +562,27 @@ export class RuntimeManager {
     const allowed = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
     const present = await inventory(directory)
     if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Runtime file inventory does not match its manifest')
-    for (const file of manifest.files) {
-      let ancestor = directory
-      for (const part of file.path.split('/').slice(0, -1)) {
-        ancestor = join(ancestor, part)
-        if (!(await lstat(ancestor)).isDirectory() || (await lstat(ancestor)).isSymbolicLink()) throw new Error('Invalid runtime directory')
+    // Bound both open descriptors and streaming hash buffers. Every file still
+    // checks its ancestors independently; nothing is cached across verifications.
+    let next = 0, failure
+    const worker = async () => {
+      while (!failure && next < manifest.files.length) {
+        const file = manifest.files[next++]
+        try {
+          let ancestor = directory
+          for (const part of file.path.split('/').slice(0, -1)) {
+            ancestor = join(ancestor, part)
+            const info = await lstat(ancestor)
+            if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid runtime directory')
+          }
+          if (!await matches(join(directory, file.path), file)) throw new Error('Installed runtime verification failed')
+        } catch (error) { failure ??= error }
       }
-      if (!await matches(join(directory, file.path), file)) throw new Error('Installed runtime verification failed')
     }
+    // Workers catch failures so all in-flight checks close their handles before
+    // rejection (and before active() can try a different runtime).
+    await Promise.all(Array.from({ length: Math.min(4, manifest.files.length) }, worker))
+    if (failure) throw failure
     return { id, directory, manifest }
   }
 
@@ -623,7 +639,7 @@ export function processingAttestation(active, probeResult) {
   }
   return {
     runtimeManifestId: active.id,
-    pythonPath: join(active.directory, manifest.python),
+    pythonPath: toNamespacedPath(join(active.directory, manifest.python)),
     pythonSha256: pythonRecord.sha256,
     probePassed: true,
     accelerator: probeResult.accelerator,
@@ -675,6 +691,44 @@ export function validateModelManifest(value, policy) {
 export class ModelCache extends RuntimeManager {
   constructor(root, policy, options) { super(root, {}, options); this.policy = policy }
   validate(manifest) { return validateModelManifest(manifest, this.policy) }
+
+  async install(manifest, options = {}) {
+    this.validate(manifest)
+    manifest = structuredClone(manifest)
+    // Growing a verified cache must not retrieve the already installed models
+    // again. Copy from held, hash-checked descriptors; never hard-link writable
+    // staging to the previous known-good pack.
+    const active = await this.active().catch(() => null)
+    const sourceDirectory = active ? await realpath(active.directory) : null
+    const sources = new Map()
+    try {
+      for (const record of manifest.files) {
+        if (!active?.manifest.files.some(file => file.path === record.path && file.sha256 === record.sha256 && file.size === record.size)) continue
+        options.signal?.throwIfAborted()
+        const ancestors = []
+        let path = dirname(join(sourceDirectory, record.path))
+        for (;;) {
+          const info = await lstat(path)
+          if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Installed model source has an unsafe directory')
+          ancestors.push({ path, info })
+          if (dirname(path) === path) break
+          path = dirname(path)
+        }
+        const source = await checkedFile(join(sourceDirectory, record.path), constants.O_RDONLY)
+        sources.set(record.path, source)
+        for (const ancestor of ancestors) {
+          const info = await lstat(ancestor.path)
+          if (!info.isDirectory() || info.isSymbolicLink() || info.ino !== ancestor.info.ino || info.dev !== ancestor.info.dev) {
+            throw new Error('Installed model source changed while opening it')
+          }
+        }
+        if ((await source.stat()).size !== record.size || await fileHash(source, options.signal) !== record.sha256) {
+          throw new Error('Installed model source changed before reuse')
+        }
+      }
+      return await super.install(manifest, { ...options, [offlineSources]: sources })
+    } finally { await Promise.all([...sources.values()].map(source => source.close())) }
+  }
 
   async selectionForRepair() {
     // This is inventory evidence for repair, never readiness or runnable bytes.

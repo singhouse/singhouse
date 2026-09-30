@@ -4,9 +4,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { WINDOWS_SIGNING, signWindowsFile, nativeExecutableSigningExclusions, verifyAzureCliSession, verifyWindowsAuthenticode, windowsBuildConfiguration } from '../windows_signing.mjs'
 
-test('unsigned private builds explicitly disable Windows signing', () => {
+test('unsigned private builds edit EXE resources without signing', () => {
   assert.deepEqual(windowsBuildConfiguration({ platform: 'linux' }), {
-    target: ['nsis'], signAndEditExecutable: false, signExecutable: false,
+    target: ['nsis'], signAndEditExecutable: true, signExecutable: false,
   })
 })
 
