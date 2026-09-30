@@ -162,8 +162,19 @@ def test_heart_posix_cancellation_reaps_grandchild(tmp_path: Path):
     t = heart_mod.HeartTranscriber(sys.executable, script, use_vad=False, cancel_event=cancelled)
     with pytest.raises(RuntimeError, match="cancelled"): t.transcribe(str(audio))
     pid = int(Path(str(audio) + ".pid").read_text())
-    status = Path(f"/proc/{pid}/status")
-    assert not status.exists() or "State:\tZ" in status.read_text()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    if sys.platform == "linux":
+        try:
+            state = Path(f"/proc/{pid}/status").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaping can remove procfs state between observing and reading it.
+            return
+        if "State:\tZ" in state:
+            return
+    raise AssertionError(f"grandchild {pid} survived cancellation")
 
 def test_heart_windows_uses_process_group_and_taskkill_argv(monkeypatch, tmp_path: Path):
     from lyricsync.transcription import heart as heart_mod

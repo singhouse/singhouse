@@ -20,7 +20,7 @@ from backend import (_windows_extended_path, backup_sqlite_database, desktop_dat
 class DatabaseRecoveryTests(unittest.TestCase):
     def test_windows_extended_paths_preserve_drives_unc_and_existing_prefixes(self):
         cases = [
-            ("C:/Users/test/runtime/payload", "\\\\?\\C:\\Users\\test\\runtime\\payload"),
+            ("C:/FixtureData/runtime/payload", "\\\\?\\C:\\FixtureData\\runtime\\payload"),
             ("//server/share/runtime/payload", "\\\\?\\UNC\\server\\share\\runtime\\payload"),
             ("\\\\?\\C:\\runtime\\payload", "\\\\?\\C:\\runtime\\payload"),
             ("\\\\?\\UNC\\server\\share\\payload", "\\\\?\\UNC\\server\\share\\payload"),

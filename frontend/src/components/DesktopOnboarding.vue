@@ -18,8 +18,8 @@ const progress = computed(() => {
 })
 const transferBytes = computed(() => {
   const files = plan.value?.components
-  const downloads = files?.filter(file => file.sourceMode !== 'offline')
-  return downloads && downloads.every(file => Number.isFinite(file.bytes)) ? downloads.reduce((total, file) => total + file.bytes, 0) : null
+  const onlineFiles = files?.filter(file => file.sourceMode !== 'offline')
+  return onlineFiles && onlineFiles.every(file => Number.isFinite(file.bytes)) ? onlineFiles.reduce((total, file) => total + file.bytes, 0) : null
 })
 const localCopyBytes = computed(() => {
   const files = plan.value?.components?.filter(file => file.sourceMode === 'offline')
@@ -254,7 +254,7 @@ onUnmounted(() => clearInterval(poll))
           Install the processing tools and models for separation and timed lyrics. Files are retrieved from the sources below only when you choose to set up.
         </p>
         <dl class="facts">
-          <div><dt>Download size</dt><dd>{{ size(transferBytes) }}</dd></div>
+          <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
           <div v-if="localCopyBytes !== null">
             <dt>Local model files</dt><dd>{{ size(localCopyBytes) }}</dd>
           </div>

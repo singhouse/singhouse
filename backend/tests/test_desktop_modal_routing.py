@@ -14,6 +14,14 @@ def restore_desktop_globals(monkeypatch):
 
 
 def test_desktop_disables_ambient_configuration(monkeypatch):
+    def unexpected_sdk_call(*args, **kwargs):
+        pytest.fail("Disabled desktop routing must not consult ambient Modal configuration")
+
+    # The base install intentionally omits the optional SDK. Model an available
+    # SDK so this tests the routing guard independently of dependency presence.
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Client=SimpleNamespace(from_credentials=unexpected_sdk_call),
+        Function=SimpleNamespace(from_name=unexpected_sdk_call)))
     source_app_name = modal_offload.APP_NAME
     monkeypatch.setattr(modal_offload, "_ENABLED", True)
     monkeypatch.setattr(modal_offload, "_DESKTOP", None)

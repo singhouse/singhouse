@@ -3,6 +3,7 @@ import asyncio
 import json
 import hashlib
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
@@ -196,8 +197,14 @@ async def test_posix_timeout_reaps_the_whole_process_tree(tmp_path):
     except ProcessLookupError:
         return
     status = Path(f"/proc/{pid}/status")
-    if status.exists() and "State:\tZ" in status.read_text():
-        return
+    if sys.platform == "linux":
+        try:
+            state = status.read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # The child can finish being reaped after kill(pid, 0) succeeds.
+            return
+        if "State:\tZ" in state:
+            return
     raise AssertionError(f"grandchild {pid} survived timeout")
 
 @pytest.mark.asyncio
