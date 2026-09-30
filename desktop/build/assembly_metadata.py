@@ -216,7 +216,9 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
         entries = {}
         # The helper publishes separate validated outputs; all installed files
         # remain untouched until every launcher and complete RECORD plan passes.
-        with tempfile.TemporaryDirectory(prefix='normalized-launchers-') as temporary:
+        # Use the canonical assembly root: Windows system TMP can be a short
+        # path or junction that the helper correctly rejects as an output alias.
+        with tempfile.TemporaryDirectory(prefix='normalized-launchers-', dir=output) as temporary:
             for script in sorted((destination / 'bin').glob('*')):
                 path = checked_path(script.relative_to(destination).as_posix())
                 if path not in owned:
