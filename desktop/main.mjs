@@ -707,11 +707,19 @@ async function start() {
     child.once('closed', () => { projector = null; blocker.stop() })
   })
   host.once('closed', () => { host = null; projector?.destroy(); app.quit() })
-  host.webContents.on('render-process-gone', () => { projector?.destroy(); app.quit() })
+  // A renderer failure during presentation belongs to startup's error path.
+  // Quitting here would misclassify that failure as intentional cancellation.
+  let presenting = packaged, rejectPresentation
+  const presentationFailure = packaged ? new Promise((_, reject) => { rejectPresentation = reject }) : null
+  host.webContents.on('render-process-gone', () => {
+    projector?.destroy()
+    if (presenting) rejectPresentation(new Error('Renderer exited before the application finished presenting'))
+    else app.quit()
+  })
   installMenu()
   if (packaged) startupHandoff = await presentAndCompleteStartup(updates, startupHandoff,
-    { load: () => host.loadURL(launch.origin),
-      ready: () => new Promise((resolveReady, reject) => {
+    { load: () => Promise.race([host.loadURL(launch.origin), presentationFailure]),
+      ready: () => Promise.race([new Promise((resolveReady, reject) => {
         const shown = () => finish()
         const gone = () => finish(new Error('Renderer exited before the application was ready to show'))
         const closed = () => finish(new Error('Application window closed before it was ready to show'))
@@ -721,8 +729,13 @@ async function start() {
           if (error) reject(error); else resolveReady()
         }
         host.once('ready-to-show', shown); host.once('closed', closed); host.webContents.once('render-process-gone', gone)
-      }),
-      show: () => host.show(), confirm: () => confirmRenderedFrame(host) })
+      }), presentationFailure]),
+      show: () => host.show(), confirm: async () => {
+        // A crashed renderer may never settle its JavaScript/frame request.
+        const evidence = await Promise.race([confirmRenderedFrame(host), presentationFailure])
+        presenting = false
+        return evidence
+      } })
   else { await host.loadURL(launch.origin); host.show() }
   startupSurface.close()
 }
@@ -758,6 +771,9 @@ process.on('exit', () => {
   }
 })
 if (ownsInstance) app.whenReady().then(start).catch(error => {
+  // Destroying the host during an intentional quit can reject pending startup
+  // presentation. Let shutdown finish without opening a blocking error dialog.
+  if (quitting) return
   startupSurface?.close()
   dialog.showErrorBox(`${brand} could not start`, error.message)
   app.quit()
