@@ -33,7 +33,20 @@ Default builds are unsigned; Windows has an explicit signed build mode below.
 macOS Gatekeeper and Windows SmartScreen may warn or block installation; verify the artifact's origin and checksum before using the
 operating system's per-application approval controls. Default build commands do not sign or notarize artifacts. On Linux, use the archive if the
 AppImage cannot run because its host integration requirements are unavailable.
-Do not disable Electron's sandbox to launch a build.
+Do not disable Electron's sandbox to launch a build. The AppImage launcher
+requires sandboxing and refuses bypass arguments. If Electron reports unavailable
+sandbox facilities, launch stops; it does not retry without protection or change
+host settings. The archive also requires a working Electron sandbox.
+
+The Linux application includes its own `AppRun` through `linux.extraFiles`, before
+release inventory and receipt creation. With the pinned electron-builder version,
+the AppImage staging step copies that launcher over the generated launcher; the
+AppImage desktop entry uses an explicit empty argument list. Packaging tests check
+both staging paths so an upstream change cannot silently restore an unsafe fallback.
+With desktop build dependencies installed, run
+`SINGHOUSE_REQUIRE_BUILDER_TESTS=1 node --test test/appimage.test.mjs` from `desktop/`
+as part of Linux packaging qualification. Without those dependencies the staging
+test reports a skip; dependency-free launcher tests still run on Linux.
 
 The application stores its database, uploads, stems, cache, and `settings.json`
 under `backend/` in Electron's per-user application-data directory, outside the

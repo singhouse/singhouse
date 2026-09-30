@@ -41,7 +41,14 @@ export default {
   // Builds are private test artifacts; publication is a separate operation.
   publish: null,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
-  linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true },
+  linux: {
+    target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true,
+    // Copied into the application before receipt derivation. electron-builder
+    // overlays this file on its generated AppRun when staging the AppImage.
+    extraFiles: [{ from: resolve(desktop, 'build/apprun.sh'), to: 'AppRun' }],
+  },
+  // Override electron-builder's legacy AppImage desktop-entry default.
+  appImage: { executableArgs: [] },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null, icon: resolve(icons, 'singhouse.icns') },
   dmg: { icon: resolve(icons, 'singhouse.icns') },
   win: {

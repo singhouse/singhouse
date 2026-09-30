@@ -143,6 +143,8 @@ test('installer rejects stale native admission policy instead of overlaying it',
     assert.equal(valid.linux.icon, resolve(icons, 'linux'))
     assert.equal(valid.appId, pkg.desktopName.slice(0, -'.desktop'.length))
     assert.equal(valid.linux.syncDesktopName, true)
+    assert.deepEqual(valid.appImage.executableArgs, [])
+    assert.deepEqual(valid.linux.extraFiles, [{ from: resolve(desktop, 'build/apprun.sh'), to: 'AppRun' }])
     assert.equal(valid.mac.icon, resolve(icons, 'singhouse.icns'))
     assert.equal(valid.dmg.icon, valid.mac.icon)
     assert.equal(valid.win.icon, resolve(icons, 'singhouse.ico'))
