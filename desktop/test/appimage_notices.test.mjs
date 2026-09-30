@@ -57,6 +57,18 @@ test('checked-in inventory retains exact notices and mixed appindicator license 
   assert.equal(inventory.libraries.length, 6)
   assert.match(inventory.libraries.find(x => x.source === 'libappindicator').licenseEvidence, /generate-id.c/)
   assert.ok(inventory.sources.filter(x => x.path.endsWith('.dsc')).every(x => x.signatureVerified === false))
+  assert.ok(inventory.notices.some(record => record.path === 'REBUILD.txt'))
+  assert.equal(inventory.builder.extractionScripts.length, 2)
+  for (const script of inventory.builder.extractionScripts) {
+    assert.deepEqual(Object.keys(script).sort(), ['sha256', 'url'])
+    const prefix = `https://github.com/electron-userland/electron-builder-binaries/blob/${inventory.builder.commit}/`
+    assert.ok(script.url.startsWith(prefix))
+    const name = script.url.slice(prefix.length)
+    assert.match(name, /^appImage-packages-(ia32|x64)\.sh$/)
+    assert.match(script.sha256, /^[a-f0-9]{64}$/)
+    assert.equal(inventory.notices.some(record => record.path.endsWith(name)), false)
+    await assert.rejects(readFile(resolve(appImageNoticesDirectory, 'builder', name)), /ENOENT/)
+  }
 })
 
 test('packaged verification rejects missing, changed, linked, and extra library files', async t => {
@@ -89,6 +101,11 @@ test('source bundle is deterministic, complete, checksum-bound and exclusive', a
   const f = await fixture(t), output = resolve(f.root, 'sources.tar')
   const result = await createAppImageSourceBundle({ ...f, output })
   const bytes = await readFile(output), entries = tarEntries(bytes)
+  assert.deepEqual([...entries.keys()].sort(),
+    ['inventory.json', 'SHA256SUMS', ...f.inventory.sources.map(record => record.path),
+      ...f.inventory.notices.map(record => record.path)].sort())
+  assert.deepEqual(entries.get('REBUILD.txt'), await readFile(resolve(f.metadataDirectory, 'REBUILD.txt')))
+  assert.equal([...entries.keys()].some(path => path.startsWith('builder/') || path.endsWith('.sh')), false)
   assert.equal(result.sha256, hash(bytes))
   assert.equal(await readFile(`${output}.sha256`, 'utf8'), `${result.sha256}  sources.tar\n`)
   for (const record of [...f.inventory.sources, ...f.inventory.notices]) assert.equal(hash(entries.get(record.path)), record.sha256)
@@ -140,6 +157,8 @@ test('actual builder Linux resource copying places notice bytes in receipt inven
   })
   await copyFiles(matchers, undefined, false)
   const { files } = await inspectApplicationInventory(application), { inventory, bytes } = await loadAppImageNotices()
+  assert.equal(files.some(file => file.path.startsWith(`${appImageNoticesResource}/builder/`)), false)
+  assert.equal(files.some(file => file.path.startsWith(`${appImageNoticesResource}/`) && file.path.endsWith('.sh')), false)
   for (const notice of [...inventory.notices, { path: 'inventory.json', sha256: hash(bytes) }]) {
     assert.equal(files.find(f => f.path === `${appImageNoticesResource}/${notice.path}`)?.sha256, notice.sha256)
   }

@@ -79,7 +79,9 @@ unqualified LGPL-only. Preserve the complete component notices.
 First-installer packaging also creates the separate deterministic
 `Singhouse-appimage-12.0.1-library-sources.tar` and its SHA256 sidecar. The TAR
 contains exact source DSC records, upstream originals, Debian changes, the
-pinned builder extraction scripts, notices, inventory, and internal checksums.
+original `REBUILD.txt` extraction/source-build recipe, notices, inventory, and
+internal checksums. Upstream extraction scripts are identified only by public
+URLs and hashes in the inventory; their contents are not redistributed.
 DSC signatures have not been verified; source hashes are locked and were checked
 against those records. Building this local artifact does not publish it or
 establish public source availability. Source delivery and any other applicable

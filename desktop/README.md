@@ -803,7 +803,12 @@ copies exact notices into the application, checks the completed AppImage library
 bytes before creating a receipt, and writes a deterministic uncompressed
 `artifacts/Singhouse-appimage-12.0.1-library-sources.tar` plus `.sha256`. The archive
 has fixed file order, timestamps, ownership and modes and includes an internal
-`SHA256SUMS`. Existing artifact names are never overwritten. Preserve the source
+`SHA256SUMS` and the original `third-party/appimage/REBUILD.txt` recipe (stored
+as `REBUILD.txt` in the archive). The upstream extraction scripts are not
+included; inventory metadata retains only their public URLs and hashes. The
+source packages contain their own Debian build rules. The recipe describes
+extraction and rebuilding, without asserting a reproducible build or resolving
+corresponding-source adequacy. Existing artifact names are never overwritten. Preserve the source
 artifact alongside the installer for release review; this command does not
 publish either artifact or promise a public source-download location.
 

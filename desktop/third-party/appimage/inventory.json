@@ -6,7 +6,17 @@
     "archiveSha256": "d12ff7eb8f1d1ec4652ca5237a7fbdca33acc0c758045636feca62dc6ecb8ec4",
     "sourceUrl": "https://github.com/electron-userland/electron-builder-binaries/tree/57839c6516289c0412c1b0887a6718d71e1ac5c2",
     "electronBuilderVersion": "26.15.3",
-    "toolset": "0.0.0"
+    "toolset": "0.0.0",
+    "extractionScripts": [
+      {
+        "url": "https://github.com/electron-userland/electron-builder-binaries/blob/57839c6516289c0412c1b0887a6718d71e1ac5c2/appImage-packages-ia32.sh",
+        "sha256": "01cdf4a80d268586cd8bb571992bfdfad2efb9b892a0989c21dd2c3f1746bb7c"
+      },
+      {
+        "url": "https://github.com/electron-userland/electron-builder-binaries/blob/57839c6516289c0412c1b0887a6718d71e1ac5c2/appImage-packages-x64.sh",
+        "sha256": "78284348b6823362e4158a551b2ddcafad3a61dac7f25e7874444e6c364c161e"
+      }
+    ]
   },
   "arch": "x64",
   "libraries": [
@@ -74,15 +84,11 @@
   "notices": [
     {
       "path": "NOTICE.txt",
-      "sha256": "8f60c5509801892ceff545e4b22e7a460264290247634881909d7a500e81ec44"
+      "sha256": "7ce2e8c4e5cffe51e22ded070a3032159aca4216f32cc0f35f06a5d796a1a5aa"
     },
     {
-      "path": "builder/appImage-packages-ia32.sh",
-      "sha256": "01cdf4a80d268586cd8bb571992bfdfad2efb9b892a0989c21dd2c3f1746bb7c"
-    },
-    {
-      "path": "builder/appImage-packages-x64.sh",
-      "sha256": "78284348b6823362e4158a551b2ddcafad3a61dac7f25e7874444e6c364c161e"
+      "path": "REBUILD.txt",
+      "sha256": "70fac4c595d3c810381c9d41b0d316130c41941a19fb441debf44a4d91774d2b"
     },
     {
       "path": "copyright/gconf.txt",
