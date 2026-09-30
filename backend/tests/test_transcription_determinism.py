@@ -158,9 +158,16 @@ def test_heart_posix_cancellation_reaps_grandchild(tmp_path: Path):
     script = tmp_path / "heart.py"; pid_file = tmp_path / "grandchild.pid"
     script.write_text("import subprocess,time,sys\np=subprocess.Popen(['sleep','30'])\nopen(sys.argv[1]+'.pid','w').write(str(p.pid))\ntime.sleep(30)\n")
     audio = tmp_path / "audio"; audio.write_bytes(b"")
-    cancelled = threading.Event(); threading.Timer(.2, cancelled.set).start()
+    cancelled = threading.Event()
+    cancellation_times = []
+    def request_cancellation():
+        cancellation_times.append(time.monotonic())
+        cancelled.set()
+    threading.Timer(.2, request_cancellation).start()
     t = heart_mod.HeartTranscriber(sys.executable, script, use_vad=False, cancel_event=cancelled)
+    transcribe_started = time.monotonic()
     with pytest.raises(RuntimeError, match="cancelled"): t.transcribe(str(audio))
+    transcribe_finished = time.monotonic()
     pid = int(Path(str(audio) + ".pid").read_text())
     try:
         os.kill(pid, 0)
@@ -174,7 +181,32 @@ def test_heart_posix_cancellation_reaps_grandchild(tmp_path: Path):
             return
         if "State:\tZ" in state:
             return
-    raise AssertionError(f"grandchild {pid} survived cancellation")
+    # Capture diagnostics only after the unchanged survival checks fail. A
+    # disappearance during these observations must not turn that failure green.
+    observed_at = time.monotonic()
+    try:
+        observed_pgid = os.getpgid(pid)
+    except OSError as exc:
+        observed_pgid = f"{type(exc).__name__}: errno={exc.errno}"
+    observed_stat = None
+    if sys.platform == "linux":
+        try:
+            observed_stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError as exc:
+            observed_stat = f"{type(exc).__name__}: errno={exc.errno}"
+    diagnostics = {
+        "pid": pid,
+        "status_at_failed_check": state if sys.platform == "linux" else None,
+        "pgid_after_failed_check": observed_pgid,
+        "stat_after_failed_check": observed_stat,
+        "transcribe_elapsed_seconds": transcribe_finished - transcribe_started,
+        "cancellation_requested_after_seconds": (
+            cancellation_times[0] - transcribe_started if cancellation_times else None),
+        "cleanup_after_cancellation_seconds": (
+            transcribe_finished - cancellation_times[0] if cancellation_times else None),
+        "failed_check_after_transcribe_seconds": observed_at - transcribe_finished,
+    }
+    raise AssertionError(f"grandchild {pid} survived cancellation: {diagnostics!r}")
 
 def test_heart_windows_uses_process_group_and_taskkill_argv(monkeypatch, tmp_path: Path):
     from lyricsync.transcription import heart as heart_mod
