@@ -108,21 +108,25 @@ test('macOS ABI observer handles process exit but refuses denied and truncated o
   // Only fake libproc calls execute here; the helper never loads Darwin libraries.
   const script = `import importlib.util,sys,ctypes,errno
 spec=importlib.util.spec_from_file_location('observer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.os.geteuid=lambda:501
 class Fake:
  mode='normal'
- def proc_listallpids(self,buffer,size):
-  if buffer is None: return 2
-  if self.mode=='truncated': return len(buffer)
-  buffer[0]=10;buffer[1]=11;return 2
+ def proc_listpids(self,kind,uid,buffer,size):
+  assert kind==4 and uid==m.os.geteuid()
+  if self.mode=='unaligned':return 7
+  if buffer is None: return 8
+  if self.mode=='truncated': return size
+  buffer[0]=10;buffer[1]=11;return 8
  def proc_pidinfo(self,pid,flavor,arg,pointer,size):
   assert flavor==3 and size==136
   if pid==11:
    ctypes.set_errno(errno.EPERM if self.mode=='denied' else errno.ESRCH);return 0
-  info=pointer._obj;info.pid=pid;info.parent=1;info.seconds=1790000000;info.microseconds=123456
+  info=pointer._obj;info.uid=m.os.geteuid();info.pid=pid;info.parent=1;info.seconds=1790000000;info.microseconds=123456
   if self.mode=='malformed':info.microseconds=1000000
+  if self.mode=='wrong_uid':info.uid+=1
   return size
 f=Fake();assert m.snapshot(f)==[{'pid':10,'parent':1,'birth':'1790000000123456'}]
-for mode in ['denied','truncated','malformed']:
+for mode in ['denied','truncated','malformed','unaligned','wrong_uid']:
  f.mode=mode
  try:m.snapshot(f)
  except RuntimeError:pass
@@ -151,32 +155,32 @@ test('native macOS observer identifies its real child and preserves a stable bir
   })
 
 
-test('macOS EPERM is ignored only after a complete re-enumeration proves PID absence', () => {
+test('macOS own-UID observer validates UID and never treats permission denial as exit', () => {
   const script = `import importlib.util,sys,ctypes,errno
 spec=importlib.util.spec_from_file_location('observer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class Fake:
- def __init__(self,mode):self.mode=mode;self.enumerations=0
- def proc_listallpids(self,buffer,size):
-  if buffer is None:return 2
-  self.enumerations+=1
-  if self.enumerations>1:
-   if self.mode=='truncated':return len(buffer)
-   if self.mode=='error':return 0
-   if self.mode=='empty':buffer[0]=0;return 1
-   if self.mode=='malformed':buffer[0]=10;buffer[1]=10;return 2
-   if self.mode=='vanished':buffer[0]=10;return 1
-  buffer[0]=10;buffer[1]=11;return 2
+ def proc_listpids(self,kind,uid,buffer,size):
+  assert kind==4 and uid==501
+  if buffer is None:return 4
+  buffer[0]=10;return 4
  def proc_pidinfo(self,pid,flavor,arg,pointer,size):
-  if pid==11:ctypes.set_errno(errno.EPERM);return 0
-  info=pointer._obj;info.pid=pid;info.parent=1;info.seconds=1790000000;info.microseconds=123456
-  return size
-f=Fake('vanished');assert m.snapshot(f)==[{'pid':10,'parent':1,'birth':'1790000000123456'}];assert f.enumerations==2
-for mode in ['present','truncated','error','empty','malformed']:
- f=Fake(mode)
- try:m.snapshot(f)
+  ctypes.set_errno(errno.EPERM);return 0
+m.os.geteuid=lambda:501
+try:m.snapshot(Fake())
+except RuntimeError as e:assert 'Cannot inspect' in str(e)
+else:raise AssertionError('accepted same-UID permission denial')
+for uid in [-1,4294967296,True,'501',1.5]:
+ try:m.list_pids(Fake(),uid)
  except RuntimeError:pass
- else:raise AssertionError('accepted denied PID with '+mode+' re-enumeration')
- assert f.enumerations>=2
+ else:raise AssertionError('accepted invalid UID')
+class Drift(Fake):
+ def proc_pidinfo(self,pid,flavor,arg,pointer,size):
+  info=pointer._obj;info.uid=501;info.pid=pid;info.parent=1;info.seconds=1790000000
+  m.os.geteuid=lambda:502
+  return size
+try:m.snapshot(Drift())
+except RuntimeError as e:assert 'UID changed' in str(e)
+else:raise AssertionError('accepted observer UID drift')
 `
   const python = process.env.KARAOKE_DESKTOP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
   execFileSync(python, ['-I', '-B', '-c', script, fileURLToPath(new URL('./packaged-smoke-processes.py', import.meta.url))], { timeout: 10000 })
