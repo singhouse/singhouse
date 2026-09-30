@@ -113,7 +113,11 @@ Local application wheels use a fixed ZIP-compatible build epoch. Assembly
 removes uv installation-cache metadata and temporary local-wheel origin URLs;
 the exact wheel hashes and source revision remain in `provenance.json`. Installed
 RECORD files are regenerated against the resulting bytes before the complete
-native inventory is sealed. On Linux and macOS, installed Python console
+native inventory is sealed. Blank references to bytecode already omitted from
+the pinned Python archive are captured before dependency installation and
+removed only from an unchanged upstream RECORD; the original RECORD hash and
+exact omitted paths remain in provenance. Other missing files fail assembly.
+On Linux and macOS, installed Python console
 commands resolve the bundled interpreter relative to their installed location,
 so relocation does not retain a temporary build-interpreter path. Windows
 launcher bytes are unchanged: the existing console launchers retain a temporary

@@ -13,7 +13,7 @@ from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'build'))
-from assembly_metadata import WHEEL_EPOCH, normalize_installation, relocatable_script
+from assembly_metadata import WHEEL_EPOCH, normalize_installation, relocatable_script, upstream_record_omissions
 from assemble import assembly_environment
 
 
@@ -194,6 +194,98 @@ class AssemblyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'escaping'):
             self.normalize(fixture)
         self.assertTrue((fixture[2] / 'uv_cache.json').exists())
+
+    def add_stripped_bytecode_record(self, fixture):
+        destination, dist = fixture[1:3]
+        source = destination / 'example/module.py'
+        source.parent.mkdir()
+        source.write_bytes(b'value = 1\n')
+        absent = 'example/__pycache__/module.cpython-312.pyc'
+        with (dist / 'RECORD').open('a') as stream:
+            stream.write('example/module.py,,\n' + absent + ',,\n')
+        return absent
+
+    def test_only_snapshotted_upstream_stripped_bytecode_rows_are_removed(self):
+        fixture = self.fixture()
+        absent = self.add_stripped_bytecode_record(fixture)
+        snapshot = upstream_record_omissions(fixture[1])
+        original_hash = hashlib.sha256((fixture[2] / 'RECORD').read_bytes()).hexdigest()
+        result = normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+        self.assertNotIn(absent, (fixture[2] / 'RECORD').read_text())
+        self.verify_record(fixture[1], fixture[2])
+        evidence = result['upstreamOmittedBytecode']['example-1.dist-info/RECORD']
+        self.assertEqual(evidence, {'recordSha256': original_hash, 'absentBytecode': [absent]})
+
+    def test_missing_bytecode_without_upstream_snapshot_is_rejected(self):
+        fixture = self.fixture()
+        self.add_stripped_bytecode_record(fixture)
+        with self.assertRaisesRegex(ValueError, 'Missing'):
+            self.normalize(fixture)
+
+    def test_modified_record_after_snapshot_is_rejected(self):
+        fixture = self.fixture()
+        self.add_stripped_bytecode_record(fixture)
+        snapshot = upstream_record_omissions(fixture[1])
+        with (fixture[2] / 'RECORD').open('a') as stream:
+            stream.write('example/__pycache__/new.cpython-312.pyc,,\n')
+        with self.assertRaisesRegex(ValueError, 'changed after'):
+            normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+
+    def test_upstream_snapshot_rejects_missing_hashed_or_nonbytecode_files(self):
+        for index, row in enumerate(('missing.py,,', 'example/__pycache__/module.cpython-312.pyc,sha256=abc,1')):
+            fixture = self.fixture(str(index))
+            with (fixture[2] / 'RECORD').open('a') as stream:
+                stream.write(row + '\n')
+            with self.assertRaisesRegex(ValueError, 'Unexpected missing'):
+                upstream_record_omissions(fixture[1])
+
+    def test_file_lost_after_snapshot_still_fails(self):
+        fixture = self.fixture()
+        self.add_stripped_bytecode_record(fixture)
+        snapshot = upstream_record_omissions(fixture[1])
+        fixture[5].unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing'):
+            normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+
+    def test_dangling_bytecode_link_before_snapshot_is_rejected(self):
+        fixture = self.fixture()
+        absent = self.add_stripped_bytecode_record(fixture)
+        path = fixture[1] / absent
+        path.parent.mkdir()
+        path.symlink_to(self.base / 'missing-bytecode')
+        with self.assertRaisesRegex(ValueError, 'Linked omitted-bytecode'):
+            upstream_record_omissions(fixture[1])
+
+    def test_dangling_bytecode_link_after_snapshot_is_rejected(self):
+        fixture = self.fixture()
+        absent = self.add_stripped_bytecode_record(fixture)
+        snapshot = upstream_record_omissions(fixture[1])
+        path = fixture[1] / absent
+        path.parent.mkdir()
+        path.symlink_to(self.base / 'missing-bytecode')
+        with self.assertRaisesRegex(ValueError, 'Linked omitted-bytecode'):
+            normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+        self.assertIn(absent, (fixture[2] / 'RECORD').read_text())
+
+    def test_linked_bytecode_parent_after_snapshot_is_rejected(self):
+        for index, existing in enumerate((False, True)):
+            fixture = self.fixture(str(index))
+            absent = self.add_stripped_bytecode_record(fixture)
+            snapshot = upstream_record_omissions(fixture[1])
+            target = self.base / ('redirect-' + str(index))
+            if existing:
+                target.mkdir()
+            (fixture[1] / absent).parent.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'Linked omitted-bytecode'):
+                normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+            self.assertIn(absent, (fixture[2] / 'RECORD').read_text())
+
+    def test_linked_bytecode_parent_before_snapshot_is_rejected(self):
+        fixture = self.fixture()
+        absent = self.add_stripped_bytecode_record(fixture)
+        (fixture[1] / absent).parent.symlink_to(self.base / 'missing-directory', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'Linked omitted-bytecode'):
+            upstream_record_omissions(fixture[1])
 
 
 if __name__ == '__main__':

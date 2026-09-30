@@ -9,11 +9,59 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import zipfile
 
 # ZIP's earliest representable timestamp; independent of checkout/build time.
 WHEEL_EPOCH = 315532800
+
+
+def truly_absent(path: Path) -> bool:
+    """An omitted file must be absent, not hidden behind a filesystem link."""
+    if path.is_symlink() or Path(os.path.abspath(path)) != path.resolve():
+        raise ValueError(f"Linked omitted-bytecode path: {path}")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def upstream_record_omissions(destination: Path) -> dict:
+    """Snapshot stripped-bytecode rows immediately after verified Python unpack.
+
+    This is not called on the installed application environment: later missing
+    files never become admissible simply because they have a .pyc suffix.
+    """
+    omissions = {}
+    for record in sorted(destination.glob('*.dist-info/RECORD')):
+        original = record.read_bytes()
+        rows = list(csv.reader(io.StringIO(original.decode())))
+        listed = {row[0] for row in rows if len(row) == 3}
+        missing = []
+        for row in rows:
+            if len(row) != 3:
+                raise ValueError("Malformed upstream RECORD")
+            name, checksum, size = row
+            path = destination / name
+            if path.exists():
+                continue
+            if not truly_absent(path):
+                raise ValueError(f"Unexpected upstream RECORD file type: {name}")
+            match = re.fullmatch(r'(.+)/__pycache__/([^/]+)\.cpython-[0-9]+(?:\.opt-[0-9]+)?\.pyc', name)
+            source = f'{match[1]}/{match[2]}.py' if match else ''
+            if (not match or checksum or size or '\\' in name or
+                    any(part in ('', '.', '..') for part in name.split('/')) or
+                    source not in listed or not (destination / source).is_file()):
+                raise ValueError(f"Unexpected missing upstream RECORD file: {name}")
+            missing.append(name)
+        if missing:
+            omissions[record.relative_to(destination).as_posix()] = {
+                'recordSha256': hashlib.sha256(original).hexdigest(),
+                'absentBytecode': sorted(missing),
+            }
+    return omissions
 
 
 def relocatable_script(data: bytes, host_python: Path, relative_python: str) -> bytes:
@@ -36,7 +84,7 @@ def relocatable_script(data: bytes, host_python: Path, relative_python: str) -> 
 
 
 def normalize_installation(output: Path, destination: Path, host_python: Path,
-                           target: str, artifacts: list[Path]) -> dict:
+                           target: str, artifacts: list[Path], upstream_omissions=None) -> dict:
     """Plan/validate all edits, then update files and their owning RECORDs.
 
     Windows launchers are deliberately unchanged pending native qualification.
@@ -71,11 +119,29 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
 
     records = []
     owned = set()
+    omitted = {}
     for directory in sorted(destination.glob('*.dist-info')):
         record = directory / 'RECORD'
-        rows = list(csv.reader(io.StringIO(record.read_text())))
+        original = record.read_bytes()
+        rows = list(csv.reader(io.StringIO(original.decode())))
         if any(len(row) != 3 for row in rows) or len({row[0] for row in rows}) != len(rows):
             raise ValueError("Malformed or duplicate installed RECORD entries")
+        relative_record = record.relative_to(destination).as_posix()
+        prior = (upstream_omissions or {}).get(relative_record)
+        if prior:
+            if hashlib.sha256(original).hexdigest() != prior['recordSha256']:
+                raise ValueError("Upstream RECORD changed after bytecode-omission snapshot")
+            removed = []
+            kept = []
+            for row in rows:
+                if row[0] in prior['absentBytecode'] and truly_absent(destination / row[0]):
+                    if row[1:] != ['', '']:
+                        raise ValueError("Upstream omitted bytecode has unexpected integrity metadata")
+                    removed.append(row[0])
+                else:
+                    kept.append(row)
+            rows = kept
+            omitted[relative_record] = {'recordSha256': prior['recordSha256'], 'absentBytecode': sorted(removed)}
         paths = [(row[0], checked_path(row[0])) for row in rows]
         if record.resolve() not in {path for _, path in paths}:
             raise ValueError("Installed RECORD must list itself")
@@ -124,6 +190,7 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
         else:
             path.write_bytes(data)  # Existing executable modes are preserved.
     return {'schema': 1, 'localWheelEpoch': WHEEL_EPOCH,
+            'upstreamOmittedBytecode': omitted,
             'localWheelOrigins': 'sourceCommit and wheels in provenance.json',
             'installerCacheMetadata': 'removed; RECORD updated',
             'consoleLaunchers': 'unchanged-windows' if target.startswith('win32-') else 'relative-bundled-python'}

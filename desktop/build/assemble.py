@@ -19,7 +19,7 @@ import tempfile
 import urllib.request
 import zipfile
 from notices import collect as collect_notices
-from assembly_metadata import WHEEL_EPOCH, normalize_installation
+from assembly_metadata import WHEEL_EPOCH, normalize_installation, upstream_record_omissions
 
 ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = ROOT / "desktop"
@@ -133,7 +133,7 @@ def assembly_environment(cache):
                 PYTHONDONTWRITEBYTECODE="1")
 
 
-def install_dependencies(output, cache, lock, target, env):
+def install_dependencies(output, cache, lock, target, env, upstream_omissions):
     host = host_target()
     host_input = lock["targets"][host]["python"]
     wheels = Path(tempfile.mkdtemp(prefix=f"wheels-{target}-", dir=cache))
@@ -162,7 +162,7 @@ def install_dependencies(output, cache, lock, target, env):
         run("uv", "pip", "install", *selection, "--require-hashes", "--no-build-isolation",
             "-r", LOCKS / "base.txt", env=env)
         run("uv", "pip", "install", *selection, "--no-deps", *artifacts, env=env)
-        normalization = normalize_installation(output, destination, host_python, target, artifacts)
+        normalization = normalize_installation(output, destination, host_python, target, artifacts, upstream_omissions)
     if target == host:
         run("uv", "pip", "check", "--python", python_path(output, target), env=env)
     return artifacts, host_input, normalization
@@ -229,7 +229,11 @@ def main():
     python = python_path(output, target)
     if not python.is_file():
         raise SystemExit("Pinned Python archive has an unexpected layout")
-    artifacts, host_input, normalization = install_dependencies(output, cache, lock, target, env)
+    # The pinned stripped Python archive can retain blank RECORD references to
+    # bytecode it does not ship. Capture only those preexisting omissions before
+    # any dependency installation; do not excuse later missing installed files.
+    upstream_omissions = upstream_record_omissions(site_packages(output, target, lock["pythonVersion"]))
+    artifacts, host_input, normalization = install_dependencies(output, cache, lock, target, env, upstream_omissions)
     ffbin = output / "ffmpeg/bin"
     ffbin.mkdir(parents=True)
     notices = output / "notices"
