@@ -109,6 +109,20 @@ application wheels with a pinned host toolchain, installs locked dependencies,
 and rebuilds the frontend using its npm lockfile. It refuses an existing output
 directory: choose a fresh path for each assembly.
 
+Local application wheels use a fixed ZIP-compatible build epoch. Assembly
+removes uv installation-cache metadata and temporary local-wheel origin URLs;
+the exact wheel hashes and source revision remain in `provenance.json`. Installed
+RECORD files are regenerated against the resulting bytes before the complete
+native inventory is sealed. On Linux and macOS, installed Python console
+commands resolve the bundled interpreter relative to their installed location,
+so relocation does not retain a temporary build-interpreter path. Windows
+launcher bytes are unchanged: the existing console launchers retain a temporary
+build-interpreter path and still need a Windows-specific repair. The desktop
+processing path invokes bundled Python directly; its execution does not qualify
+these console launchers. These
+normalizations do not establish cross-platform or container reproducibility;
+compare two fresh assemblies and report every modeled difference.
+
 The default native payload is `desktop/native/`. Packaging creates a deterministic
 `Singhouse-<version>-<os>-<arch>.shapp` portable application and a canonical build
 receipt in `desktop/artifacts/`. The portable header binds the exact recursive

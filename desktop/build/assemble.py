@@ -19,6 +19,7 @@ import tempfile
 import urllib.request
 import zipfile
 from notices import collect as collect_notices
+from assembly_metadata import WHEEL_EPOCH, normalize_installation
 
 ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = ROOT / "desktop"
@@ -122,8 +123,14 @@ def site_packages(root, target, version):
 
 def metadata(directory):
     # Read dist-info only: never import or execute a target-architecture module.
-    return {distribution.metadata["Name"]: distribution.version
-            for distribution in importlib.metadata.distributions(path=[str(directory)])}
+    return dict(sorted((distribution.metadata["Name"], distribution.version)
+                       for distribution in importlib.metadata.distributions(path=[str(directory)])))
+
+
+def assembly_environment(cache):
+    return dict(os.environ, UV_CACHE_DIR=str(cache / "uv"), UV_PYTHON_DOWNLOADS="never",
+                SOURCE_DATE_EPOCH=str(WHEEL_EPOCH), PYTHONHASHSEED="0",
+                PYTHONDONTWRITEBYTECODE="1")
 
 
 def install_dependencies(output, cache, lock, target, env):
@@ -155,9 +162,10 @@ def install_dependencies(output, cache, lock, target, env):
         run("uv", "pip", "install", *selection, "--require-hashes", "--no-build-isolation",
             "-r", LOCKS / "base.txt", env=env)
         run("uv", "pip", "install", *selection, "--no-deps", *artifacts, env=env)
+        normalization = normalize_installation(output, destination, host_python, target, artifacts)
     if target == host:
         run("uv", "pip", "check", "--python", python_path(output, target), env=env)
-    return artifacts, host_input
+    return artifacts, host_input, normalization
 
 
 def inspect_executable(executable, cross):
@@ -214,14 +222,14 @@ def main():
     inputs = lock["targets"][target]
     cache.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True)
-    env = dict(os.environ, UV_CACHE_DIR=str(cache / "uv"), UV_PYTHON_DOWNLOADS="never")
+    env = assembly_environment(cache)
     # Archive contains a relocatable python/ prefix, not a host-bound venv.
     with tarfile.open(fetch(inputs["python"], cache), "r:gz") as archive:
         archive.extractall(output, filter="data")
     python = python_path(output, target)
     if not python.is_file():
         raise SystemExit("Pinned Python archive has an unexpected layout")
-    artifacts, host_input = install_dependencies(output, cache, lock, target, env)
+    artifacts, host_input, normalization = install_dependencies(output, cache, lock, target, env)
     ffbin = output / "ffmpeg/bin"
     ffbin.mkdir(parents=True)
     notices = output / "notices"
@@ -238,8 +246,8 @@ def main():
     shutil.copyfile(ROOT / "LICENSE", notices / "LICENSE")
     # Build from the npm lockfile; never use a developer's existing dist tree.
     npm = "npm.cmd" if sys.platform == "win32" else "npm"
-    run(npm, "ci", "--cache", cache / "npm", cwd=ROOT / "frontend")
-    run(npm, "run", "build", cwd=ROOT / "frontend")
+    run(npm, "ci", "--cache", cache / "npm", cwd=ROOT / "frontend", env=env)
+    run(npm, "run", "build", cwd=ROOT / "frontend", env=env)
     shutil.copytree(ROOT / "frontend/dist", output / "static", ignore=shutil.ignore_patterns("*.map"))
     collect_notices(ROOT / "frontend", output)
     shutil.copyfile(DESKTOP / "backend.py", output / "backend.py")
@@ -266,7 +274,8 @@ def main():
         "validation": "UNTESTED: native installation and execution required" if cross else "Native Python dependency and FFmpeg checks executed; installer validation separate",
         "hostPythonInput": host_input, "uvVersion": lock["uvVersion"],
         "wheels": {p.name: digest(p) for p in artifacts},
-        "locks": {p.name: digest(p) for p in LOCKS.iterdir() if p.is_file()},
+        "installationNormalization": normalization,
+        "locks": {p.name: digest(p) for p in sorted(LOCKS.iterdir()) if p.is_file()},
     }
     (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     # Content identity binds installed code, native binaries and frontend.
