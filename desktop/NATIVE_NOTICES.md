@@ -24,6 +24,26 @@ them are not trusted by this release.
 - Installed Python distributions retain their package and `.dist-info` license
   files. Application wheels carry the backend AGPL-3.0-only and lyricsync MIT
   license texts. The bundled backend font retains its separate font license.
+- Windows x64 console entrypoints contain the uv 0.12.8 trampoline from
+  upstream commit `68209e5c61ce4b76c2e685bea7913876bc929dc9`, declared
+  `MIT OR Apache-2.0`. The upstream MIT text credits Astral Software Inc.;
+  trampoline package metadata credits Nathaniel J. Smith, and its README
+  identifies its posy ancestry and distlib influence. Exact upstream license
+  texts, package metadata and README are copied under `native/notices/uv-*`;
+  their source URLs and hashes are pinned in `desktop/locks/native.json` and
+  retained in native provenance. Singhouse changes the interpreter-path and
+  script resources and normalizes PE/ZIP timestamps; executable code sections
+  and Python callable bodies remain unchanged. The transformation and output
+  hashes are recorded in `installationNormalization.consoleLaunchers`.
+  Additional exact dependency texts retain Jorge Aparicio's MIT notice for
+  ufmt 0.2.0 and ufmt-write 0.1.0, Microsoft's shared MIT notice for windows
+  0.61.3, windows-core 0.61.2, windows-link 0.1.3, windows-collections 0.2.0,
+  windows-future 0.2.1, windows-numerics 0.2.0, windows-result 0.3.4,
+  windows-strings 0.4.2 and windows-threading 0.1.0, and the CC0 text supplied
+  by dunce 1.0.5. Archive hashes, exact member paths and copied-text hashes are
+  recorded separately. This source dependency inventory does not establish
+  which modules survive linking or provide a complete Rust standard-library,
+  compiler-builtins or CRT inventory.
 - Electron includes its license and Chromium third-party notices in the
   application directory. Exact Electron and build dependency versions are in
   `desktop/package-lock.json`; Electron source is at

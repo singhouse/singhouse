@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import tempfile
 import zipfile
 
 # ZIP's earliest representable timestamp; independent of checkout/build time.
@@ -28,17 +29,41 @@ def truly_absent(path: Path) -> bool:
     return False
 
 
-def upstream_record_omissions(destination: Path) -> dict:
-    """Snapshot stripped-bytecode rows immediately after verified Python unpack.
+def upstream_record_omissions(destination: Path, python_input=None) -> dict:
+    """Snapshot known upstream omissions immediately after verified Python unpack.
 
     This is not called on the installed application environment: later missing
     files never become admissible simply because they have a .pyc suffix.
     """
+    policy = (python_input or {}).get('recordOmissions', {})
+    curated = policy.get('records', {})
+    if curated and policy.get('archiveSha256') != (python_input or {}).get('sha256'):
+        raise ValueError("Curated omissions do not match the verified Python archive")
+    seen = set()
     omissions = {}
     for record in sorted(destination.glob('*.dist-info/RECORD')):
         original = record.read_bytes()
         rows = list(csv.reader(io.StringIO(original.decode())))
-        listed = {row[0] for row in rows if len(row) == 3}
+        if any(len(row) != 3 for row in rows) or len({row[0] for row in rows}) != len(rows):
+            raise ValueError("Malformed or duplicate upstream RECORD entries")
+        relative_record = record.relative_to(destination).as_posix()
+        expected = curated.get(relative_record)
+        allowed = []
+        if expected:
+            seen.add(relative_record)
+            if hashlib.sha256(original).hexdigest() != expected['recordSha256']:
+                raise ValueError("Curated upstream RECORD checksum mismatch")
+            allowed = expected['absentRows']
+            if (not allowed or any(len(row) != 3 or not row[1] or not row[2] for row in allowed)
+                    or len({row[0] for row in allowed}) != len(allowed)
+                    or any(row not in rows for row in allowed)):
+                raise ValueError("Invalid curated upstream omission rows")
+            for row in allowed:
+                path = destination / row[0]
+                if (not truly_absent(path)
+                        or not path.resolve().is_relative_to(destination.resolve().parent.parent)):
+                    raise ValueError("Curated upstream omission must be absent inside Python")
+        listed = {row[0] for row in rows}
         missing = []
         for row in rows:
             if len(row) != 3:
@@ -49,6 +74,8 @@ def upstream_record_omissions(destination: Path) -> dict:
                 continue
             if not truly_absent(path):
                 raise ValueError(f"Unexpected upstream RECORD file type: {name}")
+            if row in allowed:
+                continue
             match = re.fullmatch(r'(.+)/__pycache__/([^/]+)\.cpython-[0-9]+(?:\.opt-[0-9]+)?\.pyc', name)
             source = f'{match[1]}/{match[2]}.py' if match else ''
             if (not match or checksum or size or '\\' in name or
@@ -56,11 +83,16 @@ def upstream_record_omissions(destination: Path) -> dict:
                     source not in listed or not (destination / source).is_file()):
                 raise ValueError(f"Unexpected missing upstream RECORD file: {name}")
             missing.append(name)
-        if missing:
+        if missing or allowed:
             omissions[record.relative_to(destination).as_posix()] = {
                 'recordSha256': hashlib.sha256(original).hexdigest(),
                 'absentBytecode': sorted(missing),
             }
+            if allowed:
+                omissions[relative_record]['absentRows'] = sorted(allowed)
+                omissions[relative_record]['archiveSha256'] = policy['archiveSha256']
+    if seen != set(curated):
+        raise ValueError("Curated upstream RECORD is missing")
     return omissions
 
 
@@ -84,14 +116,21 @@ def relocatable_script(data: bytes, host_python: Path, relative_python: str) -> 
 
 
 def normalize_installation(output: Path, destination: Path, host_python: Path,
-                           target: str, artifacts: list[Path], upstream_omissions=None) -> dict:
+                           target: str, artifacts: list[Path], upstream_omissions=None,
+                           windows_launcher_base: Path | None = None) -> dict:
     """Plan/validate all edits, then update files and their owning RECORDs.
 
-    Windows launchers are deliberately unchanged pending native qualification.
     Source commit and exact local-wheel hashes remain in provenance.json.
     """
+    if target.startswith("win32-"):
+        from windows_launcher import WindowsResourceAPI
+        if target != "win32-x64" or windows_launcher_base is None:
+            raise ValueError("Windows normalization requires the pinned x64 console base")
+        WindowsResourceAPI()  # Fail before planning or applying installation edits.
     output = output.resolve()
     destination = destination.resolve()
+    if target.startswith("win32-") and destination != output / "python/Lib/site-packages":
+        raise ValueError("Unexpected Windows site-packages layout for relative launcher")
     changes: dict[Path, bytes | None] = {}
     local_origins = {}
     for artifact in artifacts:
@@ -120,6 +159,7 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
     records = []
     owned = set()
     omitted = {}
+    omitted_files = {}
     for directory in sorted(destination.glob('*.dist-info')):
         record = directory / 'RECORD'
         original = record.read_bytes()
@@ -132,16 +172,25 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
             if hashlib.sha256(original).hexdigest() != prior['recordSha256']:
                 raise ValueError("Upstream RECORD changed after bytecode-omission snapshot")
             removed = []
+            removed_files = []
             kept = []
             for row in rows:
-                if row[0] in prior['absentBytecode'] and truly_absent(destination / row[0]):
+                if row in prior.get('absentRows', []):
+                    if not truly_absent(destination / row[0]):
+                        raise ValueError('Curated upstream omitted file appeared after snapshot')
+                    removed_files.append(row)
+                elif row[0] in prior['absentBytecode'] and truly_absent(destination / row[0]):
                     if row[1:] != ['', '']:
                         raise ValueError("Upstream omitted bytecode has unexpected integrity metadata")
                     removed.append(row[0])
                 else:
                     kept.append(row)
             rows = kept
-            omitted[relative_record] = {'recordSha256': prior['recordSha256'], 'absentBytecode': sorted(removed)}
+            if prior['absentBytecode']:
+                omitted[relative_record] = {'recordSha256': prior['recordSha256'], 'absentBytecode': sorted(removed)}
+            if removed_files:
+                omitted_files[relative_record] = {'recordSha256': prior['recordSha256'],
+                    'archiveSha256': prior['archiveSha256'], 'absentRows': sorted(removed_files)}
         paths = [(row[0], checked_path(row[0])) for row in rows]
         if record.resolve() not in {path for _, path in paths}:
             raise ValueError("Installed RECORD must list itself")
@@ -160,7 +209,34 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
             changes[path.resolve()] = None
         records.append((record.resolve(), paths))
 
-    if not target.startswith('win32-'):
+    windows_provenance = None
+    if target.startswith('win32-'):
+        from windows_launcher import (BASE_SHA256, UV_COMMIT, digest, expected_body,
+                                      relocate_launcher)
+        entries = {}
+        # The helper publishes separate validated outputs; all installed files
+        # remain untouched until every launcher and complete RECORD plan passes.
+        with tempfile.TemporaryDirectory(prefix='normalized-launchers-') as temporary:
+            for script in sorted((destination / 'bin').glob('*')):
+                path = checked_path(script.relative_to(destination).as_posix())
+                if path not in owned:
+                    raise ValueError("Installed launcher is missing from RECORD")
+                transformed = Path(temporary) / script.name
+                details = relocate_launcher(site_packages=destination, name=script.name,
+                                            installing_python=str(host_python),
+                                            base_path=windows_launcher_base, output=transformed)
+                changes[path] = transformed.read_bytes()
+                # Original PE hashes include disposable interpreter paths. The
+                # preserved callable body, pinned base and exact input wheels
+                # provide stable source provenance instead of those temp bytes.
+                entries[script.relative_to(destination).as_posix()] = {
+                    key: details[key] for key in ('entrypoint', 'record', 'outputSha256', 'python')}
+                entries[script.relative_to(destination).as_posix()]['bodySha256'] = digest(
+                    expected_body(details['entrypoint']))
+        windows_provenance = {'normalizer': 'uv-0.12.8-win64-console-v1',
+                              'uvCommit': UV_COMMIT, 'baseSha256': BASE_SHA256,
+                              'count': len(entries), 'entries': entries}
+    else:
         bundled_python = output / 'python/bin/python3'
         for script in sorted((destination / 'bin').glob('*')):
             path = checked_path(script.relative_to(destination).as_posix())
@@ -191,6 +267,7 @@ def normalize_installation(output: Path, destination: Path, host_python: Path,
             path.write_bytes(data)  # Existing executable modes are preserved.
     return {'schema': 1, 'localWheelEpoch': WHEEL_EPOCH,
             'upstreamOmittedBytecode': omitted,
+            **({'upstreamOmittedFiles': omitted_files} if omitted_files else {}),
             'localWheelOrigins': 'sourceCommit and wheels in provenance.json',
             'installerCacheMetadata': 'removed; RECORD updated',
-            'consoleLaunchers': 'unchanged-windows' if target.startswith('win32-') else 'relative-bundled-python'}
+            'consoleLaunchers': windows_provenance if windows_provenance is not None else 'relative-bundled-python'}

@@ -14,7 +14,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'build'))
 from assembly_metadata import WHEEL_EPOCH, normalize_installation, relocatable_script, upstream_record_omissions
-from assemble import assembly_environment
+from assemble import assembly_environment, validate_assembly_target, copy_launcher_notices
 
 
 class AssemblyMetadataTests(unittest.TestCase):
@@ -80,6 +80,36 @@ class AssemblyMetadataTests(unittest.TestCase):
         self.assertEqual(inventory(first[0]), inventory(second[0]))
         self.assertEqual(first[3].read_bytes(), second[3].read_bytes())
 
+    def test_launcher_notices_match_lock_and_fail_closed_on_changed_text(self):
+        import assemble
+        inputs = json.loads((assemble.LOCKS / 'native.json').read_text())['targets']['win32-x64']
+        notices = self.base / 'notices'
+        notices.mkdir()
+        copy_launcher_notices(inputs, notices)
+        for name, record in inputs['consoleLauncher']['notices'].items():
+            self.assertEqual(hashlib.sha256((notices / name).read_bytes()).hexdigest(), record['sha256'])
+        inputs['consoleLauncher']['notices']['uv-LICENSE-MIT']['sha256'] = '0' * 64
+        for file in notices.iterdir():
+            file.unlink()
+        with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+            copy_launcher_notices(inputs, notices)
+        self.assertEqual(list(notices.iterdir()), [])
+        copy_launcher_notices({}, notices)
+        self.assertEqual(list(notices.iterdir()), [])
+
+    def test_cross_windows_main_fails_before_source_or_process_or_filesystem_work(self):
+        import assemble
+        with patch.object(sys, 'argv', ['assemble.py', '--target', 'win32-x64']), \
+             patch.object(assemble, 'host_target', return_value='linux-x64'), \
+             patch.object(assemble, 'source_provenance') as source, \
+             patch.object(assemble.subprocess, 'check_output') as process, \
+             patch.object(assemble, 'fetch') as fetch:
+            with self.assertRaisesRegex(SystemExit, 'native Windows'):
+                assemble.main()
+        source.assert_not_called()
+        process.assert_not_called()
+        fetch.assert_not_called()
+
     @unittest.skipIf(sys.platform == 'win32', 'POSIX launcher execution')
     def test_console_script_runs_after_relocation_with_spaces_and_untrusted_path(self):
         fixture = self.fixture('original with spaces')
@@ -98,13 +128,72 @@ class AssemblyMetadataTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(direct.stdout, 'direct\n')
 
-    def test_windows_binary_launcher_is_preserved(self):
-        fixture = self.fixture(windows=True)
-        before = fixture[5].read_bytes()
-        result = self.normalize(fixture, 'win32-x64')
-        self.assertEqual(fixture[5].read_bytes(), before)
-        self.assertEqual(result['consoleLaunchers'], 'unchanged-windows')
-        self.verify_record(fixture[1], fixture[2])
+    def windows_fixture(self, name):
+        import windows_launcher as launcher
+        from test_windows_launcher import pe_fixture
+        fixture = self.fixture(name, windows=True)
+        output, destination, dist, wheel, host, script = fixture
+        manifest = {(24, 1, 1033): b'<assembly>fixture only</assembly>'}
+        base = self.base / 'console-base.exe'
+        base.write_bytes(pe_fixture(manifest))
+        resources = dict(manifest)
+        resources.update({(10, 'UV_TRAMPOLINE_KIND', 0): b'\x01',
+                          (10, 'UV_PYTHON_PATH', 0): str(host).encode(),
+                          (10, 'UV_SCRIPT_DATA', 0): launcher.script_zip(
+                              b'#!' + str(host).encode() + b'\n' + launcher.expected_body('example.cli:main'))})
+        script.write_bytes(pe_fixture(resources))
+        (dist / 'entry_points.txt').write_text('[console_scripts]\nexample = example.cli:main\n')
+        record = dist / 'RECORD'
+        with record.open('w', newline='') as stream:
+            writer = csv.writer(stream, lineterminator='\n')
+            for path in sorted(destination.rglob('*')):
+                if path.is_file():
+                    data = path.read_bytes()
+                    writer.writerow([path.relative_to(destination).as_posix(),
+                                     '' if path == record else 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode(),
+                                     '' if path == record else len(data)])
+        return fixture, base, manifest
+
+    def test_windows_normalization_real_parser_records_and_deterministic_provenance(self):
+        import windows_launcher as launcher
+        from test_windows_launcher import pe_fixture
+        first, base, manifest = self.windows_fixture('one')
+        second, _, _ = self.windows_fixture('two')
+        def update(path, resources, api):
+            path.write_bytes(pe_fixture(manifest | {(10, key, 0): data for key, data in resources.items()}, timestamp=123))
+        results = []
+        with patch.object(launcher, 'BASE_SHA256', launcher.digest(base.read_bytes())), \
+             patch.object(launcher, 'WindowsResourceAPI'), patch.object(launcher, 'write_resources', update):
+            for fixture in (first, second):
+                results.append(normalize_installation(fixture[0], fixture[1], fixture[4], 'win32-x64',
+                                                     [fixture[3]], windows_launcher_base=base))
+                self.verify_record(fixture[1], fixture[2])
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]['consoleLaunchers']['count'], 1)
+        self.assertNotIn('inputSha256', json.dumps(results))
+        self.assertEqual(first[5].read_bytes(), second[5].read_bytes())
+        self.assertNotIn(str(first[4]).encode(), first[5].read_bytes())
+
+    def test_windows_failure_does_not_apply_metadata_or_launcher_edits(self):
+        import windows_launcher as launcher
+        fixture, base, _ = self.windows_fixture('failure')
+        before = {p: p.read_bytes() for p in fixture[1].rglob('*') if p.is_file()}
+        with patch.object(launcher, 'WindowsResourceAPI'), \
+             patch.object(launcher, 'relocate_launcher', side_effect=ValueError('invalid launcher')):
+            with self.assertRaisesRegex(ValueError, 'invalid launcher'):
+                normalize_installation(fixture[0], fixture[1], fixture[4], 'win32-x64',
+                                       [fixture[3]], windows_launcher_base=base)
+        self.assertEqual(before, {p: p.read_bytes() for p in fixture[1].rglob('*') if p.is_file()})
+
+    def test_windows_target_rejects_cross_host_and_requires_native_api(self):
+        with patch('assemble.host_target', return_value='linux-x64'):
+            with self.assertRaisesRegex(SystemExit, 'native Windows'):
+                validate_assembly_target('win32-x64')
+        with patch('assemble.host_target', return_value='win32-x64'), \
+             patch('windows_launcher.WindowsResourceAPI', side_effect=RuntimeError('API unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'API unavailable'):
+                validate_assembly_target('win32-x64')
+        validate_assembly_target('linux-arm64')
 
     @unittest.skipIf(sys.platform == 'win32', 'POSIX launcher execution')
     def test_basename_invocation_from_script_directory_with_empty_path(self):
@@ -194,6 +283,78 @@ class AssemblyMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'escaping'):
             self.normalize(fixture)
         self.assertTrue((fixture[2] / 'uv_cache.json').exists())
+
+    def curated_omission_fixture(self, name='curated'):
+        fixture = self.fixture(name)
+        rows = [['../../Scripts/' + name + '.exe', 'sha256=archived-hash', '108393']
+                for name in ('pip', 'pip3.12', 'pip3')]
+        record = fixture[2] / 'RECORD'
+        with record.open('a', newline='') as stream:
+            csv.writer(stream, lineterminator='\n').writerows(rows)
+        policy = {'sha256': 'archive-hash', 'recordOmissions': {
+            'archiveSha256': 'archive-hash', 'records': {'example-1.dist-info/RECORD': {
+                'recordSha256': hashlib.sha256(record.read_bytes()).hexdigest(), 'absentRows': rows}}}}
+        return fixture, policy, rows
+
+    def test_exact_curated_hashed_omissions_preserve_original_rows_in_provenance(self):
+        fixture, policy, rows = self.curated_omission_fixture()
+        snapshot = upstream_record_omissions(fixture[1], policy)
+        result = normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+        evidence = result['upstreamOmittedFiles']['example-1.dist-info/RECORD']
+        self.assertEqual(evidence['absentRows'], sorted(rows))
+        self.assertEqual(evidence['archiveSha256'], policy['sha256'])
+        self.assertEqual(evidence['recordSha256'], policy['recordOmissions']['records']['example-1.dist-info/RECORD']['recordSha256'])
+        self.verify_record(fixture[1], fixture[2])
+        for row in rows:
+            self.assertNotIn(row[0], (fixture[2] / 'RECORD').read_text())
+            self.assertFalse((fixture[1] / row[0]).exists())
+
+    def test_curated_omissions_reject_archive_record_row_and_extra_missing_changes(self):
+        for case in ('archive', 'record', 'row', 'extra', 'no-policy'):
+            fixture, policy, rows = self.curated_omission_fixture(case)
+            record = fixture[2] / 'RECORD'
+            expected = policy['recordOmissions']['records']['example-1.dist-info/RECORD']
+            if case == 'archive':
+                policy['sha256'] = 'another-archive'
+            elif case == 'record':
+                record.write_text(record.read_text() + 'another-missing,,\n')
+            elif case == 'row':
+                expected['absentRows'][0][2] = '1'
+            elif case == 'extra':
+                record.write_text(record.read_text() + 'another-missing,sha256=other,1\n')
+                expected['recordSha256'] = hashlib.sha256(record.read_bytes()).hexdigest()
+            elif case == 'no-policy':
+                policy = None
+            with self.assertRaises(ValueError, msg=case):
+                upstream_record_omissions(fixture[1], policy)
+
+    def test_curated_omissions_reject_linked_parent_before_and_after_snapshot(self):
+        for after in (False, True):
+            fixture, policy, rows = self.curated_omission_fixture(str(after))
+            snapshot = upstream_record_omissions(fixture[1], policy) if after else None
+            path = (fixture[1] / rows[0][0]).resolve()
+            path.parent.symlink_to(self.base / 'absent-link-target', target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'Linked omitted'):
+                if after:
+                    normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+                else:
+                    upstream_record_omissions(fixture[1], policy)
+
+    def test_curated_omissions_reject_appearing_file_and_changed_record_after_snapshot(self):
+        for case in ('appeared', 'record', 'lost-payload'):
+            fixture, policy, rows = self.curated_omission_fixture(case)
+            snapshot = upstream_record_omissions(fixture[1], policy)
+            if case == 'appeared':
+                path = (fixture[1] / rows[0][0]).resolve()
+                path.parent.mkdir()
+                path.write_bytes(b'unexpected')
+            elif case == 'record':
+                record = fixture[2] / 'RECORD'
+                record.write_text(record.read_text().replace('108393', '108394'))
+            else:
+                fixture[5].unlink()
+            with self.assertRaises(ValueError, msg=case):
+                normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
 
     def add_stripped_bytecode_record(self, fixture):
         destination, dist = fixture[1:3]

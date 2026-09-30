@@ -116,14 +116,24 @@ RECORD files are regenerated against the resulting bytes before the complete
 native inventory is sealed. Blank references to bytecode already omitted from
 the pinned Python archive are captured before dependency installation and
 removed only from an unchanged upstream RECORD; the original RECORD hash and
-exact omitted paths remain in provenance. Other missing files fail assembly.
+exact omitted paths remain in provenance. The pinned Windows archive also omits
+three pip launchers still listed in its RECORD. Only the exact archive hash,
+RECORD hash and three hashed rows curated in the native lock permit their
+removal; provenance retains each original path, hash and size. These unshipped
+pip commands are not restored or qualified by assembly. Other missing files
+fail assembly.
 On Linux and macOS, installed Python console
 commands resolve the bundled interpreter relative to their installed location,
-so relocation does not retain a temporary build-interpreter path. Windows
-launcher bytes are unchanged: the existing console launchers retain a temporary
-build-interpreter path and still need a Windows-specific repair. The desktop
-processing path invokes bundled Python directly; its execution does not qualify
-these console launchers. These
+so relocation does not retain a temporary build-interpreter path. On native
+Windows x64, every installed console launcher is checked against its owning
+RECORD, declared callable, and the hash-pinned uv 0.12.8 console base. Named
+resources are regenerated with a relative bundled Python path; code sections
+and callable bodies are preserved. Assembly records the upstream revision,
+base hash, transformation count, callable-body hashes and resulting launcher
+hashes before rebuilding RECORD and inventory. Temporary original launcher
+hashes are excluded because they contain disposable build paths; exact input
+wheels and source revision remain recorded. GUI launchers are unsupported and
+fail assembly. These
 normalizations do not establish cross-platform or container reproducibility;
 compare two fresh assemblies and report every modeled difference.
 
@@ -449,8 +459,8 @@ KARAOKE_NATIVE_PAYLOAD=/tmp/singhouse-native-arm64 npm --prefix desktop run pack
 `--target` accepts `linux-x64`, `linux-arm64`, `darwin-arm64`, and `win32-x64`;
 it defaults to the host. Cross-assembly does not execute target Python or
 FFmpeg. Its provenance marks the result `UNTESTED`, requiring execution on the
-target machine. Windows payload staging is possible on another supported host;
-build and test its installer on Windows. `--cache <directory>` selects a build
+target machine. Windows x64 assembly requires a native Windows x64 host and
+the Win32 resource APIs; cross-staging Windows fails before fetching or building. `--cache <directory>` selects a build
 cache. An export without `.git` can be assembled for inspection with
 `--source-commit <40-hex-commit>`, but it cannot be packaged as a release. A
 future export path must authenticate the complete source inventory rather than
