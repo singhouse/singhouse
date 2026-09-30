@@ -149,3 +149,35 @@ test('native macOS observer identifies its real child and preserves a stable bir
       child.stdout.destroy(); child.unref()
     }
   })
+
+
+test('macOS EPERM is ignored only after a complete re-enumeration proves PID absence', () => {
+  const script = `import importlib.util,sys,ctypes,errno
+spec=importlib.util.spec_from_file_location('observer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+class Fake:
+ def __init__(self,mode):self.mode=mode;self.enumerations=0
+ def proc_listallpids(self,buffer,size):
+  if buffer is None:return 2
+  self.enumerations+=1
+  if self.enumerations>1:
+   if self.mode=='truncated':return len(buffer)
+   if self.mode=='error':return 0
+   if self.mode=='empty':buffer[0]=0;return 1
+   if self.mode=='malformed':buffer[0]=10;buffer[1]=10;return 2
+   if self.mode=='vanished':buffer[0]=10;return 1
+  buffer[0]=10;buffer[1]=11;return 2
+ def proc_pidinfo(self,pid,flavor,arg,pointer,size):
+  if pid==11:ctypes.set_errno(errno.EPERM);return 0
+  info=pointer._obj;info.pid=pid;info.parent=1;info.seconds=1790000000;info.microseconds=123456
+  return size
+f=Fake('vanished');assert m.snapshot(f)==[{'pid':10,'parent':1,'birth':'1790000000123456'}];assert f.enumerations==2
+for mode in ['present','truncated','error','empty','malformed']:
+ f=Fake(mode)
+ try:m.snapshot(f)
+ except RuntimeError:pass
+ else:raise AssertionError('accepted denied PID with '+mode+' re-enumeration')
+ assert f.enumerations>=2
+`
+  const python = process.env.KARAOKE_DESKTOP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+  execFileSync(python, ['-I', '-B', '-c', script, fileURLToPath(new URL('./packaged-smoke-processes.py', import.meta.url))], { timeout: 10000 })
+})

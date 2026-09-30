@@ -22,9 +22,8 @@ class BSDInfo(c.Structure):
         + [("nice", c.c_int32), ("seconds", c.c_uint64), ("microseconds", c.c_uint64)])
 
 
-def snapshot(lib):
-    if c.sizeof(BSDInfo) != 136 or BSDInfo.seconds.offset != 120:
-        raise RuntimeError("Unsupported macOS process-info ABI")
+def list_pids(lib):
+    """Return one complete validated PID enumeration; never infer from a partial list."""
     count = lib.proc_listallpids(None, 0)
     if count <= 0 or count > 1_000_000:
         raise RuntimeError("Invalid macOS process count")
@@ -38,20 +37,37 @@ def snapshot(lib):
             break
     else:
         raise RuntimeError("macOS process enumeration remained truncated")
-    rows, seen = [], set()
+    pids, seen = [], set()
     for pid in buffer[:count]:
         if pid == 0:  # Kernel task, not an application process.
             continue
         if pid < 0 or pid in seen:
             raise RuntimeError("Invalid or duplicate macOS process identity")
         seen.add(pid)
+        pids.append(pid)
+    if not pids:
+        raise RuntimeError("Empty macOS process enumeration")
+    return pids
+
+
+def snapshot(lib):
+    if c.sizeof(BSDInfo) != 136 or BSDInfo.seconds.offset != 120:
+        raise RuntimeError("Unsupported macOS process-info ABI")
+    rows = []
+    for pid in list_pids(lib):
         info = BSDInfo()
         c.set_errno(0)
         size = lib.proc_pidinfo(pid, 3, 0, c.byref(info), c.sizeof(info))
-        if size == 0 and c.get_errno() == errno.ESRCH:
+        error = c.get_errno()
+        if size == 0 and error == errno.ESRCH:
             continue  # Process exited between enumeration and inspection.
+        if size == 0 and error == errno.EPERM and pid not in list_pids(lib):
+            # Permission denial alone is never evidence of exit. Only a fresh,
+            # complete enumeration confirming absence can resolve this race.
+            # A still-present or reused PID, or failed enumeration, fails closed.
+            continue
         if size != c.sizeof(info):
-            raise RuntimeError(f"Cannot inspect macOS process {pid}: errno {c.get_errno()}")
+            raise RuntimeError(f"Cannot inspect macOS process {pid}: errno {error}")
         if info.pid != pid or info.parent == pid or not info.seconds or info.microseconds >= 1_000_000:
             raise RuntimeError("Malformed macOS process birth identity")
         rows.append({"pid": pid, "parent": info.parent,
