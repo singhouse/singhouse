@@ -116,7 +116,12 @@ RECORD files are regenerated against the resulting bytes before the complete
 native inventory is sealed. Blank references to bytecode already omitted from
 the pinned Python archive are captured before dependency installation and
 removed only from an unchanged upstream RECORD; the original RECORD hash and
-exact omitted paths remain in provenance. Other missing files fail assembly.
+exact omitted paths remain in provenance. The pinned Windows archive also omits
+three pip launchers still listed in its RECORD. Only the exact archive hash,
+RECORD hash and three hashed rows curated in the native lock permit their
+removal; provenance retains each original path, hash and size. These unshipped
+pip commands are not restored or qualified by assembly. Other missing files
+fail assembly.
 On Linux and macOS, installed Python console
 commands resolve the bundled interpreter relative to their installed location,
 so relocation does not retain a temporary build-interpreter path. On native

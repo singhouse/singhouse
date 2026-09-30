@@ -256,10 +256,10 @@ def main():
     python = python_path(output, target)
     if not python.is_file():
         raise SystemExit("Pinned Python archive has an unexpected layout")
-    # The pinned stripped Python archive can retain blank RECORD references to
-    # bytecode it does not ship. Capture only those preexisting omissions before
+    # The pinned Python archive can retain RECORD references to stripped
+    # bytecode or exact hash-curated unshipped Windows pip launchers. Capture only those preexisting omissions before
     # any dependency installation; do not excuse later missing installed files.
-    upstream_omissions = upstream_record_omissions(site_packages(output, target, lock["pythonVersion"]))
+    upstream_omissions = upstream_record_omissions(site_packages(output, target, lock["pythonVersion"]), inputs["python"])
     artifacts, host_input, normalization = install_dependencies(output, cache, lock, target, env, upstream_omissions)
     ffbin = output / "ffmpeg/bin"
     ffbin.mkdir(parents=True)

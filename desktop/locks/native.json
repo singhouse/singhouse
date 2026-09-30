@@ -77,7 +77,32 @@
     "win32-x64": {
       "python": {
         "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.12.14%2B20260825-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
-        "sha256": "8e6aad12ef6fc9685e67ce66253f8f72d6e8fa02cb7187e5850bd4db5ecd9e2a"
+        "sha256": "8e6aad12ef6fc9685e67ce66253f8f72d6e8fa02cb7187e5850bd4db5ecd9e2a",
+        "recordOmissions": {
+          "archiveSha256": "8e6aad12ef6fc9685e67ce66253f8f72d6e8fa02cb7187e5850bd4db5ecd9e2a",
+          "records": {
+            "pip-26.2.1.dist-info/RECORD": {
+              "recordSha256": "c966f17ff32cb46b8cb66568db9caa93e46739b749573353e0343ddce9c33842",
+              "absentRows": [
+                [
+                  "../../Scripts/pip.exe",
+                  "sha256=c-j_6WAtvprEWwrAt82iKrLuLcyk0GBnkUABhAWk414",
+                  "108393"
+                ],
+                [
+                  "../../Scripts/pip3.12.exe",
+                  "sha256=c-j_6WAtvprEWwrAt82iKrLuLcyk0GBnkUABhAWk414",
+                  "108393"
+                ],
+                [
+                  "../../Scripts/pip3.exe",
+                  "sha256=c-j_6WAtvprEWwrAt82iKrLuLcyk0GBnkUABhAWk414",
+                  "108393"
+                ]
+              ]
+            }
+          }
+        }
       },
       "ffmpeg": {
         "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz",

@@ -284,6 +284,78 @@ class AssemblyMetadataTests(unittest.TestCase):
             self.normalize(fixture)
         self.assertTrue((fixture[2] / 'uv_cache.json').exists())
 
+    def curated_omission_fixture(self, name='curated'):
+        fixture = self.fixture(name)
+        rows = [['../../Scripts/' + name + '.exe', 'sha256=archived-hash', '108393']
+                for name in ('pip', 'pip3.12', 'pip3')]
+        record = fixture[2] / 'RECORD'
+        with record.open('a', newline='') as stream:
+            csv.writer(stream, lineterminator='\n').writerows(rows)
+        policy = {'sha256': 'archive-hash', 'recordOmissions': {
+            'archiveSha256': 'archive-hash', 'records': {'example-1.dist-info/RECORD': {
+                'recordSha256': hashlib.sha256(record.read_bytes()).hexdigest(), 'absentRows': rows}}}}
+        return fixture, policy, rows
+
+    def test_exact_curated_hashed_omissions_preserve_original_rows_in_provenance(self):
+        fixture, policy, rows = self.curated_omission_fixture()
+        snapshot = upstream_record_omissions(fixture[1], policy)
+        result = normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+        evidence = result['upstreamOmittedFiles']['example-1.dist-info/RECORD']
+        self.assertEqual(evidence['absentRows'], sorted(rows))
+        self.assertEqual(evidence['archiveSha256'], policy['sha256'])
+        self.assertEqual(evidence['recordSha256'], policy['recordOmissions']['records']['example-1.dist-info/RECORD']['recordSha256'])
+        self.verify_record(fixture[1], fixture[2])
+        for row in rows:
+            self.assertNotIn(row[0], (fixture[2] / 'RECORD').read_text())
+            self.assertFalse((fixture[1] / row[0]).exists())
+
+    def test_curated_omissions_reject_archive_record_row_and_extra_missing_changes(self):
+        for case in ('archive', 'record', 'row', 'extra', 'no-policy'):
+            fixture, policy, rows = self.curated_omission_fixture(case)
+            record = fixture[2] / 'RECORD'
+            expected = policy['recordOmissions']['records']['example-1.dist-info/RECORD']
+            if case == 'archive':
+                policy['sha256'] = 'another-archive'
+            elif case == 'record':
+                record.write_text(record.read_text() + 'another-missing,,\n')
+            elif case == 'row':
+                expected['absentRows'][0][2] = '1'
+            elif case == 'extra':
+                record.write_text(record.read_text() + 'another-missing,sha256=other,1\n')
+                expected['recordSha256'] = hashlib.sha256(record.read_bytes()).hexdigest()
+            elif case == 'no-policy':
+                policy = None
+            with self.assertRaises(ValueError, msg=case):
+                upstream_record_omissions(fixture[1], policy)
+
+    def test_curated_omissions_reject_linked_parent_before_and_after_snapshot(self):
+        for after in (False, True):
+            fixture, policy, rows = self.curated_omission_fixture(str(after))
+            snapshot = upstream_record_omissions(fixture[1], policy) if after else None
+            path = (fixture[1] / rows[0][0]).resolve()
+            path.parent.symlink_to(self.base / 'absent-link-target', target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'Linked omitted'):
+                if after:
+                    normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+                else:
+                    upstream_record_omissions(fixture[1], policy)
+
+    def test_curated_omissions_reject_appearing_file_and_changed_record_after_snapshot(self):
+        for case in ('appeared', 'record', 'lost-payload'):
+            fixture, policy, rows = self.curated_omission_fixture(case)
+            snapshot = upstream_record_omissions(fixture[1], policy)
+            if case == 'appeared':
+                path = (fixture[1] / rows[0][0]).resolve()
+                path.parent.mkdir()
+                path.write_bytes(b'unexpected')
+            elif case == 'record':
+                record = fixture[2] / 'RECORD'
+                record.write_text(record.read_text().replace('108393', '108394'))
+            else:
+                fixture[5].unlink()
+            with self.assertRaises(ValueError, msg=case):
+                normalize_installation(fixture[0], fixture[1], fixture[4], 'linux-x64', [fixture[3]], snapshot)
+
     def add_stripped_bytecode_record(self, fixture):
         destination, dist = fixture[1:3]
         source = destination / 'example/module.py'
