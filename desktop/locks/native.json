@@ -145,6 +145,37 @@
             "url": "https://raw.githubusercontent.com/astral-sh/uv/68209e5c61ce4b76c2e685bea7913876bc929dc9/crates/uv-trampoline/README.md",
             "sha256": "4726ed8fe09ce62c1ebee979ddf8c812b437529fac2a5613c71dd6fefb27546f",
             "sourceCommit": "68209e5c61ce4b76c2e685bea7913876bc929dc9"
+          },
+          "uv-ufmt-LICENSE-MIT": {
+            "url": "https://static.crates.io/crates/ufmt/ufmt-0.2.0.crate",
+            "archiveSha256": "1a64846ec02b57e9108d6469d98d1648782ad6bb150a95a9baac26900bbeab9d",
+            "archiveMember": "ufmt-0.2.0/LICENSE-MIT",
+            "sha256": "93b7583ea64e5b4ebba5bcb812da97ed16860a85ea4a15328e7d70558d72ca72",
+            "sourceCrate": "ufmt",
+            "sourceVersion": "0.2.0",
+            "additionalSource": {
+              "url": "https://raw.githubusercontent.com/japaric/ufmt/f59b61d7ed3dd9d98846f9557f15b556c2959170/LICENSE-MIT",
+              "sourceCommit": "f59b61d7ed3dd9d98846f9557f15b556c2959170",
+              "sourceCrate": "ufmt-write",
+              "sourceVersion": "0.1.0",
+              "sha256": "93b7583ea64e5b4ebba5bcb812da97ed16860a85ea4a15328e7d70558d72ca72"
+            }
+          },
+          "uv-windows-rs-LICENSE-MIT": {
+            "url": "https://static.crates.io/crates/windows/windows-0.61.3.crate",
+            "archiveSha256": "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893",
+            "archiveMember": "windows-0.61.3/license-mit",
+            "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+            "sourceCrate": "windows",
+            "sourceVersion": "0.61.3"
+          },
+          "uv-dunce-LICENSE": {
+            "url": "https://static.crates.io/crates/dunce/dunce-1.0.5.crate",
+            "archiveSha256": "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813",
+            "archiveMember": "dunce-1.0.5/LICENSE",
+            "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+            "sourceCrate": "dunce",
+            "sourceVersion": "1.0.5"
           }
         }
       }

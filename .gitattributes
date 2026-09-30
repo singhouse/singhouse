@@ -1,0 +1,2 @@
+# Preserve exact upstream bytes verified by native notice hashes.
+desktop/licenses/uv-* -text
