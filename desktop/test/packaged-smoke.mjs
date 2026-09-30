@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Linux: xvfb-run -a node desktop/test/packaged-smoke.mjs --executable /path/to/karaoke-desktop
+// Outer AppImage: add --fixture-ffmpeg /absolute/path/to/ffmpeg for synthetic media only.
 import { _electron as electron } from 'playwright'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, existsSync, appendFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, appendFileSync, statSync, accessSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path'
 
@@ -20,9 +21,22 @@ async function waitForHost(application) {
 }
 
 assert.ok(['linux', 'win32'].includes(process.platform), 'This harness supports Linux and Windows packaged applications')
-const option = process.argv.indexOf('--executable')
-assert.ok(option >= 0 && process.argv[option + 1], 'Pass --executable pointing to the packaged application')
-const executablePath = resolve(process.argv[option + 1])
+const options = new Map()
+for (let index = 2; index < process.argv.length; index += 2) {
+  const name = process.argv[index], value = process.argv[index + 1]
+  assert.ok(['--executable', '--fixture-ffmpeg'].includes(name), `Unknown argument: ${name}`)
+  assert.ok(!options.has(name), `Duplicate argument: ${name}`)
+  assert.ok(value && !value.startsWith('--'), `Missing value for ${name}`)
+  options.set(name, value)
+}
+assert.ok(options.has('--executable'), 'Pass --executable pointing to the packaged application')
+const executablePath = resolve(options.get('--executable'))
+const fixtureFfmpeg = options.get('--fixture-ffmpeg')
+if (fixtureFfmpeg !== undefined) {
+  assert.ok(isAbsolute(fixtureFfmpeg), '--fixture-ffmpeg must be an absolute path')
+  assert.ok(statSync(fixtureFfmpeg).isFile(), '--fixture-ffmpeg must name an existing regular executable file')
+  accessSync(fixtureFfmpeg, constants.X_OK)
+}
 const temporary = mkdtempSync(join(tmpdir(), 'singhouse-packaged-smoke-'))
 const env = { ...process.env, XDG_CONFIG_HOME: temporary }
 delete env.KARAOKE_DESKTOP_PYTHON
@@ -42,7 +56,7 @@ const wait = milliseconds => new Promise(done => setTimeout(done, milliseconds))
 
 async function launch() {
   // Launch the built executable itself. No source application or demo args.
-  application = await electron.launch({ executablePath, args: [`--user-data-dir=${join(temporary, 'profile')}`], env, timeout: 60000 })
+  application = await electron.launch({ chromiumSandbox: true, executablePath, args: [`--user-data-dir=${join(temporary, 'profile')}`], env, timeout: 60000 })
   let logBytes = 0
   for (const [name, stream] of [['stdout', application.process().stdout], ['stderr', application.process().stderr]]) {
     stream?.on('data', data => {
@@ -52,8 +66,10 @@ async function launch() {
       diagnostic({ event: name, text })
     })
   }
-  const identity = await application.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData') }))
+  const identity = await application.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData'),
+    sandboxBypassSwitches: ['no-sandbox', 'disable-sandbox', 'disable-setuid-sandbox', 'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-namespace-sandbox', 'single-process', 'in-process-gpu'].filter(flag => app.commandLine.hasSwitch(flag)) }))
   assert.equal(identity.packaged, true)
+  assert.deepEqual(identity.sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
   const child = relative(temporary, identity.userData)
   assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Packaged app must use isolated test userData')
   if (userData) assert.equal(identity.userData, userData)
@@ -102,7 +118,11 @@ async function sandboxChecks(host) {
 
 try {
   const fixture = join(temporary, 'synthetic.mp4')
-  const ffmpeg = join(dirname(executablePath), 'resources/native/ffmpeg/bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+  // An external encoder generates only the synthetic input. It is not evidence
+  // that the image includes or authenticates that encoder; import still uses
+  // the packaged backend and its own admitted runtime.
+  const ffmpeg = fixtureFfmpeg ?? join(dirname(executablePath), 'resources/native/ffmpeg/bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+  diagnostic({ event: 'fixture-encoder', path: ffmpeg, external: fixtureFfmpeg !== undefined })
   execFileSync(ffmpeg, ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
     'testsrc2=size=320x180:rate=25', '-f', 'lavfi', '-i',
     'sine=frequency=220:sample_rate=48000', '-t', '30', '-c:v', 'libx264',

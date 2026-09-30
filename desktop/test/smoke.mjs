@@ -17,9 +17,11 @@ async function waitForHost(application) {
 }
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const application = await electron.launch({ args: [desktop, '--demo'], env: process.env })
+const application = await electron.launch({ chromiumSandbox: true, args: [desktop, '--demo'], env: process.env })
 let runtime
 try {
+  const sandboxBypassSwitches = await application.evaluate(({ app }) => ['no-sandbox', 'disable-sandbox', 'disable-setuid-sandbox', 'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-namespace-sandbox', 'single-process', 'in-process-gpu'].filter(flag => app.commandLine.hasSwitch(flag)))
+  assert.deepEqual(sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
   runtime = await application.evaluate(({ app }) => app.getPath('userData').replace(/[\\/]electron$/, ''))
   const host = await waitForHost(application)
   await host.getByText('Quiet light', { exact: true }).click()

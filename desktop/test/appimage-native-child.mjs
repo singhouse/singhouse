@@ -3,19 +3,20 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+const sha256 = (path, read = readFileSync) => createHash('sha256').update(read(path)).digest('hex')
 const request = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 assert.equal(realpathSync(request.output), request.output)
 assert.equal(lstatSync(request.output).uid, process.getuid())
 assert.equal(lstatSync(request.output).mode & 0o077, 0)
 const report = { schema: 1, passed: false, checks: [], modules: {}, scope: 'anchor primitives only' }
 const check = (name, evidence) => report.checks.push({ name, passed: true, evidence })
-function identity(path) {
-  const canonicalPath = realpathSync(path), info = lstatSync(canonicalPath)
-  return { path, canonicalPath, dev: info.dev, ino: info.ino, size: info.size, mode: info.mode, uid: info.uid, sha256: sha256(path) }
+function identity(path, filesystem = { realpathSync, lstatSync, readFileSync }) {
+  const canonicalPath = filesystem.realpathSync(path), info = filesystem.lstatSync(canonicalPath)
+  return { path, canonicalPath, dev: info.dev, ino: info.ino, size: info.size, mode: info.mode, uid: info.uid, sha256: sha256(path, filesystem.readFileSync) }
 }
 try {
   assert.ok(process.versions.electron, 'Must run in packaged Electron, not system Node')
@@ -23,7 +24,11 @@ try {
   const mount = dirname(process.execPath), asar = join(mount, 'resources', 'app.asar')
   const launcherPath = join(asar, 'recovery_launcher.mjs'), bootstrapPath = join(asar, 'bootstrap.mjs')
   // ASAR imports MUST work directly in this packaged runtime. Never import checkout or extracted substitutes.
-  report.modules = { launcher: identity(launcherPath), bootstrap: identity(bootstrapPath), asar: identity(asar) }
+  // Electron's patched fs treats app.asar as an archive directory. Read the physical
+  // container with original-fs; archive members and imports retain ASAR-aware access.
+  const physicalFs = createRequire(import.meta.url)('original-fs')
+  assert.ok(physicalFs.lstatSync(asar).isFile(), 'Mounted ASAR container must be a physical file')
+  report.modules = { launcher: identity(launcherPath), bootstrap: identity(bootstrapPath), asar: identity(asar, physicalFs) }
   const { verifiedAppImageRuntime, ensureRecoveryAnchor } = await import(pathToFileURL(launcherPath).href)
   const { verifyRecoveryAnchor } = await import(pathToFileURL(bootstrapPath).href)
   const runtime = verifiedAppImageRuntime()

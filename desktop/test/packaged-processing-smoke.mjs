@@ -193,12 +193,14 @@ export async function run(options) {
     const { _electron: electron } = await import('playwright')
     // Playwright owns launch timeout cleanup. An outer Promise.race could
     // abandon a late successful handle before it becomes ours to close.
-    application = await electron.launch({ executablePath: options.executable,
+    application = await electron.launch({ chromiumSandbox: true, executablePath: options.executable,
       args: [`--user-data-dir=${profile}`], env, timeout: Math.min(300000, remaining()) })
     remaining() // Assign ownership first so an expired deadline still closes it.
     const identity = await bounded(application.evaluate(({ app }) => ({ packaged: app.isPackaged,
+      sandboxBypassSwitches: ['no-sandbox', 'disable-sandbox', 'disable-setuid-sandbox', 'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-namespace-sandbox', 'single-process', 'in-process-gpu'].filter(flag => app.commandLine.hasSwitch(flag)),
       ownsInstance: app.hasSingleInstanceLock(), userData: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch })))
     assert.equal(identity.packaged, true)
+    assert.deepEqual(identity.sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
     assert.equal(identity.ownsInstance, true, 'Qualification profile is already in use')
     assert.equal(resolve(identity.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Application selected a different profile')
     const child = relative(options.output, identity.userData)
@@ -210,6 +212,13 @@ export async function run(options) {
       assert.ok(Date.now() < launchDeadline, 'Application host did not start'); remaining(); await pause(200)
     }
     await bounded(host.waitForLoadState('domcontentloaded'))
+    const preferences = await bounded(application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(window => ({
+      sandbox: window.webContents.getLastWebPreferences().sandbox,
+      isolation: window.webContents.getLastWebPreferences().contextIsolation,
+      node: window.webContents.getLastWebPreferences().nodeIntegration,
+    }))))
+    assert.ok(preferences.length > 0, 'Packaged application must have a sandboxed host window')
+    for (const preference of preferences) assert.deepEqual(preference, { sandbox: true, isolation: true, node: false })
     assert.equal((await api('/health')).status, 'ok')
   }
   async function install(path, kind) {
