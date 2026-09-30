@@ -11,6 +11,7 @@ import { appRelativeInventory, macExecutableModes, sealSignedMacApplication, not
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
+import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
@@ -209,6 +210,7 @@ async function main() {
         await signMacDiskImage(installer, macSelection)
         await verifyMacDiskImageApplication(installer, installerApplicationInventory, macModes, macSelection)
         await verifyMacZipApplication(zip, installerApplicationInventory, macModes, macSelection)
+        await regenerateFinalBlockmap(installer)
         // A checksum is published only after notarization and stapling have
         // finalized the disk image. It is an immutable sidecar, like the receipt.
         for (const artifact of [installer, zip]) {
