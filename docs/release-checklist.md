@@ -9,8 +9,9 @@
   notices, and all built font licenses/notices.
 - [ ] Windows 11 25H2 x86-64, macOS 14+ Apple silicon, Ubuntu 24.04 x86-64,
   Ubuntu 24.04 ARM64, and the actual Asahi show system have explicit results.
-- [ ] Downloaded unsigned-installer behavior is recorded beside each download
-  and in install instructions; no global security-disable instruction appears.
+- [ ] Downloaded-installer behavior and exact per-artifact signing status are
+  recorded beside each download and in install instructions; no global
+  security-disable instruction appears.
 - [ ] Prepared-media clean install, offline restart, update, interrupted update,
   recovery, uninstall retention, and reinstall have passed on every target.
 - [ ] Every advertised processing route passes the fixed 20-song quality,

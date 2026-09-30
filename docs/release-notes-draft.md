@@ -6,12 +6,16 @@ library you already have. Local processing capabilities depend on the platform
 and on separately installed, verified runtime and model packs listed in the
 final qualification matrix.
 
-Signing status applies to each exact artifact. The Windows installer built from
-revision `150ae52666fc0a531bb657316c5dde208dfd560a` has a verified Authenticode
-signature and timestamp. A signed and notarized macOS build path is available,
-but signing and notarization of this candidate remain incomplete; earlier
-notarization does not qualify a rebuilt artifact. Label any unsigned test
-artifact individually in its download description.
+Signing status applies to each exact artifact. The macOS application and DMG
+built from revision `09d796fdb6b35cef3b62fecefa86284246d080cb` passed signing,
+notarization and stapling checks. The DMG SHA-256 is
+`64b1e542ad3cac4f28f1d9ff39957be7eccc0d662850215c130a45b3c0d4aafc`.
+The Windows build from revision
+`07b44604f73dc3f5d8911a9beeb690c1092050b9` passed Authenticode signature and
+timestamp verification for its application, installer and installed uninstaller,
+and a disposable install/uninstall test. These checks do not establish
+browser-download reputation or physical playback qualification. Label any
+unsigned test artifact individually in its download description.
 
 Windows SmartScreen or macOS Gatekeeper may warn or block a download. Verify the
 published SHA-256 before opening it, and use only per-application actions offered
