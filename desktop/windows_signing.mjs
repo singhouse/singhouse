@@ -59,7 +59,9 @@ function authenticationMode({ env, manualAzureCli, azureOidc }) {
 }
 
 export function windowsBuildConfiguration({ signedRelease = false, manualAzureCli = false, azureOidc = false, env = process.env, platform = process.platform, signImpl = signWindowsFile } = {}) {
-  if (!signedRelease) return { target: ['nsis'], signAndEditExecutable: false, signExecutable: false }
+  // Keep resedit active so the application EXE receives its icon and version
+  // resources. signExecutable independently disables code signing in v26.
+  if (!signedRelease) return { target: ['nsis'], signAndEditExecutable: true, signExecutable: false }
   if (platform !== 'win32') throw new Error('Signed Windows releases must be built on Windows')
   const mode = authenticationMode({ env, manualAzureCli, azureOidc })
   return {

@@ -6,6 +6,7 @@ import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const icons = resolve(desktop, 'build/icons')
 export const sourceRoot = resolve(desktop, '..')
 const native = resolve(process.env.KARAOKE_NATIVE_PAYLOAD || resolve(desktop, 'native'))
 export const releasePolicyPath = resolve(process.env.SINGHOUSE_RELEASE_POLICY || resolve(desktop, 'release.json'))
@@ -33,16 +34,18 @@ export default {
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'processing-catalog.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'processing-catalog.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs', 'macos_signing.mjs'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
   asar: true,
   npmRebuild: false,
   // Builds are private test artifacts; publication is a separate operation.
   publish: null,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
-  linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo' },
-  mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null },
+  linux: { target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true },
+  mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null, icon: resolve(icons, 'singhouse.icns') },
+  dmg: { icon: resolve(icons, 'singhouse.icns') },
   win: {
+    icon: resolve(icons, 'singhouse.ico'),
     ...windowsBuildConfiguration({ signedRelease, manualAzureCli, azureOidc }),
     ...(signedRelease ? { signExts: nativeExecutableSigningExclusions(native,
       JSON.parse(readFileSync(resolve(native, 'files.json'), 'utf8'))) } : {}),
@@ -51,6 +54,8 @@ export default {
   // compressor. The managed Python payload includes ARM launcher templates, so
   // use the ZIP extractor and disable the differential 7z package path.
   nsis: {
+    installerIcon: resolve(icons, 'singhouse.ico'),
+    uninstallerIcon: resolve(icons, 'singhouse.ico'),
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
