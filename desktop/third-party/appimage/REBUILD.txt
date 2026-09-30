@@ -1,0 +1,59 @@
+SPDX-License-Identifier: AGPL-3.0-only
+
+AppImage library extraction and source rebuild recipe
+
+These instructions were written for Singhouse. inventory.json binds six x64
+library files to exact Ubuntu binary packages and eighteen source-package
+inputs. Its builder.extractionScripts entries record external provenance URLs
+and hashes only. Those upstream scripts are not distributed here and are not
+required by this recipe. This recipe does not cover the AppImage runtime itself.
+
+Recover the distributed library bytes
+
+1. For each libraries entry, obtain the binaryPackageUrl file and check its
+   SHA256 against binaryPackageSha256 before extracting it. Work in a separate,
+   empty directory for each package. dpkg-deb --extract PACKAGE DIRECTORY
+   extracts package data without running maintainer scripts.
+2. Inside each extracted package, select the regular file in the left column
+   below. Copy its bytes into a separate application staging tree at the path
+   in the right column. Each left path is relative to usr/lib/x86_64-linux-gnu/.
+   These are library files, not the package's SONAME symlinks.
+
+   Package file                   Application path
+   libgconf-2.so.4.1.5             usr/lib/libgconf-2.so.4
+   libnotify.so.4.0.0              usr/lib/libnotify.so.4
+   libappindicator.so.1.0.0        usr/lib/libappindicator.so.1
+   libindicator.so.7.0.0           usr/lib/libindicator.so.7
+   libXtst.so.6.1.0                usr/lib/libXtst.so.6
+   libXss.so.1.0.0                 usr/lib/libXss.so.1
+
+3. Check each staged file against the corresponding libraries[].sha256. The
+   recorded buildId provides additional identification. Do not strip, relink,
+   or otherwise transform these files when checking the distributed bytes.
+   Retain the copyright and license directories supplied beside this recipe.
+
+Build the library source packages
+
+1. Check this source artifact's SHA256SUMS. Keep all sources/ files together;
+   each of the six .dsc files names its upstream archive and Debian changes.
+   inventory.json records their public URLs and SHA256 values. The .dsc
+   signatures have not been verified; digest consistency is a separate check.
+2. In an isolated working directory, use dpkg-source -x PATH/TO/PACKAGE.dsc
+   for each package. It applies the included Debian changes to the upstream
+   source. The resulting debian/ directory contains the package build rules
+   and dependency declarations, including debian/rules and debian/control.
+3. Prepare an amd64 Debian/Ubuntu build environment appropriate to the exact
+   package version. Read its build dependencies, install them in that isolated
+   environment, and use dpkg-checkbuilddeps in the extracted source tree to
+   identify missing requirements. Then run dpkg-buildpackage -b -us -uc there
+   to invoke the included package build rules and produce binary packages.
+4. Inspect the resulting packages and extract the libraries using the mapping
+   above. Rebuilt or modified binaries can have different hashes and build IDs;
+   they cannot satisfy the existing release's exact binary inventory. A new
+   release must record and review its new inputs and resulting identities.
+
+The retained sources include upstream code and Debian packaging changes. This
+recipe does not pin a historical build environment or claim a reproducible
+rebuild; no rebuild has been established by creating the source artifact.
+The artifact and these instructions do not establish public source delivery or
+resolve whether additional corresponding-source materials are required.

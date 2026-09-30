@@ -1,0 +1,7 @@
+AppImage bundled libraries
+
+This directory retains exact Ubuntu binary-package copyright notices and upstream license texts for the libraries described in inventory.json. REBUILD.txt provides an original extraction and source-build recipe. Pinned upstream extraction-script URLs and hashes are retained only as external provenance in inventory.json; the script contents are not distributed.
+
+libappindicator contains mixed licenses: app-indicator and enum source files allow LGPL version 3 and/or 2.1; compiled generate-id.c and dbus-shared.h specify GPL version 3. Preserve all notices. The GPL-3 text is licenses/libindicator/COPYING; LGPL-3 and LGPL-2.1 texts are under licenses/libappindicator/. Do not describe this binary as unqualified LGPL-only.
+
+The separate AppImage library source artifact contains the exact source DSC, upstream original archives and Debian changes, with hashes. Packaging creates this artifact locally; its creation does not establish public availability. Upstream source URLs identify the retained inputs. DSC signatures have not been verified; SHA256 consistency and exact binary-package matching were verified. No reproducible rebuild or general license compatibility assertion is made.

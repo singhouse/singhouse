@@ -2,6 +2,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
 
@@ -42,6 +43,7 @@ export default {
   publish: null,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   linux: {
+    extraResources: [{ from: appImageNoticesDirectory, to: 'third-party/appimage', filter: ['**/*'] }],
     target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true,
     // Copied into the application before receipt derivation. electron-builder
     // overlays this file on its generated AppRun when staging the AppImage.
