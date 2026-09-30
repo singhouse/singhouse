@@ -48,6 +48,34 @@ With desktop build dependencies installed, run
 as part of Linux packaging qualification. Without those dependencies the staging
 test reports a skip; dependency-free launcher tests still run on Linux.
 
+Linux first-installer builds additionally require `unsquashfs` from squashfs-tools
+4.6 or newer within the 4.x series on the build host. This is a build-only tool;
+it is not required to launch the installed application. The build checks and logs
+its version, validates the listing before extraction, and never runs the AppImage
+to inspect it. Symlinks must use canonical relative targets; a path that could
+resolve differently after traversing another symlink is rejected. SquashFS offsets come from the selected builder runtime bytes,
+whose prefix must match the image. The bounded extraction fixture tests also use
+`mksquashfs`; install both tools when running the required packaging tests above.
+
+First-installer packaging requires a fresh Linux unpacked output directory.
+Preserve or explicitly remove a previous build before starting another. A temporary
+preparatory AppImage supplies the complete generated layout, including icons,
+desktop metadata, symlinks, and runtime support libraries. The original application
+must remain identical within that layout. Those additions enter the canonical
+unpacked application before the portable payload, release identity, and receipt
+are derived. A separate temporary input avoids duplicate generated symlinks when
+building the final AppImage. The final extracted image must exactly match the
+modeled application plus its receipt, including executable permission bits.
+
+This requires two AppImage compression passes and temporary space for the copied
+application and extracted images. Temporary trees are owned by the build and
+removed on success or failure. Final AppImage/archive outputs are first copied
+to exclusive temporary files on the destination filesystem, given the exact
+source permissions, synced, and published through exclusive hardlinks. Existing
+artifacts are never replaced. Abrupt termination can leave a hidden staging
+directory, but never exposes an incomplete final artifact name. Tool-version logging and inventory checks are validation
+measures; they do not establish byte-for-byte reproducible container builds.
+
 The application stores its database, uploads, stems, cache, and `settings.json`
 under `backend/` in Electron's per-user application-data directory, outside the
 installed binaries. The settings file contains a persistent session secret;
