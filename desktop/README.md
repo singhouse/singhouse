@@ -817,3 +817,48 @@ ARM64 it adds none: packaging checks an explicit empty library inventory,
 rejects unexpected `usr/lib` entries, and does not require the x64 source inputs.
 Other AppImage toolsets require a new verified inventory before use. Run
 `node --test test/appimage_notices.test.mjs` for notice and source-artifact checks.
+
+
+### Fresh Windows inference with retained verified setup
+
+The test-only `test/packaged-processing-smoke.mjs` can submit a new licensed
+excerpt using an existing isolated qualification profile without installing or
+retrieving runtime/model files. Run from a checkout with desktop test dependencies
+already installed, using the exact verified packaged candidate:
+
+```powershell
+node desktop/test/packaged-processing-smoke.mjs `
+  --executable "C:\candidate\Singhouse.exe" `
+  --runtime-manifest "C:\verified-pack\manifest.json" `
+  --audio "C:\licensed-excerpt.wav" `
+  --output "C:\new-attempt-evidence" `
+  --retained-profile "C:\prior-qualification\profile" `
+  --expected-source-commit FULL_40_HEX_SOURCE_COMMIT `
+  --timeout-seconds 7200
+```
+
+Use an unused evidence directory outside the retained profile. This mode excludes
+`--resume`, executable-upgrade options and `--download-models`. Candidate native
+provenance and release receipt must agree with the full expected source commit;
+evidence records those hashes, the native manifest, application archive, executable
+and independent test harness hash. The application's normal startup verification
+must admit the requested runtime and installed models. Missing readiness fails;
+there is no installation or repair fallback and no activation-pointer transplant.
+
+Before Electron launches, bundled Python reads SQLite in immutable read-only mode
+and rejects unfinished songs and every nonterminal job, including orphaned queued
+or expired running jobs. A nonempty WAL is a blocker: the test never checkpoints
+or repairs the database. Close other users of this isolated profile first. The
+profile must contain at most 500 songs. The harness submits one new upload with a durable intent marker, requires a
+new song/job with no preexisting stem directory, observes separation, verifies
+Heart word timings and aligned decoded stems, and checks retained song/current-job
+records remain unchanged. After shutdown, on successful and failed attempts, a
+read-only audit compares hashes of every original song and job row. Missing or
+changed rows, or inability to audit, fails qualification. It does not delete the new song or old data. An ambiguous
+submission is a failed attempt; retain its evidence and do not treat it as a resume.
+
+This is fresh local pipeline evidence with retained setup, not clean installation,
+model installation, corpus accuracy, representative memory or physical-output
+qualification. The runner still requires Electron's host window; it is not a
+headless backend test. Modal, external lyric lookup and external correction remain
+disabled. Existing fresh-install and installation-only resume modes are unchanged.
