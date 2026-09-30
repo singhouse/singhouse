@@ -472,8 +472,9 @@ async function start() {
       const appImage = process.platform === 'linux' ? verifiedAppImageRuntime() : null
       await runRecoveryAnchor({ anchorPath: recoveryArguments[1], kitRoot: recoveryArguments[2], recoveryArgs: recoveryArguments.slice(3),
         executablePath: stableFirstInstallerExecutable({ verifiedAppImage: appImage }), bootstrapPath: resolve(desktopDir, 'bootstrap.mjs'),
-        pythonPath: lockPython, helperPath: durabilityHelper, verifiedAppImage: appImage,
-        ...(process.platform === 'linux' ? { platformTrust: async (_anchor, evidence) => evidence.verifiedAppImage?.verified === true } : {}) })
+        // Runtime recognition does not establish first-installer authority.
+        // Preserve bootstrap's default platform trust, including Linux denial.
+        pythonPath: lockPython, helperPath: durabilityHelper, verifiedAppImage: appImage })
       shutdownComplete = true; app.quit(); return
     }
     expectedIdentity = validateManifest(JSON.parse(readFileSync(resolve(nativeDir, 'manifest.json'), 'utf8')), app.getVersion(), process.platform, process.arch)
