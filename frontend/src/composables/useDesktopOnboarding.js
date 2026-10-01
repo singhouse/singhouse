@@ -11,6 +11,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const busy = ref(false)
   const error = ref('')
   let navigationGeneration = 0
+  let pendingCheck = null
   const navigation = () => ({ generation: navigationGeneration, step: step.value, choice: choice.value })
   const currentNavigation = snapshot => snapshot.generation === navigationGeneration
     && snapshot.step === step.value && snapshot.choice === choice.value
@@ -18,7 +19,9 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const canStart = computed(() => plan.value?.available === true && !!plan.value?.planId && !busy.value)
 
   async function persist(skipped = false) {
-    await bridge.setOnboardingState({ step: step.value, choice: choice.value, skipped })
+    // A check is transient; reopening setup checks again from live status.
+    const saved = step.value !== 'checking' ? step.value : choice.value === 'modal' ? 'modal' : 'choose'
+    await bridge.setOnboardingState({ step: saved, choice: choice.value, skipped })
   }
   async function guarded(action) {
     if (busy.value) return false
@@ -34,6 +37,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     status.value = next
     if (next?.state === 'restart-required') step.value = 'restart'
     else if (next?.state === 'running') step.value = 'progress'
+    else if (next?.state === 'checking') step.value = 'checking'
     else if (next?.state === 'ready') {
       if (next.restartRequired) step.value = 'restart'
       else applyLocalReady()
@@ -42,7 +46,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   }
   function applyLocalReady() {
     if (choice.value === 'local') step.value = 'ready'
-    else if (['ready', 'progress', 'restart'].includes(step.value)) step.value = 'modal'
+    else if (['ready', 'progress', 'restart', 'checking'].includes(step.value)) step.value = 'modal'
   }
   function applyPlan(next) {
     plan.value = next
@@ -65,6 +69,38 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     if (modal?.active === true) step.value = 'ready'
     else if (step.value === 'ready') step.value = 'modal'
   }
+  // A finished setup awaiting reopening is re-verified once. Only the live
+  // preflight result can show readiness; anything short of it is repairable.
+  // The outcome applies while the check screen is still showing; an action
+  // that failed without leaving it must not strand the check.
+  function verifyCheck() {
+    pendingCheck ??= (async () => {
+      let next = null, failure = null
+      try { next = await preflight() } catch (cause) { failure = cause }
+      if (step.value !== 'checking') return
+      const live = await bridge.getSetupStatus().catch(() => null)
+      if (step.value !== 'checking') return
+      const settled = live && !['checking', 'idle'].includes(live.state)
+      // Live verification already established readiness; a lost reply is not a failure.
+      if (failure && !(settled && live.state === 'ready' && !live.restartRequired)) {
+        error.value = failure?.message || 'Setup could not be checked. Please try again.'
+      }
+      if (settled) status.value = live
+      if (next) applyPlan(next)
+      if (step.value === 'checking') {
+        if (settled) applyStatus(live)
+        else {
+          const message = 'Review setup to check and repair the installation.'
+          applyStatus({ state: 'error', phase: 'verification', message, error: message, retryable: true })
+        }
+      }
+      const settledNavigation = navigation()
+      try { await applyModalStatus() } catch (cause) {
+        if (currentNavigation(settledNavigation)) error.value = cause?.message || 'Unable to read setup progress.'
+      }
+    })().finally(() => { pendingCheck = null })
+    return pendingCheck
+  }
   async function refresh() {
     let snapshot = navigation()
     try {
@@ -73,6 +109,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       const choosing = step.value === 'choose'
       applyStatus(live)
       if (choosing && status.value?.state === 'ready' && !status.value.restartRequired) step.value = 'choose'
+      if (step.value === 'checking') return verifyCheck()
       snapshot = navigation()
       if (step.value !== 'choose') await applyModalStatus()
     } catch (cause) {
@@ -81,7 +118,8 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     }
   }
   async function initialize() {
-    return guarded(async () => {
+    let checking = false
+    const initialized = await guarded(async () => {
       const saved = await bridge.getOnboardingState()
       if (steps.has(saved?.step)) step.value = saved.step
       choice.value = saved?.choice === 'modal' ? 'modal' : 'local'
@@ -89,9 +127,13 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       // Readiness always comes from the runtime, never from saved navigation.
       if (['ready', 'restart', 'progress'].includes(step.value)) step.value = choice.value === 'modal' ? 'modal' : 'choose'
       applyStatus(live)
+      // The check runs outside the busy guard so the library stays reachable.
+      if (step.value === 'checking') { checking = true; return }
       if (['choose', 'consent', 'error'].includes(step.value)) applyPlan(await preflight())
       await applyModalStatus()
     })
+    if (checking) await verifyCheck()
+    return initialized
   }
   async function chooseProcessing() {
     return guarded(async () => {

@@ -1159,9 +1159,17 @@ status transition, observed time per setup phase, the `models.json` hash, the
 installed model set identity, every application launch, and the Playwright
 version.
 
-Controls are judged and pressed only after the setup dialog reports
-`aria-busy="false"`; the choice, review and retry screens render before their
-own preflight finishes. Before consent nothing is installed, so the harness may
+The harness identifies the dialog, its current step and its controls through
+the dialog's `data-testid` hooks and `data-step` attribute, not through copy.
+Wizard mode therefore requires a candidate that carries these hooks: if the
+setup dialog that opens at launch has no `data-testid="onboarding-dialog"` or no
+`data-step`, the run stops at once with `This candidate predates the wizard test
+hooks; wizard mode cannot drive it`. Heading text is read only to tell a
+cancelled setup and a failed verification from other error screens; an error
+screen whose heading matches none of them is recorded as `error-unclassified`.
+Controls are
+judged and pressed only after the setup dialog reports `aria-busy="false"`; the
+choice, review and retry screens render before their own preflight finishes. Before consent nothing is installed, so the harness may
 read the plan then (only while the wizard is idle). After relaunch it never
 calls the plan read, which would itself re-verify the installed runtime. Setup
 must leave its previous state within 60 seconds of the install click, or the run
@@ -1169,23 +1177,46 @@ fails with `setup did not start`.
 
 Setup reports runtime transfer, hash verification and the runtime self-test as
 one phase. The evidence splits them at the last observed progress change, which
-is an observation bound, not a measurement. Runtime files are transferred
-individually; there is no extraction phase.
+is an observation bound, not a measurement. The harness handles both runtime
+delivery forms in the catalog. Individually delivered files have no unpack
+phase. An archive-delivered runtime is retrieved as its parts and then unpacked:
+transfer size, consent size and sources come from the parts, the installed size
+from the file records, and setup progress names each part during retrieval and
+each file during unpacking. Unpacking is timed from its first to its last
+observed progress change (`unpackObservedMs`, `postUnpackObservedMs`), again an
+observation bound; the self-test after unpacking reports no progress of its own.
 
 The application exits when its restart control is pressed. The harness records
 the application's relaunch request instead of letting it start an instance the
 harness does not own, then launches the same executable with the same profile
 itself (`restart.initiatedBy` is `application-ui` once the request is recorded).
-After relaunch the setup dialog is expected to reopen while the application
-re-verifies the installed runtime. The harness waits up to 240 seconds for the
-dialog to become idle and settle, recording every distinct step, status and
-heading with timestamps. It passes only if the dialog settles on the ready
-screen, the active runtime is the one the plan promised with the expected lock
-and target, and the installed model set is the one the policy selects. If an
-error or cancelled screen or status appears at any point, the run fails with
-`A verified restart was presented as an interrupted setup (product defect)`;
-current builds that restore the interrupted-setup checkpoint fail here. A
-settled restart, progress or error screen also fails. The same processing and
+After relaunch the setup dialog is expected to reopen on its checking step while
+the application re-verifies the installed runtime. The checking step is never
+treated as settled. The harness waits up to 240 seconds for the dialog to become
+idle and settle, recording every distinct step, status, status phase and
+heading with timestamps. It passes only if the check is observed (the wizard or
+setup status shows `checking` at least once, the only observable sign that the
+restored setup checkpoint is exercised), the dialog settles on the ready screen while setup
+status is `ready`, the active runtime is the one the plan promised with the
+expected lock and target, and the installed model set is the one the policy
+selects. The wizard and setup status are polled about every 250 ms; the check
+is missed only if it completes entirely before the harness's first poll after
+relaunch, and a missed check fails the run. If a cancelled or generic error
+screen or status appears at any point, the run fails with `A verified restart
+was presented as an interrupted setup (product defect)`; a build that restores
+the finished-setup checkpoint as an interrupted setup fails here. If the wizard
+reports that local processing could not be verified, the run fails with
+`Post-restart verification failed`: when setup status reported a verification
+error the evidence says the installed runtime or models did not pass live
+verification; when status was still checking, or could not be read, it says
+only that the check did not complete; with any other status it says the wizard
+showed a failed verification while the setup service reported that status, a
+disagreement that is still a failed run. An unclassified error screen counts as
+that failure only with a verification error in status. Otherwise, if setup
+status is an error outside verification or is cancelled, it fails as
+`presented as an interrupted setup`, and with any other status it fails as an
+error screen the harness cannot classify. A settled restart or progress screen,
+or a dialog still checking at the timeout, also fails. The same processing and
 shutdown checks as the other modes follow.
 
 The evidence fields are named for what they prove: wizard evidence carries
@@ -1207,9 +1238,26 @@ Two recovery exercises are available; choose at most one:
 Either retry must offer the same plan. Pass the pack server's standard output,
 saved to a file, as `--pack-server-log <file>` to classify the retry from the
 server's own request records: `resumed` requires the first request for that file
-after the stop to carry `Range: bytes=N-` (N > 0) and receive 206; `restarted`
-means it was requested from the start. Without the log, or without such a
-request, the retry is `unproven`; polling alone never proves a resume.
+after the stop to carry `Range: bytes=N-` (N > 0), receive 206 and be logged as
+`complete` with exactly the file size minus N bytes served, and no later request
+for that file to fetch it from zero; `restarted` means it was requested from the
+start, either first or after a resume. Without the log, or without such a
+request, the retry is `unproven`; polling alone never proves a resume. For an
+archive-delivered runtime the file is the interrupted part: when setup stops,
+the harness records the staged size of every part
+(`<id>.archive/part-NNN.partial`), and the kept bytes are those of the part the
+retry is judged on (with an injected failure and the log, the part the server
+failed, which may differ from the last part setup progress named). With the
+log, an archive retry passes only when some but not all of that part was kept
+(0 < kept bytes < part size) and the retry resumed it from exactly the kept
+bytes as above; a refetch from zero or a resume from another byte fails the run.
+If the kept bytes are unknown, if nothing was kept (retrieving the part from
+zero is then correct), or if the part was already complete when the stop took
+effect, the run fails as `Unproven`: the harness could not show a resume, which
+says nothing against the product. For individual files the classification is
+recorded as evidence only. A catalog whose archive parts share a file name under
+different paths is refused by the harness, because setup progress names each
+part by its file name alone.
 
 #### Private test sources
 
