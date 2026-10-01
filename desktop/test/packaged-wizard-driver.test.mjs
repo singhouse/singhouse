@@ -146,7 +146,7 @@ function productFixture({ memory = false } = {}) {
     sourceCommit: 'a'.repeat(40), packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/package', sha256: sha256('package'), notices: ['NOTICE'] }],
     files: runtime.files.map(({ url, ...file }) => file) }
   runtime.provenance = { inputLock: JSON.stringify(lock), lockSha256: sha256(JSON.stringify(lock)), sourceCommit: lock.sourceCommit, packages: lock.packages }
-  const qualification = { passed: true, runtimeLockSha256: runtime.provenance.lockSha256, platform: 'linux', arch: 'x64', accelerator: 'cpu', evidenceReference: 'run-1' }
+  const qualification = { passed: true, runtimeLockSha256: runtime.provenance.lockSha256, platform: 'linux', arch: 'x64', accelerator: 'cpu', evidenceReference: 'run-1', scope: 'full' }
   const policy = { schema: 1, allowedHosts: ['example.org'], models: ids.map(id => ({ id, files: [{ path: `huggingface/${id}`, url: `https://example.org/${id}`, sha256: sha256(id), revision: sha256(id), size: 11, executable: false }] })) }
   const options = { identity, trustedLocks: [runtime.provenance.lockSha256], modelPolicy: policy }
   const input = { runtime, qualification, models: ids.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })),
