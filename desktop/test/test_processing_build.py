@@ -25,6 +25,40 @@ class ProcessingBuildTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def test_pack_delivery_options_pass_through_to_the_assembler(self):
+        common = ['--requirements', 'req.json', '--target', 'linux-x64', '--accelerator', 'cpu', '--output', 'out', '--cache', 'cache']
+        cases = [
+            ([], dict(base_url=None, blobs=None, archive_base_url=None, archive_part_size=None, archive_name=None)),
+            (['--archive-base-url', 'https://example.org/releases/download/v1/', '--archive-part-size', '1000', '--archive-name', 'tools.pack.gz'],
+             dict(base_url=None, blobs=None, archive_base_url='https://example.org/releases/download/v1/', archive_part_size=1000, archive_name='tools.pack.gz')),
+            (['--blobs'], dict(base_url=None, blobs=True, archive_base_url=None, archive_part_size=None, archive_name=None)),
+            (['--base-url', 'https://example.org/blobs/'], dict(base_url='https://example.org/blobs/', blobs=None, archive_base_url=None, archive_part_size=None, archive_name=None)),
+        ]
+        for extra, expected in cases:
+            with self.subTest(extra=extra), patch.object(builder, 'build') as build:
+                builder.main(common + extra)
+                self.assertEqual(build.call_args.kwargs['delivery_options'], expected)
+        # Invalid or mixed options are refused by the same validation, before any build work.
+        for extra in (['--blobs', '--archive-name', 'x'], ['--base-url', 'https://example.org/b/', '--archive-base-url', 'https://example.org/a/'],
+                      ['--archive-part-size', '0'], ['--archive-base-url', 'http://example.org/'], ['--archive-name', 'nested/name']):
+            with self.subTest(extra=extra), patch.object(builder, 'build') as build, \
+                    patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit) as exit:
+                builder.main(common + extra)
+            self.assertEqual(exit.exception.code, 2)
+            build.assert_not_called()
+
+    def test_build_validates_delivery_before_work_and_hands_options_to_assemble(self):
+        with patch.object(builder, 'validate_requirements') as validate, patch.object(builder.subprocess, 'check_output') as uv:
+            for options in (dict(archive_part_size=2 ** 31), dict(blobs=True, archive_name='x'), dict(unknown=True)):
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    builder.build(self.root / 'missing.json', 'linux-x64', 'cpu', self.root / 'out', self.root / 'cache',
+                                  delivery_options=options)
+            validate.assert_not_called()
+            uv.assert_not_called()
+        # The final assembly call receives exactly the requested options.
+        source = Path(builder.__file__).read_text()
+        self.assertIn("assemble(payload, lock_path, output / 'pack', **delivery_options)", source)
+
     def test_materializes_internal_file_alias_and_rejects_escape(self):
         payload = self.root / 'payload'
         payload.mkdir()

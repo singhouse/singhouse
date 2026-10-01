@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import struct
 import subprocess
 import unittest
 import zlib
@@ -261,6 +262,133 @@ class ArchivePackTests(unittest.TestCase):
                 pack = broken(name.replace(" ", "-"), mutate)
                 with self.assertRaisesRegex(ValueError, message):
                     builder.from_pack(pack, self.root / ("out-" + name.replace(" ", "-")))
+
+    def test_from_pack_rehosts_an_archive_pack_with_full_reverification(self):
+        first = builder.assemble(self.payload, self.lock_path, self.root / "first", archive_part_size=1000)
+        fresh = builder.assemble(self.payload, self.lock_path, self.root / "fresh", archive_base_url=self.BASE,
+                                 archive_part_size=700, archive_name="runtime.pack.gz")
+        shutil.rmtree(self.payload)
+        rehosted = builder.from_pack(self.root / "first", self.root / "rehosted", archive_base_url=self.BASE,
+                                     archive_part_size=700, archive_name="runtime.pack.gz")
+        self.assertEqual(rehosted, fresh)
+        self.assertEqual(self.tree(self.root / "rehosted"), self.tree(self.root / "fresh"))
+        # Re-hosting a re-hosted pack (published URLs) with the original options
+        # restores the original parts byte for byte.
+        back = builder.from_pack(self.root / "rehosted", self.root / "back", archive_part_size=1000)
+        self.assertEqual(back["archive"]["parts"][0]["sha256"], first["archive"]["parts"][0]["sha256"])
+        self.assertEqual({k: v for k, v in self.tree(self.root / "back").items() if k.startswith("archive/")},
+                         {k: v for k, v in self.tree(self.root / "first").items() if k.startswith("archive/")})
+        subprocess.run([sys.executable, str(Path(builder.__file__)), "--from-pack", str(self.root / "first"),
+                        "--output", str(self.root / "cli"), "--archive-base-url", self.BASE, "--archive-part-size", "700",
+                        "--archive-name", "runtime.pack.gz"], check=True)
+        self.assertEqual(self.tree(self.root / "cli"), self.tree(self.root / "fresh"))
+
+    def test_from_pack_rejects_archive_packs_that_fail_any_check_before_writing(self):
+        builder.assemble(self.payload, self.lock_path, self.root / "source", archive_part_size=1000)
+        honest = json.loads((self.root / "source/manifest.json").read_text())
+        stream = b"".join((self.root / "source/archive" / Path(part["url"]).name).read_bytes() for part in honest["archive"]["parts"])
+        lock = json.loads(self.lock_path.read_text())
+        data = b"".join(self.contents[record["path"]][0] for record in lock["files"])
+
+        def gzip(content):
+            compressor = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+            return (builder.GZIP_HEADER + compressor.compress(content) + compressor.flush()
+                    + struct.pack("<II", zlib.crc32(content), len(content) & 0xFFFFFFFF))
+
+        def republish(compressed):
+            # A self-consistent manifest for different archive bytes: part
+            # digests match, so only the stream and lock checks can object.
+            def mutate(pack):
+                manifest = json.loads((pack / "manifest.json").read_text())
+                for path in (pack / "archive").iterdir():
+                    path.unlink()
+                parts = [compressed[i:i + 1000] for i in range(0, len(compressed), 1000)]
+                manifest["archive"]["parts"] = []
+                for index, part in enumerate(parts):
+                    name = f"bad.pack.gz.{index + 1:03d}"
+                    (pack / "archive" / name).write_bytes(part)
+                    manifest["archive"]["parts"].append({"url": "https://example.org/r/" + name,
+                                                         "sha256": hashlib.sha256(part).hexdigest(), "size": len(part)})
+                (pack / "manifest.json").write_text(json.dumps(manifest))
+            return mutate
+
+        flipped = bytearray(stream)
+        flipped[-8] ^= 0xFF
+        first_part = lambda pack: pack / "archive" / Path(honest["archive"]["parts"][0]["url"]).name
+        tampered = data.replace(b"MIT notice", b"MIT n0tice")
+        cases = [
+            ("flipped part byte", lambda pack: first_part(pack).write_bytes(
+                first_part(pack).read_bytes()[:500] + bytes([first_part(pack).read_bytes()[500] ^ 1]) + first_part(pack).read_bytes()[501:]),
+             "does not match its manifest"),
+            ("flipped header byte", lambda pack: first_part(pack).write_bytes(
+                bytes([first_part(pack).read_bytes()[0] ^ 1]) + first_part(pack).read_bytes()[1:]), "does not match its manifest"),
+            ("missing part", lambda pack: first_part(pack).unlink(), "archive part"),
+            ("symlinked part", lambda pack: (shutil.copy(first_part(pack), self.root / "elsewhere"), first_part(pack).unlink(),
+                                             first_part(pack).symlink_to(self.root / "elsewhere")), "archive part"),
+            ("extra gzip member", republish(stream + gzip(b"extra")), "trailing"),
+            ("trailing garbage", republish(stream + b"garbage"), "trailing"),
+            ("extra uncompressed byte", republish(gzip(data + b"x")), "trailing"),
+            ("flipped trailer CRC", republish(bytes(flipped)), "trailer"),
+            ("truncated stream", republish(stream[:-20]), "truncated|trailer"),
+            ("optional header fields", republish(b"\x1f\x8b\x08\x08" + stream[4:]), "gzip member"),
+            ("wrong file inside archive", republish(gzip(tampered)), "does not match its lock"),
+            ("short uncompressed stream", republish(gzip(data[:-1])), "ended before|does not match its lock"),
+            ("edited manifest", lambda pack: (pack / "manifest.json").write_text(
+                (pack / "manifest.json").read_text().replace('"cpu"', '"cuda"')), "fresh assembly"),
+            ("per-file URL in archive pack", lambda pack: (pack / "manifest.json").write_text(json.dumps(
+                {**honest, "files": [{**record, "url": "https://example.org/f"} for record in honest["files"]]})), "fresh assembly"),
+            ("nested part name", lambda pack: (pack / "manifest.json").write_text(json.dumps(
+                {**honest, "archive": {**honest["archive"], "parts": [{**honest["archive"]["parts"][0], "url": "https://example.org/a/..%2Fx"}]}})),
+             "flat names"),
+        ]
+        real_write = builder.write_output
+        for name, mutate, message in cases:
+            with self.subTest(case=name):
+                pack = self.root / name.replace(" ", "-")
+                shutil.copytree(self.root / "source", pack)
+                mutate(pack)
+                writes = []
+
+                def recording(*args, **kwargs):
+                    writes.append(args[0])
+                    return real_write(*args, **kwargs)
+                builder.write_output = recording
+                try:
+                    with self.assertRaisesRegex(ValueError, message):
+                        builder.from_pack(pack, self.root / "out" / name.replace(" ", "-"))
+                finally:
+                    builder.write_output = real_write
+                # Archive faults are found by the verification pass, before any output exists.
+                self.assertEqual(writes, [])
+                self.assertFalse((self.root / "out").exists() and any((self.root / "out").iterdir()))
+
+    def test_failed_assembly_leaves_no_partial_output(self):
+        real = builder.checked_chunks
+        written = []
+
+        def failing(record, source):
+            if record["path"] == "lib/data/noise.bin":
+                yield next(real(record, source))
+                # Output already exists in the temporary sibling at this point.
+                written.append(sorted(path.relative_to(self.root / "out").as_posix() for path in (self.root / "out").rglob("*") if path.is_file()))
+                raise OSError("simulated read failure mid-stream")
+            yield from real(record, source)
+        builder.checked_chunks = failing
+        try:
+            for options, kind in ((dict(archive_part_size=4000), "/archive/"), (dict(blobs=True), "/blobs/")):
+                with self.subTest(options=options), self.assertRaisesRegex(OSError, "simulated"):
+                    builder.assemble(self.payload, self.lock_path, self.root / "out" / "pack", **options)
+                self.assertTrue(any(kind in path for path in written[-1]), written)
+                self.assertFalse(any(path.startswith("pack/") for path in written[-1]))
+                # Nothing remains: no parts or blobs without a manifest, no temporary directory.
+                self.assertEqual(list((self.root / "out").iterdir()), [])
+        finally:
+            builder.checked_chunks = real
+        manifest = builder.assemble(self.payload, self.lock_path, self.root / "out" / "pack", archive_part_size=4000)
+        self.assertEqual(sorted(path.name for path in (self.root / "out").iterdir()), ["pack"])
+        self.assertTrue(manifest["archive"]["parts"][0]["url"].startswith((self.root / "out" / "pack" / "archive").absolute().as_uri()))
+        with self.assertRaisesRegex(ValueError, "Output exists"):
+            builder.assemble(self.payload, self.lock_path, self.root / "out" / "pack")
 
     def test_delivery_options_are_mutually_exclusive_and_validated(self):
         invalid = [

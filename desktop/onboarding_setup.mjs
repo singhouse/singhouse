@@ -230,16 +230,26 @@ export class OnboardingSetup {
       const runtimeNeeded = installed.runtime?.id !== hash(selected.runtime)
       const modelsNeeded = installed.models?.id !== hash(selected.models)
       if (modelsNeeded && offlineDirectory !== null) await this.inspectOfflineModels(selected.models, offlineDirectory, signal)
-      const runtimeBytes = runtimeNeeded ? bytes(selected.runtime) : 0
+      // Archive-form runtimes transfer their compressed parts, then extract the
+      // full uncompressed tree; per-file runtimes transfer the tree itself.
+      const runtimeParts = selected.runtime.archive?.parts
+      const runtimeInstalledBytes = runtimeNeeded ? bytes(selected.runtime) : 0
+      const runtimeBytes = !runtimeNeeded ? 0 : runtimeParts ? runtimeParts.reduce((sum, part) => sum + part.size, 0) : runtimeInstalledBytes
       const modelBytes = modelsNeeded ? bytes(selected.models) : 0
-      // Same staging/activation reservation as RuntimeManager. Conservative:
-      // existing model files are reused, but their staged copies still need space.
-      const diskRequiredBytes = (runtimeBytes + modelBytes) * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
+      // Never weaker than the reservation each installer makes. A per-file
+      // runtime and the models need their staged copy plus the activated tree
+      // (bytes * 2). An archive runtime needs every part (none are assumed to
+      // be retrieved yet) plus the uncompressed tree. Each install adds 64 MiB.
+      // Conservative: existing model files are reused, but their staged copies
+      // still need space.
+      const runtimeReserve = !runtimeNeeded ? 0 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
+      const diskRequiredBytes = runtimeReserve + modelBytes * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
       const diskFreeBytes = this.diskFree ? await this.diskFree() : null
       signal?.throwIfAborted()
+      const runtimeSources = runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
       const components = [
-        ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, sourceMode: 'catalog',
-          sources: [...new Set(selected.runtime.files.map(file => new URL(file.url).origin))],
+        ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, installedBytes: runtimeInstalledBytes, sourceMode: 'catalog',
+          sources: [...new Set(runtimeSources.map(url => new URL(url).origin))],
           terms: selected.runtime.provenance.packages.map(p => ({ label: `${p.name}: ${p.license}`, url: p.sourceUrl })) }] : []),
         ...selected.entries.map(entry => ({ label: entry.id, sourceMode: modelSource, bytes: installed.models?.manifest.models.includes(entry.id) ? 0 : bytes(entry),
           sources: offlineDirectory === null ? [...new Set(entry.files.map(file => new URL(file.url).origin))] : ['Selected model folder'], terms: entry.terms })),

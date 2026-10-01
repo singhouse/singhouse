@@ -754,7 +754,7 @@ test('archive extraction resumes after interruption without re-retrieving or rew
   const { fetchImpl, requests } = assetServer(urls, parts)
   let extracting = false, syncs = 0
   const manager = archiveManager(root, fetchImpl, { progress: event => {
-    if (event.phase === 'retrieve' && event.file.includes(`part ${parts.length} of`) && event.received === event.total) extracting = true
+    if (event.phase === 'retrieve' && event.part === parts.length && event.received === event.total) extracting = true
   } })
   const handle = await open(join(root, 'python'), 'r')
   const prototype = Object.getPrototypeOf(handle)
@@ -780,17 +780,35 @@ test('archive extraction resumes after interruption without re-retrieving or rew
   assert.equal((await stat(join(installed.directory, 'python/bin/python3'))).ino, earlier, 'verified files are not rewritten')
 })
 
-test('a fully staged archive pack activates without its parts and without network access', async t => {
+test('a staged archive tree activates offline only after its stream was validated', async t => {
   const { root } = await fixture(t)
-  const { manifest, entries } = archiveManifest()
-  const manager = archiveManager(root, async () => { throw new Error('offline') })
-  const staged = join(manager.root, 'staging', sha(JSON.stringify(manifest)))
+  const { manifest, parts, urls, entries } = archiveManifest()
+  const id = sha(JSON.stringify(manifest))
+  // Files placed in staging without a validated stream (an older or forged
+  // tree) are never activated on their own; the parts must be decoded again.
+  const offline = archiveManager(root, async () => { throw new Error('offline') })
+  const staged = join(offline.root, 'staging', id)
   for (const entry of entries) {
     await mkdir(join(staged, entry.path, '..'), { recursive: true })
     await writeFile(join(staged, entry.path), entry.data)
   }
-  const installed = await manager.install(manifest)
-  await assertInstalled(manager, installed, entries)
+  await assert.rejects(offline.install(manifest), /offline/)
+  assert.equal(await offline.active(), null)
+  // Crash after the stream validated and the parts were removed: the retained
+  // tree and its marker finish activation without any network access.
+  let crashed = false
+  const crashing = archiveManager(root, assetServer(urls, parts).fetchImpl, { directorySync: async path => {
+    if (!crashed && path === staged) {
+      await assert.rejects(stat(join(crashing.root, 'staging', `${id}.archive`)), { code: 'ENOENT' })
+      crashed = true
+      throw new Error('simulated power loss')
+    }
+  } })
+  await assert.rejects(crashing.install(manifest), /simulated power loss/)
+  assert.ok(crashed)
+  assert.deepEqual((await readdir(join(crashing.root, 'staging'))).sort(), [id, `${id}.stream`])
+  const installed = await offline.install(manifest)
+  await assertInstalled(offline, installed, entries)
 })
 
 test('corrupt, truncated, padded, multi-member or mislabelled archives fail closed and keep the active runtime', async t => {
@@ -863,4 +881,109 @@ test('runtime source redirects follow only approved HTTPS release-asset endpoint
   manager.fetch = async () => new Response(null, { status: 302 })
   await assert.rejects(manager.fetchSource(origin, {}), /missing/)
   await assert.rejects(manager.fetchSource(new URL('http://example.org/part'), {}), /HTTPS/)
+})
+
+test('a malformed archive stream is rejected on every attempt while its parts are the source', async t => {
+  const { root } = await fixture(t)
+  const entries = archiveEntries()
+  const data = Buffer.concat(entries.map(entry => entry.data))
+  const honest = gzipConcat(data)
+  const flipped = Buffer.from(honest); flipped[flipped.length - 8] ^= 0xff
+  const cases = [
+    ['extra gzip member', Buffer.concat([honest, gzipSync(Buffer.from('extra'))]), /trailing/],
+    ['trailing garbage', Buffer.concat([honest, Buffer.from('garbage')]), /trailing/],
+    ['extra uncompressed byte', gzipConcat(Buffer.concat([data, Buffer.from('x')])), /trailing/],
+    ['flipped trailer CRC', flipped, /corrupt/],
+  ]
+  for (const [name, compressed, expected] of cases) {
+    const store = join(root, name.replaceAll(' ', '-'))
+    const bad = archiveManifest(entries, { compressed })
+    const id = sha(JSON.stringify(bad.manifest))
+    for (const attempt of [1, 2]) {
+      const { fetchImpl, requests } = assetServer(bad.urls, bad.parts)
+      const manager = archiveManager(store, fetchImpl)
+      await assert.rejects(manager.install(bad.manifest), expected, `${name}, attempt ${attempt}`)
+      assert.equal(await manager.active(), null, `${name}, attempt ${attempt}`)
+      // The parts and everything extracted from them are discarded, so the
+      // next attempt retrieves and decodes them again and fails again.
+      assert.deepEqual(await readdir(join(manager.root, 'staging')), [], `${name}, attempt ${attempt}`)
+      assert.deepEqual(requests.map(request => request.url), bad.urls, `${name}, attempt ${attempt}`)
+      assert.ok(!(await readdir(join(manager.root, 'packs'))).includes(id))
+    }
+    // Once a correct archive is published (new part digests, so a new
+    // manifest), the third attempt installs it.
+    const good = archiveManifest(entries)
+    const manager = archiveManager(store, assetServer(good.urls, good.parts).fetchImpl)
+    await assertInstalled(manager, await manager.install(good.manifest), entries)
+  }
+})
+
+// Writes `bytes` split at `cuts` as the retrieved parts and decodes them.
+// Writes `bytes` split at `cuts` as the retrieved parts and decodes them.
+// With `streamOnly`, files count as already staged, so only the stream is checked.
+async function decodeLayout(root, entries, bytes, cuts, { streamOnly = false } = {}) {
+  const parts = []
+  let previous = 0
+  for (const cut of [...cuts, bytes.length]) { if (cut > previous) parts.push(bytes.subarray(previous, cut)); previous = cut }
+  const manifest = { files: entries.map(({ path, data, executable }) => ({ path, size: data.length, sha256: sha(data), executable })),
+    archive: { format: 'concat-gzip-v1', parts: parts.map((part, i) => ({ url: `https://example.org/p.${i + 1}`, sha256: sha(part), size: part.length })) } }
+  // Only the listed parts are read; a stream-only check leaves staging untouched.
+  const staging = join(root, 'layout-staging'), archive = join(root, 'layout-archive')
+  if (!streamOnly) await rm(staging, { recursive: true, force: true })
+  await mkdir(staging, { recursive: true }); await mkdir(archive, { recursive: true })
+  for (const [i, part] of parts.entries()) await writeFile(join(archive, `part-${String(i + 1).padStart(3, '0')}.partial`), part)
+  try {
+    await layoutManager(root).decodeArchive(manifest, staging, archive, manifest.files.map(() => streamOnly), new AbortController().signal)
+    if (!streamOnly) for (const entry of entries) assert.deepEqual(await readFile(join(staging, entry.path)), entry.data)
+    return 'ok'
+  } catch (error) { return error.message }
+}
+const layoutManagers = new Map()
+const layoutManager = root => {
+  if (!layoutManagers.has(root)) layoutManagers.set(root, archiveManager(root, undefined))
+  return layoutManagers.get(root)
+}
+
+test('trailer detection is independent of how parts and reads split the stream', async t => {
+  const { root } = await fixture(t)
+  const entries = archiveEntries()
+  const honest = gzipConcat(Buffer.concat(entries.map(entry => entry.data)))
+  const L = honest.length
+  // The layouts the review reproduced, including eight 1-byte trailer parts.
+  const layouts = [[L - 8, L - 5], [L - 8, L - 6, L - 3, L - 1], [L - 10, L - 8, L - 4],
+    [L - 9, L - 7, L - 6, L - 5, L - 4, L - 3, L - 2, L - 1], [L - 12, L - 4],
+    [L - 8, L - 7, L - 6, L - 5, L - 4, L - 3, L - 2, L - 1]]
+  for (let n = 1; n <= 8; n++) layouts.push([L - 8, ...Array.from({ length: n - 1 }, (_, i) => L - 8 + i + 1)])
+  for (const cuts of layouts) assert.equal(await decodeLayout(root, entries, honest, cuts), 'ok', String(cuts.map(cut => cut - L)))
+  const padded = Buffer.concat([honest, Buffer.from('x')])
+  for (const cuts of layouts) assert.match(await decodeLayout(root, entries, padded, cuts.map(cut => cut + 1)), /trailing/, String(cuts.map(cut => cut - L)))
+})
+
+test('exhaustive small-layout sweep accepts every split of a valid archive and rejects padded ones', async t => {
+  const { root } = await fixture(t)
+  const entries = [
+    { path: 'python/bin/python3', data: Buffer.from('fixture python'), executable: true },
+    { path: 'NOTICE.fixture', data: Buffer.from('MIT notice'), executable: false },
+    { path: 'lib/zero', data: Buffer.alloc(0), executable: false },
+  ]
+  const honest = gzipConcat(Buffer.concat(entries.map(entry => entry.data)))
+  const L = honest.length
+  const variants = [
+    ['honest', honest, /^ok$/],
+    ['one trailing byte', Buffer.concat([honest, Buffer.from([0])]), /trailing/],
+    ['empty second member', Buffer.concat([honest, gzipSync(Buffer.alloc(0))]), /trailing/],
+    ['missing last byte', honest.subarray(0, L - 1), /truncated|corrupt|ended before/],
+  ]
+  for (const [name, bytes, expected] of variants) {
+    const N = bytes.length, layouts = [[]]
+    // Every single split point, every subset of split points among the last
+    // nine boundaries (the trailer and where the deflate data ends), and for
+    // the valid archive every pair of split points.
+    for (let a = 1; a < N; a++) {
+      layouts.push([a])
+      if (name === 'honest') for (let b = a + 1; b < N; b++) layouts.push([a, b])
+    }
+    for (let mask = 1; mask < 2 ** 9; mask++) layouts.push(Array.from({ length: 9 }, (_, i) => N - 9 + i).filter((_, i) => mask & (1 << i)))
+    for (const cuts of layouts) assert.match(await decodeLayout(root, entries, bytes, cuts, { streamOnly: true }), expected, `${name}: ${cuts}`)
+  }
 })

@@ -383,7 +383,7 @@ onUnmounted(() => clearInterval(poll))
             v-if="progress !== undefined"
             class="quiet"
           >
-            {{ status?.progress?.file }} · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of this file)
+            <template v-if="status?.progress?.phase === 'retrieve'">Retrieving the processing tools archive<template v-if="status.progress.part && status.progress.parts">, part {{ status.progress.part }} of {{ status.progress.parts }}</template></template><template v-else-if="status?.progress?.phase === 'extract'">Unpacking and checking processing tools</template><template v-else>{{ status?.progress?.file }}</template> · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of {{ status?.progress?.phase === 'retrieve' ? 'this part' : status?.progress?.phase === 'extract' ? 'the processing tools' : 'this file' }})
           </p>
         </div>
         <details>
