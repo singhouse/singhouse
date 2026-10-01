@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { packagedLayout, packagedResources, samePath } from './packaged-smoke-paths.mjs'
+import { isInside, packagedLayout, packagedResources, samePath } from './packaged-smoke-paths.mjs'
 
 test('Mac application resources are a sibling of MacOS, including paths with spaces', () => {
   assert.equal(packagedResources('/Applications/Test Singhouse.app/Contents/MacOS/Singhouse', 'darwin'),
@@ -47,4 +47,25 @@ test('path identity folds case only where the platform filesystem does', () => {
     assert.equal(samePath(platform === 'win32' ? 'C:\\a\\profile' : '/a/profile', platform === 'win32' ? 'C:\\a\\other' : '/a/other', platform), false)
   }
   assert.throws(() => samePath('/a', '/a', 'aix'), /Unsupported/)
+})
+
+test('containment folds case on macOS and Windows but not on Linux', () => {
+  // A macOS evidence directory differing only in case is the same directory.
+  assert.equal(isInside('/Users/Op/Evidence', '/users/op/evidence/profile', 'darwin'), true)
+  assert.equal(isInside('/Users/Op/Evidence/Profile', '/users/op/evidence', 'darwin'), false)
+  assert.equal(isInside('/Users/Op/Evidence/Profile', '/users/op/evidence/profile/run', 'darwin'), true)
+  assert.equal(isInside('/Users/Op/Evidence', '/users/op/EVIDENCE', 'darwin'), false)
+  assert.equal(isInside('/Users/Op/Profile', '/Users/Op/Evidence', 'darwin'), false)
+  assert.equal(isInside('C:\\Evidence', 'c:\\evidence\\profile', 'win32'), true)
+  assert.equal(isInside('c:\\EVIDENCE', 'C:\\Evidence\\Profile', 'win32'), true)
+  assert.equal(isInside('/srv/Evidence', '/srv/evidence/profile', 'linux'), false)
+  assert.equal(isInside('/srv/evidence', '/srv/evidence/profile', 'linux'), true)
+  for (const platform of ['darwin', 'linux']) {
+    assert.equal(isInside('/a/evidence', '/a/evidence', platform), false)
+    assert.equal(isInside('/a/evidence', '/a/evidence/../other', platform), false)
+    // A sibling whose name merely starts with dots is not an escape or a child.
+    assert.equal(isInside('/a/evidence', '/a/evidence/..profile', platform), true)
+    assert.equal(isInside('/a/evidence', '/a/..evidence', platform), false)
+  }
+  assert.throws(() => isInside('/a', '/a/b', 'aix'), /Unsupported/)
 })

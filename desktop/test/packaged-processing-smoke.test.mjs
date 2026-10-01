@@ -4,10 +4,12 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase,
-  applicationEnvironment, shutdownStrategy, validateResumedApplication } from './packaged-processing-smoke.mjs'
+  applicationEnvironment, shutdownStrategy, validateResumedApplication, candidateIdentity, executableIdentityLimitation, harnessIdentity, HARNESS_FILES,
+  extraCaCertificate, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
@@ -18,13 +20,18 @@ test('resume is explicit and retains model retrieval consent requirement', () =>
   assert.throws(() => parseArguments([...args.slice(0, -1), '--resume']), /consent/)
 })
 
+// Linux upgrades keep the stock executable; only the archive/native payload change.
+const candidateTuple = (seed, overrides = {}) => ({ executableSha256: seed.repeat(64), applicationArchiveSha256: 'e'.repeat(64),
+  nativeManifestSha256: 'f'.repeat(64), nativeProvenanceSha256: '1'.repeat(64), releaseReceiptSha256: '2'.repeat(64), ...overrides })
+
 function fixture(t) {
   // Physical root: macOS temporary directories are reached through /var links.
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'processing-resume-')))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const output = join(root, 'evidence'); mkdirSync(output); mkdirSync(join(output, 'profile'))
-  const expected = { executableSha256: 'a'.repeat(64), runtimeManifestSha256: 'b'.repeat(64), input: { sha256: 'c'.repeat(64), bytes: 123 } }
-  const prior = { schema: 1, kind: 'packaged-local-processing-smoke', status: 'running', ...expected,
+  const expected = { candidate: candidateTuple('a'), runtimeManifestSha256: 'b'.repeat(64), input: { sha256: 'c'.repeat(64), bytes: 123 } }
+  const prior = { schema: EVIDENCE_SCHEMA, kind: 'packaged-local-processing-smoke', mode: 'advanced', status: 'running', ...expected,
+    executableSha256: expected.candidate.executableSha256,
     application: { packaged: true, platform: process.platform, arch: process.arch, userData: join(output, 'profile') } }
   const save = () => writeFileSync(join(output, 'evidence.json'), JSON.stringify(prior))
   save(); return { root, output, expected, prior, save }
@@ -39,9 +46,12 @@ test('interrupted evidence is hash linked without modifying bytes or inferring a
 
 test('resume rejects changed payloads, wrong profile, completed runs and inference retries', t => {
   const f = fixture(t)
-  for (const field of ['executableSha256', 'runtimeManifestSha256']) {
-    assert.throws(() => validateResume(f.output, { ...f.expected, [field]: 'd'.repeat(64) }), /changed/)
+  // Every element of the candidate identity is bound, not only the executable.
+  for (const key of CANDIDATE_KEYS) {
+    assert.throws(() => validateResume(f.output, { ...f.expected, candidate: { ...f.expected.candidate, [key]: 'd'.repeat(64) } }),
+      /candidate changed outside the explicit upgrade lineage/)
   }
+  assert.throws(() => validateResume(f.output, { ...f.expected, runtimeManifestSha256: 'd'.repeat(64) }), /manifest changed/)
   assert.throws(() => validateResume(f.output, { ...f.expected, input: { sha256: 'd'.repeat(64), bytes: 123 } }), /audio changed/)
   const originalProfile = f.prior.application.userData
   f.prior.application.userData = f.root; f.save()
@@ -111,36 +121,94 @@ test('executable upgrade requires explicit resume and a full original hash', () 
   assert.equal(parseArguments([...args, '--resume', flag, digest.toUpperCase()]).upgradeFromExecutableSha256, digest)
 })
 
-test('explicit upgrade preserves original evidence and binds original and current hashes', t => {
+test('explicit upgrade preserves original evidence and binds original and current candidate tuples', t => {
   const f = fixture(t), original = readFileSync(join(f.output, 'evidence.json'))
-  const current = { ...f.expected, executableSha256: 'd'.repeat(64) }
-  assert.throws(() => validateResume(f.output, current), /executable changed/)
-  const result = validateResume(f.output, current, f.expected.executableSha256)
-  assert.deepEqual(result.upgrade, { fromExecutableSha256: f.expected.executableSha256,
-    toExecutableSha256: current.executableSha256,
-    qualification: 'Application upgrade with retained setup; not clean-install proof' })
+  const from = f.expected.candidate.executableSha256
+  for (const current of [{ ...f.expected, candidate: candidateTuple('d') },
+    // Linux: the stock executable is unchanged while the application archive changes.
+    { ...f.expected, candidate: { ...f.expected.candidate, applicationArchiveSha256: '3'.repeat(64) } }]) {
+    assert.throws(() => validateResume(f.output, current), /candidate changed/)
+    const result = validateResume(f.output, current, from)
+    assert.deepEqual(result.upgrade, { fromExecutableSha256: from, toExecutableSha256: current.candidate.executableSha256,
+      fromCandidate: f.expected.candidate, toCandidate: current.candidate,
+      qualification: 'Application upgrade with retained setup; not clean-install proof' })
+    assert.throws(() => validateResume(f.output, current, 'e'.repeat(64)), /does not match original/)
+  }
   assert.deepEqual(readFileSync(join(f.output, 'evidence.json')), original)
-  assert.throws(() => validateResume(f.output, f.expected, f.expected.executableSha256), /must change/)
-  assert.throws(() => validateResume(f.output, current, 'e'.repeat(64)), /executable changed|does not match/)
+  assert.throws(() => validateResume(f.output, f.expected, from), /must change the candidate/)
 })
 
 test('upgrade retries require every prior candidate to have explicit matching lineage', t => {
-  const f = fixture(t), current = { ...f.expected, executableSha256: 'd'.repeat(64) }
-  const result = validateResume(f.output, current, f.expected.executableSha256)
+  const f = fixture(t), from = f.expected.candidate.executableSha256
+  const current = { ...f.expected, candidate: { ...f.expected.candidate, nativeManifestSha256: '4'.repeat(64) } }
+  const result = validateResume(f.output, current, from)
   const directory = join(f.output, 'resume-first'); mkdirSync(directory)
   const attempt = { ...f.prior, resume: { priorEvidence: '../evidence.json', priorEvidenceSha256: result.sha256 } }
   const save = () => writeFileSync(join(directory, 'evidence.json'), JSON.stringify(attempt))
-  save(); assert.equal(validateResume(f.output, current, f.expected.executableSha256).attempts.length, 1)
-  attempt.executableSha256 = current.executableSha256; save()
-  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /matching upgrade lineage/)
+  save(); assert.equal(validateResume(f.output, current, from).attempts.length, 1)
+  attempt.candidate = current.candidate; save()
+  assert.throws(() => validateResume(f.output, current, from), /matching upgrade lineage/)
   attempt.upgrade = result.upgrade; save()
-  assert.equal(validateResume(f.output, current, f.expected.executableSha256).attempts.length, 1)
-  attempt.upgrade = { ...result.upgrade, fromExecutableSha256: 'e'.repeat(64) }; save()
-  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /matching upgrade lineage/)
-  attempt.executableSha256 = 'e'.repeat(64); save()
-  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /executable changed/)
-  attempt.executableSha256 = current.executableSha256; attempt.upgrade = result.upgrade; attempt.inferenceStartedAt = 'recorded'; save()
-  assert.throws(() => validateResume(f.output, current, f.expected.executableSha256), /installation interruptions only/)
+  assert.equal(validateResume(f.output, current, from).attempts.length, 1)
+  attempt.upgrade = { ...result.upgrade, fromCandidate: { ...result.upgrade.fromCandidate, applicationArchiveSha256: '5'.repeat(64) } }; save()
+  assert.throws(() => validateResume(f.output, current, from), /matching upgrade lineage/)
+  attempt.candidate = { ...current.candidate, applicationArchiveSha256: '6'.repeat(64) }; save()
+  assert.throws(() => validateResume(f.output, current, from), /candidate changed outside/)
+  attempt.candidate = current.candidate; attempt.upgrade = result.upgrade; attempt.inferenceStartedAt = 'recorded'; save()
+  assert.throws(() => validateResume(f.output, current, from), /installation interruptions only/)
+})
+
+test('legacy evidence without a candidate tuple resumes only on Windows by executable hash', t => {
+  const f = fixture(t)
+  delete f.prior.candidate; f.prior.schema = 1; f.prior.application.platform = 'win32'; f.save()
+  // Legacy Windows evidence: the executable hash is the recorded identity.
+  assert.equal(validateResume(f.output, f.expected, undefined, 'win32').candidate.legacy, true)
+  assert.throws(() => validateResume(f.output, { ...f.expected, candidate: candidateTuple('d') }, undefined, 'win32'), /candidate changed/)
+  const upgraded = validateResume(f.output, { ...f.expected, candidate: candidateTuple('d') }, f.expected.candidate.executableSha256, 'win32')
+  assert.deepEqual(upgraded.upgrade.fromCandidate, { executableSha256: f.expected.candidate.executableSha256 })
+  // An old-format upgrade attempt keeps its three recorded fields.
+  const directory = join(f.output, 'resume-first'); mkdirSync(directory)
+  writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ...f.prior, executableSha256: 'd'.repeat(64),
+    resume: { priorEvidence: '../evidence.json', priorEvidenceSha256: upgraded.sha256 },
+    upgrade: { fromExecutableSha256: upgraded.upgrade.fromExecutableSha256, toExecutableSha256: 'd'.repeat(64), qualification: upgraded.upgrade.qualification } }))
+  assert.equal(validateResume(f.output, { ...f.expected, candidate: candidateTuple('d') }, f.expected.candidate.executableSha256, 'win32').attempts.length, 1)
+  rmSync(directory, { recursive: true })
+  for (const platform of ['linux', 'darwin']) {
+    f.prior.application.platform = platform; f.save()
+    assert.throws(() => validateResume(f.output, f.expected, undefined, platform), /lacks the candidate identity tuple/)
+  }
+  // A tuple can never appear on schema 1, nor be absent on the current schema.
+  f.prior.application.platform = 'win32'; f.prior.schema = EVIDENCE_SCHEMA; f.save()
+  assert.throws(() => validateResume(f.output, f.expected, undefined, 'win32'), /lacks a candidate identity/)
+  assert.throws(() => recordedCandidate({ schema: 1, candidate: f.expected.candidate, executableSha256: 'a'.repeat(64) }, 'win32'), /schema/)
+  assert.throws(() => recordedCandidate({ schema: EVIDENCE_SCHEMA, candidate: { ...f.expected.candidate, executableSha256: 'd'.repeat(64) },
+    executableSha256: 'a'.repeat(64) }, 'linux'), /inconsistent/)
+  assert.throws(() => recordedCandidate({ schema: EVIDENCE_SCHEMA, candidate: { executableSha256: 'a'.repeat(64) }, executableSha256: 'a'.repeat(64) }, 'linux'), /malformed/)
+})
+
+test('resume refuses wizard or retained evidence and a different recorded architecture before launch', t => {
+  const f = fixture(t)
+  for (const mode of ['wizard', 'retained']) {
+    f.prior.mode = mode; f.save()
+    assert.throws(() => validateResume(f.output, f.expected), /advanced-route/)
+  }
+  f.prior.mode = 'advanced'; f.prior.application.arch = process.arch === 'arm64' ? 'x64' : 'arm64'; f.save()
+  assert.throws(() => validateResume(f.output, f.expected), /different architecture/)
+  delete f.prior.application.arch; f.save()
+  assert.throws(() => validateResume(f.output, f.expected), /different architecture/)
+  f.prior.application.arch = 'arm64'; f.save()
+  assert.equal(validateResume(f.output, f.expected, undefined, process.platform, 'arm64').prior.application.arch, 'arm64')
+})
+
+test('resume profile identity folds case on macOS and Windows but not Linux', t => {
+  const f = fixture(t)
+  f.prior.application.userData = join(f.output, 'PROFILE')
+  for (const platform of ['darwin', 'win32']) {
+    f.prior.application.platform = platform; f.save()
+    assert.equal(validateResume(f.output, f.expected, undefined, platform).prior.application.userData, join(f.output, 'PROFILE'))
+  }
+  f.prior.application.platform = 'linux'; f.save()
+  assert.throws(() => validateResume(f.output, f.expected, undefined, 'linux'), /profile identity/)
 })
 
 
@@ -192,6 +260,123 @@ test('retained profile excludes linked storage and overlapping evidence', t => {
   const link = join(f.root, 'linked-profile')
   symlinkSync(profile, link, process.platform === 'win32' ? 'junction' : 'dir')
   assert.throws(() => validateRetainedProfile(link, join(f.root, 'new-evidence')), /physical/)
+})
+
+test('macOS retained profile containment cannot be bypassed by letter case', t => {
+  const f = fixture(t), profile = join(f.output, 'profile')
+  // On a case-folding volume these name the profile itself and the directory
+  // that contains it. Parents must exist physically, so they are built from
+  // existing directories.
+  for (const output of [join(f.output, 'PROFILE'), join(f.root, 'EVIDENCE'), join(f.root, 'Evidence')]) {
+    assert.throws(() => validateRetainedProfile(profile, output, 'darwin'), /separate directories/)
+  }
+  validateRetainedProfile(profile, join(f.root, 'new-evidence'), 'darwin')
+  if (process.platform === 'linux') {
+    // Linux keeps case-distinct names distinct.
+    validateRetainedProfile(profile, join(f.output, 'PROFILE'), 'linux')
+  }
+})
+
+test('evidence output is created only beneath a physical parent and never adopted', t => {
+  const f = fixture(t)
+  assertPhysicalOutputParent(join(f.root, 'new-evidence'))
+  assert.throws(() => assertPhysicalOutputParent(f.output), /already exist/)
+  assert.throws(() => assertPhysicalOutputParent(join(f.root, 'missing', 'evidence')), /ENOENT/)
+  const link = join(f.root, 'linked-parent')
+  symlinkSync(f.output, link, process.platform === 'win32' ? 'junction' : 'dir')
+  assert.throws(() => assertPhysicalOutputParent(join(link, 'evidence')), /physical/)
+})
+
+test('candidate identity hashes executable, archive, native manifest/provenance and optional receipt', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'candidate-identity-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const build = (directory, receipt) => {
+    mkdirSync(join(directory, 'resources', 'native'), { recursive: true })
+    writeFileSync(join(directory, 'Singhouse'), 'stock electron')
+    writeFileSync(join(directory, 'resources', 'app.asar'), `archive ${directory}`)
+    writeFileSync(join(directory, 'resources', 'native', 'manifest.json'), '{"runtimeId":"x"}')
+    writeFileSync(join(directory, 'resources', 'native', 'provenance.json'), '{"sourceCommit":"y"}')
+    if (receipt) writeFileSync(join(directory, 'resources', 'release-receipt.json'), receipt)
+    return candidateIdentity(join(directory, 'Singhouse'), 'linux')
+  }
+  const first = build(join(root, 'one'), '{"r":1}'), second = build(join(root, 'two'))
+  assert.deepEqual(Object.keys(first), CANDIDATE_KEYS)
+  assert.equal(first.executableSha256, hash('stock electron'))
+  // Identical stock executables; the archive distinguishes the builds.
+  assert.equal(first.executableSha256, second.executableSha256)
+  assert.notEqual(first.applicationArchiveSha256, second.applicationArchiveSha256)
+  assert.equal(first.releaseReceiptSha256, hash('{"r":1}')); assert.equal(second.releaseReceiptSha256, null)
+  assert.equal(first.nativeManifestSha256, hash('{"runtimeId":"x"}')); assert.equal(first.nativeProvenanceSha256, hash('{"sourceCommit":"y"}'))
+  const contents = join(root, 'Singhouse.app', 'Contents')
+  mkdirSync(join(contents, 'MacOS'), { recursive: true }); mkdirSync(join(contents, 'Resources', 'native'), { recursive: true })
+  writeFileSync(join(contents, 'MacOS', 'Singhouse'), 'mac launcher'); writeFileSync(join(contents, 'Resources', 'app.asar'), 'mac archive')
+  writeFileSync(join(contents, 'Resources', 'native', 'manifest.json'), '{}'); writeFileSync(join(contents, 'Resources', 'native', 'provenance.json'), '{}')
+  const mac = candidateIdentity(join(contents, 'MacOS', 'Singhouse'), 'darwin')
+  assert.equal(mac.applicationArchiveSha256, hash('mac archive')); assert.equal(mac.releaseReceiptSha256, null)
+  rmSync(join(root, 'two', 'resources', 'app.asar'))
+  assert.throws(() => candidateIdentity(join(root, 'two', 'Singhouse'), 'linux'), /ENOENT/)
+})
+
+test('executable identity limitation is stated for each platform', () => {
+  assert.match(executableIdentityLimitation('linux'), /stock Electron binary on Linux and is identical across builds/)
+  assert.match(executableIdentityLimitation('darwin'), /does not identify the application archive/)
+  assert.match(executableIdentityLimitation('win32'), /does not by itself identify the application archive/)
+  assert.throws(() => executableIdentityLimitation('aix'), /Unsupported/)
+})
+
+test('harness identity hashes every local file the harness loads', () => {
+  const desktop = fileURLToPath(new URL('../', import.meta.url)), identity = harnessIdentity()
+  assert.deepEqual(Object.keys(identity.files), [...HARNESS_FILES])
+  for (const [file, digest] of Object.entries(identity.files)) assert.equal(digest, hash(readFileSync(join(desktop, file))))
+  // Closure: every relative import or URL reference of a listed module is listed.
+  for (const file of HARNESS_FILES.filter(file => file.endsWith('.mjs'))) {
+    const source = readFileSync(join(desktop, file), 'utf8')
+    const references = [...source.matchAll(/from '(\.{1,2}\/[^']+)'|import\('(\.{1,2}\/[^']+)'\)|new URL\('(\.{1,2}\/[^']+)', import\.meta\.url\)/gu)]
+      .map(match => match[1] ?? match[2] ?? match[3]).filter(reference => !reference.endsWith('/'))
+    for (const reference of references) {
+      const resolved = relative(desktop, join(desktop, dirname(file), reference)).split(sep).join('/')
+      assert.ok(HARNESS_FILES.includes(resolved), `${file} loads unlisted ${resolved}`)
+    }
+  }
+})
+
+test('extra CA input is a small PEM certificate bundle with no private key', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'extra-ca-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const pem = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0Fy\n-----END CERTIFICATE-----\n'
+  writeFileSync(join(root, 'ca.pem'), pem + pem)
+  assert.deepEqual(extraCaCertificate(join(root, 'ca.pem')), { path: join(root, 'ca.pem'), sha256: hash(pem + pem), certificates: 2 })
+  writeFileSync(join(root, 'key.pem'), `${pem}-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n`)
+  assert.throws(() => extraCaCertificate(join(root, 'key.pem')), /private key/)
+  writeFileSync(join(root, 'junk.pem'), `${pem}trailing text`)
+  assert.throws(() => extraCaCertificate(join(root, 'junk.pem')), /only PEM certificates/)
+  writeFileSync(join(root, 'empty.pem'), 'not a certificate')
+  assert.throws(() => extraCaCertificate(join(root, 'empty.pem')), /PEM certificates/)
+  symlinkSync(join(root, 'ca.pem'), join(root, 'link.pem'))
+  assert.throws(() => extraCaCertificate(join(root, 'link.pem')), /regular file/)
+  assert.throws(() => extraCaCertificate('ca.pem'), /absolute/)
+})
+
+test('wizard mode is exclusive, fresh-profile only, and requires the expected runtime lock', () => {
+  const lock = 'A'.repeat(64)
+  const base = ['--executable', 'app', '--audio', 'audio.wav', '--output', 'evidence', '--wizard', '--expected-runtime-lock-sha256', lock]
+  const parsed = parseArguments(base)
+  assert.equal(parsed.mode, 'wizard'); assert.equal(parsed.expectedRuntimeLockSha256, 'a'.repeat(64))
+  assert.equal(parsed.interruptRuntimeRetrieval, false); assert.equal(parsed.resume, false); assert.equal(parsed.manifest, undefined)
+  assert.equal(parseArguments([...base, '--interrupt-runtime-retrieval']).interruptRuntimeRetrieval, true)
+  assert.ok(parseArguments([...base, '--extra-ca-cert', 'ca.pem']).extraCaCert.endsWith('ca.pem'))
+  for (const extra of [['--runtime-manifest', 'm.json'], ['--download-models'], ['--retained-profile', 'p'], ['--resume'],
+    ['--upgrade-from-executable-sha256', 'b'.repeat(64)], ['--expected-source-commit', 'c'.repeat(40)]]) {
+    assert.throws(() => parseArguments([...base, ...extra]), /Wizard mode excludes/)
+  }
+  assert.throws(() => parseArguments(base.slice(0, -2)), /expected-runtime-lock/)
+  assert.throws(() => parseArguments([...base.slice(0, -1), 'abc']), /64 hex/)
+  assert.throws(() => parseArguments([...base, '--wizard']), /Duplicate --wizard/)
+  assert.throws(() => parseArguments([...args, '--interrupt-runtime-retrieval']), /requires --wizard/)
+  assert.throws(() => parseArguments([...args, '--expected-runtime-lock-sha256', 'a'.repeat(64)]), /requires --wizard/)
+  assert.throws(() => parseArguments(args.filter((_, i) => i !== 2 && i !== 3)), /Missing --runtime-manifest/)
+  assert.equal(parseArguments(args).mode, 'advanced')
+  assert.equal(parseArguments([...args.slice(0, -1), '--retained-profile', 'p', '--expected-source-commit', 'a'.repeat(40)]).mode, 'retained')
 })
 
 test('fresh inference cannot adopt an existing song or job', () => {
@@ -248,10 +433,23 @@ test('resume evidence binds to the platform that recorded it', t => {
 
 test('relaunch after resume refuses another platform, architecture or profile', () => {
   const prior = { platform: 'darwin', arch: 'arm64', userData: '/Users/op/evidence/profile' }
-  validateResumedApplication(prior, { ...prior, packaged: true })
-  assert.throws(() => validateResumedApplication(prior, { ...prior, platform: 'linux' }), /different platform/)
-  assert.throws(() => validateResumedApplication(prior, { ...prior, arch: 'x64' }), /different architecture/)
-  assert.throws(() => validateResumedApplication(prior, { ...prior, userData: '/Users/op/evidence/Profile' }))
+  validateResumedApplication(prior, { ...prior, packaged: true }, 'darwin')
+  assert.throws(() => validateResumedApplication(prior, { ...prior, platform: 'linux' }, 'darwin'), /different platform/)
+  assert.throws(() => validateResumedApplication(prior, { ...prior, arch: 'x64' }, 'darwin'), /different architecture/)
+  assert.throws(() => validateResumedApplication(prior, { ...prior, userData: '/Users/op/other/profile' }, 'darwin'), /different profile/)
+  // The default macOS volume folds case; the same comparison on Linux does not.
+  validateResumedApplication(prior, { ...prior, userData: '/Users/op/evidence/Profile' }, 'darwin')
+  const linux = { ...prior, platform: 'linux', userData: '/home/op/evidence/profile' }
+  assert.throws(() => validateResumedApplication(linux, { ...linux, userData: '/home/op/evidence/Profile' }, 'linux'), /different profile/)
+  assert.throws(() => validateResumedApplication(linux, { ...linux, userData: undefined }, 'linux'), /different profile/)
+})
+
+test('harness and application architecture must agree; the application identity is authoritative', () => {
+  const harness = { platform: 'darwin', arch: 'arm64' }
+  validateHarnessArchitecture(harness, { platform: 'darwin', arch: 'arm64' })
+  // An x64 Node under translation would observe and record a different target.
+  assert.throws(() => validateHarnessArchitecture({ platform: 'darwin', arch: 'x64' }, { platform: 'darwin', arch: 'arm64' }), /architecture \(arm64\) differs from the harness Node \(x64\)/)
+  assert.throws(() => validateHarnessArchitecture(harness, { platform: 'linux', arch: 'arm64' }), /platform differs/)
 })
 
 test('Linux resume does not accept a profile that differs only in case', { skip: process.platform !== 'linux' }, t => {
@@ -274,7 +472,19 @@ test('launch environment is allowlisted per platform and keeps the profile isola
   assert.deepEqual(keys('win32'), ['APPDATA', 'DISPLAY', 'LANG', 'LC_ALL', 'LOCALAPPDATA', 'PATH', 'Path', 'SystemRoot', 'TEMP', 'TMPDIR',
     'USERPROFILE', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'])
   assert.deepEqual(keys('darwin'), ['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'XDG_CONFIG_HOME'])
-  assert.deepEqual(keys('linux'), ['DISPLAY', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'])
+  // Half a Wayland session description is never passed.
+  assert.deepEqual(keys('linux'), ['DISPLAY', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'])
+  assert.deepEqual(Object.keys(applicationEnvironment({ ...source, XDG_SESSION_TYPE: 'wayland' }, 'linux', '/evidence')).sort(),
+    ['DISPLAY', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE'])
+  assert.deepEqual(Object.keys(applicationEnvironment({ PATH: '/bin', DISPLAY: ':0', XDG_SESSION_TYPE: 'x11' }, 'linux', '/evidence')).sort(),
+    ['DISPLAY', 'PATH', 'XDG_CONFIG_HOME'])
+  // Inherited trust overrides never pass; an explicit CA path is the only source.
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    assert.equal(applicationEnvironment({ ...source, NODE_EXTRA_CA_CERTS: '/inherited.pem', SSL_CERT_FILE: '/x', NODE_TLS_REJECT_UNAUTHORIZED: '0' }, platform, '/evidence').NODE_EXTRA_CA_CERTS, undefined)
+    const env = applicationEnvironment(source, platform, '/evidence', { extraCaCertificate: '/operator/ca.pem' })
+    assert.equal(env.NODE_EXTRA_CA_CERTS, '/operator/ca.pem'); assert.equal(env.NODE_TLS_REJECT_UNAUTHORIZED, undefined)
+  }
+  assert.throws(() => applicationEnvironment(source, 'linux', '/evidence', { extraCaCertificate: 'relative.pem' }), /absolute/)
   for (const platform of ['win32', 'darwin', 'linux']) {
     const env = applicationEnvironment(source, platform, '/evidence')
     assert.equal(env.XDG_CONFIG_HOME, '/evidence')

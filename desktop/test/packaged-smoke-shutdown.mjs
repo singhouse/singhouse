@@ -60,10 +60,30 @@ export function collectOwned(table, known) {
   return owned
 }
 
+// Pure mapping from a shutdown report to durable evidence. Process rows keep
+// only {pid, parent}; birth values are ownership internals, not evidence.
+// `forced` is true when the retained root was still running at failure, the
+// only case in which closePackagedApplication signals it.
+export function shutdownEvidence({ event, processes, error, closeSettled, exitCode, signalCode, cleanupErrors } = {}) {
+  assert.equal(typeof event, 'string', 'Shutdown report requires an event')
+  const entry = { event }
+  if (Array.isArray(processes)) {
+    entry.processCount = processes.length
+    entry.processes = processes.map(({ pid, parent }) => ({ pid, parent }))
+  }
+  if (error !== undefined) entry.error = String(error)
+  for (const [key, value] of Object.entries({ closeSettled, exitCode, signalCode })) if (value !== undefined) entry[key] = value
+  if (cleanupErrors !== undefined) entry.cleanupErrors = cleanupErrors.map(String)
+  return { entry, forced: event === 'shutdown-failed' && exitCode === null && signalCode === null }
+}
+
 // No launch race: callers must await electron.launch's own timeout and retain
-// the returned application before entering this function.
+// the returned application before entering this function. `initiate` starts
+// the shutdown (default: Playwright close). An application that is already
+// quitting on its own passes a promise for its exit instead; it is observed
+// to completion the same way and is never signalled unless it fails.
 export async function closePackagedApplication(application, {
-  timeout = 20000, table = processTable, report = () => {},
+  timeout = 20000, table = processTable, report = () => {}, initiate = () => application.close(),
 } = {}) {
   const child = application.process()
   let known = [], failure
@@ -76,7 +96,7 @@ export async function closePackagedApplication(application, {
   } catch (error) { failure = error }
   let settled = false, closeError
   // Rejection is consumed even if close settles after the deadline.
-  void Promise.resolve().then(() => application.close()).then(
+  void Promise.resolve().then(() => initiate()).then(
     () => { settled = true }, error => { settled = true; closeError = error },
   )
   const deadline = Date.now() + timeout

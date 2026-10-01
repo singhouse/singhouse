@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { closePackagedApplication, collectOwned, processTable, parseDarwinProcessTable } from './packaged-smoke-shutdown.mjs'
+import { closePackagedApplication, collectOwned, processTable, parseDarwinProcessTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
 
 const root = { pid: 10, parent: 1, birth: '100' }
 const backend = { pid: 11, parent: 10, birth: '101' }
@@ -61,6 +61,45 @@ test('resolved close with a surviving descendant is a failure', async () => {
   await assert.rejects(closePackagedApplication(app, { timeout: 20, table: async () => rows, report: row => reports.push(row) }), /did not shut down cleanly/)
   assert.equal(child.kills, 0)
   assert.deepEqual(reports.at(-1).processes, [{ ...backend, parent: 1 }])
+})
+
+test('shutdown evidence keeps remaining process identity, exit facts and cleanup errors', () => {
+  assert.deepEqual(shutdownEvidence({ event: 'before-close', processes: [root, backend] }), { forced: false,
+    entry: { event: 'before-close', processCount: 2, processes: [{ pid: 10, parent: 1 }, { pid: 11, parent: 10 }] } })
+  assert.deepEqual(shutdownEvidence({ event: 'closed', processes: [] }), { forced: false, entry: { event: 'closed', processCount: 0, processes: [] } })
+  const hung = shutdownEvidence({ event: 'shutdown-failed', error: new Error('did not shut down cleanly'), closeSettled: false,
+    exitCode: null, signalCode: null, processes: [root, backend] })
+  assert.equal(hung.forced, true)
+  assert.deepEqual(hung.entry, { event: 'shutdown-failed', processCount: 2, processes: [{ pid: 10, parent: 1 }, { pid: 11, parent: 10 }],
+    error: 'Error: did not shut down cleanly', closeSettled: false, exitCode: null, signalCode: null })
+  // Clean root exit with a surviving descendant: nothing was forced.
+  const orphan = shutdownEvidence({ event: 'shutdown-failed', error: 'x', closeSettled: true, exitCode: 0, signalCode: null, processes: [{ ...backend, parent: 1 }] })
+  assert.equal(orphan.forced, false); assert.deepEqual(orphan.entry.processes, [{ pid: 11, parent: 1 }])
+  assert.equal(shutdownEvidence({ event: 'shutdown-failed', exitCode: null, signalCode: 'SIGKILL' }).forced, false)
+  const cleanup = shutdownEvidence({ event: 'after-forced-cleanup', processes: [backend], cleanupErrors: [new Error('EPERM')] })
+  assert.deepEqual(cleanup.entry, { event: 'after-forced-cleanup', processCount: 1, processes: [{ pid: 11, parent: 10 }], cleanupErrors: ['Error: EPERM'] })
+  assert.deepEqual(shutdownEvidence({ event: 'cleanup-inspection-failed', error: 'denied', cleanupErrors: [] }).entry,
+    { event: 'cleanup-inspection-failed', error: 'denied', cleanupErrors: [] })
+  assert.throws(() => shutdownEvidence({}), /event/)
+})
+
+test('an application quitting on its own is observed to a clean exit without being closed', async () => {
+  let rows = [root, backend], closes = 0
+  const { app, child } = fixture(() => { closes++ })
+  const reports = []
+  await closePackagedApplication(app, { table: async () => rows, report: row => reports.push(row),
+    initiate: async () => { rows = []; child.exitCode = 0 } })
+  assert.equal(closes, 0); assert.equal(child.kills, 0)
+  assert.deepEqual(reports.map(row => row.event), ['before-close', 'closed'])
+})
+
+test('a self-quitting application that never exits is forced and fails', async () => {
+  const { app, child } = fixture(() => {})
+  const reports = []
+  await assert.rejects(closePackagedApplication(app, { timeout: 20, table: async () => [root], report: row => reports.push(row),
+    initiate: () => new Promise(() => {}) }), /did not shut down cleanly/)
+  assert.equal(child.kills, 1)
+  assert.equal(shutdownEvidence(reports.find(row => row.event === 'shutdown-failed')).forced, true)
 })
 
 test('Linux forced cleanup stops its real retained child without reporting success', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {

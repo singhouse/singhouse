@@ -4,23 +4,50 @@ import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { packagedLayout, samePath } from './packaged-smoke-paths.mjs'
-import { closePackagedApplication, processTable } from './packaged-smoke-shutdown.mjs'
+import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
+import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
+import { WIZARD_LIMITATIONS, acceptConsent, assertCatalogLock, assertPostRestart, assertWizardPlan, cancelFromUi, chooseLocalAndContinue,
+  classifyRetry, clickRestart, consentSnapshot, createStatusTracker, installedRuntimeIdentity, interceptRelaunch, observeOnboarding,
+  onboardingDialog, partialRuntimeBytes, readPlan, readStatus, retryFromUi, shouldInterrupt, summarizeCatalog, waitForStep } from './packaged-wizard-driver.mjs'
+
+const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval' }
 
 export function parseArguments(args) {
-  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256', '--retained-profile', '--expected-source-commit'])
+  const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256',
+    '--retained-profile', '--expected-source-commit', '--expected-runtime-lock-sha256', '--extra-ca-cert'])
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]
-    if (flag === '--resume') { assert.ok(!options.resume, 'Duplicate --resume'); options.resume = true; continue }
-    if (flag === '--download-models') { options.downloadModels = true; continue }
+    if (Object.hasOwn(BOOLEAN_FLAGS, flag)) {
+      assert.ok(!options[BOOLEAN_FLAGS[flag]], `Duplicate ${flag}`); options[BOOLEAN_FLAGS[flag]] = true; continue
+    }
     if (flag === '--model-folder') throw new Error('The advanced application route has no combined offline model-folder import. Use --download-models explicitly; do not transplant cache pointers.')
     if (!valued.has(flag) || options[flag] !== undefined || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Invalid argument: ${flag}`)
     options[flag] = args[++i]
   }
-  for (const key of ['--executable', '--runtime-manifest', '--audio', '--output']) assert.ok(options[key], `Missing ${key}`)
+  for (const key of ['--executable', '--audio', '--output']) assert.ok(options[key], `Missing ${key}`)
+  const seconds = Number(options['--timeout-seconds'] ?? 3600)
+  assert.ok(Number.isInteger(seconds) && seconds >= 60 && seconds <= 14400, 'Timeout must be 60–14400 seconds')
+  const common = { executable: resolve(options['--executable']), audio: resolve(options['--audio']), output: resolve(options['--output']),
+    timeoutMs: seconds * 1000, extraCaCert: options['--extra-ca-cert'] ? resolve(options['--extra-ca-cert']) : undefined }
+  if (options.wizard) {
+    // The wizard's own consent screen covers runtime and model retrieval;
+    // it installs into a new profile only, with no operator manifest.
+    for (const [present, flag] of [[options['--runtime-manifest'], '--runtime-manifest'], [options.downloadModels, '--download-models'],
+      [options['--retained-profile'], '--retained-profile'], [options.resume, '--resume'], [options['--upgrade-from-executable-sha256'], '--upgrade-from-executable-sha256'],
+      [options['--expected-source-commit'], '--expected-source-commit']]) {
+      assert.ok(!present, `Wizard mode excludes ${flag}`)
+    }
+    const lock = options['--expected-runtime-lock-sha256']
+    assert.match(lock ?? '', /^[a-fA-F0-9]{64}$/u, 'Wizard mode requires --expected-runtime-lock-sha256 with 64 hex characters')
+    return { ...common, mode: 'wizard', expectedRuntimeLockSha256: lock.toLowerCase(), interruptRuntimeRetrieval: options.interruptRuntimeRetrieval === true,
+      resume: false }
+  }
+  assert.ok(!options.interruptRuntimeRetrieval, '--interrupt-runtime-retrieval requires --wizard')
+  assert.ok(!options['--expected-runtime-lock-sha256'], '--expected-runtime-lock-sha256 requires --wizard')
+  assert.ok(options['--runtime-manifest'], 'Missing --runtime-manifest')
   const retainedProfile = options['--retained-profile'], expectedSourceCommit = options['--expected-source-commit']
   if (retainedProfile) {
     assert.ok(!options.resume && !options.downloadModels && !options['--upgrade-from-executable-sha256'], 'Retained setup excludes resume, upgrades and model retrieval')
@@ -34,61 +61,167 @@ export function parseArguments(args) {
     assert.ok(options.resume, 'Executable upgrade requires --resume')
     assert.match(upgradeFrom, /^[a-fA-F0-9]{64}$/, 'Upgrade prior executable SHA-256 must be 64 hex characters')
   }
-  const seconds = Number(options['--timeout-seconds'] ?? 3600)
-  assert.ok(Number.isInteger(seconds) && seconds >= 60 && seconds <= 14400, 'Timeout must be 60–14400 seconds')
-  return { executable: resolve(options['--executable']), manifest: resolve(options['--runtime-manifest']),
+  return { ...common, mode: retainedProfile ? 'retained' : 'advanced', manifest: resolve(options['--runtime-manifest']),
     retainedProfile: retainedProfile ? resolve(retainedProfile) : undefined, expectedSourceCommit: expectedSourceCommit?.toLowerCase(),
-    resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase(), audio: resolve(options['--audio']), output: resolve(options['--output']), timeoutMs: seconds * 1000 }
+    resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase() }
 }
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const pause = ms => new Promise(resolveWait => setTimeout(resolveWait, ms))
 const MODEL_IDS = ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer']
 const PLATFORMS = ['win32', 'darwin', 'linux']
+export const EVIDENCE_SCHEMA = 2
+
+// Every local file this harness loads, relative to the desktop directory.
+// A unit test checks this list is closed over the harness's relative imports.
+export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
+  'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs'])
+export function harnessIdentity(root = fileURLToPath(new URL('../', import.meta.url))) {
+  return { files: Object.fromEntries(HARNESS_FILES.map(file => [file, hash(readFileSync(join(root, ...file.split('/'))))])) }
+}
+
+// An operator-supplied PEM bundle of extra trust anchors for a private test
+// source. It adds roots for the application's Node TLS; verification stays on.
+export function extraCaCertificate(path) {
+  assert.ok(isAbsolute(path), 'Extra CA certificate path must be absolute')
+  const info = lstatSync(path)
+  assert.ok(info.isFile() && !info.isSymbolicLink(), 'Extra CA certificate must be a regular file')
+  assert.ok(info.size > 0 && info.size <= 1024 * 1024, 'Extra CA certificate must be a small PEM file')
+  const text = readFileSync(path, 'utf8')
+  assert.ok(!/PRIVATE KEY/u.test(text), 'Extra CA file must not contain a private key')
+  const certificates = text.match(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/gu) ?? []
+  assert.ok(certificates.length > 0, 'Extra CA file must contain PEM certificates')
+  const residue = text.replace(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/gu, '').trim()
+  assert.equal(residue, '', 'Extra CA file may contain only PEM certificates')
+  return { path, sha256: hash(Buffer.from(text)), certificates: certificates.length }
+}
 
 // Allowlisted launch environment. Windows keeps its established set unchanged.
-// POSIX hosts need HOME and, on Linux, the display/session socket variables;
-// service, loader, Node/Electron and backend overrides never pass through.
-// --user-data-dir remains the only profile selector and is asserted after launch.
-export function applicationEnvironment(source, platform, output) {
+// POSIX hosts need HOME and, on Linux, the display/session variables; a
+// Wayland socket travels with its session type so Electron selects the same
+// display backend as the desktop session. Service, loader, Node/Electron and
+// backend overrides never pass through; NODE_EXTRA_CA_CERTS is set only from
+// an explicit --extra-ca-cert, never inherited. --user-data-dir remains the
+// only profile selector and is asserted after launch.
+export function applicationEnvironment(source, platform, output, { extraCaCertificate: caPath } = {}) {
   assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
   const allowed = {
     win32: /^(PATH|Path|SystemRoot|SYSTEMROOT|WINDIR|windir|COMSPEC|ComSpec|PATHEXT|TEMP|TMP|TMPDIR|USERPROFILE|APPDATA|LOCALAPPDATA|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u,
     darwin: /^(PATH|HOME|TMPDIR|LANG|LC_[A-Z_]+)$/u,
-    linux: /^(PATH|HOME|TMPDIR|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u,
+    linux: /^(PATH|HOME|TMPDIR|DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u,
   }[platform]
   const env = Object.fromEntries(Object.entries(source).filter(([key, value]) => allowed.test(key) && typeof value === 'string'))
+  if (platform === 'linux' && (env.WAYLAND_DISPLAY === undefined) !== (env.XDG_SESSION_TYPE === undefined)) {
+    // Never pass half of a Wayland session description.
+    delete env.WAYLAND_DISPLAY; delete env.XDG_SESSION_TYPE
+  }
   env.XDG_CONFIG_HOME = output
+  if (caPath !== undefined) {
+    assert.ok(isAbsolute(caPath), 'Extra CA certificate path must be absolute')
+    env.NODE_EXTRA_CA_CERTS = caPath
+  }
   return env
 }
 
-// Windows retains its established owned-child close. POSIX packaged apps put
-// the backend and runtime children in a detached process group, so a clean
-// Electron exit alone is not shutdown; observe the owned tree to completion.
+// Windows retains its established owned-child close. On POSIX the packaged
+// backend runs in its own detached session, and the Heart transcription
+// worker starts yet another session below it; neither is in Electron's
+// process group, so a clean Electron exit alone is not shutdown. Observe the
+// owned process tree (by parent lineage, not group) to completion.
 export const shutdownStrategy = platform => {
   assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
   return platform === 'win32' ? 'owned-child' : 'owned-process-tree'
 }
 
+// Candidate identity recorded in every mode. The executable alone does not
+// identify a build: on Linux it is the stock Electron binary.
+export const CANDIDATE_KEYS = Object.freeze(['executableSha256', 'applicationArchiveSha256', 'nativeManifestSha256',
+  'nativeProvenanceSha256', 'releaseReceiptSha256'])
+export function candidateIdentity(executable, platform = process.platform) {
+  const { resources, native } = packagedLayout(executable, platform)
+  const file = path => hash(readFileSync(path))
+  const receipt = join(resources, 'release-receipt.json')
+  return { executableSha256: file(executable), applicationArchiveSha256: file(join(resources, 'app.asar')),
+    nativeManifestSha256: file(join(native, 'manifest.json')), nativeProvenanceSha256: file(join(native, 'provenance.json')),
+    // A signed macOS bundle keeps its receipt outside the sealed bundle.
+    releaseReceiptSha256: existsSync(receipt) ? file(receipt) : null }
+}
+
+export function executableIdentityLimitation(platform) {
+  return {
+    linux: 'executableSha256 is the stock Electron binary on Linux and is identical across builds; the candidate is identified by the application archive, native manifest/provenance and receipt hashes, not by every native payload file',
+    darwin: 'executableSha256 is the Contents/MacOS launcher (the Electron binary, as signed); it does not identify the application archive, native payload or the rest of the bundle, which the candidate tuple records in part (archive, native manifest/provenance, receipt when present)',
+    win32: 'executableSha256 is the Windows launcher (the Electron binary with embedded resources and any signature); it does not by itself identify the application archive or native payload, which the candidate tuple records in part',
+  }[platform] ?? assert.fail('Unsupported processing smoke platform')
+}
+
+// Prior evidence identity. Evidence without the tuple predates it: only a
+// Windows executable hash is accepted as a legacy identity there; on Linux
+// and macOS that hash does not distinguish builds, so resume is refused.
+export function recordedCandidate(prior, platform) {
+  if (Object.hasOwn(prior, 'candidate')) {
+    assert.equal(prior.schema, EVIDENCE_SCHEMA, 'Prior evidence schema does not match its candidate identity')
+    assert.ok(prior.candidate && CANDIDATE_KEYS.every(key => Object.hasOwn(prior.candidate, key))
+      && CANDIDATE_KEYS.filter(key => key !== 'releaseReceiptSha256').every(key => /^[a-f0-9]{64}$/u.test(prior.candidate[key] ?? '')),
+    'Prior evidence has a malformed candidate identity')
+    assert.equal(prior.candidate.executableSha256, prior.executableSha256, 'Prior evidence candidate identity is inconsistent')
+    return { identity: prior.candidate, legacy: false }
+  }
+  assert.equal(prior.schema, 1, 'Prior evidence lacks a candidate identity')
+  assert.equal(platform, 'win32', `Prior evidence lacks the candidate identity tuple; on ${platform} its executable hash does not identify the candidate. Start a new evidence directory.`)
+  assert.match(prior.executableSha256 ?? '', /^[a-f0-9]{64}$/u, 'Prior evidence has no executable identity')
+  return { identity: { executableSha256: prior.executableSha256 }, legacy: true }
+}
+export function sameCandidate(recorded, current) {
+  return recorded.legacy ? recorded.identity.executableSha256 === current.executableSha256
+    : CANDIDATE_KEYS.every(key => recorded.identity[key] === current[key])
+}
+
 // A resume relaunches in the original profile on the same OS and architecture
 // that recorded it; other hosts are a new qualification, never a continuation.
-export function validateResumedApplication(prior, identity) {
+export function validateResumedApplication(prior, identity, platform = process.platform) {
   assert.equal(identity.platform, prior.platform, 'Resume evidence was recorded on a different platform')
   assert.equal(identity.arch, prior.arch, 'Resume evidence was recorded on a different architecture')
-  assert.equal(prior.userData, identity.userData)
+  assert.ok(typeof identity.userData === 'string' && samePath(prior.userData, identity.userData, platform),
+    'Relaunched application selected a different profile than the recorded attempt')
 }
+
+// The application reports its own architecture; the harness's Node must match
+// it so process observation, bundled tools and evidence describe one target.
+export function validateHarnessArchitecture(harness, identity) {
+  assert.equal(identity.platform, harness.platform, 'Packaged application platform differs from the harness host')
+  assert.equal(identity.arch, harness.arch,
+    `Packaged application architecture (${identity.arch}) differs from the harness Node (${harness.arch}); run the harness with a Node build native to the application architecture`)
+}
+
+// Output directories are created only beneath a physical, existing parent.
+export function assertPhysicalOutputParent(output, platform = process.platform) {
+  const parent = dirname(output)
+  const info = lstatSync(parent)
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Evidence parent must be a physical directory')
+  assert.ok(samePath(realpathSync(parent), parent, platform), 'Evidence parent must be a physical path')
+  assert.ok(!existsSync(output), 'Evidence directory must not already exist; use --resume only for an interrupted installation')
+}
+
+const UPGRADE_QUALIFICATION = 'Application upgrade with retained setup; not clean-install proof'
+const LEGACY_UPGRADE_KEYS = ['fromExecutableSha256', 'toExecutableSha256', 'qualification']
 
 // Resumption only continues installation in the original empty qualification
 // profile. A submitted inference is never silently adopted or declared passed.
-export function validateResume(output, expected, upgradeFromExecutableSha256, platform = process.platform) {
+// `expected.candidate` is the current candidate tuple. The upgrade flag
+// selects the original candidate by its executable hash; lineage then binds
+// the original and current tuples, so a Linux upgrade may keep the same
+// stock executable while its archive or native payload changes.
+export function validateResume(output, expected, upgradeFromExecutableSha256, platform = process.platform, arch = process.arch) {
   assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
+  const current = expected.candidate
+  assert.ok(current && CANDIDATE_KEYS.every(key => Object.hasOwn(current, key)), 'Current candidate identity is required')
   if (upgradeFromExecutableSha256 !== undefined) {
     assert.match(upgradeFromExecutableSha256, /^[a-f0-9]{64}$/, 'Invalid upgrade prior executable SHA-256')
-    assert.notEqual(upgradeFromExecutableSha256, expected.executableSha256, 'Executable upgrade must change the candidate')
   }
   const physicalDirectory = path => {
     assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink(), 'Resume directory must not be a link')
-    assert.ok(samePath(realpathSync(path), path), 'Resume path must be physical')
+    assert.ok(samePath(realpathSync(path), path, platform), 'Resume path must be physical')
   }
   physicalDirectory(output)
   const profile = join(output, 'profile')
@@ -98,28 +231,32 @@ export function validateResume(output, expected, upgradeFromExecutableSha256, pl
     const evidencePath = join(directory, 'evidence.json')
     assert.ok(lstatSync(evidencePath).isFile() && !lstatSync(evidencePath).isSymbolicLink(), 'Prior evidence must be a regular file')
     const bytes = readFileSync(evidencePath), prior = JSON.parse(bytes)
-    assert.equal(prior.schema, 1); assert.equal(prior.kind, 'packaged-local-processing-smoke')
+    assert.ok([1, EVIDENCE_SCHEMA].includes(prior.schema), 'Unsupported prior evidence schema'); assert.equal(prior.kind, 'packaged-local-processing-smoke')
+    assert.ok(prior.mode === undefined || prior.mode === 'advanced', 'Only advanced-route installation evidence can resume')
     assert.ok(['running', 'failed'].includes(prior.status), 'Only incomplete qualification evidence can resume')
     assert.ok(!['inferenceStartedAt', 'songId', 'jobId', 'outputs', 'transcription'].some(key => Object.hasOwn(prior, key)),
       'Resume supports installation interruptions only; use a new output for inference retries')
-    assert.ok(prior.executableSha256 === expected.executableSha256
-      || (upgradeFromExecutableSha256 !== undefined && prior.executableSha256 === upgradeFromExecutableSha256),
-    'Resume executable changed outside the explicit upgrade lineage')
+    const candidate = recordedCandidate(prior, platform)
     assert.equal(prior.runtimeManifestSha256, expected.runtimeManifestSha256, 'Resume runtime manifest changed')
     assert.equal(prior.input?.sha256, expected.input.sha256, 'Resume audio changed')
     assert.equal(prior.input?.bytes, expected.input.bytes, 'Resume audio size changed')
     assert.equal(prior.application?.packaged, true)
     assert.equal(prior.application?.platform, platform, 'Resume evidence was recorded on a different platform')
-    assert.ok(samePath(prior.application.userData, profile), 'Prior profile identity does not match isolated profile')
-    return { prior, sha256: hash(bytes) }
+    assert.equal(prior.application?.arch, arch, 'Resume evidence was recorded for a different architecture')
+    assert.ok(samePath(prior.application.userData, profile, platform), 'Prior profile identity does not match isolated profile')
+    return { prior, candidate, sha256: hash(bytes) }
   }
   const original = readAttempt(output), attempts = []
-  assert.equal(original.prior.executableSha256, upgradeFromExecutableSha256 ?? expected.executableSha256,
-    'Upgrade prior executable SHA-256 does not match original evidence')
   assert.ok(!Object.hasOwn(original.prior, 'upgrade'), 'Original evidence cannot be an upgrade attempt')
-  const upgrade = upgradeFromExecutableSha256 === undefined ? undefined : {
-    fromExecutableSha256: upgradeFromExecutableSha256, toExecutableSha256: expected.executableSha256,
-    qualification: 'Application upgrade with retained setup; not clean-install proof' }
+  let upgrade
+  if (upgradeFromExecutableSha256 === undefined) {
+    assert.ok(sameCandidate(original.candidate, current), 'Resume candidate changed outside the explicit upgrade lineage')
+  } else {
+    assert.equal(original.prior.executableSha256, upgradeFromExecutableSha256, 'Upgrade prior executable SHA-256 does not match original evidence')
+    assert.ok(!sameCandidate(original.candidate, current), 'Candidate upgrade must change the candidate identity')
+    upgrade = { fromExecutableSha256: upgradeFromExecutableSha256, toExecutableSha256: current.executableSha256,
+      fromCandidate: original.candidate.identity, toCandidate: current, qualification: UPGRADE_QUALIFICATION }
+  }
 
   // Every previous resume is relevant, even if the original evidence still
   // says installation was interrupted and the library was later emptied.
@@ -129,10 +266,16 @@ export function validateResume(output, expected, upgradeFromExecutableSha256, pl
     const attempt = readAttempt(directory)
     assert.equal(attempt.prior.resume?.priorEvidence, '../evidence.json', 'Resume attempt has invalid lineage')
     assert.equal(attempt.prior.resume?.priorEvidenceSha256, original.sha256, 'Resume attempt has changed lineage')
-    if (upgrade && attempt.prior.executableSha256 === expected.executableSha256) {
-      assert.deepEqual(attempt.prior.upgrade, upgrade, 'Resume attempt lacks explicit matching upgrade lineage')
-    } else {
+    if (upgrade && sameCandidate(attempt.candidate, current)) {
+      const recorded = attempt.prior.upgrade
+      if (attempt.candidate.legacy) {
+        assert.ok(recorded && LEGACY_UPGRADE_KEYS.every(key => recorded[key] === upgrade[key]), 'Resume attempt lacks explicit matching upgrade lineage')
+      } else assert.deepEqual(recorded, upgrade, 'Resume attempt lacks explicit matching upgrade lineage')
+    } else if (original.candidate.legacy ? attempt.prior.executableSha256 === original.prior.executableSha256
+      : sameCandidate(attempt.candidate, original.candidate.identity)) {
       assert.ok(!Object.hasOwn(attempt.prior, 'upgrade'), 'Resume attempt has unexpected upgrade lineage')
+    } else {
+      assert.fail('Resume candidate changed outside the explicit upgrade lineage')
     }
     attempts.push({ evidence: `../${name}/evidence.json`, sha256: attempt.sha256, status: attempt.prior.status })
   }
@@ -164,16 +307,13 @@ export function validateRetainedCandidate(executable, expectedSourceCommit, plat
     identity: records.receipt.value.identity, applicationArchiveSha256: hash(readFileSync(join(resources, 'app.asar'))) }
 }
 
-export function validateRetainedProfile(profile, output) {
+export function validateRetainedProfile(profile, output, platform = process.platform) {
   const info = lstatSync(profile)
   assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Retained profile must be a physical directory')
-  assert.ok(samePath(realpathSync(profile), profile), 'Retained profile must be physical')
-  assert.ok(samePath(realpathSync(dirname(output)), dirname(output)), 'Evidence parent must be physical')
-  for (const [parent, child] of [[profile, output], [output, profile]]) {
-    const path = relative(parent, child)
-    assert.ok(path && (path === '..' || path.startsWith('../') || path.startsWith('..\\') || isAbsolute(path)),
-      'Retained profile and evidence must be separate directories')
-  }
+  assert.ok(samePath(realpathSync(profile), profile, platform), 'Retained profile must be physical')
+  assert.ok(samePath(realpathSync(dirname(output)), dirname(output), platform), 'Evidence parent must be physical')
+  assert.ok(!samePath(profile, output, platform) && !isInside(profile, output, platform) && !isInside(output, profile, platform),
+    'Retained profile and evidence must be separate directories')
 }
 
 export function validateFreshSubmission(submitted, priorSongs, priorJobs) {
@@ -232,25 +372,40 @@ export async function run(options) {
   assert.ok(Number.isFinite(inputDuration) && inputDuration > 0 && inputDuration <= 120, 'Supply a vocal excerpt no longer than 120 seconds')
   assert.ok(statSync(options.audio).size > 0 && statSync(options.audio).size <= 64 * 1024 * 1024, 'Supply a short licensed audio excerpt of at most 64 MiB')
   const input = readFileSync(options.audio)
-  const manifestBytes = readFileSync(options.manifest), manifest = JSON.parse(manifestBytes)
-  assert.equal(manifest.kind, 'processing')
+  const wizardMode = options.mode === 'wizard'
+  // Wizard mode takes its runtime from the application's own catalog later.
+  const manifestBytes = wizardMode ? null : readFileSync(options.manifest)
+  let manifest = wizardMode ? null : JSON.parse(manifestBytes)
+  if (!wizardMode) assert.equal(manifest.kind, 'processing')
+  const trust = options.extraCaCert === undefined ? null : extraCaCertificate(options.extraCaCert)
   // The real app, not this harness, decides whether this lock is trusted.
   const profile = options.retainedProfile ?? join(options.output, 'profile')
   if (options.retainedProfile) {
     assert.ok(!options.resume && !options.upgradeFromExecutableSha256, 'Retained setup cannot resume')
     validateRetainedProfile(profile, options.output)
   }
-  if (!options.resume) mkdirSync(options.output) // Never adopt an existing output implicitly.
+  if (!options.resume) {
+    // Never adopt an existing output implicitly; a wizard profile is new by construction.
+    assertPhysicalOutputParent(options.output)
+    mkdirSync(options.output)
+  }
   const started = Date.now(), deadline = started + options.timeoutMs
-  const evidence = { schema: 1, kind: 'packaged-local-processing-smoke', startedAt: new Date(started).toISOString(),
-    status: 'running', platform: process.platform, arch: process.arch,
+  const candidate = candidateIdentity(options.executable)
+  const evidence = { schema: EVIDENCE_SCHEMA, kind: 'packaged-local-processing-smoke', mode: options.mode, startedAt: new Date(started).toISOString(),
+    status: 'running', harness: { platform: process.platform, arch: process.arch, ...harnessIdentity() },
     layout: { kind: layout.kind, resources: layout.resources, python: layout.python, ffmpeg: layout.ffmpeg, ffprobe: layout.ffprobe }, input: { sha256: hash(input), bytes: input.length, durationSeconds: inputDuration },
-    executableSha256: hash(readFileSync(options.executable)),
-    runtimeManifestSha256: hash(manifestBytes), runtimeLockSha256: manifest.provenance?.lockSha256,
-    consent: { modelRetrieval: !options.retainedProfile, localInference: true }, timingsMs: {}, transitions: [],
+    candidate, executableSha256: candidate.executableSha256,
+    runtimeManifestSha256: wizardMode ? null : hash(manifestBytes),
+    runtimeLockSha256: wizardMode ? options.expectedRuntimeLockSha256 : manifest.provenance?.lockSha256,
+    consent: { modelRetrieval: wizardMode ? 'application-setup-consent-screen' : !options.retainedProfile, localInference: true },
+    shutdownStrategy: shutdownStrategy(process.platform), trust: { extraCaCertificate: trust },
+    timingsMs: {}, transitions: [],
     limitations: ['Not corpus accuracy or listening evidence', 'Not physical output or show qualification',
-      'No representative RAM/VRAM measurement', 'Does not qualify a release catalog'] }
-  evidence.harnessSha256 = hash(readFileSync(new URL(import.meta.url)))
+      'No representative RAM/VRAM measurement', 'Does not qualify a release catalog', executableIdentityLimitation(process.platform)] }
+  // Compatibility field: the main harness file only; see harness.files.
+  evidence.harnessSha256 = evidence.harness.files['test/packaged-processing-smoke.mjs']
+  if (trust) evidence.limitations.push('An operator-supplied extra CA was trusted by the application\'s Node TLS for a private test source')
+  if (wizardMode) evidence.limitations.push(...WIZARD_LIMITATIONS)
   if (options.retainedProfile) {
     evidence.release = validateRetainedCandidate(options.executable, options.expectedSourceCommit)
     evidence.retainedSetup = { profile, qualification: 'Fresh local inference with retained setup; not installation proof' }
@@ -266,7 +421,11 @@ export async function run(options) {
     evidence.resume = { priorEvidence: '../evidence.json', priorEvidenceSha256: resumed.sha256,
       priorAttempts: resumed.attempts, priorStatus: resumed.prior.status, classification: resumed.prior.status === 'running'
         ? 'Prior attempt ended without a recorded outcome; interruption is not a pass'
-        : 'Prior attempt failed; this is a new qualification attempt' }
+        : 'Prior attempt failed; this is a new qualification attempt',
+      priorCandidateIdentity: resumed.candidate.legacy ? 'legacy-executable-only' : 'candidate-tuple' }
+    if (resumed.candidate.legacy) {
+      evidence.limitations.push('Resumed from legacy evidence that recorded only the executable hash; the earlier application archive and native payload are unverified')
+    }
     if (resumed.upgrade) {
       evidence.upgrade = resumed.upgrade
       evidence.limitations.push(resumed.upgrade.qualification)
@@ -275,7 +434,7 @@ export async function run(options) {
   }
   const save = () => writeFileSync(join(artifactDirectory, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
   save()
-  const env = applicationEnvironment(process.env, process.platform, options.output)
+  const env = applicationEnvironment(process.env, process.platform, options.output, { extraCaCertificate: trust?.path })
   let application, host, databaseBaseline
   const database = join(profile, 'backend', 'desktop.db')
   const remaining = () => { const value = deadline - Date.now(); assert.ok(value > 0, 'Total processing smoke deadline exceeded'); return value }
@@ -291,29 +450,38 @@ export async function run(options) {
       return response.json()
     }, path), 20000)
   }
-  async function close() {
+  async function close({ initiate, timeout = 30000 } = {}) {
+    // `initiate(child, exited)` replaces Playwright close when the application
+    // quits itself (the setup restart control); observation is identical.
     if (!application) return
     const owned = application; application = null
     const child = owned.process()
-    if (shutdownStrategy(process.platform) === 'owned-process-tree') {
-      evidence.shutdown ??= []
-      // Same bounded close as the packaged smoke; it forces only the retained child.
-      return closePackagedApplication(owned, { timeout: 30000, table: () => processTable({ python: nativePython }),
-        report: ({ event, processes, error, exitCode, signalCode }) => {
-          if (event === 'shutdown-failed' && exitCode === null && signalCode === null) evidence.forcedShutdown = true
-          evidence.shutdown.push({ event, processes: processes?.length, ...(error && { error }) })
-        } })
-    }
     let timer, onExit
     const exited = child.exitCode !== null || child.signalCode !== null
       ? Promise.resolve()
       : new Promise(resolveExit => { onExit = resolveExit; child.once('exit', onExit) })
+    const start = initiate ? () => initiate(child, exited) : () => owned.close()
+    if (shutdownStrategy(process.platform) === 'owned-process-tree') {
+      evidence.shutdown ??= []
+      // Same bounded close as the packaged smoke; it forces only the retained child.
+      try {
+        return await closePackagedApplication(owned, { timeout, table: () => processTable({ python: nativePython }), initiate: start,
+          report: report => {
+            const { entry, forced } = shutdownEvidence(report)
+            if (forced) evidence.forcedShutdown = true
+            if (entry.cleanupErrors?.length) evidence.shutdownCleanupError = entry.cleanupErrors.join('; ')
+            evidence.shutdown.push(entry)
+          } })
+      } finally { if (onExit) child.removeListener('exit', onExit) }
+    }
     try {
-      await Promise.race([(async () => { await owned.close(); await exited })(),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Application close timed out')), 30000) })])
+      await Promise.race([(async () => { await start(); await exited })(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Application close timed out')), timeout) })])
       assert.equal(child.exitCode, 0, 'Owned application exited unsuccessfully')
       assert.equal(child.signalCode, null, 'Owned application exited by signal')
+      ;(evidence.shutdown ??= []).push(shutdownEvidence({ event: 'closed', exitCode: child.exitCode, signalCode: child.signalCode }).entry)
     } catch (error) {
+      ;(evidence.shutdown ??= []).push(shutdownEvidence({ event: 'shutdown-failed', error, exitCode: child.exitCode, signalCode: child.signalCode }).entry)
       // Force only the still-running owned process. Cleanup cannot turn an
       // unsuccessful or timed-out normal shutdown into qualification evidence.
       if (child.exitCode === null && child.signalCode === null) {
@@ -339,13 +507,12 @@ export async function run(options) {
       sandboxBypassSwitches: ['no-sandbox', 'disable-sandbox', 'disable-setuid-sandbox', 'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-namespace-sandbox', 'single-process', 'in-process-gpu'].filter(flag => app.commandLine.hasSwitch(flag)),
       ownsInstance: app.hasSingleInstanceLock(), userData: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch })))
     assert.equal(identity.packaged, true)
-    assert.equal(identity.platform, process.platform, 'Packaged application platform differs from the harness host')
+    validateHarnessArchitecture(evidence.harness, identity)
     assert.deepEqual(identity.sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
     assert.equal(identity.ownsInstance, true, 'Qualification profile is already in use')
     assert.ok(samePath(identity.userData, profile), 'Application selected a different profile')
     if (!options.retainedProfile) {
-      const child = relative(options.output, identity.userData)
-      assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Application profile escaped the isolated directory')
+      assert.ok(isInside(options.output, identity.userData), 'Application profile escaped the isolated directory')
     }
     if (evidence.application) validateResumedApplication(evidence.application, identity)
     evidence.application = identity
@@ -403,6 +570,112 @@ export async function run(options) {
     }
     evidence.timingsMs[`${kind}Installation`] = Date.now() - installationStarted; save()
   }
+  // The ordinary first-launch path: only visible UI controls act; bridge
+  // calls are reads. Ends with the promised runtime active after restart.
+  async function wizardSetup() {
+    const expectedLock = options.expectedRuntimeLockSha256, stepTimeout = () => Math.min(120000, remaining())
+    const wizard = evidence.wizard = {}
+    const catalogEncoded = await bounded(application.evaluate(({ app }) => {
+      const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
+      const file = path.join(app.getAppPath(), 'processing-catalog.json')
+      return fs.existsSync(file) ? fs.readFileSync(file).toString('base64') : null
+    }))
+    assert.ok(catalogEncoded, 'This candidate ships no processing catalog; its setup wizard cannot offer local processing')
+    const catalogBytes = Buffer.from(catalogEncoded, 'base64'), summary = summarizeCatalog(catalogBytes)
+    wizard.catalog = summary; save()
+    assertCatalogLock(summary, expectedLock, evidence.application)
+    manifest = JSON.parse(catalogBytes.toString('utf8')).runtime
+
+    const firstStep = await waitForStep(host, 'welcome', { timeoutMs: stepTimeout() })
+    wizard.onboarding = { shownOnFirstLaunch: true, firstStep, advancedRouteUsed: false }
+    await onboardingDialog(host).getByRole('button', { name: /^Get started/u }).click()
+    await chooseLocalAndContinue(host, { timeoutMs: stepTimeout() })
+    const plan = await bounded(readPlan(host), 60000)
+    wizard.statusBeforeConsent = await bounded(readStatus(host), 20000)
+    wizard.plan = assertWizardPlan(plan, summary, expectedLock)
+    wizard.consent = await bounded(consentSnapshot(host, plan), 20000)
+    save()
+
+    const setupStarted = Date.now(), tracker = createStatusTracker({ runtimeBytes: summary.runtimeBytes, start: setupStarted })
+    wizard.consent.acceptedAt = new Date(setupStarted).toISOString()
+    await acceptConsent(host)
+    let interruption = null
+    for (;;) {
+      remaining()
+      const status = await bounded(readStatus(host), 20000), observation = tracker.observe(status)
+      if (observation.transition) { wizard.transitions = tracker.transitions; save() }
+      if (options.interruptRuntimeRetrieval && !interruption && shouldInterrupt(observation, status)) {
+        interruption = { elapsedMs: Date.now() - setupStarted, atFraction: observation.runtimeFraction,
+          file: observation.progress.file, receivedAtCancel: observation.progress.received }
+        await cancelFromUi(host)
+        let after = status
+        while (after.state === 'running') { remaining(); await pause(250); after = await bounded(readStatus(host), 20000); tracker.observe(after) }
+        interruption.statusAfterCancel = { state: after.state, retryable: after.retryable === true, message: after.message ?? null }
+        wizard.interruption = interruption; save()
+        assert.equal(after.state, 'cancelled', `Cancelling runtime retrieval ended in ${after.state}`)
+        assert.equal(after.retryable, true, 'Cancelled setup is not retryable')
+        await waitForStep(host, 'cancelled', { timeoutMs: stepTimeout() })
+        interruption.bytesPresentAfterCancel = partialRuntimeBytes(profile, summary.runtimeId, interruption.file)
+        tracker.nextAttempt()
+        await retryFromUi(host, { timeoutMs: stepTimeout() })
+        const retryPlan = await bounded(readPlan(host), 60000)
+        assert.equal(retryPlan.planId, plan.planId, 'Retry offered a different installation plan')
+        interruption.retryAcceptedAt = new Date().toISOString()
+        await acceptConsent(host)
+        save(); continue
+      }
+      if (observation.terminal === 'error' || observation.terminal === 'cancelled') {
+        throw new Error(`Setup ${observation.terminal}: ${status.error || status.message || 'no details supplied'}`)
+      }
+      // A fresh profile never loaded a runtime, so completion requires restart.
+      assert.notEqual(observation.terminal, 'ready', 'Fresh setup reported ready without the required restart')
+      if (observation.terminal === 'restart-required') break
+      await pause(500)
+    }
+    if (options.interruptRuntimeRetrieval) {
+      assert.ok(interruption, 'Runtime retrieval finished before the 5% interruption point was observed; use a slower or larger runtime source')
+      interruption.retry = classifyRetry({ bytesPresent: interruption.bytesPresentAfterCancel,
+        retry: tracker.fileObservations('runtime', interruption.file) })
+    }
+    wizard.transitions = tracker.transitions
+    wizard.phases = tracker.summary()
+    evidence.timingsMs.wizardSetup = Date.now() - setupStarted
+    save()
+
+    // Restart through the UI. The application's own relaunch would start an
+    // instance the harness does not own, holding this profile's single-instance
+    // lock; the request is recorded and the harness relaunches instead.
+    await waitForStep(host, 'restart', { timeoutMs: stepTimeout() })
+    const marker = join(artifactDirectory, 'application-relaunch-request.json')
+    await bounded(interceptRelaunch(application, marker), 20000)
+    wizard.restart = { initiatedBy: 'application-ui', relaunchedBy: 'harness', applicationRelaunch: 'intercepted-and-recorded' }
+    save()
+    const restartPage = host
+    await close({ timeout: 120000, initiate: async (child, exited) => {
+      try { await clickRestart(restartPage) } catch (error) {
+        if (child.exitCode === null && child.signalCode === null) wizard.restart.clickError = error.message
+      }
+      await exited
+    } })
+    host = null
+    wizard.restart.relaunchRequest = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+    save()
+    assert.ok(wizard.restart.relaunchRequest, 'The restart control exited the application without requesting a relaunch')
+    await launch()
+    const onboarding = await bounded(observeOnboarding(host), 60000)
+    const status = await bounded(readStatus(host), 20000)
+    // Preflight re-runs the installed runtime self-test.
+    const postPlan = await bounded(readPlan(host), Math.min(300000, remaining()))
+    const postReadiness = await api('/api/features/processing')
+    let installed
+    try { installed = installedRuntimeIdentity(profile, postReadiness.runtime?.id) } catch (error) { installed = { error: error.message } }
+    wizard.postRestart = { onboarding, status: { state: status?.state, phase: status?.phase, message: status?.message ?? null, restartRequired: status?.restartRequired },
+      plan: { available: postPlan?.available, ready: postPlan?.ready, restartRequired: postPlan?.restartRequired, reason: postPlan?.reason ?? null },
+      runtime: postReadiness.runtime, installed }
+    save()
+    assert.ok(!installed.error, installed.error)
+    assertPostRestart({ onboarding, status, plan: postPlan, readiness: postReadiness, installed }, summary, expectedLock)
+  }
   try {
     if (options.retainedProfile) {
       databaseBaseline = retainedDatabaseSnapshot(nativePython, database, true)
@@ -436,34 +709,40 @@ export async function run(options) {
     assert.equal(featurePolicy.lyrics_lookup.enabled, false, 'External lyric lookup must be disabled')
     const initialReadiness = await api('/api/features/processing')
     evidence.initialReadiness = initialReadiness
-    evidence.runtimeReused = Boolean((resumed || options.retainedProfile) && reusableRuntime(initialReadiness, manifest)); save()
-    if (options.retainedProfile) assert.ok(evidence.runtimeReused, 'Retained runtime must be admitted without installation')
-    else if (!evidence.runtimeReused) await install(options.manifest, 'processing')
-    const policyEncoded = await bounded(application.evaluate(({ app }) => {
-      const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
-      return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
-    }))
-    const policyBytes = Buffer.from(policyEncoded, 'base64')
-    const policy = JSON.parse(policyBytes.toString('utf8'))
-    const entries = MODEL_IDS.map(id => { const matches = policy.models.filter(entry => entry.id === id); assert.equal(matches.length, 1); return matches[0] })
-    const modelManifest = { schema: 1, kind: 'models', models: MODEL_IDS, files: entries.flatMap(entry => entry.files) }
-    const modelPath = join(artifactDirectory, 'model-manifest.json')
-    const modelManifestBytes = Buffer.from(`${JSON.stringify(modelManifest, null, 2)}\n`)
-    if (resumed) {
-      if (resumed.prior.modelPolicySha256) assert.equal(hash(policyBytes), resumed.prior.modelPolicySha256, 'Packaged model policy changed')
-      if (resumed.prior.modelManifestSha256) assert.equal(hash(modelManifestBytes), resumed.prior.modelManifestSha256, 'Model manifest changed')
-      const oldModelPath = join(options.output, 'model-manifest.json')
-      if (existsSync(oldModelPath)) {
-        assert.ok(lstatSync(oldModelPath).isFile() && !lstatSync(oldModelPath).isSymbolicLink(), 'Prior model manifest must be a regular file')
-        assert.equal(hash(readFileSync(oldModelPath)), hash(modelManifestBytes), 'Prior model manifest changed')
+    if (wizardMode) {
+      assert.equal(initialReadiness.runtime, null, 'Wizard mode requires a profile with no admitted processing runtime')
+      evidence.runtimeReused = false; save()
+      await wizardSetup()
+    } else {
+      evidence.runtimeReused = Boolean((resumed || options.retainedProfile) && reusableRuntime(initialReadiness, manifest)); save()
+      if (options.retainedProfile) assert.ok(evidence.runtimeReused, 'Retained runtime must be admitted without installation')
+      else if (!evidence.runtimeReused) await install(options.manifest, 'processing')
+      const policyEncoded = await bounded(application.evaluate(({ app }) => {
+        const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
+        return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
+      }))
+      const policyBytes = Buffer.from(policyEncoded, 'base64')
+      const policy = JSON.parse(policyBytes.toString('utf8'))
+      const entries = MODEL_IDS.map(id => { const matches = policy.models.filter(entry => entry.id === id); assert.equal(matches.length, 1); return matches[0] })
+      const modelManifest = { schema: 1, kind: 'models', models: MODEL_IDS, files: entries.flatMap(entry => entry.files) }
+      const modelPath = join(artifactDirectory, 'model-manifest.json')
+      const modelManifestBytes = Buffer.from(`${JSON.stringify(modelManifest, null, 2)}\n`)
+      if (resumed) {
+        if (resumed.prior.modelPolicySha256) assert.equal(hash(policyBytes), resumed.prior.modelPolicySha256, 'Packaged model policy changed')
+        if (resumed.prior.modelManifestSha256) assert.equal(hash(modelManifestBytes), resumed.prior.modelManifestSha256, 'Model manifest changed')
+        const oldModelPath = join(options.output, 'model-manifest.json')
+        if (existsSync(oldModelPath)) {
+          assert.ok(lstatSync(oldModelPath).isFile() && !lstatSync(oldModelPath).isSymbolicLink(), 'Prior model manifest must be a regular file')
+          assert.equal(hash(readFileSync(oldModelPath)), hash(modelManifestBytes), 'Prior model manifest changed')
+        }
       }
-    }
-    writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
-    evidence.modelPolicySha256 = hash(policyBytes)
-    evidence.modelManifestSha256 = hash(modelManifestBytes)
-    if (!options.retainedProfile) {
-      await install(modelPath, 'models')
-      await close(); await launch()
+      writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
+      evidence.modelPolicySha256 = hash(policyBytes)
+      evidence.modelManifestSha256 = hash(modelManifestBytes)
+      if (!options.retainedProfile) {
+        await install(modelPath, 'models')
+        await close(); await launch()
+      }
     }
     const readiness = await api('/api/features/processing')
     evidence.readiness = readiness

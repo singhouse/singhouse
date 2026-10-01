@@ -636,7 +636,7 @@ fresh temporary data and checks relocation, authenticated boot, origin/host
 rejection, synthetic prepared-video import and decoding, the library lock, and
 persistent restart. It does not test installation or physical playback.
 
-The packaged application smoke harness supports Linux and Windows, using a
+The packaged application smoke harness supports Linux, Windows and macOS, using a
 temporary user-data directory. Point it at the packaged application's executable:
 
 ```sh
@@ -648,7 +648,7 @@ The same command can test the installed executable after a test installation.
 
 The installed macOS bundle is `Singhouse.app`, with executable
 `Singhouse.app/Contents/MacOS/Singhouse`; Windows installs `Singhouse.exe`.
-The packaged smoke harness does not yet support macOS.
+On macOS, pass that inner executable to `--executable`.
 
 Use the actual unpacked directory for your target; omit `xvfb-run -a` when running
 on a graphical Linux desktop. This launches the packaged application, exercises
@@ -847,12 +847,89 @@ Other AppImage toolsets require a new verified inventory before use. Run
 `node --test test/appimage_notices.test.mjs` for notice and source-artifact checks.
 
 
-### Fresh Windows inference with retained verified setup
+### Packaged processing smoke
 
-The test-only `test/packaged-processing-smoke.mjs` can submit a new licensed
-excerpt using an existing isolated qualification profile without installing or
-retrieving runtime/model files. Run from a checkout with desktop test dependencies
-already installed, using the exact verified packaged candidate:
+The test-only `test/packaged-processing-smoke.mjs` launches an exact packaged
+candidate, submits one new licensed excerpt, observes separation, verifies Heart
+word timings and aligned decoded stems, and shuts the application down while
+recording its process tree. It runs on Linux, Windows and macOS. Run it from a
+checkout with desktop test dependencies installed (`npm ci` in `desktop/`).
+
+Pass the platform's executable to `--executable`:
+
+- Windows: `C:\candidate\Singhouse.exe`
+- macOS: `/path/to/Singhouse.app/Contents/MacOS/Singhouse`
+- Linux: the unpacked application's executable, for example
+  `desktop/artifacts/linux-unpacked/Singhouse`
+
+Every mode takes `--audio`, a new `--output` directory and an optional
+`--timeout-seconds` (default 3600). The output directory must not exist, and
+its parent must be a physical directory with no symbolic link or junction in
+the path; on macOS, use `/private/tmp` rather than `/tmp`. Pass physical paths
+everywhere. The harness never deletes evidence.
+
+Linux needs a display. Pass `DISPLAY` (with `XAUTHORITY` if your server
+requires it), or `WAYLAND_DISPLAY` together with `XDG_SESSION_TYPE`, or run
+under `xvfb-run -a`. A Wayland variable without its pair is not passed to the
+application. Electron's sandbox stays enabled: if `chrome-sandbox` is not
+setuid root and the kernel restricts unprivileged user namespaces, the
+application cannot start. The harness has no option to disable the sandbox or
+certificate verification; fix the host instead.
+
+#### Modes
+
+| Mode | Selected by | Installs | Model retrieval consent |
+|---|---|---|---|
+| Fresh install | `--runtime-manifest` and `--download-models` | Through the advanced manifest installer | `--download-models` |
+| Resume | Fresh install options plus `--resume`, same `--output` | Continues the interrupted attempt | `--download-models` |
+| Retained setup | `--runtime-manifest`, `--retained-profile`, `--expected-source-commit` | Nothing | Not applicable |
+| Wizard | `--wizard` and `--expected-runtime-lock-sha256` | Through the first-launch setup screens | The application's own consent screen |
+
+Fresh install, resume and wizard modes use a new profile inside the evidence
+directory. For example, on Linux:
+
+```sh
+xvfb-run -a node desktop/test/packaged-processing-smoke.mjs \
+  --executable desktop/artifacts/linux-unpacked/Singhouse \
+  --runtime-manifest /verified-pack/manifest.json \
+  --audio /licensed-excerpt.wav \
+  --output /evidence/new-attempt \
+  --download-models
+```
+
+#### Candidate identity
+
+Evidence records the candidate as a tuple of SHA-256 hashes: the executable,
+the application archive (`app.asar`), the native manifest and provenance, and
+the release receipt when the candidate carries one (otherwise `null`). On Linux
+the executable is the stock Electron binary and is identical across builds, so
+the executable hash alone never identifies a candidate. Evidence also records a
+SHA-256 for each harness file it loads, the harness platform and architecture,
+and the application's own reported platform and architecture. The application's
+architecture is authoritative; if it differs from the Node architecture running
+the harness (for example an x64 Node under translation on Apple silicon), the
+run fails before processing.
+
+#### Resume and upgrades
+
+`--resume` continues an interrupted fresh-install attempt in the same evidence
+directory. Earlier evidence is hash linked and never modified. Resume refuses
+evidence from another platform or architecture, evidence recorded in retained
+or wizard mode, and any change to the candidate tuple. Profile paths are
+compared case-insensitively on macOS and Windows and exactly on Linux.
+
+To continue with a different candidate, add
+`--upgrade-from-executable-sha256 <full original executable hash>`. The
+candidate tuple must then change, and the evidence binds the original and
+current tuples as the upgrade lineage; every later attempt must carry the same
+lineage. Evidence written before candidate tuples were recorded resumes only on
+Windows, where it is compared by executable hash alone and marked as legacy.
+On Linux and macOS such evidence is refused; start a new attempt.
+
+#### Retained setup
+
+Retained mode submits a new excerpt using an existing isolated qualification
+profile without installing or retrieving runtime or model files:
 
 ```powershell
 node desktop/test/packaged-processing-smoke.mjs `
@@ -865,27 +942,25 @@ node desktop/test/packaged-processing-smoke.mjs `
   --timeout-seconds 7200
 ```
 
-The same options run on macOS with `--executable /path/to/Singhouse.app/Contents/MacOS/Singhouse`
-and on Linux with the unpacked application's executable (for example
-`desktop/artifacts/linux-unpacked/Singhouse`, under `xvfb-run -a` without a display).
-Pass physical paths: on macOS, use `/private/tmp` rather than `/tmp`. A signed macOS
-bundle keeps its release receipt outside the bundle, so this retained mode refuses it.
+The same options run on macOS and Linux with the executables listed above. A
+signed macOS bundle keeps its release receipt outside the bundle, so this
+retained mode refuses it.
 
-Use an unused evidence directory outside the retained profile. This mode excludes
-`--resume`, executable-upgrade options and `--download-models`. Candidate native
-provenance and release receipt must agree with the full expected source commit;
-evidence records those hashes, the native manifest, application archive, executable
-and independent test harness hash. The application's normal startup verification
-must admit the requested runtime and installed models. Missing readiness fails;
-there is no installation or repair fallback and no activation-pointer transplant.
+Use an unused evidence directory outside the retained profile; the two may not
+contain each other, compared case-insensitively on macOS and Windows. This mode
+excludes `--resume`, executable-upgrade options and `--download-models`.
+Candidate native provenance and release receipt must agree with the full
+expected source commit. The application's normal startup verification must
+admit the requested runtime and installed models. Missing readiness fails;
+there is no installation or repair fallback and no activation-pointer
+transplant.
 
 Before Electron launches, bundled Python reads SQLite in immutable read-only mode
 and rejects unfinished songs and every nonterminal job, including orphaned queued
 or expired running jobs. A nonempty WAL is a blocker: the test never checkpoints
 or repairs the database. Close other users of this isolated profile first. The
 profile must contain at most 500 songs. The harness submits one new upload with a durable intent marker, requires a
-new song/job with no preexisting stem directory, observes separation, verifies
-Heart word timings and aligned decoded stems, and checks retained song/current-job
+new song/job with no preexisting stem directory, and checks retained song/current-job
 records remain unchanged. After shutdown, on successful and failed attempts, a
 read-only audit compares hashes of every original song and job row. Missing or
 changed rows, or inability to audit, fails qualification. It does not delete the new song or old data. An ambiguous
@@ -893,6 +968,82 @@ submission is a failed attempt; retain its evidence and do not treat it as a res
 
 This is fresh local pipeline evidence with retained setup, not clean installation,
 model installation, corpus accuracy, representative memory or physical-output
-qualification. The runner still requires Electron's host window; it is not a
-headless backend test. Modal, external lyric lookup and external correction remain
-disabled. Existing fresh-install and installation-only resume modes are unchanged.
+qualification.
+
+#### Wizard
+
+Wizard mode drives the real first-launch setup screens on a fresh profile:
+welcome, choosing local processing, the installation review, and consent. It
+then follows setup status to completion and presses the restart control:
+
+```sh
+node desktop/test/packaged-processing-smoke.mjs \
+  --executable /path/to/Singhouse.app/Contents/MacOS/Singhouse \
+  --audio /private/tmp/licensed-excerpt.wav \
+  --output /private/tmp/wizard-evidence \
+  --wizard \
+  --expected-runtime-lock-sha256 FULL_64_HEX_RUNTIME_LOCK
+```
+
+Wizard mode excludes `--runtime-manifest`, `--download-models`,
+`--retained-profile`, `--resume`, executable upgrades and
+`--expected-source-commit`. The catalog shipped inside the candidate must name
+the expected runtime lock, be marked qualified for that lock, and target this
+platform and architecture. The installation plan shown in the wizard must offer
+exactly that catalog runtime (size and sources) and the three default models
+from their upstream sources. Evidence records the plan, the consent screen text
+and its hash, every status transition, and observed time per setup phase.
+
+Setup reports runtime transfer, hash verification and the runtime self-test as
+one phase. The evidence splits them at the last observed progress change, which
+is an observation bound, not a measurement. Runtime files are transferred
+individually; there is no extraction phase.
+
+The application exits when its restart control is pressed. The harness records
+the application's relaunch request instead of letting it start an instance the
+harness does not own, then launches the same executable with the same profile
+itself. After relaunch it requires that the setup screens are not shown again,
+setup status is `ready`, the active runtime is the one the plan promised, and
+its installed manifest carries the expected lock. The same processing and
+shutdown checks as the other modes follow.
+
+`--interrupt-runtime-retrieval` cancels setup from the wizard's own controls once
+at least 5% of the runtime has transferred, records the partial bytes kept on
+disk, retries from the wizard, and classifies the retry as restarted, consistent
+with resume, or indeterminate. Polling cannot prove a resume; correlate with the
+source server's range log.
+
+#### Private test sources
+
+The test-only `test/local-pack-server.mjs` serves the files in one operator
+directory over HTTPS on `127.0.0.1` for a private test catalog (see
+`--private-test-local-sources` above). It serves only flat file names from that
+directory, never follows symbolic links, accepts only `GET` and `HEAD`, and
+supports `Range: bytes=N-` for resume tests. It logs one JSON line per request.
+
+```sh
+node desktop/test/local-pack-server.mjs --directory /verified-pack/files \
+  --port 8443 --cert server.pem --key server-key.pem [--fail-after-bytes N]
+```
+
+`--fail-after-bytes` drops the first transfer after that many bytes to exercise
+interruption. `--redirect-via` answers with redirects; the application refuses
+redirects for runtime files, so this only exercises that refusal.
+
+To let the packaged application trust a private test certificate authority,
+pass `--extra-ca-cert /absolute/ca.pem` to the processing smoke harness. The
+file must be a regular file containing only PEM certificates and no private
+key. The harness passes it to the application as `NODE_EXTRA_CA_CERTS`, which
+the application's setup downloads use; it records the file's hash in the
+evidence. Inherited trust variables are never passed through. The operating
+system trust store is not changed, and certificate verification is never
+disabled.
+
+#### Limits
+
+The runner requires Electron's host window; it is not a headless backend test.
+Modal, external lyric lookup and external correction remain disabled. None of
+these modes is clean-machine, corpus accuracy, representative memory or
+physical-output qualification. Process-tree evidence lists every descendant
+still running after shutdown. The harness signals only the application process
+it launched, and only after a failed shutdown.

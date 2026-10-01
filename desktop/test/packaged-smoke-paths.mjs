@@ -37,3 +37,14 @@ export function samePath(left, right, platform = process.platform) {
   const path = platformPath(platform), a = path.resolve(left), b = path.resolve(right)
   return platform === 'linux' ? a === b : a.toLowerCase() === b.toLowerCase()
 }
+
+// Strict containment under the same case rule as samePath: `child` is inside
+// `parent` and is not `parent` itself. posix.relative is case-sensitive, so a
+// macOS path differing only in letter case would otherwise look unrelated.
+// Unicode normalization differences are not folded.
+export function isInside(parent, child, platform = process.platform) {
+  const path = platformPath(platform)
+  const fold = value => platform === 'linux' ? path.resolve(value) : path.resolve(value).toLowerCase()
+  const rel = path.relative(fold(parent), fold(child))
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
+}
