@@ -30,7 +30,7 @@ from packaging.version import Version
 
 from assemble import (ROOT, LOCKS, PLATFORMS, digest, fetch, host_target,
                       python_path, site_packages, run, metadata, source_provenance)
-from assemble_processing import assemble, relative
+from assemble_processing import DEFAULT_PART_SIZE, assemble, delivery, relative
 
 MODULES = {
     'transcription': ['faster_whisper', 'lyricsync.transcription.heart', 'karaoke_backend.workers.heart_transcriptor'],
@@ -348,7 +348,16 @@ def build_wheel(source, destination, host_python, env, toolchain=None):
     return wheels[0]
 
 
-def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None):
+DELIVERY_OPTIONS = ('base_url', 'blobs', 'archive_base_url', 'archive_part_size', 'archive_name')
+
+
+def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None, *, delivery_options=None):
+    # Pack delivery options pass through to the assembler unchanged. Validate
+    # them before any build work so a bad option fails fast, exactly as there.
+    delivery_options = dict(delivery_options or {})
+    if set(delivery_options) - set(DELIVERY_OPTIONS):
+        raise ValueError('Unknown pack delivery option')
+    delivery(**delivery_options)
     lock = json.loads(requirements.read_text())
     validate_requirements(lock, target, accelerator)
     toolchain = validate_native_toolchain(native_toolchain)
@@ -491,13 +500,13 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
                       files=inventory(payload, target))
     lock_path = output / 'processing-input.json'
     lock_path.write_text(json.dumps(input_lock, indent=2, sort_keys=True) + '\n')
-    manifest = assemble(payload, lock_path, output / 'pack')
+    manifest = assemble(payload, lock_path, output / 'pack', **delivery_options)
     print(json.dumps(dict(manifest=str(output / 'pack/manifest.json'), lockSha256=digest(lock_path),
                           packages=len(packages)), indent=2))
     return manifest
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--requirements', type=Path, required=True)
     parser.add_argument('--target', choices=sorted(PLATFORMS), required=True)
@@ -506,8 +515,21 @@ def main():
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--build-requirements', type=Path, help='Additional exact hash-locked host build wheels (no dependency resolution)')
     parser.add_argument('--native-toolchain', type=Path, help='Exact host compiler executable/version and supporting input identity lock')
-    args = parser.parse_args()
-    build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements, args.native_toolchain)
+    # Pack delivery, passed through to assemble_processing (same names, same validation).
+    parser.add_argument('--blobs', action='store_true', help='Write the per-file blob form instead of an archive')
+    parser.add_argument('--base-url', help='Blob form: explicit blob publication directory URL (implies --blobs)')
+    parser.add_argument('--archive-base-url', help="Archive part publication directory URL ending in '/'; omission produces local file URLs")
+    parser.add_argument('--archive-part-size', type=int, help=f'Maximum bytes per archive part (default {DEFAULT_PART_SIZE})')
+    parser.add_argument('--archive-name', help='Archive part file name stem; parts are <name>.001, <name>.002, ...')
+    args = parser.parse_args(argv)
+    options = dict(base_url=args.base_url, blobs=args.blobs or None, archive_base_url=args.archive_base_url,
+                   archive_part_size=args.archive_part_size, archive_name=args.archive_name)
+    try:
+        delivery(**options)
+    except ValueError as error:
+        parser.error(str(error))
+    build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements, args.native_toolchain,
+          delivery_options=options)
 
 
 if __name__ == '__main__':

@@ -65,7 +65,7 @@ test('model redirects refuse unsafe destinations before contacting them', async 
   await assert.rejects(cache.fetchSource(new URL(manifest.files[0].url), {}), /limit/)
   assert.equal(requests, 6)
   const runtime = new RuntimeManager('/tmp/fixture', {}, { fetchImpl: async (_url, options) => {
-    assert.equal(options.redirect, 'error'); return new Response('strict')
+    assert.equal(options.redirect, 'manual'); assert.equal(options.credentials, 'omit'); return new Response('strict')
   } })
   await runtime.fetchSource(new URL(manifest.files[0].url), {})
 })

@@ -577,22 +577,100 @@ python3 desktop/build/build_processing.py \
 
 Build native source extensions on their target runner. Dependency locks for
 other targets describe build inputs, not successful hardware qualification.
-To package a separately constructed locked payload:
+The build writes its pack to `<output>/pack` through the assembler below and
+accepts the same delivery options (`--archive-base-url`, `--archive-part-size`,
+`--archive-name`, `--blobs`, `--base-url`), validated the same way before any
+build work starts. To package a separately constructed locked payload:
 
 ```sh
 python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
   --lock /path/to/processing-input-lock.json --output /path/to/new-pack
 ```
 
-The output includes `manifest.json`, `input-lock.json`, and content-addressed
-`blobs/`. By default its URLs refer to those local blobs; `--base-url` may declare
-an explicit HTTPS blob directory for a separately managed distribution. The
+By default the output is archive form: `manifest.json`, `input-lock.json`, and
+`archive/<name>.001`, `.002`, … The archive format (`concat-gzip-v1`) has no
+internal paths or headers. Its uncompressed stream is every locked file's bytes
+concatenated in manifest order. That stream is gzip-compressed deterministically
+(one member, fixed header, zero timestamp, no file name) and split into
+consecutive parts of at most `--archive-part-size` bytes (default 1900 MiB;
+release assets are limited to 2 GiB). The manifest lists each part's URL,
+SHA-256, and size; files carry no URLs. The default part name is
+`singhouse-processing-<platform>-<arch>-<accelerator>-<lock hash prefix>.pack.gz`
+(override it with `--archive-name`). Part URLs default to `file://` URLs for the local `archive/`
+directory; `--archive-base-url` declares the directory the parts will be
+published to. The assembler accepts an `https://` or local `file://` base URL
+that ends in `/` and has no credentials, query, or fragment. Identical inputs
+and options produce byte-identical output with the same Python and zlib. The
+assembler writes into a temporary sibling directory and renames it into place
+only when the whole pack is complete; a failed run leaves no output (never
+parts without a manifest), and an existing output directory is refused.
+
+`--from-pack` re-packages an existing pack without its original payload, for
+example to convert a per-file pack or to re-host an archive pack under a new
+base URL or part size:
+
+```sh
+python3 desktop/build/assemble_processing.py --from-pack /path/to/pack \
+  --archive-base-url https://example.org/releases/download/tag/ --output /path/to/new-pack
+```
+
+The input pack's manifest must be bound to its `input-lock.json` and match a
+fresh assembly of that lock. For a per-file input, every blob's size and
+SHA-256 are re-verified as it streams into the archive. For an archive input,
+the parts are read from the pack's own `archive/` directory by the file name
+that ends each part URL (URLs are never fetched). Before anything is written,
+every part's size and SHA-256 are checked and the whole stream is decoded with
+the installer's rules (plain gzip header, one member, matching trailer, nothing
+after the last file), checking every file's size and SHA-256 against the lock.
+It is decoded and checked again while the new parts are written. Either way the
+output is identical to assembling the payload directly with the same archive
+options.
+The older per-file form (`blobs/` named by content hash, one URL per file) is
+still available with `--blobs`, or with `--base-url` to declare an explicit
+HTTPS blob directory. Blob and archive options cannot be combined. The
 assembler does not upload anything. Each package must name its retained license
 or notice files; the manifest embeds and hash-binds the complete input lock and
 rejects missing notice files. File hashes establish correspondence
 with a selected manifest; they do not establish publisher identity.
 Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+
+For archive-form packs, installation retrieves each part into
+`processing/staging/<id>.archive/`, outside the pack tree. It resumes partial
+parts with HTTP ranges and checks each part's size and SHA-256. Then it reads
+the parts again (checking their SHA-256 again), streams them through one
+decompressor, and writes the files in manifest order, checking every file's
+size and SHA-256 as it is written. The part sizes fix the stream's length, so
+the header, deflate data, and eight-byte trailer are located by offset alone,
+however the parts or reads split them. Any of these rejects the archive: a
+header with optional fields, a short stream, a bad gzip trailer, a second gzip
+member, or any byte beyond the last file. A rejected archive is never
+activated, on that attempt or any later one while the same parts are the
+source: its parts and everything extracted from them are deleted, so a retry
+retrieves and checks them again. Only a stream that passes every check writes
+`processing/staging/<id>.stream`, a marker that the staged files came from a
+validated stream; staged files are reused without decoding again only when
+that marker is present and every file still verifies. Parts are removed only
+after the marker is written and every staged file verifies. After an
+interruption, a retry does not fetch parts again that are already complete,
+and does not rewrite staged files that already verify, but decodes the whole
+stream again unless the marker is present. The free-space check requires the
+parts not yet retrieved, plus the full uncompressed pack, plus 64 MiB; setup's
+preflight reserves all parts (as if none were retrieved) plus the
+uncompressed pack plus 64 MiB, and reports the compressed part total as the
+runtime's transfer size and the uncompressed total separately.
+
+Part URLs are checked at three layers. The runtime manifest validator accepts
+`https://` and local `file://` URLs (no credentials or fragment). The
+application's setup catalog accepts only `https://` URLs without credentials,
+query, or fragment, plus local `file://` URLs in explicit private-test mode.
+The assembler's default is local `file://` URLs, so a pack meant for the setup
+catalog is assembled with an `https://` `--archive-base-url`. Every runtime
+pack retrieval over HTTPS, per-file and archive alike, follows redirects only
+to HTTPS on `github.com`, `objects.githubusercontent.com`, or
+`release-assets.githubusercontent.com` (default port, no credentials, at most
+five hops); the first request goes to the manifest URL. Each retry starts again
+from the manifest URL, because signed redirect targets expire.
 
 Installation checks free disk space, takes an exclusive lock, resumes partial
 files where supported, checks every size and hash, and synchronizes payload files

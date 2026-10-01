@@ -295,6 +295,25 @@ describe('desktop setup screens', () => {
     expect(wrapper.text()).toContain('model.bin · 250 / 1,000 bytes (25% of this file)')
     wrapper.unmount()
   })
+  it('describes processing tools archive retrieval and unpacking from structured progress fields', async () => {
+    const cases = [
+      [{ file: 'tools.pack.gz.002', phase: 'retrieve', part: 2, parts: 3, received: 500, total: 1000 },
+        'Retrieving the processing tools archive, part 2 of 3 · 500 / 1,000 bytes (50% of this part)'],
+      [{ file: 'tools.pack.gz.001', phase: 'retrieve', received: 100, total: 1000 },
+        'Retrieving the processing tools archive · 100 / 1,000 bytes (10% of this part)'],
+      [{ file: 'python/bin/python3', phase: 'extract', received: 750, total: 1000 },
+        'Unpacking and checking processing tools · 750 / 1,000 bytes (75% of the processing tools)'],
+    ]
+    for (const [progress, line] of cases) {
+      globalThis.window.karaokeDesktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', progress }) })
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      expect(wrapper.find('.quiet').text().replace(/\s+/g, ' ')).toBe(line)
+      expect(wrapper.text()).not.toContain(progress.file)
+      expect(wrapper.text()).not.toMatch(/download/i)
+      wrapper.unmount()
+    }
+  })
   it('renders real download details before a consent action', async () => {
     const desktop = bridge()
     globalThis.window.karaokeDesktop = desktop

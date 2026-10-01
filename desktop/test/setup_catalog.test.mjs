@@ -151,3 +151,30 @@ test('CLI validates against the release policy channel and refuses private-smoke
   await prepareSetupCatalog([...args, '--output', output, '--release', await releaseFile(root, 'private-test')])
   assert.equal(JSON.parse(await readFile(output, 'utf8')).qualification.scope, 'private-smoke')
 })
+
+test('archive-form runtimes source-check every part URL with the per-file rule', () => {
+  const archived = url => {
+    const { input, options } = fixture()
+    for (const file of input.runtime.files) delete file.url
+    input.runtime.archive = { format: 'concat-gzip-v1', parts: [
+      { url: 'https://example.org/releases/runtime.pack.gz.001', sha256: sha('part-1'), size: 10 },
+      { url, sha256: sha('part-2'), size: 10 }] }
+    return { input, options }
+  }
+  const { input, options } = archived('https://example.org/releases/runtime.pack.gz.002')
+  const catalog = createSetupCatalog(input, options)
+  assert.deepEqual(catalog.runtime.archive, input.runtime.archive)
+  assert.deepEqual(validateSetupCatalog(catalog, options), catalog)
+  for (const url of ['file:///tmp/runtime.pack.gz.002', 'https://user:secret@example.org/part', 'http://example.org/part',
+    'https://example.org/part?token=secret']) {
+    const { input, options } = archived(url)
+    assert.throws(() => createSetupCatalog(input, options), /HTTPS|local|Inputs/, url)
+  }
+  const local = archived('file:///tmp/runtime.pack.gz.002')
+  const privateCatalog = createSetupCatalog(local.input, { ...local.options, privateTestLocalSources: true })
+  assert.throws(() => validateSetupCatalog(privateCatalog, local.options), /private-test/)
+  // Mixed delivery forms never reach the catalog.
+  const mixed = archived('https://example.org/releases/runtime.pack.gz.002')
+  mixed.input.runtime.files[0].url = 'https://example.org/python'
+  assert.throws(() => createSetupCatalog(mixed.input, mixed.options), /mixes/)
+})

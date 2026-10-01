@@ -6,12 +6,33 @@ import { constants } from 'node:fs'
 import { mkdir, mkdtemp, open, readFile, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, isAbsolute, toNamespacedPath } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
 import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const hashPattern = /^[a-f0-9]{64}$/
 const token = /^[A-Za-z0-9._+-]{1,128}$/
 const offlineSources = Symbol('verified offline model sources')
+// Processing archive delivery. The archive carries no paths or headers of its
+// own: its uncompressed stream is the concatenation of every manifest file's
+// bytes in manifest order, so layout always comes from the validated manifest.
+const ARCHIVE_FORMAT = 'concat-gzip-v1'
+const MAX_ARCHIVE_PARTS = 64
+const MAX_ARCHIVE_PART_SIZE = 2 ** 31 - 1
+// The fixed gzip header the format permits: deflate, no optional fields.
+const GZIP_HEADER_SIZE = 10, GZIP_TRAILER_SIZE = 8
+// Bounded inflater input per step (deflate expands at most ~1032x).
+const INFLATE_SLICE = 16 * 1024
+// Bounded per-file metadata/sync work in flight while staging an archive pack;
+// each file is still checked on its own, only the waiting overlaps.
+const ARCHIVE_FILE_CONCURRENCY = 16
+// Content errors that the same hash-pinned parts would reproduce on any retry.
+const archiveInvalid = Symbol('runtime archive content is invalid')
+const invalidArchive = message => Object.assign(new Error(message), { [archiveInvalid]: true })
+// Runtime archive redirects may land only on these explicit release-asset
+// endpoints (HTTPS port 443); the first request goes to the manifest's URL.
+const runtimeTransferHosts = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'])
+const redirectStatuses = [301, 302, 303, 307, 308]
 // Explicit upstream endpoints; do not permit arbitrary subdomains or ports.
 // Hugging Face Hub's documented proxy/firewall endpoints (HTTPS port 443).
 const modelTransferHosts = new Set(['huggingface.co', 'cdn-lfs.huggingface.co',
@@ -111,6 +132,39 @@ export async function acquireInstallLock(path, python) {
   })
 }
 
+function sourceUrl(value) {
+  let url
+  try { url = new URL(typeof value === 'string' ? value : '') } catch { throw new Error('Inputs require local files or HTTPS') }
+  if (!['https:', 'file:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error('Inputs require local files or HTTPS')
+  if (url.protocol === 'file:' && url.hostname && url.hostname !== 'localhost') throw new Error('Remote file shares are not supported')
+  return url
+}
+
+const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys)
+
+// The archive description is deliberately NOT bound to the input lock: the
+// lock fixes the file inventory, while where those bytes are hosted is covered
+// by the manifest identity, the application-packaged catalog, and the per-file
+// size and hash checks applied to every extracted file before activation.
+function validateArchive(archive) {
+  if (!exactKeys(archive, ['format', 'parts']) || archive.format !== ARCHIVE_FORMAT
+      || !Array.isArray(archive.parts) || !archive.parts.length || archive.parts.length > MAX_ARCHIVE_PARTS) {
+    throw new Error('Processing archive description is invalid')
+  }
+  const urls = new Set()
+  for (const part of archive.parts) {
+    if (!exactKeys(part, ['sha256', 'size', 'url']) || !hashPattern.test(part.sha256)
+        || !Number.isSafeInteger(part.size) || part.size < 1 || part.size > MAX_ARCHIVE_PART_SIZE) {
+      throw new Error('Processing archive part is invalid')
+    }
+    const url = sourceUrl(part.url)
+    if (urls.has(url.href)) throw new Error('Processing archive parts must be distinct')
+    urls.add(url.href)
+  }
+  if (!Number.isSafeInteger(archive.parts.reduce((sum, part) => sum + part.size, 0))) throw new Error('Processing archive is too large')
+}
+
 export function validateProcessingManifest(value, expected, trustedLocks = []) {
   let inputLock
   try { inputLock = JSON.parse(value?.provenance?.inputLock) } catch { throw new Error('Processing manifest provenance is missing or malformed') }
@@ -161,15 +215,18 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
       })) throw new Error('Processing package provenance or notices are malformed')
   if (value.accelerator === 'metal' && value.platform !== 'darwin'
       || value.accelerator === 'cuda' && value.platform === 'darwin') throw new Error('Invalid accelerator target')
+  // Exactly one delivery form: every file has its own URL (and there is no
+  // archive), or an archive is present and no file names a URL.
+  const archived = value.archive !== undefined
+  if (archived) validateArchive(value.archive)
   const paths = new Set()
   for (const file of value.files) {
     if (!safePath(file.path) || file.path === 'manifest.json' || file.path.endsWith('.partial')
         || paths.has(value.platform === 'linux' ? file.path : file.path.toLowerCase()) || !hashPattern.test(file.sha256)
         || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.executable !== 'boolean') throw new Error('Invalid processing file record')
     paths.add(value.platform === 'linux' ? file.path : file.path.toLowerCase())
-    const url = new URL(file.url)
-    if (!['https:', 'file:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error('Inputs require local files or HTTPS')
-    if (url.protocol === 'file:' && url.hostname && url.hostname !== 'localhost') throw new Error('Remote file shares are not supported')
+    if (!archived) sourceUrl(file.url)
+    else if (Object.hasOwn(file, 'url')) throw new Error('Processing manifest mixes per-file and archive delivery')
   }
   if (!value.files.some(file => file.path === value.python && file.executable)) throw new Error('Pack lacks its managed Python executable')
   const total = value.files.reduce((sum, file) => sum + file.size, 0)
@@ -190,6 +247,8 @@ export async function checkedFile(path, flags) {
 
 async function fileHash(file, signal) {
   const hash = createHash('sha256')
+  // Callers await before getting here; never build a stream on an aborted signal.
+  signal?.throwIfAborted()
   for await (const chunk of file.createReadStream({ start: 0, autoClose: false, signal })) hash.update(chunk)
   return hash.digest('hex')
 }
@@ -229,6 +288,75 @@ export async function runNativeHelper(python, helper, args, { failure = 'Native 
 async function plainDirectory(path) {
   await mkdir(path, { recursive: true, mode: 0o700 })
   if (!(await lstat(path)).isDirectory() || (await lstat(path)).isSymbolicLink()) throw new Error('Runtime directory must not be a symbolic link')
+}
+
+// Checks (creating when absent) each ancestor of `path` below `staging`, one
+// level at a time, so a pre-existing symlink can never be traversed. An
+// existing directory costs a single lstat; nothing is cached between calls.
+async function stagingAncestors(staging, path) {
+  let ancestor = staging
+  for (const part of path.split('/').slice(0, -1)) {
+    ancestor = join(ancestor, part)
+    let info
+    try { info = await lstat(ancestor) } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      // Create only this level (its parent was lstat-checked just above), then
+      // lstat what now exists here; a link or non-directory is rejected below.
+      // The check-then-use window is the same as the earlier recursive form's.
+      try { await mkdir(ancestor, { mode: 0o700 }) } catch (created) { if (created.code !== 'EEXIST') throw created }
+      info = await lstat(ancestor)
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Runtime directory must not be a symbolic link')
+  }
+}
+
+// Runs `task` over `items` with at most `limit` in flight. The first failure
+// stops new work; every in-flight task settles (closing its descriptors)
+// before that failure is rethrown.
+async function boundedEach(items, limit, task) {
+  let next = 0, failed = false, failure
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next++
+      try { await task(items[index], index) } catch (error) { if (!failed) { failed = true; failure = error } }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  if (failed) throw failure
+}
+
+const archivePartName = index => `part-${String(index + 1).padStart(3, '0')}.partial`
+// A short neutral identifier for progress events: the part's published name.
+const archivePartLabel = (url, index) => {
+  let name = ''
+  try { name = decodeURIComponent(new URL(url).pathname.split('/').pop()) } catch { /* fall back below */ }
+  return /^[A-Za-z0-9._+-]{1,200}$/.test(name) ? name : `archive part ${index + 1}`
+}
+
+// The marker that a staging tree was produced by a stream that passed every
+// format check. It sits beside the tree, never inside the pack inventory.
+async function streamValidated(marker) {
+  try {
+    const value = JSON.parse(await checkedRead(marker))
+    return exactKeys(value, ['format', 'schema']) && value.schema === 1 && value.format === ARCHIVE_FORMAT
+  } catch (error) {
+    if (error.code && !['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code)) throw error
+    return false
+  }
+}
+
+// A disk-space estimate only; integrity never depends on what is found here.
+async function archiveRemaining(directory, parts) {
+  let remaining = 0
+  for (const [index, part] of parts.entries()) {
+    let present = 0
+    try {
+      const info = await lstat(join(directory, archivePartName(index)))
+      if (info.isFile() && info.size <= part.size) present = info.size
+    } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error }
+    remaining += part.size - present
+  }
+  return remaining
 }
 
 async function matches(path, record) {
@@ -382,9 +510,26 @@ export class RuntimeManager {
     })
   }
 
-  async fetchSource(url, options) { return this.fetch(url, { ...options, redirect: 'error' }) }
+  async fetchSource(url, options) {
+    // The first request goes to the validated manifest URL. Release-asset hosts
+    // answer with a redirect to a signed, expiring URL; follow only those to the
+    // explicit runtime delivery endpoints. Every call (including a resumed
+    // Range request) starts again from the manifest URL, never a cached target.
+    if (url.protocol !== 'https:') throw new Error('Runtime sources require HTTPS')
+    for (let hops = 0; ; hops++) {
+      if (hops && (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port
+          || !runtimeTransferHosts.has(url.hostname))) throw new Error('Runtime source redirect is not approved')
+      options.signal?.throwIfAborted()
+      const response = await this.fetch(url, { ...options, redirect: 'manual', credentials: 'omit' })
+      if (!redirectStatuses.includes(response.status)) return response
+      await response.body?.cancel()
+      const location = response.headers?.get('location')
+      if (!location || hops >= 5) throw new Error('Runtime source redirect is missing or exceeds the limit')
+      url = new URL(location, url)
+    }
+  }
 
-  async transfer(record, partial, signal, offlineSource) {
+  async transfer(record, partial, signal, offlineSource, details = {}) {
     // Keep one no-follow descriptor from fstat through write/hash/chmod. A
     // concurrently replaced directory entry cannot redirect these file writes.
     const target = await checkedFile(partial, constants.O_CREAT | constants.O_RDWR)
@@ -400,6 +545,9 @@ export class RuntimeManager {
         source = offlineSource.createReadStream({ start: offset, autoClose: false, signal })
       } else if (url.protocol === 'file:') {
         localSource = await checkedFile(fileURLToPath(url), constants.O_RDONLY)
+        // A stream built on an already-aborted signal reports the abort twice,
+        // once as an uncaught exception; check synchronously right before it.
+        signal?.throwIfAborted()
         source = localSource.createReadStream({ start: offset, autoClose: false, signal })
       } else {
         const response = await this.fetchSource(url, { signal,
@@ -423,7 +571,7 @@ export class RuntimeManager {
           written += result.bytesWritten
         }
         size += chunk.length
-        this.progress({ file: record.path, received: size, total: record.size })
+        this.progress({ file: record.path, received: size, total: record.size, ...details })
       }
       if ((await target.stat()).size !== record.size || await fileHash(target) !== record.sha256) {
         await target.truncate(0)
@@ -436,6 +584,258 @@ export class RuntimeManager {
         throw new Error('Runtime partial path changed during transfer')
       }
     } finally { await localSource?.close(); await target.close() }
+  }
+
+  async extractArchive(manifest, staging, archiveDirectory, marker, signal) {
+    const { files } = manifest, parts = manifest.archive.parts
+    // Resume after a validated extraction: a staged tree is reused only when
+    // this exact archive's stream passed every format check (the marker) and
+    // every file still verifies. Files never reach staging otherwise.
+    const present = new Array(files.length).fill(false)
+    await boundedEach(files, ARCHIVE_FILE_CONCURRENCY, async (record, index) => {
+      signal.throwIfAborted()
+      await stagingAncestors(staging, record.path)
+      present[index] = await matches(join(staging, record.path), record)
+    })
+    if (present.every(Boolean) && await streamValidated(marker)) return
+    await rm(marker, { force: true })
+    await plainDirectory(archiveDirectory)
+    for (const [index, part] of parts.entries()) {
+      signal.throwIfAborted()
+      const record = { path: archivePartLabel(part.url, index), url: part.url, sha256: part.sha256, size: part.size, executable: false }
+      await this.transfer(record, join(archiveDirectory, archivePartName(index)), signal, undefined,
+        { phase: 'retrieve', part: index + 1, parts: parts.length })
+    }
+    signal.throwIfAborted()
+    try {
+      await this.decodeArchive(manifest, staging, archiveDirectory, present, signal)
+    } catch (error) {
+      if (error?.[archiveInvalid] && !signal.aborted) {
+        // These hash-pinned parts can never yield a valid pack. Discard them
+        // and everything extracted from them, so no later attempt reuses either.
+        await rm(archiveDirectory, { recursive: true, force: true })
+        await rm(staging, { recursive: true, force: true })
+      }
+      throw error
+    }
+    // Durably record that this staging tree came from a fully validated stream.
+    const handle = await checkedFile(marker, constants.O_CREAT | constants.O_RDWR)
+    try {
+      await handle.truncate(0)
+      await handle.writeFile(JSON.stringify({ schema: 1, format: ARCHIVE_FORMAT }))
+      await handle.sync()
+    } finally { await handle.close() }
+    await this.directorySync(dirname(marker))
+  }
+
+  async decodeArchive(manifest, staging, archiveDirectory, present, signal) {
+    const { files } = manifest, parts = manifest.archive.parts
+    // The part sizes fix the stream length, so every byte's role is known by
+    // its offset alone: fixed header, raw deflate body, eight-byte trailer.
+    const compressedTotal = parts.reduce((sum, part) => sum + part.size, 0)
+    if (compressedTotal < GZIP_HEADER_SIZE + GZIP_TRAILER_SIZE) throw invalidArchive('Runtime archive is truncated or corrupt')
+    const bodyEnd = compressedTotal - GZIP_TRAILER_SIZE
+    const header = Buffer.alloc(GZIP_HEADER_SIZE), trailer = Buffer.alloc(GZIP_TRAILER_SIZE)
+
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+    let index = 0, current = null, produced = 0, checksum = 0, reported = 0
+    const report = () => {
+      reported = produced
+      this.progress({ file: current?.record.path ?? files.at(-1).path, received: produced, total: totalBytes, phase: 'extract' })
+    }
+    const prepare = async at => {
+      const record = files[at]
+      if (present[at]) return { record, written: 0 }
+      // Re-check ancestors immediately before opening, as per-file retrieval does.
+      await stagingAncestors(staging, record.path)
+      const partial = join(staging, record.path) + '.partial'
+      const handle = await checkedFile(partial, constants.O_CREAT | constants.O_RDWR)
+      try { await handle.truncate(0) } catch (error) { await handle.close(); throw error }
+      return { record, written: 0, partial, handle, hash: createHash('sha256') }
+    }
+    // Files are opened (each with its own ancestor check and no-follow
+    // descriptor) a bounded distance ahead of the stream, so opening overlaps
+    // decoding. Bytes still reach only the file the stream offset selects.
+    const opening = new Map()
+    const begin = () => {
+      for (let ahead = index; ahead < Math.min(files.length, index + ARCHIVE_FILE_CONCURRENCY); ahead++) {
+        if (opening.has(ahead)) continue
+        const pending = prepare(ahead)
+        pending.catch(() => {})
+        opening.set(ahead, pending)
+      }
+      const pending = opening.get(index)
+      opening.delete(index)
+      return pending
+    }
+    // A file's content check happens in stream order, as soon as its last byte
+    // is written. Its chmod, sync, identity check and rename (each still in
+    // that order, on its own held descriptor) run with a bounded number of
+    // other files' in flight, so syncs overlap instead of serialising the
+    // stream. Every one settles before this method returns or throws.
+    const settling = new Set()
+    let settleFailed = false, settleFailure
+    const settle = async ({ record, partial, handle }) => {
+      try {
+        await handle.chmod(record.executable ? 0o700 : 0o600)
+        await handle.sync()
+        const named = await lstat(partial), owned = await handle.stat()
+        if (!named.isFile() || named.isSymbolicLink() || named.ino !== owned.ino || named.dev !== owned.dev) {
+          throw new Error('Runtime partial path changed during extraction')
+        }
+      } finally { await handle.close() }
+      signal.throwIfAborted()
+      await rename(partial, join(staging, record.path))
+    }
+    const settled = () => { if (settleFailed) throw settleFailure }
+    const finish = async entry => {
+      current = null
+      index++
+      if (!entry.handle) return
+      const { record, handle } = entry
+      if (entry.written !== record.size || entry.hash.digest('hex') !== record.sha256) {
+        try { await handle.truncate(0) } finally { await handle.close() }
+        throw invalidArchive('Runtime archive checksum or size mismatch; previous runtime preserved')
+      }
+      const task = settle(entry).catch(error => { if (!settleFailed) { settleFailed = true; settleFailure = error } })
+        .finally(() => settling.delete(task))
+      settling.add(task)
+      while (settling.size >= ARCHIVE_FILE_CONCURRENCY) await Promise.race(settling)
+      settled()
+    }
+    // Opens the next file needing bytes; zero-length files complete at once.
+    const advance = async () => {
+      while (index < files.length) {
+        current = await begin()
+        if (current.record.size) return
+        await finish(current)
+      }
+    }
+    const consume = async chunk => {
+      checksum = zlib.crc32(chunk, checksum)
+      produced += chunk.length
+      while (chunk.length) {
+        if (!current) throw invalidArchive('Runtime archive has unexpected trailing data')
+        const take = Math.min(chunk.length, current.record.size - current.written)
+        const slice = chunk.subarray(0, take)
+        if (current.handle) {
+          current.hash.update(slice)
+          let written = 0
+          while (written < slice.length) {
+            const result = await current.handle.write(slice, written, slice.length - written, current.written + written)
+            if (!result.bytesWritten) throw new Error('Runtime archive extraction write made no progress')
+            written += result.bytesWritten
+          }
+        }
+        current.written += take
+        chunk = chunk.subarray(take)
+        if (current.written === current.record.size) { await finish(current); await advance() }
+      }
+      if (produced - reported >= 8 * 1024 * 1024) report()
+    }
+
+    // The inflater is driven one bounded slice at a time and never sees a byte
+    // outside the deflate body. After each slice it must have consumed all of
+    // it; a deflate stream that ends early leaves input unconsumed, which is
+    // data between the deflate end and the trailer (e.g. a second member).
+    // This relies on `bytesWritten` counting only the input the zlib engine
+    // consumed (Node's zlib advances it by avail_in before minus after each
+    // engine call, so input left over after the stream end is not counted);
+    // the layout sweep tests guard that behaviour on every supported runtime.
+    const inflater = zlib.createInflateRaw()
+    const output = []
+    let inflateError, fed = 0
+    inflater.on('data', chunk => output.push(chunk))
+    inflater.on('error', error => { inflateError ??= error })
+    // Cancellation destroys the inflater, which settles every wait below.
+    // Always destroy with a real error: abort reasons may be falsy, and
+    // destroy(null) emits neither 'end' nor 'error'. Each wait then calls
+    // signal.throwIfAborted(), so the caller's own reason is what surfaces.
+    const cancel = () => inflater.destroy(new Error('Runtime archive extraction cancelled'))
+    signal.addEventListener('abort', cancel, { once: true })
+    const ended = new Promise(resolveEnd => {
+      inflater.once('end', resolveEnd); inflater.once('error', resolveEnd); inflater.once('close', resolveEnd)
+    })
+    const drain = async () => {
+      while (output.length) { signal.throwIfAborted(); await consume(output.shift()) }
+    }
+    const inflate = async slice => {
+      // A data error destroys the stream without calling the in-flight write
+      // callback, so 'error' must settle this wait as well.
+      const error = await new Promise(resolveWrite => {
+        const failed = failure => resolveWrite(failure ?? new Error('Runtime archive inflater failed'))
+        inflater.once('error', failed)
+        inflater.write(slice, failure => { inflater.off('error', failed); resolveWrite(failure) })
+      })
+      signal.throwIfAborted()
+      fed += slice.length
+      if (error || inflateError || inflater.destroyed) throw invalidArchive('Runtime archive is truncated or corrupt')
+      if (inflater.bytesWritten !== fed) throw invalidArchive('Runtime archive has unexpected trailing data')
+      await drain()
+    }
+    try {
+      signal.throwIfAborted()
+      await advance()
+      let offset = 0
+      // Parts are read from fresh no-follow descriptors in manifest order and
+      // hashed again here, so the validated stream is exactly the pinned parts.
+      for (const [partIndex, part] of parts.entries()) {
+        const file = await checkedFile(join(archiveDirectory, archivePartName(partIndex)), constants.O_RDONLY)
+        try {
+          if ((await file.stat()).size !== part.size) throw invalidArchive('Runtime archive part changed before extraction')
+          const hash = createHash('sha256')
+          let read = 0
+          // Synchronously before building the stream (see transfer).
+          signal.throwIfAborted()
+          for await (const chunk of file.createReadStream({ start: 0, autoClose: false, signal })) {
+            signal.throwIfAborted()
+            read += chunk.length
+            if (read > part.size) throw invalidArchive('Runtime archive part changed before extraction')
+            hash.update(chunk)
+            for (let position = 0; position < chunk.length;) {
+              const at = offset + position
+              if (at < GZIP_HEADER_SIZE) {
+                const take = Math.min(chunk.length - position, GZIP_HEADER_SIZE - at)
+                chunk.copy(header, at, position, position + take)
+                position += take
+                // The fixed header the format permits: deflate, no optional fields.
+                if (at + take === GZIP_HEADER_SIZE && (header[0] !== 0x1f || header[1] !== 0x8b || header[2] !== 8 || header[3] !== 0)) {
+                  throw invalidArchive('Runtime archive format is invalid')
+                }
+              } else if (at < bodyEnd) {
+                const take = Math.min(chunk.length - position, bodyEnd - at, INFLATE_SLICE)
+                await inflate(chunk.subarray(position, position + take))
+                position += take
+              } else {
+                position += chunk.copy(trailer, at - bodyEnd, position)
+              }
+            }
+            offset += chunk.length
+          }
+          if (read !== part.size || hash.digest('hex') !== part.sha256) throw invalidArchive('Runtime archive part changed before extraction')
+        } finally { await file.close() }
+      }
+      // The body is exhausted: the deflate stream must be complete right here.
+      inflater.end()
+      await ended
+      signal.throwIfAborted()
+      if (inflateError || inflater.bytesWritten !== fed) throw invalidArchive('Runtime archive is truncated or corrupt')
+      await drain()
+      await Promise.all(settling)
+      settled()
+    } finally {
+      signal.removeEventListener('abort', cancel)
+      inflater.destroy()
+      await current?.handle?.close().catch(() => {})
+      for (const pending of opening.values()) await (await pending.catch(() => null))?.handle?.close().catch(() => {})
+      // No sync, close or rename may outlive this method (callers may discard staging).
+      await Promise.all(settling)
+    }
+    if (current || index < files.length) throw invalidArchive('Runtime archive ended before every file was extracted')
+    if (trailer.readUInt32LE(0) !== checksum >>> 0 || trailer.readUInt32LE(4) !== produced % 2 ** 32) {
+      throw invalidArchive('Runtime archive is truncated or corrupt')
+    }
+    report()
   }
 
   async install(manifest, { signal, probeTimeout, [offlineSources]: sources } = {}) {
@@ -451,19 +851,32 @@ export class RuntimeManager {
     this.busy = true
     try {
       signal.throwIfAborted()
+      const archive = manifest.kind === 'processing' ? manifest.archive : undefined
       const bytes = manifest.files.reduce((sum, file) => sum + file.size, 0)
-      if (await this.diskFree() < bytes * 2 + 64 * 1024 * 1024) throw new Error('Not enough disk space for retrieval and activation; previous runtime preserved')
       const packs = join(this.root, 'packs'), staging = join(this.root, 'staging', id)
+      // Archive parts live beside, never inside, the pack tree: `<id>.archive`
+      // cannot equal any hex `<id>`, and the staging inventory stays exact.
+      const archiveDirectory = join(this.root, 'staging', `${id}.archive`)
+      const streamMarker = join(this.root, 'staging', `${id}.stream`)
+      // Archive form: the remaining compressed parts and the full extracted tree
+      // coexist until every file verifies (parts are removed only afterwards);
+      // activation renames staging, so no third copy is made. Already retrieved
+      // part bytes are discounted; extracted bytes are not, which errs high.
+      const required = archive ? await archiveRemaining(archiveDirectory, archive.parts) + bytes : bytes * 2
+      if (await this.diskFree() < required + 64 * 1024 * 1024) throw new Error('Not enough disk space for retrieval and activation; previous runtime preserved')
       await plainDirectory(packs)
       await plainDirectory(join(this.root, 'staging'))
       await plainDirectory(staging)
-      for (const record of manifest.files) {
+      if (archive) await this.extractArchive(manifest, staging, archiveDirectory, streamMarker, signal)
+      // Every file is checked again on its own fresh descriptor before
+      // activation. Archive packs have no transfers here, so those checks run
+      // with bounded overlap; per-file retrieval stays strictly sequential.
+      const stage = async record => {
         signal?.throwIfAborted()
         const destination = join(staging, record.path)
         // Validate each ancestor so a pre-existing symlink cannot escape staging.
-        let ancestor = staging
-        for (const part of record.path.split('/').slice(0, -1)) { ancestor = join(ancestor, part); await plainDirectory(ancestor) }
-        if (!await matches(destination, record)) {
+        await stagingAncestors(staging, record.path)
+        if (!archive && !await matches(destination, record)) {
           await this.transfer(record, destination + '.partial', signal, sources?.get(record.path))
           signal.throwIfAborted()
           await rename(destination + '.partial', destination)
@@ -471,11 +884,21 @@ export class RuntimeManager {
         await rm(destination + '.partial', { force: true })
         const file = await checkedFile(destination, constants.O_RDWR)
         try {
-          if ((await file.stat()).size !== record.size || await fileHash(file) !== record.sha256) throw new Error('Runtime file changed before activation')
-          await file.chmod(record.executable ? 0o700 : 0o600)
+          const info = await file.stat()
+          if (info.size !== record.size || await fileHash(file) !== record.sha256) throw new Error('Runtime file changed before activation')
+          // A no-op chmod still dirties the inode (ctime), turning the sync
+          // below into a journal commit per file. Comparing all permission and
+          // special bits (setuid/setgid/sticky) keeps the resulting mode identical.
+          const mode = record.executable ? 0o700 : 0o600
+          if ((info.mode & 0o7777) !== mode) await file.chmod(mode)
           await file.sync()
         } finally { await file.close() }
       }
+      if (archive) await boundedEach(manifest.files, ARCHIVE_FILE_CONCURRENCY, stage)
+      else for (const record of manifest.files) await stage(record)
+      // Every file is verified in staging; the compressed parts are no longer
+      // needed. A crash before this point retries from the retained parts.
+      if (archive) await rm(archiveDirectory, { recursive: true, force: true })
       const manifestFile = await checkedFile(join(staging, 'manifest.json'), constants.O_CREAT | constants.O_EXCL | constants.O_RDWR).catch(async error => {
         if (error.code !== 'EEXIST') throw error
         if (await checkedRead(join(staging, 'manifest.json')) !== JSON.stringify(manifest)) throw new Error('Staging manifest mismatch')
@@ -516,6 +939,7 @@ export class RuntimeManager {
           await this.durableReplace(staging, destination)
         } else await this.durableReplace(destination, destination)
       } else await this.durableReplace(staging, destination)
+      if (archive) await rm(streamMarker, { force: true })
       await this.verify(id)
       if (manifest.kind === 'processing') await this.probe({ id }, { timeout: probeTimeout, signal })
       signal?.throwIfAborted()
@@ -651,7 +1075,7 @@ export function processingAttestation(active, probeResult) {
 }
 
 export function validateModelManifest(value, policy) {
-  if (!value || value.schema !== 1 || value.kind !== 'models'
+  if (!value || value.schema !== 1 || value.kind !== 'models' || value.archive !== undefined
       || !Array.isArray(value.models) || !value.models.length || new Set(value.models).size !== value.models.length || value.models.some(id => !token.test(id))
       || !Array.isArray(value.files) || !value.files.length) throw new Error('Invalid upstream model manifest')
   if (policy?.schema !== 1 || !Array.isArray(policy.models) || !Array.isArray(policy.allowedHosts)) throw new Error('Invalid application model policy')

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, symlink, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+import { crc32, deflateRawSync } from 'node:zlib'
 import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
+import { RuntimeManager } from '../runtime_manager.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 function fixture(overrides = {}) {
@@ -415,4 +418,106 @@ test('private-smoke qualification is selectable only on the private-test channel
   const broken = fixture({ releaseChannel: 'private-test', catalogError: 'The processing installation catalog could not be verified.' })
   broken.setup.catalog.qualification.scope = 'private-smoke'
   assert.equal((await broken.setup.preflight()).qualificationScope, null)
+})
+
+// ---- Archive-form runtime catalogs ----------------------------------------
+const MiB = 1024 * 1024
+const sha = value => createHash('sha256').update(value).digest('hex')
+const archiveIdentity = { appVersion: '0.1.0', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0', platform: 'linux', arch: 'x64' }
+// A complete, lock-bound, functional-probe runtime delivered as two archive parts.
+function archiveRuntime(entries) {
+  const data = Buffer.concat(entries.map(entry => entry.data))
+  const trailer = Buffer.alloc(8)
+  trailer.writeUInt32LE(crc32(data) >>> 0, 0); trailer.writeUInt32LE(data.length, 4)
+  const bytes = Buffer.concat([Buffer.from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]), deflateRawSync(data), trailer])
+  const parts = [bytes.subarray(0, 40), bytes.subarray(40)]
+  const urls = ['https://github.com/owner/repo/releases/download/v1/tools.pack.gz.001', 'https://github.com/owner/repo/releases/download/v1/tools.pack.gz.002']
+  const manifest = { schema: 1, kind: 'processing', ...archiveIdentity, pythonVersion: '3.12.14', accelerator: 'cpu', python: 'python/bin/python3',
+    probe: { schema: 2, type: 'python-functional-v1', modules: ['audio_separator.separator', 'demucs.separate', 'faster_whisper', 'karaoke_backend.workers.heart_transcriptor', 'lyricsync.transcription.heart'] },
+    capabilities: ['transcription', 'separation'], models: [...LOCAL_MODEL_IDS],
+    modelCapabilities: Object.fromEntries(LOCAL_MODEL_IDS.map(id => [id, id === 'heart-transcriptor' ? 'transcription' : 'separation'])),
+    files: entries.map(({ path, data, executable }) => ({ path, size: data.length, sha256: sha(data), executable })) }
+  const inputLock = { schema: 1, kind: 'processing-input', ...Object.fromEntries(
+    ['appVersion', 'backendVersion', 'lyricsyncVersion', 'pythonVersion', 'platform', 'arch', 'accelerator', 'python', 'capabilities', 'models', 'modelCapabilities', 'probe', 'files']
+      .map(key => [key, structuredClone(manifest[key])])), sourceCommit: 'a'.repeat(40),
+  packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/fixture.whl', sha256: 'c'.repeat(64), notices: ['NOTICE.fixture'] }] }
+  manifest.provenance = { sourceCommit: inputLock.sourceCommit, lockSha256: sha(JSON.stringify(inputLock)),
+    inputLock: JSON.stringify(inputLock), packages: structuredClone(inputLock.packages), qualification: 'UNTESTED' }
+  manifest.archive = { format: 'concat-gzip-v1', parts: parts.map((part, i) => ({ url: urls[i], sha256: sha(part), size: part.length })) }
+  return { manifest, parts, urls }
+}
+const archiveEntries = [
+  { path: 'python/bin/python3', data: Buffer.from('fixture python'), executable: true },
+  { path: 'NOTICE.fixture', data: Buffer.from('MIT notice'), executable: false },
+  { path: 'lib/noise.bin', data: Buffer.concat(Array.from({ length: 40 }, (_, i) => createHash('sha256').update(String(i)).digest())), executable: false },
+]
+
+test('preflight plans an archive-form runtime from its parts: sources, transfer and installed sizes, disk reservation', async () => {
+  const { manifest } = archiveRuntime(archiveEntries)
+  const { setup } = fixture()
+  setup.catalog.runtime = manifest
+  setup.catalog.qualification.runtimeLockSha256 = manifest.provenance.lockSha256
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  const runtime = plan.components.find(component => component.label === 'Local processing runtime')
+  const transfer = manifest.archive.parts.reduce((sum, part) => sum + part.size, 0)
+  const installed = manifest.files.reduce((sum, file) => sum + file.size, 0)
+  assert.notEqual(transfer, installed)
+  assert.deepEqual(runtime.sources, ['https://github.com'])
+  assert.equal(runtime.bytes, transfer)
+  assert.equal(runtime.installedBytes, installed)
+  // Every part not yet retrieved, plus the uncompressed tree, plus the margin:
+  // exactly what RuntimeManager.install reserves for a fresh archive install.
+  assert.equal(plan.diskRequiredBytes, transfer + installed + 30 * 2 + 128 * MiB)
+  setup.diskFree = async () => plan.diskRequiredBytes - 1
+  assert.match((await setup.preflight()).reason, /Not enough free disk space/)
+  // Per-file runtimes keep their sources and reservation unchanged.
+  const legacy = fixture()
+  const legacyPlan = await legacy.setup.preflight()
+  assert.deepEqual(legacyPlan.components[0].sources, ['https://example.org'])
+  assert.equal(legacyPlan.components[0].bytes, 5)
+  assert.equal(legacyPlan.components[0].installedBytes, 5)
+})
+
+test('full setup installs an archive-form runtime catalog through the runtime manager', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'onboarding-archive-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { manifest, parts, urls } = archiveRuntime(archiveEntries)
+  const requests = []
+  const fetchImpl = async (url, options) => {
+    requests.push(String(url))
+    assert.equal(options.redirect, 'manual')
+    const bytes = parts[urls.indexOf(String(url))]
+    return bytes ? new Response(bytes) : new Response('missing', { status: 404 })
+  }
+  let reserved
+  const runtime = new RuntimeManager(join(root, 'processing'), archiveIdentity, { fetchImpl,
+    lockPython: process.platform === 'win32' ? 'python.exe' : 'python3',
+    durabilityHelper: fileURLToPath(new URL('../backend.py', import.meta.url)),
+    trustedLocks: [manifest.provenance.lockSha256], diskFree: async () => { reserved ??= true; return 1e12 } })
+  runtime.probe = async () => ({ schema: 2, accelerator: 'cpu', hardwareAvailable: true, pythonVersion: '3.12.14', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0',
+    capabilities: manifest.capabilities, components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1'])),
+    capabilitiesReady: true, verifiedCapabilities: manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } })
+  const { setup, cache, calls } = fixture({ runtime })
+  setup.catalog.runtime = manifest
+  setup.catalog.qualification.runtimeLockSha256 = manifest.provenance.lockSha256
+  const events = []
+  setup.notify = state => { if (state.progress) events.push(state.progress) }
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  assert.deepEqual(plan.components[0].sources, ['https://github.com'])
+  assert.equal(requests.length, 0, 'preflight retrieves nothing')
+  const status = await start(setup, plan.planId)
+  assert.equal(status.state, 'restart-required', status.error)
+  assert.deepEqual(requests, urls)
+  assert.deepEqual(calls, ['models'])
+  assert.ok(reserved)
+  const active = await runtime.active()
+  assert.equal(active.id, hash(manifest))
+  for (const entry of archiveEntries) assert.deepEqual(await readFile(join(active.directory, entry.path)), entry.data)
+  assert.deepEqual(events.filter(event => event.phase === 'retrieve').map(event => [event.part, event.parts]).filter((v, i, a) => i === a.findIndex(o => o[0] === v[0])), [[1, 2], [2, 2]])
+  assert.equal(events.at(-1).phase, 'extract')
+  setup.loaded = { runtimeId: active.id, modelsId: cache.value.id }
+  assert.equal((await setup.preflight()).ready, true)
 })
