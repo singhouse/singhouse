@@ -2,6 +2,14 @@ name: Private Windows signing candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      processing_mode:
+        description: Whether the candidate packages the committed win32-x64 processing catalog
+        type: choice
+        options:
+          - playback-only
+          - processing-ready
+        default: playback-only
 
 permissions:
   contents: read
@@ -116,11 +124,26 @@ jobs:
           & ./desktop/build/sign_windows.ps1 -ValidateOnly
       - name: Assemble signed Windows application and first installer
         shell: pwsh
+        env:
+          PROCESSING_MODE: ${{ inputs.processing_mode }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # The dispatch choice reaches the shell only as data; a fixed mapping
+          # selects the packaging flag and anything else stops before assembly.
+          switch -Exact -CaseSensitive ($env:PROCESSING_MODE) {
+            'playback-only' { $processingFlag = '--playback-only' }
+            'processing-ready' { $processingFlag = '--processing-ready' }
+            default { throw 'Unknown processing mode.' }
+          }
+          # Packaging re-validates the catalog; this only fails before the
+          # lengthy native assembly when the committed catalog is absent.
+          if ($env:PROCESSING_MODE -ceq 'processing-ready' -and
+              -not (Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json' -PathType Leaf)) {
+            throw 'processing-ready requires the committed desktop/processing-catalogs/win32-x64.json; choose playback-only or commit the generated catalog.'
+          }
           python desktop/build/assemble.py --target win32-x64 --output desktop/native
           if ($LASTEXITCODE -ne 0) { throw 'Native assembly failed.' }
-          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc
+          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc $processingFlag
           if ($LASTEXITCODE -ne 0) { throw 'Signed installer packaging failed.' }
       - name: Verify signatures and write final SHA-256 inventory
         shell: pwsh
@@ -144,7 +167,7 @@ jobs:
           } | Set-Content -Encoding ascii desktop/artifacts/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: windows-signed-${{ github.sha }}
+          name: windows-signed-${{ inputs.processing_mode }}-${{ github.sha }}
           path: desktop/artifacts/
           include-hidden-files: true
           if-no-files-found: error

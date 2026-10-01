@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
-import { validateSetupCatalog } from './setup_catalog.mjs'
+import { validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
 import { checkModalConnection } from './modal_connection.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -595,16 +595,21 @@ async function start() {
   if (packaged) {
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
-    let catalog = null, catalogError
-    try {
-      if (existsSync(catalogPath)) catalog = validateSetupCatalog(JSON.parse(readFileSync(catalogPath, 'utf8')), {
-        identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
-      })
-    } catch {
-      catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.'
+    let catalog = null, catalogError, catalogText = null
+    const rejectCatalog = () => { catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.' }
+    try { if (existsSync(catalogPath)) catalogText = readFileSync(catalogPath, 'utf8') }
+    catch { rejectCatalog(); console.error('Could not read the processing installation catalog.') }
+    // The same validation the packaging gate applied to this exact catalog.
+    if (catalogText !== null) {
+      try {
+        catalog = validateShippedCatalog(catalogText, {
+          identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
+          releaseChannel: releasePolicy.channel,
+        })
+      } catch (error) { rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
     }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, catalogError, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
       hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
       diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,

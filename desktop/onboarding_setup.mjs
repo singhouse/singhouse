@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { checkedFile, processingAttestation } from './runtime_manager.mjs'
-import { validateSetupMemory } from './setup_catalog.mjs'
+import { QUALIFICATION_SCOPES, qualificationScopeError, validateSetupMemory } from './setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -93,9 +93,11 @@ export class OnboardingSetup {
     this.#offlineModelsDirectory = directory === null ? null : resolve(directory)
   }
 
-  constructor({ runtime, cache, policy, catalog = null, catalogError = null, hardware = async () => ({}), diskFree,
+  // releaseChannel is the validated release policy's channel; it decides
+  // whether private-smoke qualification evidence is acceptable.
+  constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
     loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
-    Object.assign(this, { runtime, cache, policy, catalogError, hardware, diskFree, loaded, load, save, notify })
+    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
     this.state = initial()
     this.operation = null
@@ -114,6 +116,14 @@ export class OnboardingSetup {
       }
     }
     return structuredClone(this.state)
+  }
+
+  // The scope the wizard labels, carried on the preflight plan only: only a
+  // scope this build accepts is reported, so the label can never describe a
+  // catalog that selection would refuse.
+  qualificationScope() {
+    const scope = this.catalog?.qualification?.scope
+    return !this.catalogError && QUALIFICATION_SCOPES.includes(scope) && !qualificationScopeError(scope, this.releaseChannel) ? scope : null
   }
 
   async update(values) {
@@ -145,7 +155,7 @@ export class OnboardingSetup {
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
     if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
-        || q.runtimeLockSha256 !== runtime.provenance.lockSha256
+        || q.runtimeLockSha256 !== runtime.provenance.lockSha256 || qualificationScopeError(q.scope, this.releaseChannel)
         || ['platform', 'arch', 'accelerator'].some(key => q[key] !== runtime[key])) {
       throw new Error('Local song processing is not available in this version yet. Its processing tools still need to pass the required checks.')
     }
@@ -212,7 +222,7 @@ export class OnboardingSetup {
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+      qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
     if (installed.installed) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
       const selected = this.selection(installed.models)
