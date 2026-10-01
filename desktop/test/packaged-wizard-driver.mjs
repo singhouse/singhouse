@@ -20,17 +20,20 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const jsonIdentity = value => sha256(JSON.stringify(value))
 const pause = ms => new Promise(resolveWait => setTimeout(resolveWait, ms))
 
-// Visible step headings (DesktopOnboarding.vue). Text locators are the only
-// hooks the component offers; see the README for the stable hooks that would
-// make this independent of copy changes. `cancelled` is the error step showing
-// a cancelled status.
+// Steps are read from the dialog's `data-step` hook. The error step carries
+// three distinct outcomes that only its heading names, so headings still
+// refine it: `cancelled` (a cancelled or interrupted status),
+// `verification-failed` (an honest failed re-verification after restart) and
+// `error`. A candidate without `data-step` falls back to the heading alone.
 const HEADINGS = [
   ['welcome', 'Your library. Your stage.'],
   ['choose', 'Where should we prepare your songs?'],
   ['consent', 'Review your installation.'],
   ['modal', 'Your account. Your control.'],
   ['progress', 'We’ll take it from here.'],
+  ['checking', 'Checking your setup.'],
   ['cancelled', 'Setup cancelled.'],
+  ['verification-failed', 'Local processing could not be verified.'],
   ['error', 'Setup could not finish.'],
   ['restart', 'Restart to finish setup.'],
   ['ready', 'Let’s add your first song.'],
@@ -39,6 +42,14 @@ export const normalizeText = text => String(text ?? '').replace(/\s+/gu, ' ').tr
 export function stepFromHeading(text) {
   const normalized = normalizeText(text)
   return HEADINGS.find(([, heading]) => heading === normalized)?.[0] ?? null
+}
+const ERROR_OUTCOMES = Object.freeze(['cancelled', 'verification-failed', 'error'])
+// The step a user sees, from the `data-step` hook refined by the heading.
+export function stepFrom(dataStep, heading) {
+  if (!dataStep) return stepFromHeading(heading)
+  if (dataStep !== 'error') return dataStep
+  const outcome = stepFromHeading(heading)
+  return ERROR_OUTCOMES.includes(outcome) ? outcome : 'error'
 }
 
 // A source a release catalog would never name: loopback, private-range or
@@ -190,7 +201,9 @@ export function assertWizardPlan(plan, summary, expectedLock) {
 
 // The consent screen must show every component and exact byte count it asks
 // consent for. `formatted` is each component's byte count as the renderer
-// formats it (toLocaleString in the renderer's own locale).
+// formats it (toLocaleString in the renderer's own locale). An archive-
+// delivered component may add its installed size after the exact retrieval
+// size ("… bytes) to retrieve, 1.9 GiB installed"); that never replaces it.
 export function assertConsentText(text, plan, formatted) {
   const normalized = normalizeText(text)
   for (const [index, component] of plan.components.entries()) {
@@ -386,19 +399,30 @@ export function installedModelsIdentity(profile) {
 }
 
 // Judges the post-restart observation sequence. Expected: the dialog reopens,
-// the wizard shows a neutral checking state while its own preflight
-// re-verifies the runtime, then settles on `ready`; setup status is never
-// `cancelled` or `error`. An error or cancelled screen at any point is the
-// product presenting a verified restart as an interrupted setup.
+// the wizard shows its neutral `checking` step while its own preflight
+// re-verifies the runtime, then settles on `ready`. A cancelled, interrupted
+// or generic error screen or status at any point is the product presenting a
+// verified restart as an interrupted setup. An honest failed re-verification
+// (the verification-failed screen, or an error status in the verification
+// phase) is reported as such; it is still a failed run.
 export const INTERRUPTED_STEPS = Object.freeze(['error', 'cancelled'])
+const honestFailure = item => item.step === 'verification-failed'
+  || (item.statusState === 'error' && item.statusPhase === 'verification' && !INTERRUPTED_STEPS.includes(item.step))
 export function judgePostRestart({ observations, settled, timedOut, timeoutMs }) {
   assert.ok(Array.isArray(observations), 'Post-restart observations are missing')
   assert.ok(observations.some(item => item.dialogVisible), 'The setup dialog did not reopen after restart; expected it to re-verify the installed runtime')
-  const interrupted = observations.filter(item => INTERRUPTED_STEPS.includes(item.step) || INTERRUPTED_STEPS.includes(item.statusState))
+  const interrupted = observations.filter(item => !honestFailure(item)
+    && (INTERRUPTED_STEPS.includes(item.step) || INTERRUPTED_STEPS.includes(item.statusState)))
   if (interrupted.length) {
     const first = interrupted[0]
     throw new Error(`A verified restart was presented as an interrupted setup (product defect): at ${first.elapsedMs} ms the wizard showed step ${first.step ?? 'unknown'} `
       + `with status ${first.statusState ?? 'unknown'} (${JSON.stringify(first.heading)}); see wizard.postRestart.observations`)
+  }
+  const failed = observations.find(honestFailure)
+  if (failed) {
+    throw new Error(`Post-restart verification failed: at ${failed.elapsedMs} ms the wizard reported that local processing could not be verified `
+      + `(step ${failed.step ?? 'unknown'}, status ${failed.statusState ?? 'unknown'}/${failed.statusPhase ?? 'unknown'}: ${JSON.stringify(failed.statusMessage ?? failed.heading)}); `
+      + 'the installed runtime or models did not pass live verification; see wizard.postRestart.observations')
   }
   if (timedOut || !settled) {
     const last = observations.at(-1)
@@ -441,23 +465,29 @@ export const WIZARD_LIMITATIONS = Object.freeze([
 
 // ---- Playwright steps (require a live packaged application) ----
 
-export function onboardingDialog(page) { return page.getByRole('dialog', { name: /setup$/u }) }
+export function onboardingDialog(page) { return page.getByTestId('onboarding-dialog') }
+// A wizard control by its stable test hook.
+export function control(page, id) { return onboardingDialog(page).getByTestId(id) }
+
+async function readStep(dialog) {
+  const dataStep = await dialog.getAttribute('data-step', { timeout: 2000 }).catch(() => null)
+  const heading = normalizeText(await dialog.getByRole('heading', { level: 1 }).innerText({ timeout: 2000 }).catch(() => '')) || null
+  return { heading, step: stepFrom(dataStep, heading) }
+}
 
 export async function currentStep(page) {
   const dialog = onboardingDialog(page)
   if (!await dialog.isVisible()) return null
-  const heading = dialog.getByRole('heading', { level: 1 })
-  return stepFromHeading(await heading.innerText({ timeout: 2000 }).catch(() => ''))
+  return (await readStep(dialog)).step
 }
 
 // One read of what a user sees: dialog visibility, its busy flag, the step
-// heading and the step it names (null for a heading this driver does not know).
+// heading and the step (null when neither hook nor heading names one).
 export async function uiSnapshot(page) {
   const dialog = onboardingDialog(page)
   if (!await dialog.isVisible()) return { dialogVisible: false, busy: null, heading: null, step: null }
   const busy = await dialog.getAttribute('aria-busy', { timeout: 2000 }).catch(() => null)
-  const heading = normalizeText(await dialog.getByRole('heading', { level: 1 }).innerText({ timeout: 2000 }).catch(() => '')) || null
-  return { dialogVisible: true, busy: busy === 'true' ? true : busy === 'false' ? false : null, heading, step: stepFromHeading(heading) }
+  return { dialogVisible: true, busy: busy === 'true' ? true : busy === 'false' ? false : null, ...await readStep(dialog) }
 }
 
 export async function waitForStep(page, expected, { timeoutMs, interval = 250 } = {}) {
@@ -471,8 +501,12 @@ export async function waitForStep(page, expected, { timeoutMs, interval = 250 } 
   throw new Error(`Setup wizard did not reach ${wanted.join(' or ')} (last step: ${seen ?? 'none'})`)
 }
 
-// Controls are judged only while the wizard is idle: during its own preflight
-// the dialog is aria-busy and every control is disabled.
+// Controls are judged only while the wizard is idle: while one of its actions
+// runs (including the preflight behind the choice and consent screens) the
+// dialog is aria-busy and that screen's controls are disabled. The
+// post-restart check is not such an action: it shows the `checking` step with
+// the dialog not busy and its library control enabled, so it is observed by
+// step, not by this wait.
 export async function waitForIdle(page, { timeoutMs, interval = 100 } = {}) {
   assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0, 'waitForIdle requires a timeout')
   const dialog = onboardingDialog(page), deadline = Date.now() + timeoutMs
@@ -486,18 +520,17 @@ export async function waitForIdle(page, { timeoutMs, interval = 100 } = {}) {
   throw new Error(`Setup wizard stayed busy for ${Math.round(timeoutMs / 1000)} s (aria-busy=${busy ?? 'unavailable'})`)
 }
 
-const button = (page, name) => onboardingDialog(page).getByRole('button', { name })
 
 export async function chooseLocalAndContinue(page, { timeoutMs }) {
   await waitForStep(page, 'choose', { timeoutMs })
   await waitForIdle(page, { timeoutMs })
-  const local = button(page, /^On this computer/u)
+  const local = control(page, 'onboarding-choice-local')
   if (await local.isDisabled()) {
     throw new Error(`Local processing is unavailable in the wizard: ${normalizeText(await onboardingDialog(page).locator('#local-reason').innerText())}`)
   }
   if (await local.getAttribute('aria-pressed') !== 'true') await local.click()
   assert.equal(await local.getAttribute('aria-pressed'), 'true', 'Local processing choice was not selected')
-  await button(page, 'Continue →').click()
+  await control(page, 'onboarding-continue').click()
   await waitForStep(page, 'consent', { timeoutMs })
   await waitForIdle(page, { timeoutMs })
 }
@@ -514,7 +547,7 @@ export async function consentSnapshot(page, plan) {
 
 export async function acceptConsent(page, { timeoutMs }) {
   await waitForIdle(page, { timeoutMs })
-  const install = button(page, /^Install tools and models/u)
+  const install = control(page, 'onboarding-install')
   assert.equal(await install.isEnabled(), true, 'Install control is disabled')
   await install.click()
 }
@@ -533,22 +566,20 @@ export async function waitForSetupStart(read, { before, timeoutMs, interval = 25
 }
 
 export async function cancelFromUi(page) {
-  const dialog = onboardingDialog(page)
-  const summary = dialog.locator('summary', { hasText: 'Setup controls' })
-  const details = dialog.locator('details', { has: summary })
-  if (await details.getAttribute('open') === null) await summary.click()
-  await button(page, 'Cancel setup').click()
+  const details = control(page, 'onboarding-setup-controls')
+  if (await details.getAttribute('open') === null) await details.locator('summary').click()
+  await control(page, 'onboarding-cancel').click()
 }
 
 export async function retryFromUi(page, { timeoutMs }) {
   await waitForIdle(page, { timeoutMs })
-  await button(page, 'Review setup and retry').click()
+  await control(page, 'onboarding-retry').click()
   await chooseLocalAndContinue(page, { timeoutMs })
 }
 
 export async function clickRestart(page) {
   // The application quits during this action; Playwright may lose the page.
-  await button(page, /^Restart /u).click({ noWaitAfter: true, timeout: 10000 })
+  await control(page, 'onboarding-restart').click({ noWaitAfter: true, timeout: 10000 })
 }
 
 // Records the application's relaunch request instead of letting it spawn an
@@ -563,8 +594,9 @@ export async function interceptRelaunch(application, markerPath) {
 }
 
 // After relaunch: record every distinct (dialog visibility, step, status,
-// heading) with timestamps until the wizard is idle on one screen for
-// `settleMs`, or `timeoutMs` passes. Only getSetupStatus is read; the
+// heading) with timestamps until the wizard is idle on one screen other than
+// `checking` for `settleMs`, or `timeoutMs` passes. `checking` is the
+// wizard's own re-verification still running: not settled, not a failure. Only getSetupStatus is read; the
 // wizard's own preflight is the only verification that runs.
 export async function observePostRestart(page, { timeoutMs, interval = 250, settleMs = 1500, read = readStatus, snapshot = uiSnapshot,
   now = Date.now } = {}) {
@@ -582,12 +614,13 @@ export async function observePostRestart(page, { timeoutMs, interval = 250, sett
       const signature = JSON.stringify([ui.dialogVisible, ui.step, ui.heading, status?.state ?? null])
       if (signature !== observations.at(-1)?.signature) {
         observations.push({ signature, elapsedMs: at - start, at: new Date(at).toISOString(), dialogVisible: ui.dialogVisible,
-          busy: ui.busy, step: ui.step, heading: ui.heading, statusState: status?.state ?? null, statusMessage: status?.message ?? null,
+          busy: ui.busy, step: ui.step, heading: ui.heading, statusState: status?.state ?? null, statusPhase: status?.phase ?? null,
+          statusMessage: status?.message ?? null,
           ...(status?.readError && { statusReadError: status.readError }) })
       }
     }
     const seenDialog = observations.some(item => item.dialogVisible)
-    if (seenDialog && ui.busy === false && at - stableSince >= settleMs) {
+    if (seenDialog && ui.busy === false && ui.step !== 'checking' && at - stableSince >= settleMs) {
       return { observations: observations.map(({ signature, ...item }) => item), timedOut: false, elapsedMs: at - start,
         settled: { dialogVisible: ui.dialogVisible, step: ui.step, heading: ui.heading, statusState: status?.state ?? null } }
     }

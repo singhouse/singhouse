@@ -11,8 +11,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
 import { WIZARD_LIMITATIONS, acceptConsent, assertCatalogLock, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
-  catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, createStatusTracker, installedModelsIdentity,
-  installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, onboardingDialog, parsePackServerLog, partialRuntimeBytes,
+  catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, control, createStatusTracker, installedModelsIdentity,
+  installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, parsePackServerLog, partialRuntimeBytes,
   readPlan, readStatus, retryFromUi, runtimeFileForUrlPath, runtimeFileUrlPath, shouldInterrupt, summarizeCatalog, waitForIdle,
   waitForSetupStart, waitForStep } from './packaged-wizard-driver.mjs'
 
@@ -679,7 +679,7 @@ export async function run(options) {
     const firstStep = await waitForStep(host, 'welcome', { timeoutMs: stepTimeout() })
     wizard.onboarding = { shownOnFirstLaunch: true, firstStep, harnessUsedAdvancedRoute: false }
     await waitForIdle(host, { timeoutMs: stepTimeout() })
-    await onboardingDialog(host).getByRole('button', { name: /^Get started/u }).click()
+    await control(host, 'onboarding-get-started').click()
     await chooseLocalAndContinue(host, { timeoutMs: stepTimeout() })
     // Before consent nothing is installed, so this preflight is a read.
     const plan = await bounded(readPlan(host), 60000)

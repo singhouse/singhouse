@@ -8,11 +8,11 @@ import test from 'node:test'
 import { OnboardingSetup } from '../onboarding_setup.mjs'
 import { ModelCache, RuntimeManager } from '../runtime_manager.mjs'
 import { createSetupCatalog, validateSetupCatalog } from '../setup_catalog.mjs'
-import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalizeText, stepFromHeading, summarizeCatalog, assertCatalogLock,
+import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalizeText, stepFromHeading, stepFrom, summarizeCatalog, assertCatalogLock,
   assertWizardPlan, assertConsentText, createStatusTracker, shouldInterrupt, classifyRetry, partialRuntimeBytes, installedRuntimeIdentity,
   installedModelsIdentity, assertPostRestart, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
   parsePackServerLog, runtimeFileUrlPath, runtimeFileForUrlPath, judgePostRestart, observePostRestart, waitForIdle, acceptConsent,
-  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart } from './packaged-wizard-driver.mjs'
+  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, cancelFromUi, clickRestart } from './packaged-wizard-driver.mjs'
 
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const LOCK = 'a'.repeat(64)
@@ -48,6 +48,18 @@ test('step headings map exactly, after whitespace normalization only', () => {
   assert.equal(stepFromHeading('restart to finish setup.'), null)
   assert.equal(stepFromHeading(undefined), null)
   assert.equal(normalizeText('a\t\n b '), 'a b')
+})
+
+test('steps come from the data-step hook; headings only refine the error step or stand in without it', () => {
+  assert.equal(stepFrom('checking', 'Checking your setup.'), 'checking')
+  assert.equal(stepFrom('ready', 'Any new ready copy'), 'ready')
+  assert.equal(stepFrom('error', 'Setup cancelled.'), 'cancelled')
+  assert.equal(stepFrom('error', 'Local processing could not be verified.'), 'verification-failed')
+  assert.equal(stepFrom('error', 'Setup could not finish.'), 'error')
+  assert.equal(stepFrom('error', 'Unknown error copy'), 'error')
+  assert.equal(stepFrom('error', 'Let’s add your first song.'), 'error')
+  assert.equal(stepFrom(null, 'Restart to finish setup.'), 'restart')
+  assert.equal(stepFrom(null, 'Unknown'), null)
 })
 
 test('private test origins: loopback, private ranges, localhost and explicit ports', () => {
@@ -201,6 +213,15 @@ test('consent text must name every component with its exact formatted size', () 
   assert.throws(() => assertConsentText(text.replace('karaoke-roformer', 'other'), offered, formatted), /omits karaoke-roformer/)
   assert.throws(() => assertConsentText(text.replace('(1,000 bytes)', '(1 KB)'), offered, formatted), /exact size of Local processing runtime/)
   assert.throws(() => assertConsentText(text.replace('Install tools and models', ''), offered, formatted), /no install control/)
+})
+
+test('consent text keeps its exact retrieval sizes when installed sizes are added', () => {
+  const offered = plan(), formatted = offered.components.map(component => component.bytes.toLocaleString('en-US'))
+  const text = offered.components.map((component, index) => `${component.label} · 1 MiB\n (${formatted[index]} bytes)`
+    + (component.label === RUNTIME_COMPONENT_LABEL ? ' to retrieve, 1.9 GiB installed' : '')).join('\n') + '\nInstall tools and models'
+  assertConsentText(text, offered, formatted)
+  assert.throws(() => assertConsentText(text.replace('(1,000 bytes) to retrieve', '1.9 GiB installed'), offered, formatted),
+    /exact size of Local processing runtime/)
 })
 
 test('status tracker records transitions, per-attempt phases and transfer bounds', () => {
@@ -369,49 +390,69 @@ test('post-restart acceptance requires the promised runtime, lock, target and mo
 // ---- Fake Playwright page: the dialog, its busy flag, heading and buttons ----
 
 function fakeWizard(initial) {
-  const state = { visible: true, busy: false, heading: 'Where should we prepare your songs?', localAvailable: true, pressed: 'true',
-    calls: [], ...initial }
+  const state = { visible: true, busy: false, step: 'choose', heading: 'Where should we prepare your songs?', localAvailable: true, pressed: 'true',
+    detailsOpen: false, calls: [], ...initial }
   const tick = () => { state.onPoll?.(state) }
-  const button = name => ({
-    async isDisabled() { state.calls.push(`isDisabled:${name}:${state.busy}`); return state.busy || (String(name).includes('On this computer') && !state.localAvailable) },
-    async isEnabled() { state.calls.push(`isEnabled:${name}:${state.busy}`); return !state.busy },
-    async getAttribute(attribute) { return attribute === 'aria-pressed' ? state.pressed : null },
-    async click() { state.calls.push(`click:${name}:${state.busy}`); state.onClick?.(String(name), state) },
+  const control = id => ({
+    async isDisabled() { state.calls.push(`isDisabled:${id}:${state.busy}`); return state.busy || (id === 'onboarding-choice-local' && !state.localAvailable) },
+    async isEnabled() { state.calls.push(`isEnabled:${id}:${state.busy}`); return !state.busy },
+    async getAttribute(attribute) {
+      if (attribute === 'aria-pressed') return state.pressed
+      return attribute === 'open' && id === 'onboarding-setup-controls' && state.detailsOpen ? '' : null
+    },
+    locator(selector) { return { click: async () => { state.calls.push(`click:${id} ${selector}:${state.busy}`); state.detailsOpen = true } } },
+    async click(options) { state.calls.push(`click:${id}:${state.busy}`); state.clickOptions = options; state.onClick?.(id, state) },
   })
   const dialog = {
     async isVisible() { return state.visible },
-    async getAttribute(attribute) { tick(); return attribute === 'aria-busy' ? String(state.busy) : null },
-    getByRole(role, { name } = {}) {
-      return role === 'heading' ? { innerText: async () => state.heading } : button(name)
+    async getAttribute(attribute) {
+      tick()
+      if (attribute === 'aria-busy') return String(state.busy)
+      return attribute === 'data-step' ? state.step : null
     },
+    getByRole(role) { assert.equal(role, 'heading'); return { innerText: async () => state.heading } },
+    getByTestId: control,
     locator() { return { innerText: async () => state.reason ?? 'Local setup is currently unavailable.' } },
   }
-  return { state, page: { getByRole: () => dialog } }
+  return { state, page: { getByTestId: id => { assert.equal(id, 'onboarding-dialog'); return dialog } } }
 }
 
 test('controls are judged only after the wizard is idle (aria-busy=false)', async () => {
   // The choice screen renders while its preflight runs: busy, local disabled.
   let polls = 0
   const { state, page } = fakeWizard({ busy: true, onPoll: s => { if (++polls >= 3) s.busy = false },
-    onClick: (name, s) => { if (name.includes('Continue')) s.heading = 'Review your installation.' } })
+    onClick: (id, s) => { if (id === 'onboarding-continue') s.step = 'consent' } })
   await chooseLocalAndContinue(page, { timeoutMs: 2000 })
   assert.ok(polls >= 3)
-  assert.ok(state.calls.includes('isDisabled:/^On this computer/u:false'))
+  assert.ok(state.calls.includes('isDisabled:onboarding-choice-local:false'))
+  assert.ok(state.calls.includes('click:onboarding-continue:false'))
   assert.ok(!state.calls.some(call => call.endsWith(':true')), 'no control was judged or clicked while busy')
 
   const unavailable = fakeWizard({ localAvailable: false, reason: 'Not enough free disk space.' })
   await assert.rejects(chooseLocalAndContinue(unavailable.page, { timeoutMs: 500 }), /unavailable in the wizard: Not enough free disk space/)
 
-  const consent = fakeWizard({ busy: true, heading: 'Review your installation.' })
+  const consent = fakeWizard({ busy: true, step: 'consent', heading: 'Review your installation.' })
   setTimeout(() => { consent.state.busy = false }, 30)
   await acceptConsent(consent.page, { timeoutMs: 2000 })
-  assert.deepEqual(consent.state.calls, ['isEnabled:/^Install tools and models/u:false', 'click:/^Install tools and models/u:false'])
+  assert.deepEqual(consent.state.calls, ['isEnabled:onboarding-install:false', 'click:onboarding-install:false'])
 
-  const retry = fakeWizard({ busy: true, heading: 'Setup cancelled.',
-    onClick: (name, s) => { if (name.includes('retry')) s.heading = 'Where should we prepare your songs?'; if (name.includes('Continue')) s.heading = 'Review your installation.' } })
+  const retry = fakeWizard({ busy: true, step: 'error', heading: 'Setup cancelled.',
+    onClick: (id, s) => { if (id === 'onboarding-retry') s.step = 'choose'; if (id === 'onboarding-continue') s.step = 'consent' } })
   setTimeout(() => { retry.state.busy = false }, 30)
   await retryFromUi(retry.page, { timeoutMs: 2000 })
-  assert.equal(retry.state.calls[0], 'click:Review setup and retry:false')
+  assert.equal(retry.state.calls[0], 'click:onboarding-retry:false')
+
+  const progress = fakeWizard({ step: 'progress', heading: 'We’ll take it from here.' })
+  await cancelFromUi(progress.page)
+  assert.deepEqual(progress.state.calls, ['click:onboarding-setup-controls summary:false', 'click:onboarding-cancel:false'])
+  const restart = fakeWizard({ step: 'restart', heading: 'Restart to finish setup.' })
+  await clickRestart(restart.page)
+  assert.deepEqual(restart.state.calls, ['click:onboarding-restart:false'])
+  assert.equal(restart.state.clickOptions.noWaitAfter, true)
+
+  // The step is the hook's, whatever the heading copy says.
+  const renamed = fakeWizard({ step: 'checking', heading: 'Some future checking copy' })
+  assert.deepEqual(await uiSnapshot(renamed.page), { dialogVisible: true, busy: false, heading: 'Some future checking copy', step: 'checking' })
 
   const stuck = fakeWizard({ busy: true })
   await assert.rejects(waitForIdle(stuck.page, { timeoutMs: 50, interval: 5 }), /stayed busy .*aria-busy=true/)
@@ -474,6 +515,42 @@ test('post-restart: a clean sequence (neutral checking state, then ready) passes
   ])
   assert.deepEqual(judge(), { dialogVisible: true, step: 'ready', heading: 'Let’s add your first song.', statusState: 'idle' })
   assert.deepEqual(result.observations.map(item => item.step), [null, 'ready'])
+})
+
+test('post-restart: the checking step is not settled even when the dialog is not busy', async () => {
+  const { result, judge } = await postRestart([
+    { ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
+    { ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
+    { ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
+    { ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
+    { ui: ui('ready', 'Let’s add your first song.', false), status: { state: 'ready', phase: 'complete' } },
+  ])
+  assert.equal(result.settled.step, 'ready')
+  assert.deepEqual(result.observations.map(item => [item.step, item.statusState, item.statusPhase]),
+    [['checking', 'checking', 'verification'], ['ready', 'ready', 'complete']])
+  assert.equal(judge().step, 'ready')
+  const stuck = await postRestart([{ ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } }], 5000)
+  assert.equal(stuck.result.timedOut, true)
+  assert.throws(stuck.judge, /did not settle within 5 s after restart \(last step checking/)
+})
+
+test('post-restart: an honest failed verification is reported as such, not as an interrupted setup', async () => {
+  const failure = { state: 'error', phase: 'verification', message: 'Review setup to check and repair the installation.' }
+  for (const frames of [
+    [{ ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
+      { ui: ui('verification-failed', 'Local processing could not be verified.', false), status: failure }],
+    // The renderer's own account when the service reply was lost.
+    [{ ui: ui('verification-failed', 'Local processing could not be verified.', false), status: { state: 'checking', phase: 'verification' } }],
+  ]) {
+    const { result, judge } = await postRestart(frames)
+    assert.equal(result.settled.step, 'verification-failed')
+    assert.throws(judge, error => /Post-restart verification failed/.test(error.message) && !/product defect/.test(error.message))
+  }
+  // A verification failure shown as cancelled is still the product defect.
+  const { judge } = await postRestart([{ ui: ui('cancelled', 'Setup cancelled.', false), status: failure }])
+  assert.throws(judge, /presented as an interrupted setup \(product defect\)/)
+  const generic = await postRestart([{ ui: ui('error', 'Setup could not finish.', false), status: failure }])
+  assert.throws(generic.judge, /product defect/)
 })
 
 test('post-restart: settled restart, progress or error screens and status errors fail', async () => {

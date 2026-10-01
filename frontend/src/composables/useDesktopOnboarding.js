@@ -71,22 +71,26 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   }
   // A finished setup awaiting reopening is re-verified once. Only the live
   // preflight result can show readiness; anything short of it is repairable.
+  // The outcome applies while the check screen is still showing; an action
+  // that failed without leaving it must not strand the check.
   function verifyCheck() {
     pendingCheck ??= (async () => {
-      const snapshot = navigation()
       let next = null, failure = null
       try { next = await preflight() } catch (cause) { failure = cause }
-      if (!currentNavigation(snapshot)) return
+      if (step.value !== 'checking') return
       const live = await bridge.getSetupStatus().catch(() => null)
-      if (!currentNavigation(snapshot)) return
-      if (failure) error.value = failure?.message || 'Setup could not be checked. Please try again.'
+      if (step.value !== 'checking') return
       const settled = live && !['checking', 'idle'].includes(live.state)
+      // Live verification already established readiness; a lost reply is not a failure.
+      if (failure && !(settled && live.state === 'ready' && !live.restartRequired)) {
+        error.value = failure?.message || 'Setup could not be checked. Please try again.'
+      }
       if (settled) status.value = live
       if (next) applyPlan(next)
       if (step.value === 'checking') {
         if (settled) applyStatus(live)
         else {
-          const message = 'Local processing could not be verified. Review setup to repair the saved files.'
+          const message = 'Review setup to check and repair the installation.'
           applyStatus({ state: 'error', phase: 'verification', message, error: message, retryable: true })
         }
       }

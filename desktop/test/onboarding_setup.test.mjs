@@ -524,9 +524,9 @@ test('full setup installs an archive-form runtime catalog through the runtime ma
 
 // ---- Restored checkpoints ---------------------------------------------------
 test('each restored checkpoint kind maps to its workflow state without proving readiness', async () => {
-  for (const [saved, state] of [['running', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
-    ['restart-required', 'checking'], ['ready', 'idle'], ['idle', 'idle'], [undefined, 'idle']]) {
-    const { setup, saved: writes } = fixture({ load: async () => saved && { schema: 1, state: saved, phase: 'complete' } })
+  for (const [saved, state, phase = 'paused'] of [['running', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
+    ['restart-required', 'checking', 'complete'], ['error', 'checking', 'verification'], ['ready', 'idle'], ['idle', 'idle'], [undefined, 'idle']]) {
+    const { setup, saved: writes } = fixture({ load: async () => saved && { schema: 1, state: saved, phase } })
     const status = await setup.getStatus()
     assert.equal(status.state, state, String(saved))
     if (state === 'cancelled') {
@@ -585,7 +585,7 @@ test('a restored check that fails verification lands on a retryable, non-cancell
     assert.equal(status.retryable, true)
     assert.equal(status.phase, 'verification')
     assert.doesNotMatch(status.message, /cancel|interrupt/i)
-    assert.match(status.message, /could not be verified/)
+    assert.equal(status.message, 'Review setup to check and repair the installation.')
     assert.equal(restarted.saved.at(-1).state, 'error')
     assert.equal(restarted.events.at(-1).state, 'error')
     assert.deepEqual(restarted.calls, [])
@@ -593,10 +593,10 @@ test('a restored check that fails verification lands on a retryable, non-cancell
 })
 
 test('a restored check settles to an error when verification itself throws', async () => {
-  const { setup, runtime, saved } = await restartedFixture()
-  const controller = new AbortController()
-  runtime.active = async () => { controller.abort(); return runtime.value }
-  await assert.rejects(setup.preflight({ signal: controller.signal }))
+  const { setup, cache, saved } = await restartedFixture()
+  // A malformed installed models manifest makes verification throw.
+  cache.value = { id: 'malformed', manifest: {} }
+  await assert.rejects(setup.preflight(), TypeError)
   const status = await setup.getStatus()
   assert.equal(status.state, 'error')
   assert.doesNotMatch(status.message, /cancel|interrupt/i)
@@ -643,4 +643,71 @@ test('a setup started during a check takes precedence over the check outcome', a
   release()
   await checking
   assert.equal((await setup.getStatus()).state, 'running')
+})
+
+test('concurrent preflights during a check share one live verification and each returns a plan', async () => {
+  const { setup, runtime } = await restartedFixture()
+  const probe = runtime.probe
+  let probes = 0
+  runtime.probe = async (...args) => { probes += 1; return probe(...args) }
+  const plans = await Promise.all([setup.preflight(), setup.preflight(), setup.preflight()])
+  assert.equal(probes, 1)
+  for (const plan of plans) {
+    assert.equal(plan.ready, true)
+    assert.equal(plan.available, true)
+    assert.equal(typeof plan.planId, 'string')
+  }
+  assert.equal((await setup.getStatus()).state, 'ready')
+  // Once settled, a later preflight verifies afresh.
+  await setup.preflight()
+  assert.equal(probes, 2)
+})
+
+test('a failed check is checked again on the next launch, never shown as interrupted', async () => {
+  const first = await restartedFixture()
+  first.runtime.value = null
+  await first.setup.preflight()
+  const failed = first.saved.at(-1)
+  assert.deepEqual(failed, { schema: 1, state: 'error', phase: 'verification' })
+  const relaunched = fixture({ load: async () => failed, loaded: first.setup.loaded })
+  relaunched.runtime.value = first.runtime.value
+  const status = await relaunched.setup.getStatus()
+  assert.equal(status.state, 'checking')
+  assert.doesNotMatch(status.message, /cancel|interrupt/i)
+  // The checkpoint never proves readiness: nothing is installed, so it fails again.
+  await relaunched.setup.preflight()
+  assert.equal((await relaunched.setup.getStatus()).state, 'error')
+  assert.equal((await relaunched.setup.getStatus()).message, 'Review setup to check and repair the installation.')
+  // A repaired installation settles ready from live verification on a later launch.
+  const repaired = await restartedFixture()
+  const again = fixture({ load: async () => failed, loaded: repaired.setup.loaded })
+  again.runtime.value = repaired.runtime.value
+  again.cache.value = repaired.cache.value
+  assert.equal((await again.setup.preflight()).ready, true)
+  assert.equal((await again.setup.getStatus()).state, 'ready')
+})
+
+test('callers overlapping the checkpoint read all see the restored state', async () => {
+  const { checkpoint, runtime, cache, setup: reference } = await restartedFixture()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let loads = 0
+  const { setup } = fixture({ load: async () => { loads += 1; await gate; return checkpoint }, loaded: reference.loaded })
+  setup.runtime.value = runtime.value
+  setup.cache.value = cache.value
+  const early = [setup.getStatus(), setup.preflight(), setup.getStatus()]
+  release()
+  const [first, plan, second] = await Promise.all(early)
+  assert.equal(loads, 1)
+  assert.equal(first.state, 'checking', 'an early caller sees the restored check, never idle')
+  assert.equal(second.state, 'checking')
+  assert.equal(plan.ready, true)
+  assert.equal((await setup.getStatus()).state, 'ready', 'the overlapping preflight settled the check')
+})
+
+test('an unreadable checkpoint is treated as none and does not wedge status', async () => {
+  const { setup } = fixture({ load: async () => { throw new Error('unreadable') } })
+  assert.equal((await setup.getStatus()).state, 'idle')
+  assert.equal((await setup.preflight()).available, true)
+  assert.equal((await setup.getStatus()).state, 'idle')
 })

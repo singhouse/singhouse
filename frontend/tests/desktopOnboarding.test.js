@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // SPDX-License-Identifier: AGPL-3.0-only
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { useDesktopOnboarding } from '../src/composables/useDesktopOnboarding'
 import DesktopOnboarding from '../src/components/DesktopOnboarding.vue'
@@ -361,7 +362,8 @@ describe('desktop setup after reopening', () => {
     await flushPromises()
     const dialog = wrapper.find('[data-testid="onboarding-dialog"]')
     expect(dialog.attributes('data-step')).toBe('checking')
-    expect(dialog.attributes('aria-busy')).toBe('true')
+    expect(dialog.attributes('aria-busy')).toBe('false')
+    expect(wrapper.find('[role="status"]').attributes('aria-busy')).toBe('true')
     expect(wrapper.text()).toContain('Checking your local processing setup…')
     forbidden(wrapper.text())
     expect(wrapper.find('[data-testid="onboarding-retry"]').exists()).toBe(false)
@@ -374,20 +376,21 @@ describe('desktop setup after reopening', () => {
     await flushPromises()
     expect(dialog.attributes('data-step')).toBe('ready')
     expect(dialog.attributes('aria-busy')).toBe('false')
+    expect(wrapper.find('[aria-busy="true"]').exists()).toBe(false)
     forbidden(wrapper.text())
     expect(desktop.preflightSetup).toHaveBeenCalledOnce()
     expect(desktop.startSetup).not.toHaveBeenCalled()
     wrapper.unmount()
   })
   it('lands on the retryable error path with honest copy when verification fails', async () => {
-    const message = 'Local processing could not be verified. Review setup to repair the saved files.'
+    const message = 'Review setup to check and repair the installation.'
     const { pending } = reopened({ state: 'error', phase: 'verification', message, error: message, retryable: true })
     const wrapper = mount(DesktopOnboarding)
     await flushPromises()
     pending.resolve({ available: true, ready: false, restartRequired: false, planId: 'repair', components: [] })
     await flushPromises()
     expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('error')
-    expect(wrapper.text()).toContain('Setup needs to be verified again.')
+    expect(wrapper.find('h1').text()).toBe('Local processing could not be verified.')
     expect(wrapper.text()).toContain(message)
     forbidden(wrapper.text())
     expect(wrapper.find('[data-testid="onboarding-retry"]').attributes('disabled')).toBeUndefined()
@@ -400,7 +403,8 @@ describe('desktop setup after reopening', () => {
     pending.reject(new Error('Setup service unavailable'))
     await flushPromises()
     expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('error')
-    expect(wrapper.text()).toContain('could not be verified')
+    expect(wrapper.find('h1').text()).toBe('Local processing could not be verified.')
+    expect(wrapper.text()).toContain('Review setup to check and repair the installation.')
     expect(wrapper.text()).toContain('Setup service unavailable')
     forbidden(wrapper.text())
     wrapper.unmount()
@@ -415,20 +419,122 @@ describe('desktop setup after reopening', () => {
     expect(wrapper.find('[data-testid="onboarding-restart"]').exists()).toBe(true)
     wrapper.unmount()
   })
-  it('does not pull a user who left during the check back into setup', async () => {
+  // The library hosts the wizard and closes it on `close`, as the app shell does.
+  const Host = defineComponent(() => {
+    const open = ref(true)
+    return () => (open.value ? h(DesktopOnboarding, { onClose: () => { open.value = false } }) : h('p', 'Library'))
+  })
+  it('lets a user leave during the check without reopening setup or starting a poll', async () => {
+    const { desktop, pending } = reopened({ state: 'ready' })
+    const intervals = vi.spyOn(globalThis, 'setInterval')
+    const wrapper = mount(Host)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('checking')
+    await wrapper.find('.library').trigger('click')
+    await flushPromises()
+    expect(desktop.setOnboardingState).toHaveBeenLastCalledWith({ step: 'choose', choice: 'local', skipped: true })
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').exists()).toBe(false)
+    pending.resolve({ available: true, ready: true })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toBe('Library')
+    expect(intervals.mock.calls.filter(([, delay]) => delay === 1500)).toHaveLength(0)
+    expect(desktop.setOnboardingState).toHaveBeenCalledOnce()
+    intervals.mockRestore()
+    wrapper.unmount()
+  })
+  it('still settles the check when leaving fails and the check screen stays', async () => {
+    const { desktop, pending } = reopened({ state: 'ready' }, { setOnboardingState: vi.fn().mockRejectedValue(new Error('Could not save')) })
+    const wrapper = mount(Host)
+    await flushPromises()
+    await wrapper.find('.library').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Could not save')
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('checking')
+    pending.resolve({ available: true, ready: true })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('ready')
+    expect(desktop.preflightSetup).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+  it('starts the poll only after a check that settles while mounted', async () => {
+    const { pending } = reopened({ state: 'ready' })
+    const intervals = vi.spyOn(globalThis, 'setInterval')
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(intervals.mock.calls.filter(([, delay]) => delay === 1500)).toHaveLength(0)
+    pending.resolve({ available: true, ready: true })
+    await flushPromises()
+    expect(intervals.mock.calls.filter(([, delay]) => delay === 1500)).toHaveLength(1)
+    intervals.mockRestore()
+    wrapper.unmount()
+  })
+  it('a remounted wizard joins the check still running in the setup service', async () => {
+    // Mirrors the setup service: preflights during a check share one verification.
+    const verification = deferred()
+    let state = checking, verifications = 0, shared = null
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'progress', choice: 'local' }),
+      getSetupStatus: vi.fn(async () => state),
+      preflightSetup: vi.fn(() => {
+        if (state.state !== 'checking') return Promise.resolve({ available: true, ready: true })
+        shared ??= (verifications += 1, verification.promise.then(plan => { state = { state: 'ready' }; return plan }))
+        return shared
+      }),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const first = mount(Host)
+    await flushPromises()
+    await first.find('.library').trigger('click')
+    await flushPromises()
+    const second = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(second.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('checking')
+    forbidden(second.text())
+    verification.resolve({ available: true, ready: true })
+    await flushPromises()
+    expect(second.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('ready')
+    expect(first.find('[data-testid="onboarding-dialog"]').exists()).toBe(false)
+    expect(desktop.preflightSetup).toHaveBeenCalledTimes(2)
+    expect(verifications).toBe(1)
+    first.unmount(); second.unmount()
+  })
+  it('shows readiness from the plan when the settled status cannot be read', async () => {
     const { desktop, pending } = reopened({ state: 'ready' })
     const setup = useDesktopOnboarding(desktop)
     const initialized = setup.initialize()
     await flushPromises()
-    expect(setup.step.value).toBe('checking')
-    expect(setup.busy.value).toBe(false)
-    expect(await setup.skip()).toBe(true)
-    expect(desktop.setOnboardingState).toHaveBeenLastCalledWith({ step: 'choose', choice: 'local', skipped: true })
-    setup.step.value = 'welcome'
+    desktop.getSetupStatus.mockRejectedValue(new Error('status unavailable'))
     pending.resolve({ available: true, ready: true })
     await initialized
-    expect(setup.step.value).toBe('welcome')
+    expect(setup.step.value).toBe('ready')
+    expect(setup.error.value).toBe('')
+  })
+  it('does not show a failure alert on ready when live verification already settled ready', async () => {
+    const { pending } = reopened({ state: 'ready', restartRequired: false })
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    pending.reject(new Error('Reply lost'))
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('ready')
+    expect(wrapper.find('.alert').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('a status refresh that finds a check starts and settles it', async () => {
+    const pending = deferred()
+    const desktop = bridge({
+      getSetupStatus: vi.fn().mockResolvedValueOnce(checking).mockResolvedValue({ state: 'ready' }),
+      preflightSetup: vi.fn(() => pending.promise),
+    })
+    const setup = useDesktopOnboarding(desktop)
+    setup.step.value = 'progress'
+    const refreshed = setup.refresh()
+    await flushPromises()
+    expect(setup.step.value).toBe('checking')
     expect(desktop.preflightSetup).toHaveBeenCalledOnce()
+    pending.resolve({ available: true, ready: true })
+    await refreshed
+    expect(setup.step.value).toBe('ready')
   })
   it('shares one verification when status is refreshed during a check', async () => {
     const { desktop, pending } = reopened(checking)

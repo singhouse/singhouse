@@ -103,25 +103,32 @@ export class OnboardingSetup {
     this.state = initial()
     this.operation = null
     this.controller = null
-    this.restored = false
+    this.restoring = null
+    this.check = null
   }
 
   async getStatus() {
-    if (!this.restored) {
-      this.restored = true
-      const previous = await this.load()
-      // A checkpoint records workflow only; it never supplies runnable inputs
-      // or proves readiness. Every attempt revalidates the stores and catalog.
-      // A finished, verified run awaiting reopening is only re-checked: the
-      // next preflight settles it from live verification. It is not saved, so
-      // an exit while checking leaves the checkpoint to be checked again.
-      if (previous?.state === 'restart-required') {
-        this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
-      } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
-        this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
-      }
-    }
+    // Every early caller waits for the same checkpoint read.
+    this.restoring ??= this.restore()
+    await this.restoring
     return structuredClone(this.state)
+  }
+
+  async restore() {
+    let previous = null
+    // An unreadable checkpoint is treated as none.
+    try { previous = await this.load() } catch { /* start from idle */ }
+    // A checkpoint records workflow only; it never supplies runnable inputs
+    // or proves readiness. Every attempt revalidates the stores and catalog.
+    // A finished, verified run awaiting reopening, or a failed re-check of
+    // one, is only checked again: the next preflight settles it from live
+    // verification. It is not saved, so an exit while checking leaves the
+    // checkpoint to be checked again.
+    if (previous?.state === 'restart-required' || (previous?.state === 'error' && previous.phase === 'verification')) {
+      this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
+    } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
+      this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
+    }
   }
 
   // The scope the wizard labels, carried on the preflight plan only: only a
@@ -219,7 +226,7 @@ export class OnboardingSetup {
   }
 
   // Settles a restored check from this live verification only. A started
-  // setup or a concurrent preflight that settled first takes precedence.
+  // setup takes precedence over the outcome.
   async settleCheck(installed) {
     if (this.state.state !== 'checking') return
     if (installed?.ready) {
@@ -227,7 +234,7 @@ export class OnboardingSetup {
     } else if (installed?.restartRequired) {
       await this.update({ state: 'restart-required', phase: 'complete', message: REOPEN_MESSAGE, restartRequired: true })
     } else {
-      const message = 'Local processing could not be verified. Review setup to repair the saved files.'
+      const message = 'Review setup to check and repair the installation.'
       await this.update({ state: 'error', phase: 'verification', message, error: message, retryable: true, restartRequired: false })
     }
   }
@@ -237,9 +244,16 @@ export class OnboardingSetup {
     const offlineDirectory = this.#offlineModelsDirectory
     const modelSource = offlineDirectory === null ? 'upstream' : 'offline'
     let installed
-    try { installed = await this.installed({ signal }) }
-    catch (error) { await this.settleCheck(null); throw error }
-    await this.settleCheck(installed)
+    if (this.state.state === 'checking') {
+      // Concurrent preflights during a check share one live verification;
+      // each still builds its own plan from the shared result.
+      this.check ??= this.installed().then(
+        async result => { await this.settleCheck(result); return result },
+        async error => { await this.settleCheck(null); throw error },
+      ).finally(() => { this.check = null })
+      installed = await this.check
+      signal?.throwIfAborted()
+    } else installed = await this.installed({ signal })
     const hardware = await this.hardware()
     signal?.throwIfAborted()
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)

@@ -11,6 +11,7 @@ const { step, choice, plan, status, busy, error, localAvailable, canStart } = se
 const heading = ref(null)
 const dialog = ref(null)
 let poll
+let unmounted = false
 const stage = computed(() => step.value === 'welcome' ? 0 : step.value === 'ready' ? 2 : 1)
 const progress = computed(() => {
   const value = status.value?.progress
@@ -67,10 +68,12 @@ watch(step, async () => { await nextTick(); heading.value?.focus() })
 onMounted(async () => {
   dialog.value?.showModal()
   await setup.initialize()
+  // Leaving during the check can unmount the wizard before it settles.
+  if (unmounted) return
   poll = setInterval(() => { if (step.value === 'progress' && !busy.value) setup.refresh() }, 1500)
   heading.value?.focus()
 })
-onUnmounted(() => clearInterval(poll))
+onUnmounted(() => { unmounted = true; clearInterval(poll) })
 </script>
 
 <template>
@@ -81,7 +84,7 @@ onUnmounted(() => clearInterval(poll))
     :aria-label="`${BRAND_NAME} setup`"
     data-testid="onboarding-dialog"
     :data-step="step"
-    :aria-busy="busy || step === 'checking'"
+    :aria-busy="busy"
     @cancel.prevent="leave()"
   >
     <header class="setup-header">
@@ -385,6 +388,7 @@ onUnmounted(() => clearInterval(poll))
         <div
           class="panel"
           role="status"
+          aria-busy="true"
         >
           <p>Checking your local processing setup…</p><progress aria-label="Checking local processing setup" />
         </div>
@@ -438,7 +442,7 @@ onUnmounted(() => clearInterval(poll))
           ref="heading"
           tabindex="-1"
         >
-          {{ status?.state === 'cancelled' ? 'Setup cancelled.' : status?.phase === 'verification' ? 'Setup needs to be verified again.' : 'Setup could not finish.' }}
+          {{ status?.state === 'cancelled' ? 'Setup cancelled.' : status?.phase === 'verification' ? 'Local processing could not be verified.' : 'Setup could not finish.' }}
         </h1>
         <p class="lead">
           {{ status?.error || status?.message || 'Review setup and try again when you are ready.' }}

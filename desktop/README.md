@@ -1159,9 +1159,12 @@ status transition, observed time per setup phase, the `models.json` hash, the
 installed model set identity, every application launch, and the Playwright
 version.
 
-Controls are judged and pressed only after the setup dialog reports
-`aria-busy="false"`; the choice, review and retry screens render before their
-own preflight finishes. Before consent nothing is installed, so the harness may
+The harness identifies the dialog, its current step and its controls through
+the dialog's `data-testid` hooks and `data-step` attribute, not through copy.
+Heading text is read only to tell a cancelled setup from other error screens,
+and to recognise steps in older candidates that lack the hooks. Controls are
+judged and pressed only after the setup dialog reports `aria-busy="false"`; the
+choice, review and retry screens render before their own preflight finishes. Before consent nothing is installed, so the harness may
 read the plan then (only while the wizard is idle). After relaunch it never
 calls the plan read, which would itself re-verify the installed runtime. Setup
 must leave its previous state within 60 seconds of the install click, or the run
@@ -1176,16 +1179,19 @@ The application exits when its restart control is pressed. The harness records
 the application's relaunch request instead of letting it start an instance the
 harness does not own, then launches the same executable with the same profile
 itself (`restart.initiatedBy` is `application-ui` once the request is recorded).
-After relaunch the setup dialog is expected to reopen while the application
-re-verifies the installed runtime. The harness waits up to 240 seconds for the
-dialog to become idle and settle, recording every distinct step, status and
+After relaunch the setup dialog is expected to reopen on its checking step while
+the application re-verifies the installed runtime. The checking step is never
+treated as settled. The harness waits up to 240 seconds for the dialog to become
+idle and settle, recording every distinct step, status, status phase and
 heading with timestamps. It passes only if the dialog settles on the ready
 screen, the active runtime is the one the plan promised with the expected lock
-and target, and the installed model set is the one the policy selects. If an
-error or cancelled screen or status appears at any point, the run fails with
-`A verified restart was presented as an interrupted setup (product defect)`;
-current builds that restore the interrupted-setup checkpoint fail here. A
-settled restart, progress or error screen also fails. The same processing and
+and target, and the installed model set is the one the policy selects. If a
+cancelled or generic error screen or status appears at any point, the run fails
+with `A verified restart was presented as an interrupted setup (product
+defect)`; builds that restore the finished-setup checkpoint as an interrupted
+setup fail here. If the application honestly reports that its own check did not
+pass, the run fails with `Post-restart verification failed`. A settled restart
+or progress screen, or a dialog still checking at the timeout, also fails. The same processing and
 shutdown checks as the other modes follow.
 
 The evidence fields are named for what they prove: wizard evidence carries
