@@ -584,15 +584,54 @@ python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
   --lock /path/to/processing-input-lock.json --output /path/to/new-pack
 ```
 
-The output includes `manifest.json`, `input-lock.json`, and content-addressed
-`blobs/`. By default its URLs refer to those local blobs; `--base-url` may declare
-an explicit HTTPS blob directory for a separately managed distribution. The
+By default the output is archive form: `manifest.json`, `input-lock.json`, and
+`archive/<name>.001`, `.002`, … The archive format (`concat-gzip-v1`) has no
+internal paths or headers. Its uncompressed stream is every locked file's bytes
+concatenated in manifest order. That stream is gzip-compressed deterministically
+(one member, fixed header, zero timestamp, no file name) and split into
+consecutive parts of at most `--archive-part-size` bytes (default 1900 MiB;
+release assets are limited to 2 GiB). The manifest lists each part's URL,
+SHA-256, and size; files carry no URLs. The default part name is
+`singhouse-processing-<platform>-<arch>-<accelerator>-<lock hash prefix>.pack.gz`
+(override it with `--archive-name`). Part URLs default to the local `archive/`
+directory; `--archive-base-url` declares the HTTPS directory the parts will be
+published to. Identical inputs and options produce byte-identical output with
+the same Python and zlib. To convert an existing per-file pack without its
+original payload:
+
+```sh
+python3 desktop/build/assemble_processing.py --from-pack /path/to/blob-pack \
+  --archive-base-url https://example.org/releases/download/tag/ --output /path/to/new-pack
+```
+
+Conversion re-verifies every blob's size and SHA-256 and the lock's hash, and
+requires the old manifest to match a fresh assembly of its lock. Its output is
+identical to assembling the payload directly with the same archive options.
+The older per-file form (`blobs/` named by content hash, one URL per file) is
+still available with `--blobs`, or with `--base-url` to declare an explicit
+HTTPS blob directory. Blob and archive options cannot be combined. The
 assembler does not upload anything. Each package must name its retained license
 or notice files; the manifest embeds and hash-binds the complete input lock and
 rejects missing notice files. File hashes establish correspondence
 with a selected manifest; they do not establish publisher identity.
 Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+
+For archive-form packs, installation retrieves each part into
+`processing/staging/<id>.archive/`, outside the pack tree. It resumes partial
+parts with HTTP ranges and checks each part's size and SHA-256. Then it streams
+the parts through one decompressor and writes the files in manifest order,
+checking every file's size and SHA-256 as it is written. Any of these fails the
+installation without activating anything: a header with optional fields, a
+short stream, a bad gzip trailer, a second gzip member, or any byte beyond the
+last file. Parts are removed only after every staged file verifies. A retry
+skips files that already verify and does not fetch parts again that are already
+complete. The free-space check requires the parts not yet retrieved, plus the
+full uncompressed pack, plus 64 MiB. Part URLs must use HTTPS. Redirects are
+followed only to HTTPS on `github.com`, `objects.githubusercontent.com`, or
+`release-assets.githubusercontent.com` (default port, no credentials, at most
+five hops). Each retry starts again from the manifest URL, because signed
+redirect targets expire.
 
 Installation checks free disk space, takes an exclusive lock, resumes partial
 files where supported, checks every size and hash, and synchronizes payload files

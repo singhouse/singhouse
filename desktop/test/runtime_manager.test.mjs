@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+import { crc32, deflateRawSync, gzipSync } from 'node:zlib'
 import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
@@ -548,4 +549,318 @@ test('verification preserves long nested paths, detects subsequent corruption an
   await writeFile(path, 'MIT notice')
   await writeFile(join(installed.directory, 'unexpected'), 'extra')
   await assert.rejects(manager.verify(installed.id), /inventory/)
+})
+
+// ---- Archive delivery (concat-gzip-v1) ----------------------------------
+
+// An independent writer of the documented format: fixed gzip header, raw
+// deflate of every file's bytes in manifest order, CRC32 and length trailer.
+function gzipConcat(data, { flags = 0 } = {}) {
+  const trailer = Buffer.alloc(8)
+  trailer.writeUInt32LE(crc32(data) >>> 0, 0)
+  trailer.writeUInt32LE(data.length % 2 ** 32, 4)
+  return Buffer.concat([Buffer.from([0x1f, 0x8b, 8, flags, 0, 0, 0, 0, 0, 0xff]), deflateRawSync(data), trailer])
+}
+const splitBytes = (bytes, size) => Array.from({ length: Math.ceil(bytes.length / size) }, (_, i) => bytes.subarray(i * size, (i + 1) * size))
+
+// Deterministic incompressible bytes so a tiny part size yields several parts.
+const noise = length => {
+  const out = Buffer.alloc(length)
+  for (let i = 0, block = Buffer.alloc(0); i < length; i += 32) {
+    block = createHash('sha256').update(String(i)).digest()
+    block.copy(out, i)
+  }
+  return out
+}
+const archiveEntries = () => [
+  { path: 'lib/zero-start', data: Buffer.alloc(0), executable: false },
+  { path: 'python/bin/python3', data: Buffer.from('fixture python'), executable: true },
+  { path: 'NOTICE.fixture', data: Buffer.from('MIT notice'), executable: false },
+  { path: 'lib/a/b/c/duplicate-one.txt', data: Buffer.from('same bytes twice'), executable: false },
+  { path: 'lib/x/duplicate-two.txt', data: Buffer.from('same bytes twice'), executable: false },
+  { path: 'lib/bin/tool', data: Buffer.from('#!/bin/sh\nexit 0\n'), executable: true },
+  { path: 'lib/data/noise.bin', data: noise(3000), executable: false },
+  { path: 'lib/zero-end', data: Buffer.alloc(0), executable: false },
+]
+
+// Builds a lock-bound archive manifest. `compressed` lets a test publish bytes
+// that differ from the honest archive while the manifest stays self-consistent.
+function archiveManifest(entries = archiveEntries(), { partSize = 400, compressed, inventory } = {}) {
+  const bytes = compressed ?? gzipConcat(Buffer.concat(entries.map(entry => entry.data)))
+  const parts = splitBytes(bytes, partSize)
+  const urls = parts.map((_, i) => `https://example.org/releases/runtime.pack.gz.${String(i + 1).padStart(3, '0')}`)
+  const manifest = bindProvenance({ schema: 1, kind: 'processing', ...identity, pythonVersion: '3.12.14', accelerator: 'cpu', python: 'python/bin/python3',
+    probe: { schema: 1, type: 'python-imports-v1', modules: ['audio_separator.separator', 'demucs.separate', 'faster_whisper', 'karaoke_backend.workers.heart_transcriptor', 'lyricsync.transcription.heart'] },
+    capabilities: ['transcription', 'separation'], models: ['whisper'], modelCapabilities: { whisper: 'transcription' },
+    files: (inventory ?? entries).map(({ path, data, executable }) => ({ path, size: data.length, sha256: sha(data), executable })) })
+  manifest.archive = { format: 'concat-gzip-v1', parts: parts.map((part, i) => ({ url: urls[i], sha256: sha(part), size: part.length })) }
+  return { manifest, parts, urls, entries }
+}
+
+// A release-asset style host: honours Range and records every request.
+function assetServer(urls, parts, { intercept } = {}) {
+  const requests = []
+  const fetchImpl = async (url, options) => {
+    url = String(url)
+    requests.push({ url, options })
+    const override = await intercept?.(url, options, requests.length)
+    if (override) return override
+    const bytes = parts[urls.indexOf(url)]
+    if (!bytes) return new Response('missing', { status: 404 })
+    const start = Number(/^bytes=(\d+)-$/.exec(options.headers?.Range || '')?.[1] ?? 0)
+    if (!options.headers?.Range) return new Response(bytes)
+    return new Response(bytes.subarray(start), { status: 206, headers: { 'content-range': `bytes ${start}-${bytes.length - 1}/${bytes.length}` } })
+  }
+  return { fetchImpl, requests }
+}
+
+function archiveManager(root, fetchImpl, options = {}) {
+  const manager = new RuntimeManager(join(root, 'processing'), identity, { fetchImpl, ...options })
+  manager.probe = async () => {}
+  return manager
+}
+
+async function assertInstalled(manager, installed, entries) {
+  for (const entry of entries) {
+    const path = join(installed.directory, entry.path)
+    assert.deepEqual(await readFile(path), entry.data)
+    if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, entry.executable ? 0o700 : 0o600)
+  }
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  assert.equal((await manager.active()).id, installed.id)
+  // Parts are retired once the pack is staged; nothing but the pack remains.
+  assert.deepEqual(await readdir(join(manager.root, 'staging')), [])
+}
+
+test('archive manifests: exactly one delivery form, strict part records, lock binding intact', async () => {
+  const { manifest } = archiveManifest()
+  assert.ok(validateProcessingManifest(structuredClone(manifest), identity, testTrustedLocks))
+  const invalid = [
+    m => { m.files[0].url = 'https://example.org/file' },
+    m => { for (const file of m.files) file.url = 'https://example.org/file' },
+    m => { m.archive = null },
+    m => { m.archive = [] },
+    m => { m.archive.format = 'concat-gzip-v2' },
+    m => { m.archive.extra = true },
+    m => { m.archive.parts = [] },
+    m => { m.archive.parts = Array.from({ length: 65 }, (_, i) => ({ ...m.archive.parts[0], url: `https://example.org/p${i}` })) },
+    m => { m.archive.parts[0].sha256 = 'A'.repeat(64) },
+    m => { m.archive.parts[0].size = 0 },
+    m => { m.archive.parts[0].size = 2 ** 31 },
+    m => { m.archive.parts[0].size = 1.5 },
+    m => { m.archive.parts[0].size = '400' },
+    m => { m.archive.parts[0].name = 'part' },
+    m => { delete m.archive.parts[0].url },
+    m => { m.archive.parts[0].url = 'http://example.org/part' },
+    m => { m.archive.parts[0].url = 'https://user:secret@example.org/part' },
+    m => { m.archive.parts[0].url = 'https://example.org/part#fragment' },
+    m => { m.archive.parts[0].url = 'file://server/share/part' },
+    m => { m.archive.parts[0].url = 'not a url' },
+    m => { m.archive.parts[1].url = m.archive.parts[0].url },
+    m => { m.archive.parts[1].url = m.archive.parts[0].url.replace('https://example.org', 'HTTPS://EXAMPLE.ORG') },
+  ]
+  for (const mutate of invalid) {
+    const changed = structuredClone(manifest); mutate(changed)
+    assert.throws(() => validateProcessingManifest(changed, identity, testTrustedLocks), undefined, mutate.toString())
+  }
+  // The inventory stays lock-bound in archive form; the hosting description does not.
+  const detached = structuredClone(manifest); detached.files[1].sha256 = sha('other')
+  assert.throws(() => validateProcessingManifest(detached, identity, testTrustedLocks), /input lock/)
+  const rehosted = structuredClone(manifest); rehosted.archive.parts[0].url = 'file:///srv/runtime.pack.gz.001'
+  assert.ok(validateProcessingManifest(rehosted, identity, testTrustedLocks))
+  // Model manifests never take the archive form.
+  const revision = 'a'.repeat(40)
+  const model = { schema: 1, kind: 'models', models: ['whisper'], files: [{ path: 'huggingface/hub/model.bin',
+    url: `https://huggingface.co/upstream/model/resolve/${revision}/model.bin`, revision, sha256: sha('model'), size: 5, executable: false }] }
+  const policy = { schema: 1, allowedHosts: ['huggingface.co'], models: [{ id: 'whisper', files: structuredClone(model.files) }] }
+  assert.ok(validateModelManifest(model, policy))
+  assert.throws(() => validateModelManifest({ ...model, archive: manifest.archive }, policy), /Invalid upstream model manifest/)
+})
+
+test('archive install retrieves parts, extracts by manifest layout and reports both phases', async t => {
+  const { root } = await fixture(t)
+  const { manifest, parts, urls, entries } = archiveManifest()
+  assert.ok(parts.length >= 4, 'fixture should span several parts')
+  const { fetchImpl, requests } = assetServer(urls, parts)
+  const events = []
+  const manager = archiveManager(root, fetchImpl, { progress: event => events.push(event) })
+  const installed = await manager.install(manifest)
+  await assertInstalled(manager, installed, entries)
+  assert.deepEqual(requests.map(request => request.url), urls)
+  for (const { options } of requests) {
+    assert.equal(options.redirect, 'manual')
+    assert.equal(options.credentials, 'omit')
+  }
+  // Existing consumers read { file, received, total }; `phase` tells the stages apart.
+  for (const event of events) {
+    assert.equal(typeof event.file, 'string')
+    assert.ok(Number.isSafeInteger(event.received) && Number.isSafeInteger(event.total) && event.received <= event.total)
+    assert.ok(['retrieve', 'extract'].includes(event.phase))
+  }
+  assert.ok(events.some(event => event.phase === 'retrieve'))
+  const last = events.at(-1)
+  assert.equal(last.phase, 'extract')
+  assert.equal(last.received, entries.reduce((sum, entry) => sum + entry.data.length, 0))
+  assert.equal(last.received, last.total)
+  // Reinstalling the same selection still converges on the same verified pack.
+  assert.equal((await manager.install(manifest)).id, installed.id)
+  assert.equal((await manager.active()).id, installed.id)
+})
+
+test('archive retrieval resumes an interrupted part with Range from the manifest URL', async t => {
+  const { root } = await fixture(t)
+  const { manifest, parts, urls, entries } = archiveManifest()
+  const controller = new AbortController()
+  let interrupted = false
+  const { fetchImpl, requests } = assetServer(urls, parts, { intercept: async (url, options) => {
+    // The manifest URL redirects to a signed, expiring asset location.
+    if (url.startsWith('https://example.org/')) {
+      return new Response(null, { status: 302, headers: { location: `https://release-assets.githubusercontent.com/asset/${urls.indexOf(url)}?sig=${requests.length}` } })
+    }
+    const index = Number(/asset\/(\d+)/.exec(url)[1])
+    const bytes = parts[index]
+    if (index === 1 && !interrupted) {
+      interrupted = true
+      return { status: 200, body: (async function* () {
+        yield bytes.subarray(0, 100)
+        controller.abort()
+        throw new Error('connection reset')
+      })() }
+    }
+    const start = Number(/^bytes=(\d+)-$/.exec(options.headers?.Range || '')?.[1] ?? 0)
+    return options.headers?.Range
+      ? new Response(bytes.subarray(start), { status: 206, headers: { 'content-range': `bytes ${start}-${bytes.length - 1}/${bytes.length}` } })
+      : new Response(bytes)
+  } })
+  const manager = archiveManager(root, fetchImpl)
+  await assert.rejects(manager.install(manifest, { signal: controller.signal }))
+  assert.equal(await manager.active(), null)
+  const before = requests.length
+  const installed = await manager.install(manifest)
+  await assertInstalled(manager, installed, entries)
+  const retried = requests.slice(before)
+  // Part 1 was complete and is not requested again; part 2 resumes at byte 100,
+  // re-resolving through the original manifest URL rather than a stale signed one.
+  assert.equal(retried[0].url, urls[1])
+  assert.deepEqual(retried[0].options.headers, { Range: 'bytes=100-' })
+  assert.match(retried[1].url, /^https:\/\/release-assets\.githubusercontent\.com\/asset\/1\?sig=/)
+  assert.deepEqual(retried[1].options.headers, { Range: 'bytes=100-' })
+  assert.ok(!retried.some(request => request.url === urls[0]))
+})
+
+test('archive extraction resumes after interruption without re-retrieving or rewriting verified files', async t => {
+  const { root } = await fixture(t)
+  const { manifest, parts, urls, entries } = archiveManifest()
+  const { fetchImpl, requests } = assetServer(urls, parts)
+  let extracting = false, syncs = 0
+  const manager = archiveManager(root, fetchImpl, { progress: event => {
+    if (event.phase === 'retrieve' && event.file.includes(`part ${parts.length} of`) && event.received === event.total) extracting = true
+  } })
+  const handle = await open(join(root, 'python'), 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeSync = prototype.sync
+  // Calls after the final part completes: that part's own sync, then one per
+  // extracted file. Fail while finishing the fourth extracted file.
+  const mock = t.mock.method(prototype, 'sync', function (...args) {
+    if (extracting && ++syncs === 5) throw new Error('simulated power loss')
+    return nativeSync.apply(this, args)
+  })
+  await assert.rejects(manager.install(manifest), /simulated power loss/)
+  mock.mock.restore()
+  const id = sha(JSON.stringify(manifest))
+  const staged = join(manager.root, 'staging', id)
+  assert.deepEqual(await readFile(join(staged, 'python/bin/python3')), entries[1].data)
+  const earlier = (await stat(join(staged, 'python/bin/python3'))).ino
+  assert.equal((await readdir(join(manager.root, 'staging', `${id}.archive`))).length, parts.length)
+  const fetched = requests.length
+  const installed = await manager.install(manifest)
+  await assertInstalled(manager, installed, entries)
+  assert.equal(requests.length, fetched, 'retained, verified parts are not retrieved again')
+  assert.equal((await stat(join(installed.directory, 'python/bin/python3'))).ino, earlier, 'verified files are not rewritten')
+})
+
+test('a fully staged archive pack activates without its parts and without network access', async t => {
+  const { root } = await fixture(t)
+  const { manifest, entries } = archiveManifest()
+  const manager = archiveManager(root, async () => { throw new Error('offline') })
+  const staged = join(manager.root, 'staging', sha(JSON.stringify(manifest)))
+  for (const entry of entries) {
+    await mkdir(join(staged, entry.path, '..'), { recursive: true })
+    await writeFile(join(staged, entry.path), entry.data)
+  }
+  const installed = await manager.install(manifest)
+  await assertInstalled(manager, installed, entries)
+})
+
+test('corrupt, truncated, padded, multi-member or mislabelled archives fail closed and keep the active runtime', async t => {
+  const { root, manifest: legacy } = await fixture(t)
+  const previous = await archiveManager(root, undefined).install(legacy)
+  const entries = archiveEntries()
+  const data = Buffer.concat(entries.map(entry => entry.data))
+  const honest = gzipConcat(data)
+  const flipped = Buffer.from(honest); flipped[flipped.length - 8] ^= 0xff
+  const tampered = entries.map(entry => entry.path === 'NOTICE.fixture' ? { ...entry, data: Buffer.from('MIT n0tice') } : entry)
+  const cases = [
+    // Served bytes disagree with the manifest's part digest.
+    ['corrupt part', archiveManifest(entries), { servedCorrupt: true }, /checksum/],
+    ['truncated stream', archiveManifest(entries, { compressed: honest.subarray(0, honest.length - 20) }), {}, /truncated|end of file|ended before/],
+    ['missing trailer', archiveManifest(entries, { compressed: honest.subarray(0, honest.length - 3) }), {}, /truncated|corrupt/],
+    ['trailing garbage', archiveManifest(entries, { compressed: Buffer.concat([honest, Buffer.from('garbage')]) }), {}, /trailing/],
+    ['large trailing data', archiveManifest(entries, { compressed: Buffer.concat([honest, noise(5000)]), partSize: 1000 }), {}, /trailing/],
+    ['extra empty gzip member', archiveManifest(entries, { compressed: Buffer.concat([honest, gzipSync(Buffer.alloc(0))]) }), {}, /trailing/],
+    ['extra gzip member', archiveManifest(entries, { compressed: Buffer.concat([honest, gzipSync(Buffer.from('extra'))]) }), {}, /trailing/],
+    ['extra uncompressed bytes', archiveManifest(entries, { compressed: gzipConcat(Buffer.concat([data, Buffer.from('x')])) }), {}, /trailing/],
+    ['short uncompressed stream', archiveManifest(entries, { compressed: gzipConcat(data.subarray(0, data.length - 1)) }), {}, /ended before|checksum/],
+    ['optional header fields', archiveManifest(entries, { compressed: gzipConcat(data, { flags: 8 }) }), {}, /format/],
+    ['bad trailer checksum', archiveManifest(entries, { compressed: flipped }), {}, /corrupt/],
+    // A correctly hashed archive whose content disagrees with one locked file.
+    ['wrong file inside archive', archiveManifest(tampered, { inventory: entries }), {}, /checksum/],
+  ]
+  for (const [name, { manifest, parts, urls }, { servedCorrupt }, expected] of cases) {
+    const served = servedCorrupt ? parts.map((part, i) => i === 1 ? Buffer.from(part).fill(0, 0, 4) : part) : parts
+    const manager = archiveManager(root, assetServer(urls, served).fetchImpl)
+    await assert.rejects(manager.install(manifest), expected, name)
+    assert.equal((await manager.active()).id, previous.id, name)
+    assert.deepEqual(await readdir(join(manager.root, 'packs')), [previous.id], name)
+  }
+})
+
+test('runtime source redirects follow only approved HTTPS release-asset endpoints', async t => {
+  const { root } = await fixture(t)
+  const origin = new URL('https://example.org/releases/runtime.pack.gz.001')
+  const manager = archiveManager(root, undefined)
+  // A host that answers directly keeps working, with the same request options.
+  manager.fetch = async (url, options) => {
+    assert.equal(options.redirect, 'manual'); assert.equal(options.credentials, 'omit')
+    return new Response('direct')
+  }
+  assert.equal(await (await manager.fetchSource(origin, {})).text(), 'direct')
+  // Signed query strings are accepted on approved redirect targets.
+  const seen = []
+  manager.fetch = async url => {
+    seen.push(String(url))
+    if (seen.length === 1) return new Response(null, { status: 302, headers: { location: 'https://github.com/owner/repo/releases/asset/1' } })
+    if (seen.length === 2) return new Response(null, { status: 302, headers: { location: 'https://objects.githubusercontent.com/asset?X-Signature=abc&expires=1' } })
+    if (seen.length === 3) return new Response(null, { status: 307, headers: { location: 'https://release-assets.githubusercontent.com/asset?sig=def' } })
+    return new Response('asset bytes')
+  }
+  assert.equal(await (await manager.fetchSource(origin, {})).text(), 'asset bytes')
+  assert.equal(seen.at(-1), 'https://release-assets.githubusercontent.com/asset?sig=def')
+  for (const location of ['http://objects.githubusercontent.com/asset', 'https://user:secret@objects.githubusercontent.com/asset',
+    'https://objects.githubusercontent.com:8443/asset', 'https://objects.githubusercontent.com/asset#fragment',
+    'https://evil.example/asset', 'https://objects.githubusercontent.com.evil.example/asset', 'https://raw.githubusercontent.com/asset',
+    'https://huggingface.co/asset', 'https://127.0.0.1/asset', 'file:///tmp/asset']) {
+    let requests = 0
+    manager.fetch = async () => { requests++; return new Response(null, { status: 302, headers: { location } }) }
+    await assert.rejects(manager.fetchSource(origin, {}), /not approved/, location)
+    assert.equal(requests, 1, location)
+  }
+  let requests = 0
+  manager.fetch = async () => { requests++; return new Response(null, { status: 302, headers: { location: 'https://github.com/loop' } }) }
+  await assert.rejects(manager.fetchSource(origin, {}), /limit/)
+  assert.equal(requests, 6)
+  manager.fetch = async () => new Response(null, { status: 302 })
+  await assert.rejects(manager.fetchSource(origin, {}), /missing/)
+  await assert.rejects(manager.fetchSource(new URL('http://example.org/part'), {}), /HTTPS/)
 })

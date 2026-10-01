@@ -80,7 +80,8 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
   }
   const scopeError = qualificationScopeError(q.scope, releaseChannel)
   if (scopeError) throw new Error(scopeError)
-  for (const file of runtime.files) source(file.url, privateTestLocalSources)
+  for (const file of runtime.files) if (file.url !== undefined) source(file.url, privateTestLocalSources)
+  for (const part of runtime.archive?.parts || []) source(part.url, privateTestLocalSources)
   for (const entry of runtime.provenance.packages) source(entry.sourceUrl)
   if (!Array.isArray(catalog.models) || catalog.models.length !== SETUP_MODEL_IDS.length
       || new Set(catalog.models.map(entry => entry?.id)).size !== SETUP_MODEL_IDS.length) {
