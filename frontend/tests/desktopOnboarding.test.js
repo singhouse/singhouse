@@ -363,7 +363,9 @@ describe('desktop setup after reopening', () => {
     const dialog = wrapper.find('[data-testid="onboarding-dialog"]')
     expect(dialog.attributes('data-step')).toBe('checking')
     expect(dialog.attributes('aria-busy')).toBe('false')
-    expect(wrapper.find('[role="status"]').attributes('aria-busy')).toBe('true')
+    // The indeterminate progress conveys the check; a static busy live region would never be announced.
+    expect(wrapper.find('[role="status"]').attributes('aria-busy')).toBeUndefined()
+    expect(wrapper.find('[role="status"] progress').attributes('value')).toBeUndefined()
     expect(wrapper.text()).toContain('Checking your local processing setup…')
     forbidden(wrapper.text())
     expect(wrapper.find('[data-testid="onboarding-retry"]').exists()).toBe(false)

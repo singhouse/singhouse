@@ -388,7 +388,6 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         <div
           class="panel"
           role="status"
-          aria-busy="true"
         >
           <p>Checking your local processing setup…</p><progress aria-label="Checking local processing setup" />
         </div>

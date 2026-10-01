@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
-import { WIZARD_LIMITATIONS, acceptConsent, assertCatalogLock, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
+import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
   catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, control, createStatusTracker, installedModelsIdentity,
   installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, parsePackServerLog, partialRuntimeBytes,
   readPlan, readStatus, retryFromUi, runtimeFileForUrlPath, runtimeFileUrlPath, shouldInterrupt, summarizeCatalog, waitForIdle,
@@ -676,6 +676,7 @@ export async function run(options) {
     const policyBytes = Buffer.from(policyEncoded, 'base64'), policy = JSON.parse(policyBytes.toString('utf8'))
     evidence.modelPolicySha256 = hash(policyBytes); save()
 
+    await assertWizardHooks(host, { timeoutMs: stepTimeout() })
     const firstStep = await waitForStep(host, 'welcome', { timeoutMs: stepTimeout() })
     wizard.onboarding = { shownOnFirstLaunch: true, firstStep, harnessUsedAdvancedRoute: false }
     await waitForIdle(host, { timeoutMs: stepTimeout() })
@@ -708,7 +709,7 @@ export async function run(options) {
     let recovery = null, lastRuntimeFile = null
     async function retryAfter(stoppedStep) {
       await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
-      recovery.bytesPresentAfterStop = recovery.file ? partialRuntimeBytes(profile, summary.runtimeId, recovery.file) : null
+      recovery.bytesPresentAfterStop = recovery.file ? partialRuntimeBytes(profile, summary.runtimeId, recovery.file, manifest) : null
       tracker.nextAttempt()
       await retryFromUi(host, { timeoutMs: stepTimeout() })
       const retryPlan = await bounded(readPlan(host), 60000)
@@ -720,7 +721,8 @@ export async function run(options) {
       remaining()
       const status = await readLiveStatus(), observation = tracker.observe(status)
       if (observation.transition) { wizard.transitions = tracker.transitions; save() }
-      if (status.phase === 'runtime' && typeof status.progress?.file === 'string') lastRuntimeFile = status.progress.file
+      // Unpacking progress names unpacked files, never a retrieved unit.
+      if (status.phase === 'runtime' && typeof status.progress?.file === 'string' && status.progress.phase !== 'extract') lastRuntimeFile = status.progress.file
       if (recoveryMode === 'cancel' && !recovery && shouldInterrupt(observation, status)) {
         recovery = wizard.recovery = { kind: 'cancel', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
           atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtCancel: observation.progress.received }
@@ -776,6 +778,7 @@ export async function run(options) {
         retry: recovery.file ? tracker.fileObservations('runtime', recovery.serverFile ?? recovery.file) : null,
         log: log?.entries ?? null, path, after })
       save()
+      assertArchiveRetryResumed(summary, recovery.retry, { logged: Boolean(log) })
     }
 
     // Restart through the UI. The application's own relaunch would start an

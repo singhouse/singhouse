@@ -1161,8 +1161,13 @@ version.
 
 The harness identifies the dialog, its current step and its controls through
 the dialog's `data-testid` hooks and `data-step` attribute, not through copy.
-Heading text is read only to tell a cancelled setup from other error screens,
-and to recognise steps in older candidates that lack the hooks. Controls are
+Wizard mode therefore requires a candidate that carries these hooks: if the
+setup dialog that opens at launch has no `data-testid="onboarding-dialog"` or no
+`data-step`, the run stops at once with `This candidate predates the wizard test
+hooks; wizard mode cannot drive it`. Heading text is read only to tell a
+cancelled setup and a failed verification from other error screens; an error
+screen whose heading matches none of them is recorded as `error-unclassified`.
+Controls are
 judged and pressed only after the setup dialog reports `aria-busy="false"`; the
 choice, review and retry screens render before their own preflight finishes. Before consent nothing is installed, so the harness may
 read the plan then (only while the wizard is idle). After relaunch it never
@@ -1172,8 +1177,14 @@ fails with `setup did not start`.
 
 Setup reports runtime transfer, hash verification and the runtime self-test as
 one phase. The evidence splits them at the last observed progress change, which
-is an observation bound, not a measurement. Runtime files are transferred
-individually; there is no extraction phase.
+is an observation bound, not a measurement. The harness handles both runtime
+delivery forms in the catalog. Individually delivered files have no unpack
+phase. An archive-delivered runtime is retrieved as its parts and then unpacked:
+transfer size, consent size and sources come from the parts, the installed size
+from the file records, and setup progress names each part during retrieval and
+each file during unpacking. Unpacking is timed from its first to its last
+observed progress change (`unpackObservedMs`, `postUnpackObservedMs`), again an
+observation bound; the self-test after unpacking reports no progress of its own.
 
 The application exits when its restart control is pressed. The harness records
 the application's relaunch request instead of letting it start an instance the
@@ -1183,16 +1194,24 @@ After relaunch the setup dialog is expected to reopen on its checking step while
 the application re-verifies the installed runtime. The checking step is never
 treated as settled. The harness waits up to 240 seconds for the dialog to become
 idle and settle, recording every distinct step, status, status phase and
-heading with timestamps. It passes only if the dialog settles on the ready
-screen, the active runtime is the one the plan promised with the expected lock
-and target, and the installed model set is the one the policy selects. If a
-cancelled or generic error screen or status appears at any point, the run fails
-with `A verified restart was presented as an interrupted setup (product
-defect)`; builds that restore the finished-setup checkpoint as an interrupted
-setup fail here. If the application honestly reports that its own check did not
-pass, the run fails with `Post-restart verification failed`. A settled restart
-or progress screen, or a dialog still checking at the timeout, also fails. The same processing and
-shutdown checks as the other modes follow.
+heading with timestamps. It passes only if the check is observed (the wizard or
+setup status shows `checking` at least once, which is how the restored setup
+checkpoint is exercised), the dialog settles on the ready screen while setup
+status is `ready`, the active runtime is the one the plan promised with the
+expected lock and target, and the installed model set is the one the policy
+selects. Status is polled every 250 ms, so a check that finishes between two
+polls is not observed and fails the run. If a cancelled or generic error screen
+or status appears at any point, the run fails with `A verified restart was
+presented as an interrupted setup (product defect)`; a build that restores the
+finished-setup checkpoint as an interrupted setup fails here. If the wizard
+reports that local processing could not be verified, the run fails with
+`Post-restart verification failed`: when setup status reported a verification
+error the evidence says the installed runtime or models did not pass live
+verification; when status was still checking it says only that the check did
+not complete. An unclassified error screen counts as that failure only with a
+verification error in status, and otherwise fails as unclassifiable. A settled
+restart or progress screen, or a dialog still checking at the timeout, also
+fails. The same processing and shutdown checks as the other modes follow.
 
 The evidence fields are named for what they prove: wizard evidence carries
 `expectedRuntimeLockSha256` from the command line and `runtimeLockSha256` only
@@ -1215,7 +1234,11 @@ saved to a file, as `--pack-server-log <file>` to classify the retry from the
 server's own request records: `resumed` requires the first request for that file
 after the stop to carry `Range: bytes=N-` (N > 0) and receive 206; `restarted`
 means it was requested from the start. Without the log, or without such a
-request, the retry is `unproven`; polling alone never proves a resume.
+request, the retry is `unproven`; polling alone never proves a resume. For an
+archive-delivered runtime the file is the interrupted part, and its kept bytes
+are read from that part's staged partial file. With the log, an archive retry
+must resume that part with a Range request from the kept bytes, or the run
+fails; for individual files the classification is recorded as evidence only.
 
 #### Private test sources
 
