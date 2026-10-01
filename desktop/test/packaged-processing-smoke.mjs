@@ -1,23 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Explicit, real local inference. Run only with licensed evaluation audio.
 import assert from 'node:assert/strict'
-import { createHash, randomUUID } from 'node:crypto'
+import { X509Certificate, createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
-import { WIZARD_LIMITATIONS, acceptConsent, assertCatalogLock, assertPostRestart, assertWizardPlan, cancelFromUi, chooseLocalAndContinue,
-  classifyRetry, clickRestart, consentSnapshot, createStatusTracker, installedRuntimeIdentity, interceptRelaunch, observeOnboarding,
-  onboardingDialog, partialRuntimeBytes, readPlan, readStatus, retryFromUi, shouldInterrupt, summarizeCatalog, waitForStep } from './packaged-wizard-driver.mjs'
+import { WIZARD_LIMITATIONS, acceptConsent, assertCatalogLock, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
+  catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, createStatusTracker, installedModelsIdentity,
+  installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, onboardingDialog, parsePackServerLog, partialRuntimeBytes,
+  readPlan, readStatus, retryFromUi, runtimeFileForUrlPath, runtimeFileUrlPath, shouldInterrupt, summarizeCatalog, waitForIdle,
+  waitForSetupStart, waitForStep } from './packaged-wizard-driver.mjs'
 
-const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval' }
+const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval',
+  '--expect-retrieval-failure-then-retry': 'expectRetrievalFailure' }
+// Setup must leave `idle` this soon after the install click.
+export const SETUP_START_TIMEOUT_MS = 60000
+// The wizard's own post-restart preflight re-hashes the runtime and runs its
+// self-test (up to about 120 s); this bound adds margin.
+export const POST_RESTART_SETTLE_TIMEOUT_MS = 240000
 
 export function parseArguments(args) {
   const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256',
-    '--retained-profile', '--expected-source-commit', '--expected-runtime-lock-sha256', '--extra-ca-cert'])
+    '--retained-profile', '--expected-source-commit', '--expected-runtime-lock-sha256', '--extra-ca-cert', '--pack-server-log'])
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]
     if (Object.hasOwn(BOOLEAN_FLAGS, flag)) {
@@ -42,11 +51,19 @@ export function parseArguments(args) {
     }
     const lock = options['--expected-runtime-lock-sha256']
     assert.match(lock ?? '', /^[a-fA-F0-9]{64}$/u, 'Wizard mode requires --expected-runtime-lock-sha256 with 64 hex characters')
+    assert.ok(!(options.interruptRuntimeRetrieval && options.expectRetrievalFailure),
+      'Choose one of --interrupt-runtime-retrieval and --expect-retrieval-failure-then-retry')
+    assert.ok(!options['--pack-server-log'] || options.interruptRuntimeRetrieval || options.expectRetrievalFailure,
+      '--pack-server-log requires --interrupt-runtime-retrieval or --expect-retrieval-failure-then-retry')
     return { ...common, mode: 'wizard', expectedRuntimeLockSha256: lock.toLowerCase(), interruptRuntimeRetrieval: options.interruptRuntimeRetrieval === true,
-      resume: false }
+      expectRetrievalFailure: options.expectRetrievalFailure === true,
+      packServerLog: options['--pack-server-log'] ? resolve(options['--pack-server-log']) : undefined, resume: false }
   }
-  assert.ok(!options.interruptRuntimeRetrieval, '--interrupt-runtime-retrieval requires --wizard')
-  assert.ok(!options['--expected-runtime-lock-sha256'], '--expected-runtime-lock-sha256 requires --wizard')
+  for (const [present, flag] of [[options.interruptRuntimeRetrieval, '--interrupt-runtime-retrieval'],
+    [options.expectRetrievalFailure, '--expect-retrieval-failure-then-retry'], [options['--pack-server-log'], '--pack-server-log'],
+    [options['--expected-runtime-lock-sha256'], '--expected-runtime-lock-sha256']]) {
+    assert.ok(!present, `${flag} requires --wizard`)
+  }
   assert.ok(options['--runtime-manifest'], 'Missing --runtime-manifest')
   const retainedProfile = options['--retained-profile'], expectedSourceCommit = options['--expected-source-commit']
   if (retainedProfile) {
@@ -76,24 +93,62 @@ export const EVIDENCE_SCHEMA = 2
 // A unit test checks this list is closed over the harness's relative imports.
 export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
   'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs'])
+export function playwrightVersion() {
+  try { return createRequire(import.meta.url)('playwright/package.json').version } catch { return null }
+}
 export function harnessIdentity(root = fileURLToPath(new URL('../', import.meta.url))) {
-  return { files: Object.fromEntries(HARNESS_FILES.map(file => [file, hash(readFileSync(join(root, ...file.split('/'))))])) }
+  return { files: Object.fromEntries(HARNESS_FILES.map(file => [file, hash(readFileSync(join(root, ...file.split('/'))))])),
+    playwright: { version: playwrightVersion() } }
+}
+
+// Refuses a path with a symbolic link (or junction) in any component.
+export function assertNoLinkedComponents(path, label) {
+  assert.ok(isAbsolute(path), `${label} path must be absolute`)
+  for (let current = path; ; current = dirname(current)) {
+    assert.ok(!lstatSync(current).isSymbolicLink(), `${label} path has a linked component: ${current}`)
+    if (dirname(current) === current) break
+  }
 }
 
 // An operator-supplied PEM bundle of extra trust anchors for a private test
 // source. It adds roots for the application's Node TLS; verification stays on.
+// Every certificate must be a CA certificate (basic constraints CA:TRUE).
 export function extraCaCertificate(path) {
-  assert.ok(isAbsolute(path), 'Extra CA certificate path must be absolute')
+  assertNoLinkedComponents(path, 'Extra CA certificate')
   const info = lstatSync(path)
   assert.ok(info.isFile() && !info.isSymbolicLink(), 'Extra CA certificate must be a regular file')
   assert.ok(info.size > 0 && info.size <= 1024 * 1024, 'Extra CA certificate must be a small PEM file')
-  const text = readFileSync(path, 'utf8')
+  const bytes = readFileSync(path), text = bytes.toString('utf8')
   assert.ok(!/PRIVATE KEY/u.test(text), 'Extra CA file must not contain a private key')
-  const certificates = text.match(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/gu) ?? []
-  assert.ok(certificates.length > 0, 'Extra CA file must contain PEM certificates')
+  const blocks = text.match(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/gu) ?? []
+  assert.ok(blocks.length > 0, 'Extra CA file must contain PEM certificates')
   const residue = text.replace(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----/gu, '').trim()
   assert.equal(residue, '', 'Extra CA file may contain only PEM certificates')
-  return { path, sha256: hash(Buffer.from(text)), certificates: certificates.length }
+  const certificates = blocks.map(block => {
+    let certificate
+    try { certificate = new X509Certificate(block) } catch { throw new Error('Extra CA file contains a certificate that does not parse') }
+    assert.equal(certificate.ca, true, 'Extra CA file may contain only CA certificates (basic constraints CA:TRUE)')
+    return { subject: certificate.subject.split('\n').join(', '), fingerprint256: certificate.fingerprint256, validTo: certificate.validTo }
+  })
+  return { path, bytes, sha256: hash(bytes), certificates }
+}
+
+// The application trusts a copy kept with the evidence, never the operator's
+// original, so the hashed bytes are the bytes it used.
+export function copyExtraCaCertificate(trust, directory) {
+  const copy = join(directory, 'extra-ca.pem')
+  writeFileSync(copy, trust.bytes, { flag: 'wx', mode: 0o444 })
+  const written = readFileSync(copy)
+  assert.equal(hash(written), trust.sha256, 'Extra CA copy differs from the validated certificate')
+  return { source: trust.path, copy, sha256: hash(written), certificates: trust.certificates }
+}
+
+export function readPackServerLog(path) {
+  assertNoLinkedComponents(path, 'Pack server log')
+  const info = lstatSync(path)
+  assert.ok(info.isFile(), 'Pack server log must be a regular file')
+  const bytes = readFileSync(path)
+  return { path, sha256: hash(bytes), entries: parsePackServerLog(bytes.toString('utf8')) }
 }
 
 // Allowlisted launch environment. Windows keeps its established set unchanged.
@@ -260,6 +315,9 @@ export function validateResume(output, expected, upgradeFromExecutableSha256, pl
 
   // Every previous resume is relevant, even if the original evidence still
   // says installation was interrupted and the library was later emptied.
+  // Tuples recorded on the original (non-upgrade) lineage: once any attempt
+  // carries one, every other attempt and a non-upgrade resume must match it.
+  const lineageTuples = original.candidate.legacy ? [] : [original.candidate.identity]
   for (const name of readdirSync(output).filter(name => name.startsWith('resume-')).sort()) {
     const directory = join(output, name)
     physicalDirectory(directory)
@@ -274,12 +332,18 @@ export function validateResume(output, expected, upgradeFromExecutableSha256, pl
     } else if (original.candidate.legacy ? attempt.prior.executableSha256 === original.prior.executableSha256
       : sameCandidate(attempt.candidate, original.candidate.identity)) {
       assert.ok(!Object.hasOwn(attempt.prior, 'upgrade'), 'Resume attempt has unexpected upgrade lineage')
+      if (!attempt.candidate.legacy) lineageTuples.push(attempt.candidate.identity)
     } else {
       assert.fail('Resume candidate changed outside the explicit upgrade lineage')
     }
     attempts.push({ evidence: `../${name}/evidence.json`, sha256: attempt.sha256, status: attempt.prior.status })
   }
-  return { ...original, attempts, upgrade }
+  const bound = lineageTuples[0], equalTuple = (left, right) => CANDIDATE_KEYS.every(key => left[key] === right[key])
+  assert.ok(lineageTuples.every(tuple => equalTuple(tuple, bound)), 'Resume attempts on the original candidate recorded different candidate tuples')
+  if (upgrade === undefined && bound) {
+    assert.ok(equalTuple(bound, current), 'Resume candidate differs from the candidate tuple recorded earlier in this evidence chain')
+  }
+  return { ...original, attempts, upgrade, ...(bound && original.candidate.legacy && { boundCandidate: bound }) }
 }
 
 export function reusableRuntime(readiness, manifest) {
@@ -395,10 +459,14 @@ export async function run(options) {
     status: 'running', harness: { platform: process.platform, arch: process.arch, ...harnessIdentity() },
     layout: { kind: layout.kind, resources: layout.resources, python: layout.python, ffmpeg: layout.ffmpeg, ffprobe: layout.ffprobe }, input: { sha256: hash(input), bytes: input.length, durationSeconds: inputDuration },
     candidate, executableSha256: candidate.executableSha256,
+    candidateObservations: [{ label: 'start', at: new Date(started).toISOString(), matches: true, identity: candidate }],
     runtimeManifestSha256: wizardMode ? null : hash(manifestBytes),
-    runtimeLockSha256: wizardMode ? options.expectedRuntimeLockSha256 : manifest.provenance?.lockSha256,
-    consent: { modelRetrieval: wizardMode ? 'application-setup-consent-screen' : !options.retainedProfile, localInference: true },
-    shutdownStrategy: shutdownStrategy(process.platform), trust: { extraCaCertificate: trust },
+    // Wizard mode records the operator's expectation here and the observed
+    // installed lock in runtimeLockSha256 only once it is verified.
+    ...(wizardMode ? { expectedRuntimeLockSha256: options.expectedRuntimeLockSha256 } : { runtimeLockSha256: manifest.provenance?.lockSha256 }),
+    // Wizard mode: set when the consent screen's install control is accepted.
+    consent: { modelRetrieval: wizardMode ? null : !options.retainedProfile, localInference: true },
+    shutdownStrategy: shutdownStrategy(process.platform), trust: { extraCaCertificate: null },
     timingsMs: {}, transitions: [],
     limitations: ['Not corpus accuracy or listening evidence', 'Not physical output or show qualification',
       'No representative RAM/VRAM measurement', 'Does not qualify a release catalog', executableIdentityLimitation(process.platform)] }
@@ -433,8 +501,18 @@ export async function run(options) {
     evidence.application = resumed.prior.application
   }
   const save = () => writeFileSync(join(artifactDirectory, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
+  // Passed as NODE_EXTRA_CA_CERTS, which the application's managed child
+  // processes inherit; it takes effect only while Electron's node-options
+  // fuse remains enabled in the candidate.
+  if (trust) evidence.trust = { extraCaCertificate: copyExtraCaCertificate(trust, artifactDirectory), inheritedByChildren: true }
   save()
-  const env = applicationEnvironment(process.env, process.platform, options.output, { extraCaCertificate: trust?.path })
+  const observeCandidate = label => {
+    const identity = candidateIdentity(options.executable)
+    const matches = CANDIDATE_KEYS.every(key => identity[key] === candidate[key])
+    evidence.candidateObservations.push({ label, at: new Date().toISOString(), matches, identity }); save()
+    assert.ok(matches, `Candidate identity changed (${label}); the executable, archive, native payload records or receipt were modified during the run`)
+  }
+  const env = applicationEnvironment(process.env, process.platform, options.output, { extraCaCertificate: evidence.trust.extraCaCertificate?.copy })
   let application, host, databaseBaseline
   const database = join(profile, 'backend', 'desktop.db')
   const remaining = () => { const value = deadline - Date.now(); assert.ok(value > 0, 'Total processing smoke deadline exceeded'); return value }
@@ -515,7 +593,11 @@ export async function run(options) {
       assert.ok(isInside(options.output, identity.userData), 'Application profile escaped the isolated directory')
     }
     if (evidence.application) validateResumedApplication(evidence.application, identity)
+    // Every launch is kept; `application` is the current one.
+    evidence.applicationLaunches ??= []
+    evidence.applicationLaunches.push({ at: new Date().toISOString(), ...identity })
     evidence.application = identity
+    if (evidence.applicationLaunches.length > 1) observeCandidate(`relaunch-${evidence.applicationLaunches.length}`)
     const launchDeadline = Date.now() + Math.min(300000, remaining())
     while (!(host = application.windows().find(window => /^http:\/\/127\.0\.0\.1:\d+\//.test(window.url())))) {
       assert.ok(Date.now() < launchDeadline, 'Application host did not start'); remaining(); await pause(200)
@@ -570,59 +652,97 @@ export async function run(options) {
     }
     evidence.timingsMs[`${kind}Installation`] = Date.now() - installationStarted; save()
   }
-  // The ordinary first-launch path: only visible UI controls act; bridge
-  // calls are reads. Ends with the promised runtime active after restart.
+  // The ordinary first-launch path: only visible UI controls act. The harness
+  // reads setup status freely, but calls preflightSetup only before consent
+  // (nothing installed) and only while the wizard is idle. Ends with the
+  // promised runtime active after restart.
   async function wizardSetup() {
     const expectedLock = options.expectedRuntimeLockSha256, stepTimeout = () => Math.min(120000, remaining())
     const wizard = evidence.wizard = {}
-    const catalogEncoded = await bounded(application.evaluate(({ app }) => {
+    const readArchive = name => bounded(application.evaluate(({ app }, name) => {
       const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
-      const file = path.join(app.getAppPath(), 'processing-catalog.json')
+      const file = path.join(app.getAppPath(), name)
       return fs.existsSync(file) ? fs.readFileSync(file).toString('base64') : null
-    }))
+    }, name))
+    const catalogEncoded = await readArchive('processing-catalog.json')
     assert.ok(catalogEncoded, 'This candidate ships no processing catalog; its setup wizard cannot offer local processing')
     const catalogBytes = Buffer.from(catalogEncoded, 'base64'), summary = summarizeCatalog(catalogBytes)
-    wizard.catalog = summary; save()
+    wizard.catalog = summary
+    evidence.limitations.push(...catalogLimitations(summary)); save()
     assertCatalogLock(summary, expectedLock, evidence.application)
     manifest = JSON.parse(catalogBytes.toString('utf8')).runtime
+    const policyEncoded = await readArchive('models.json')
+    assert.ok(policyEncoded, 'This candidate ships no model policy')
+    const policyBytes = Buffer.from(policyEncoded, 'base64'), policy = JSON.parse(policyBytes.toString('utf8'))
+    evidence.modelPolicySha256 = hash(policyBytes); save()
 
     const firstStep = await waitForStep(host, 'welcome', { timeoutMs: stepTimeout() })
-    wizard.onboarding = { shownOnFirstLaunch: true, firstStep, advancedRouteUsed: false }
+    wizard.onboarding = { shownOnFirstLaunch: true, firstStep, harnessUsedAdvancedRoute: false }
+    await waitForIdle(host, { timeoutMs: stepTimeout() })
     await onboardingDialog(host).getByRole('button', { name: /^Get started/u }).click()
     await chooseLocalAndContinue(host, { timeoutMs: stepTimeout() })
+    // Before consent nothing is installed, so this preflight is a read.
     const plan = await bounded(readPlan(host), 60000)
     wizard.statusBeforeConsent = await bounded(readStatus(host), 20000)
     wizard.plan = assertWizardPlan(plan, summary, expectedLock)
+    wizard.plan.identity = assertPlanIdentity(plan, { catalogRuntime: manifest, policy })
     wizard.consent = await bounded(consentSnapshot(host, plan), 20000)
     save()
 
     const setupStarted = Date.now(), tracker = createStatusTracker({ runtimeBytes: summary.runtimeBytes, start: setupStarted })
-    wizard.consent.acceptedAt = new Date(setupStarted).toISOString()
-    await acceptConsent(host)
-    let interruption = null
+    const readLiveStatus = () => bounded(readStatus(host), 20000)
+    // Accept the consent screen, then require setup to leave its prior state.
+    async function accept() {
+      const before = await readLiveStatus()
+      await acceptConsent(host, { timeoutMs: stepTimeout() })
+      const acceptedAt = new Date().toISOString()
+      tracker.observe(await bounded(waitForSetupStart(readLiveStatus, { before, timeoutMs: SETUP_START_TIMEOUT_MS }), SETUP_START_TIMEOUT_MS + 30000))
+      return acceptedAt
+    }
+    wizard.consent.acceptedAt = await accept()
+    evidence.consent.modelRetrieval = 'application-setup-consent-screen'; save()
+
+    // Optional recovery exercise: a cancel from the UI, or an injected source
+    // failure, followed by "Review setup and retry" and the same plan.
+    const recoveryMode = options.interruptRuntimeRetrieval ? 'cancel' : options.expectRetrievalFailure ? 'injected-failure' : null
+    let recovery = null, lastRuntimeFile = null
+    async function retryAfter(stoppedStep) {
+      await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
+      recovery.bytesPresentAfterStop = recovery.file ? partialRuntimeBytes(profile, summary.runtimeId, recovery.file) : null
+      tracker.nextAttempt()
+      await retryFromUi(host, { timeoutMs: stepTimeout() })
+      const retryPlan = await bounded(readPlan(host), 60000)
+      assert.equal(retryPlan.planId, plan.planId, 'Retry offered a different installation plan')
+      recovery.retryAcceptedAt = await accept()
+      save()
+    }
     for (;;) {
       remaining()
-      const status = await bounded(readStatus(host), 20000), observation = tracker.observe(status)
+      const status = await readLiveStatus(), observation = tracker.observe(status)
       if (observation.transition) { wizard.transitions = tracker.transitions; save() }
-      if (options.interruptRuntimeRetrieval && !interruption && shouldInterrupt(observation, status)) {
-        interruption = { elapsedMs: Date.now() - setupStarted, atFraction: observation.runtimeFraction,
-          file: observation.progress.file, receivedAtCancel: observation.progress.received }
+      if (status.phase === 'runtime' && typeof status.progress?.file === 'string') lastRuntimeFile = status.progress.file
+      if (recoveryMode === 'cancel' && !recovery && shouldInterrupt(observation, status)) {
+        recovery = wizard.recovery = { kind: 'cancel', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
+          atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtCancel: observation.progress.received }
         await cancelFromUi(host)
         let after = status
-        while (after.state === 'running') { remaining(); await pause(250); after = await bounded(readStatus(host), 20000); tracker.observe(after) }
-        interruption.statusAfterCancel = { state: after.state, retryable: after.retryable === true, message: after.message ?? null }
-        wizard.interruption = interruption; save()
+        while (after.state === 'running') { remaining(); await pause(250); after = await readLiveStatus(); tracker.observe(after) }
+        recovery.statusAfterStop = { state: after.state, retryable: after.retryable === true, message: after.message ?? null }
+        save()
         assert.equal(after.state, 'cancelled', `Cancelling runtime retrieval ended in ${after.state}`)
         assert.equal(after.retryable, true, 'Cancelled setup is not retryable')
-        await waitForStep(host, 'cancelled', { timeoutMs: stepTimeout() })
-        interruption.bytesPresentAfterCancel = partialRuntimeBytes(profile, summary.runtimeId, interruption.file)
-        tracker.nextAttempt()
-        await retryFromUi(host, { timeoutMs: stepTimeout() })
-        const retryPlan = await bounded(readPlan(host), 60000)
-        assert.equal(retryPlan.planId, plan.planId, 'Retry offered a different installation plan')
-        interruption.retryAcceptedAt = new Date().toISOString()
-        await acceptConsent(host)
-        save(); continue
+        await retryAfter('cancelled')
+        continue
+      }
+      if (recoveryMode === 'injected-failure' && !recovery && observation.terminal === 'error') {
+        recovery = wizard.recovery = { kind: 'injected-failure', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
+          failedPhase: tracker.lastRunningPhase(), file: lastRuntimeFile, error: status.error ?? status.message ?? null,
+          statusAfterStop: { state: status.state, retryable: status.retryable === true, message: status.message ?? null } }
+        save()
+        assert.equal(recovery.failedPhase, 'runtime', `Setup failed during ${recovery.failedPhase ?? 'an unknown phase'}, not runtime retrieval: ${recovery.error}`)
+        assert.equal(status.retryable, true, 'Failed setup is not retryable')
+        await retryAfter('error')
+        continue
       }
       if (observation.terminal === 'error' || observation.terminal === 'cancelled') {
         throw new Error(`Setup ${observation.terminal}: ${status.error || status.message || 'no details supplied'}`)
@@ -632,49 +752,80 @@ export async function run(options) {
       if (observation.terminal === 'restart-required') break
       await pause(500)
     }
-    if (options.interruptRuntimeRetrieval) {
-      assert.ok(interruption, 'Runtime retrieval finished before the 5% interruption point was observed; use a slower or larger runtime source')
-      interruption.retry = classifyRetry({ bytesPresent: interruption.bytesPresentAfterCancel,
-        retry: tracker.fileObservations('runtime', interruption.file) })
-    }
     wizard.transitions = tracker.transitions
     wizard.phases = tracker.summary()
     evidence.timingsMs.wizardSetup = Date.now() - setupStarted
     save()
+    if (recoveryMode) {
+      assert.ok(recovery, recoveryMode === 'cancel'
+        ? 'Runtime retrieval finished before the 5% interruption point was observed; throttle the pack server (--throttle-bytes-per-second) or use a larger runtime'
+        : 'Setup completed without the expected retrieval failure; start the pack server with --fail-after-bytes smaller than a runtime file')
+      // Classified only from the source server's request log, read now that
+      // retrieval is over; without it the retry is unproven.
+      const log = options.packServerLog ? readPackServerLog(options.packServerLog) : null
+      if (log) wizard.packServerLog = { path: log.path, sha256: log.sha256, requests: log.entries.length }
+      let path, after = recovery.at
+      if (recovery.kind === 'injected-failure' && log) {
+        const injected = log.entries.filter(entry => entry.outcome === 'injected-failure')
+        assert.equal(injected.length, 1, 'The pack server log must record exactly one injected failure')
+        recovery.serverInjectedFailure = injected[0]
+        path = injected[0].url.split('?')[0]; after = injected[0].time
+        recovery.serverFile = runtimeFileForUrlPath(manifest, path)
+      } else if (recovery.file) path = runtimeFileUrlPath(manifest, recovery.file)
+      recovery.retry = classifyRetry({ bytesPresent: recovery.bytesPresentAfterStop,
+        retry: recovery.file ? tracker.fileObservations('runtime', recovery.serverFile ?? recovery.file) : null,
+        log: log?.entries ?? null, path, after })
+      save()
+    }
 
     // Restart through the UI. The application's own relaunch would start an
     // instance the harness does not own, holding this profile's single-instance
     // lock; the request is recorded and the harness relaunches instead.
     await waitForStep(host, 'restart', { timeoutMs: stepTimeout() })
+    await waitForIdle(host, { timeoutMs: stepTimeout() })
     const marker = join(artifactDirectory, 'application-relaunch-request.json')
     await bounded(interceptRelaunch(application, marker), 20000)
-    wizard.restart = { initiatedBy: 'application-ui', relaunchedBy: 'harness', applicationRelaunch: 'intercepted-and-recorded' }
+    wizard.restart = { relaunchedBy: 'harness', applicationRelaunch: 'intercepted-and-recorded' }
     save()
     const restartPage = host
-    await close({ timeout: 120000, initiate: async (child, exited) => {
-      try { await clickRestart(restartPage) } catch (error) {
-        if (child.exitCode === null && child.signalCode === null) wizard.restart.clickError = error.message
-      }
-      await exited
-    } })
-    host = null
-    wizard.restart.relaunchRequest = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
-    save()
+    let clickError = null
+    try {
+      await close({ timeout: 120000, initiate: async (child, exited) => {
+        // The page may close mid-click as the application quits; the relaunch
+        // marker, not the click result, decides whether the request was made.
+        try { await clickRestart(restartPage) } catch (error) { clickError = error.message }
+        await exited
+      } })
+    } finally {
+      host = null
+      wizard.restart.relaunchRequest = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+      if (wizard.restart.relaunchRequest) wizard.restart.initiatedBy = 'application-ui'
+      else if (clickError) wizard.restart.clickError = clickError
+      save()
+    }
     assert.ok(wizard.restart.relaunchRequest, 'The restart control exited the application without requesting a relaunch')
     await launch()
-    const onboarding = await bounded(observeOnboarding(host), 60000)
-    const status = await bounded(readStatus(host), 20000)
-    // Preflight re-runs the installed runtime self-test.
-    const postPlan = await bounded(readPlan(host), Math.min(300000, remaining()))
+
+    // Let the wizard's own preflight re-verify the runtime and settle; the
+    // harness starts no verification of its own here.
+    const settleTimeout = Math.min(POST_RESTART_SETTLE_TIMEOUT_MS, remaining())
+    const post = await bounded(observePostRestart(host, { timeoutMs: settleTimeout }), settleTimeout + 30000)
+    wizard.postRestart = { observations: post.observations, settled: post.settled, timedOut: post.timedOut, elapsedMs: post.elapsedMs }
+    save()
+    judgePostRestart({ ...post, timeoutMs: settleTimeout })
     const postReadiness = await api('/api/features/processing')
-    let installed
+    let installed, installedModels
     try { installed = installedRuntimeIdentity(profile, postReadiness.runtime?.id) } catch (error) { installed = { error: error.message } }
-    wizard.postRestart = { onboarding, status: { state: status?.state, phase: status?.phase, message: status?.message ?? null, restartRequired: status?.restartRequired },
-      plan: { available: postPlan?.available, ready: postPlan?.ready, restartRequired: postPlan?.restartRequired, reason: postPlan?.reason ?? null },
-      runtime: postReadiness.runtime, installed }
+    try { installedModels = installedModelsIdentity(profile) } catch (error) { installedModels = { error: error.message } }
+    Object.assign(wizard.postRestart, { runtime: postReadiness.runtime, installed, installedModels })
     save()
     assert.ok(!installed.error, installed.error)
-    assertPostRestart({ onboarding, status, plan: postPlan, readiness: postReadiness, installed }, summary, expectedLock)
+    assert.ok(!installedModels.error, installedModels.error)
+    assertPostRestart({ settled: post.settled, readiness: postReadiness, installed, installedModels }, summary, expectedLock,
+      wizard.plan.identity.modelsManifestId)
+    evidence.runtimeLockSha256 = installed.runtimeLockSha256
+    evidence.installedModelsId = installedModels.modelsId
+    save()
   }
   try {
     if (options.retainedProfile) {
@@ -840,6 +991,9 @@ export async function run(options) {
           evidence.status = 'failed'
           evidence.retainedSetup.preservationAudit = { status: 'failed', error: error.message }
         }
+      }
+      try { observeCandidate('after-final-shutdown') } catch (error) {
+        evidence.status = 'failed'; evidence.candidateChangeError = error.message
       }
       evidence.finishedAt = new Date().toISOString(); evidence.timingsMs.total = Date.now() - started; save()
     }

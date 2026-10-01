@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { closePackagedApplication, collectOwned, processTable, parseDarwinProcessTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
+import { closePackagedApplication, collectOwned, processTable, parseDarwinProcessTable, shutdownEvidence, isZombie, liveProcesses } from './packaged-smoke-shutdown.mjs'
 
 const root = { pid: 10, parent: 1, birth: '100' }
 const backend = { pid: 11, parent: 10, birth: '101' }
@@ -81,6 +81,29 @@ test('shutdown evidence keeps remaining process identity, exit facts and cleanup
   assert.deepEqual(shutdownEvidence({ event: 'cleanup-inspection-failed', error: 'denied', cleanupErrors: [] }).entry,
     { event: 'cleanup-inspection-failed', error: 'denied', cleanupErrors: [] })
   assert.throws(() => shutdownEvidence({}), /event/)
+})
+
+test('Linux zombies are not still running: excluded from the clean-close check and recorded separately', async () => {
+  const zombie = { ...backend, state: 'Z' }, sleeping = { pid: 12, parent: 11, birth: '102', state: 'S' }
+  assert.equal(isZombie(zombie), true); assert.equal(isZombie(sleeping), false); assert.equal(isZombie(backend), false)
+  assert.deepEqual(liveProcesses([root, zombie, sleeping]), [root, sleeping])
+  // The root exits; its unreaped child is a zombie still in the table.
+  let rows = [{ ...root, state: 'S' }, { ...backend, state: 'S' }]
+  const { app } = fixture(child => { rows = [zombie]; child.exitCode = 0 })
+  const reports = []
+  await closePackagedApplication(app, { table: async () => rows, report: row => reports.push(row) })
+  assert.deepEqual(reports.map(row => row.event), ['before-close', 'closed'])
+  assert.deepEqual(reports[0].zombies, []); assert.deepEqual(reports.at(-1).zombies, [zombie])
+  assert.deepEqual(shutdownEvidence(reports.at(-1)).entry, { event: 'closed', processCount: 0, processes: [], zombieCount: 1, zombies: [{ pid: 11, parent: 10 }] })
+  assert.deepEqual(shutdownEvidence(reports[0]).entry.zombies, undefined)
+  // A live descendant beside a zombie still fails, and only the live one is "still running".
+  let hung = [{ ...root, state: 'S' }, { ...backend, state: 'S' }, sleeping]
+  // The live grandchild's parent is the zombie, so lineage still owns it.
+  const failing = fixture(child => { hung = [zombie, sleeping]; child.exitCode = 0 })
+  const failed = []
+  await assert.rejects(closePackagedApplication(failing.app, { timeout: 20, table: async () => hung, report: row => failed.push(row) }), /did not shut down cleanly/)
+  const report = failed.find(row => row.event === 'shutdown-failed')
+  assert.deepEqual(report.processes.map(row => row.pid), [12]); assert.deepEqual(report.zombies.map(row => row.pid), [11])
 })
 
 test('an application quitting on its own is observed to a clean exit without being closed', async () => {

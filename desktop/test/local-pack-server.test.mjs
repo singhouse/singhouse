@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { createPackServer, listen, parseRange, parseServerArguments, routeRequest, validFileName } from './local-pack-server.mjs'
+import { createPackServer, listen, parseRange, parseServerArguments, routeRequest, validFileName, assertKeyMaterialOutside, THROTTLE_LIMITS, USAGE } from './local-pack-server.mjs'
 
 function openssl() {
   try { execFileSync('openssl', ['version'], { stdio: 'ignore', timeout: 5000 }); return true } catch { return false }
@@ -31,11 +32,23 @@ test('arguments require an explicit directory, port and PEM pair', () => {
   for (const prefix of ['hop', '/a/b', '/..%2f', '/']) assert.throws(() => parseServerArguments([...base, '--redirect-via', prefix]))
   assert.equal(parseServerArguments([...base, '--fail-after-bytes', '10']).failAfterBytes, 10)
   assert.throws(() => parseServerArguments([...base, '--fail-after-bytes', '-1']), /Invalid argument|non-negative/)
+  assert.deepEqual(parseServerArguments(['--help']), { help: true })
+  assert.throws(() => parseServerArguments([...base, '--help']), /Invalid argument: --help/)
+  assert.match(USAGE, /--redirect-via \/PREFIX\s+Manual-only/u)
+  assert.match(USAGE, /error state/)
+  assert.equal(parseServerArguments(base).throttleBytesPerSecond, undefined)
+  for (const rate of [THROTTLE_LIMITS.minimum, 65536, THROTTLE_LIMITS.maximum]) {
+    assert.equal(parseServerArguments([...base, '--throttle-bytes-per-second', String(rate)]).throttleBytesPerSecond, rate)
+  }
+  for (const rate of ['0', '1023', String(THROTTLE_LIMITS.maximum + 1), '1.5', 'fast', '1e6']) {
+    assert.throws(() => parseServerArguments([...base, '--throttle-bytes-per-second', rate]), /Throttle/, rate)
+  }
 })
 
 test('routes accept only flat file names and never list or traverse', () => {
   assert.equal(validFileName('runtime-0001.part_a.bin'), true)
-  for (const name of ['', '.', '..', 'a/b', 'a b', 'ä', 'a\\b']) assert.equal(validFileName(name), false)
+  for (const name of ['', '.', '..', 'a/b', 'a b', 'ä', 'a\\b', '.key.pem', '.env', '..hidden']) assert.equal(validFileName(name), false)
+  assert.equal(routeRequest({ method: 'GET', url: '/.key.pem' }).status, 404)
   assert.deepEqual(routeRequest({ method: 'GET', url: '/blob.bin' }), { status: 200, name: 'blob.bin' })
   assert.deepEqual(routeRequest({ method: 'HEAD', url: '/blob.bin' }), { status: 200, name: 'blob.bin' })
   for (const url of ['/', '/..', '/a/../b', '/sub/blob.bin']) assert.equal(routeRequest({ method: 'GET', url }).status, 404)
@@ -111,7 +124,8 @@ test('serves full files, HEAD, exact resume ranges and 416 over verified TLS', {
   assert.equal((await s.fetch('/blob.bin', { method: 'POST' })).status, 405)
   assert.equal((await s.fetch('/missing.bin')).status, 404)
   assert.equal((await s.fetch('/')).status, 404)
-  assert.ok(s.lines.every(line => typeof line.time === 'string' && typeof line.status === 'number'))
+  assert.ok(s.lines.every(line => typeof line.time === 'string' && typeof line.started === 'string' && line.started <= line.time
+    && typeof line.status === 'number'))
   assert.deepEqual(s.lines.slice(0, 3).map(line => [line.method, line.status, line.bytes]),
     [['GET', 200, bytes.length], ['HEAD', 200, 0], ['GET', 206, bytes.length - 100]])
 })
@@ -152,4 +166,54 @@ test('fail-after-bytes truncates exactly one response, then resume completes', {
   assert.equal(again.status, 200); assert.equal(again.body.length, bytes.length)
   assert.equal(s.lines[0].outcome, 'injected-failure'); assert.equal(s.lines[0].bytes, 1000)
   assert.equal(s.lines.filter(line => line.outcome === 'injected-failure').length, 1)
+})
+
+test('key material inside the served directory is refused, through links too', { skip: SKIP }, t => {
+  const f = fixture(t)
+  assertKeyMaterialOutside(f.served, [join(f.root, 'cert.pem'), join(f.root, 'key.pem')])
+  writeFileSync(join(f.served, 'key.pem'), f.key)
+  assert.throws(() => assertKeyMaterialOutside(f.served, [join(f.root, 'cert.pem'), join(f.served, 'key.pem')]), /resolves inside the served directory/)
+  symlinkSync(join(f.served, 'key.pem'), join(f.root, 'outside-link.pem'))
+  assert.throws(() => assertKeyMaterialOutside(f.served, [join(f.root, 'outside-link.pem')]), /resolves inside/)
+  // The CLI refuses before listening.
+  const script = fileURLToPath(new URL('./local-pack-server.mjs', import.meta.url))
+  const result = spawnSync(process.execPath, [script, '--directory', f.served, '--port', '1', '--cert', join(f.root, 'cert.pem'),
+    '--key', join(f.served, 'key.pem')], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(result.status, 1); assert.match(result.stderr, /resolves inside the served directory/); assert.equal(result.stdout, '')
+  const help = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(help.status, 0); assert.equal(help.stdout, `${USAGE}\n`)
+})
+
+test('dot-files in the served directory are never served', { skip: SKIP }, async t => {
+  const f = fixture(t)
+  writeFileSync(join(f.served, '.hidden.bin'), 'secret')
+  const s = await start(t, f)
+  assert.equal((await s.fetch('/.hidden.bin')).status, 404)
+})
+
+test('fail-after-bytes is not consumed by HEAD, short files or short ranges', { skip: SKIP }, async t => {
+  const f = fixture(t), bytes = Buffer.alloc(8 * 1024, 3)
+  writeFileSync(join(f.served, 'small.bin'), 'tiny'); writeFileSync(join(f.served, 'blob.bin'), bytes)
+  const s = await start(t, f, { failAfterBytes: 1000 })
+  assert.equal((await s.fetch('/blob.bin', { method: 'HEAD' })).status, 200)
+  assert.equal((await s.fetch('/small.bin')).body.toString(), 'tiny')
+  const tail = await s.fetch('/blob.bin', { headers: { Range: `bytes=${bytes.length - 500}-` } })
+  assert.equal(tail.status, 206); assert.equal(tail.body.length, 500)
+  const first = await s.fetch('/blob.bin').catch(error => ({ error }))
+  assert.ok(first.error || first.complete === false || first.body.length < bytes.length, 'the first long response is truncated')
+  assert.equal((await s.fetch('/blob.bin')).body.length, bytes.length)
+  assert.deepEqual(s.lines.map(line => line.outcome ?? null), [null, 'complete', 'complete', 'injected-failure', 'complete'])
+})
+
+test('throttle paces the response body and stays within its bounds', { skip: SKIP }, async t => {
+  const f = fixture(t), bytes = Buffer.alloc(32 * 1024, 5)
+  writeFileSync(join(f.served, 'blob.bin'), bytes)
+  assert.throws(() => createPackServer({ directory: f.served, cert: f.cert, key: f.key, throttleBytesPerSecond: 10 }), /Throttle/)
+  const s = await start(t, f, { throttleBytesPerSecond: 64 * 1024 })
+  const begun = Date.now(), response = await s.fetch('/blob.bin'), elapsed = Date.now() - begun
+  assert.deepEqual(response.body, bytes)
+  // 32 KiB at 64 KiB/s takes about 500 ms; allow scheduling slack below that.
+  assert.ok(elapsed >= 400, `throttled transfer took ${elapsed} ms`)
+  const ranged = await s.fetch('/blob.bin', { headers: { Range: `bytes=${bytes.length - 2048}-` } })
+  assert.equal(ranged.status, 206); assert.deepEqual(ranged.body, bytes.subarray(bytes.length - 2048))
 })

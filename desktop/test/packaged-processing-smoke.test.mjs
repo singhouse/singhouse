@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase,
   applicationEnvironment, shutdownStrategy, validateResumedApplication, candidateIdentity, executableIdentityLimitation, harnessIdentity, HARNESS_FILES,
-  extraCaCertificate, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
+  extraCaCertificate, copyExtraCaCertificate, readPackServerLog, playwrightVersion, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
@@ -186,6 +186,30 @@ test('legacy evidence without a candidate tuple resumes only on Windows by execu
   assert.throws(() => recordedCandidate({ schema: EVIDENCE_SCHEMA, candidate: { executableSha256: 'a'.repeat(64) }, executableSha256: 'a'.repeat(64) }, 'linux'), /malformed/)
 })
 
+test('legacy chain binds to the first candidate tuple any attempt recorded', t => {
+  const f = fixture(t)
+  delete f.prior.candidate; f.prior.schema = 1; f.prior.application.platform = 'win32'; f.save()
+  const first = validateResume(f.output, f.expected, undefined, 'win32')
+  const directory = join(f.output, 'resume-first'); mkdirSync(directory)
+  const attempt = { ...f.prior, schema: EVIDENCE_SCHEMA, candidate: f.expected.candidate,
+    resume: { priorEvidence: '../evidence.json', priorEvidenceSha256: first.sha256 } }
+  const save = () => writeFileSync(join(directory, 'evidence.json'), JSON.stringify(attempt))
+  save()
+  const bound = validateResume(f.output, f.expected, undefined, 'win32')
+  assert.deepEqual(bound.boundCandidate, f.expected.candidate); assert.equal(bound.attempts.length, 1)
+  // Same executable, different archive: legacy matching alone would accept it.
+  const drifted = { ...f.expected, candidate: { ...f.expected.candidate, applicationArchiveSha256: '7'.repeat(64) } }
+  assert.throws(() => validateResume(f.output, drifted, undefined, 'win32'), /differs from the candidate tuple recorded earlier/)
+  // Two attempts on the original executable must agree with each other.
+  const second = join(f.output, 'resume-second'); mkdirSync(second)
+  writeFileSync(join(second, 'evidence.json'), JSON.stringify({ ...attempt, candidate: drifted.candidate }))
+  assert.throws(() => validateResume(f.output, drifted, undefined, 'win32'), /recorded different candidate tuples/)
+  rmSync(second, { recursive: true })
+  // An explicit upgrade is not bound to the original-lineage tuple.
+  const upgraded = validateResume(f.output, { ...f.expected, candidate: candidateTuple('d') }, f.expected.candidate.executableSha256, 'win32')
+  assert.equal(upgraded.attempts.length, 1)
+})
+
 test('resume refuses wizard or retained evidence and a different recorded architecture before launch', t => {
   const f = fixture(t)
   for (const mode of ['wizard', 'retained']) {
@@ -328,6 +352,8 @@ test('harness identity hashes every local file the harness loads', () => {
   const desktop = fileURLToPath(new URL('../', import.meta.url)), identity = harnessIdentity()
   assert.deepEqual(Object.keys(identity.files), [...HARNESS_FILES])
   for (const [file, digest] of Object.entries(identity.files)) assert.equal(digest, hash(readFileSync(join(desktop, file))))
+  assert.deepEqual(identity.playwright, { version: playwrightVersion() })
+  assert.match(identity.playwright.version, /^\d+\.\d+\.\d+/u)
   // Closure: every relative import or URL reference of a listed module is listed.
   for (const file of HARNESS_FILES.filter(file => file.endsWith('.mjs'))) {
     const source = readFileSync(join(desktop, file), 'utf8')
@@ -340,21 +366,47 @@ test('harness identity hashes every local file the harness loads', () => {
   }
 })
 
-test('extra CA input is a small PEM certificate bundle with no private key', t => {
+// Real certificates: the harness parses each one and requires CA:TRUE.
+const opensslAvailable = (() => { try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); return true } catch { return false } })()
+function certificate(root, name, ca) {
+  const key = join(root, `${name}.key`), cert = join(root, `${name}.pem`)
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-keyout', key, '-out', cert,
+    '-days', '1', '-subj', `/CN=${name}`, '-addext', `basicConstraints=critical,CA:${ca ? 'TRUE' : 'FALSE'}`], { stdio: 'ignore' })
+  return readFileSync(cert, 'utf8')
+}
+
+test('extra CA input is a small bundle of parsed CA:TRUE certificates with no private key or linked path', { skip: !opensslAvailable && 'openssl unavailable' }, t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'extra-ca-')))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const pem = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0Fy\n-----END CERTIFICATE-----\n'
-  writeFileSync(join(root, 'ca.pem'), pem + pem)
-  assert.deepEqual(extraCaCertificate(join(root, 'ca.pem')), { path: join(root, 'ca.pem'), sha256: hash(pem + pem), certificates: 2 })
-  writeFileSync(join(root, 'key.pem'), `${pem}-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n`)
+  const first = certificate(root, 'first-ca', true), second = certificate(root, 'second-ca', true), leaf = certificate(root, 'leaf', false)
+  writeFileSync(join(root, 'ca.pem'), first + second)
+  const trust = extraCaCertificate(join(root, 'ca.pem'))
+  assert.equal(trust.path, join(root, 'ca.pem')); assert.equal(trust.sha256, hash(first + second))
+  assert.deepEqual(trust.certificates.map(entry => entry.subject), ['CN=first-ca', 'CN=second-ca'])
+  assert.ok(trust.certificates.every(entry => /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/u.test(entry.fingerprint256) && entry.validTo))
+  writeFileSync(join(root, 'leaf-bundle.pem'), first + leaf)
+  assert.throws(() => extraCaCertificate(join(root, 'leaf-bundle.pem')), /only CA certificates/)
+  writeFileSync(join(root, 'key.pem'), `${first}${readFileSync(join(root, 'first-ca.key'), 'utf8')}`)
   assert.throws(() => extraCaCertificate(join(root, 'key.pem')), /private key/)
-  writeFileSync(join(root, 'junk.pem'), `${pem}trailing text`)
+  writeFileSync(join(root, 'junk.pem'), `${first}trailing text`)
   assert.throws(() => extraCaCertificate(join(root, 'junk.pem')), /only PEM certificates/)
   writeFileSync(join(root, 'empty.pem'), 'not a certificate')
   assert.throws(() => extraCaCertificate(join(root, 'empty.pem')), /PEM certificates/)
+  writeFileSync(join(root, 'garbled.pem'), '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0Fy\n-----END CERTIFICATE-----\n')
+  assert.throws(() => extraCaCertificate(join(root, 'garbled.pem')), /does not parse/)
   symlinkSync(join(root, 'ca.pem'), join(root, 'link.pem'))
-  assert.throws(() => extraCaCertificate(join(root, 'link.pem')), /regular file/)
+  assert.throws(() => extraCaCertificate(join(root, 'link.pem')), /linked component/)
+  // A linked directory anywhere in the path is refused too.
+  mkdirSync(join(root, 'real')); writeFileSync(join(root, 'real', 'ca.pem'), first)
+  symlinkSync(join(root, 'real'), join(root, 'linked-dir'))
+  assert.throws(() => extraCaCertificate(join(root, 'linked-dir', 'ca.pem')), /linked component: .*linked-dir$/)
   assert.throws(() => extraCaCertificate('ca.pem'), /absolute/)
+  // The application is given a read-only copy beside the evidence, re-hashed.
+  const evidence = join(root, 'evidence'); mkdirSync(evidence)
+  const copied = copyExtraCaCertificate(trust, evidence)
+  assert.deepEqual(copied, { source: trust.path, copy: join(evidence, 'extra-ca.pem'), sha256: trust.sha256, certificates: trust.certificates })
+  assert.equal(readFileSync(copied.copy, 'utf8'), first + second)
+  assert.throws(() => copyExtraCaCertificate(trust, evidence), /EEXIST/)
 })
 
 test('wizard mode is exclusive, fresh-profile only, and requires the expected runtime lock', () => {
@@ -365,6 +417,18 @@ test('wizard mode is exclusive, fresh-profile only, and requires the expected ru
   assert.equal(parsed.interruptRuntimeRetrieval, false); assert.equal(parsed.resume, false); assert.equal(parsed.manifest, undefined)
   assert.equal(parseArguments([...base, '--interrupt-runtime-retrieval']).interruptRuntimeRetrieval, true)
   assert.ok(parseArguments([...base, '--extra-ca-cert', 'ca.pem']).extraCaCert.endsWith('ca.pem'))
+  // Injected retrieval failure is a separate exercise from a UI cancel; the
+  // server request log is optional evidence for either.
+  const failure = parseArguments([...base, '--expect-retrieval-failure-then-retry', '--pack-server-log', 'server.log'])
+  assert.equal(failure.expectRetrievalFailure, true); assert.equal(failure.interruptRuntimeRetrieval, false)
+  assert.ok(failure.packServerLog.endsWith('server.log'))
+  assert.equal(parsed.expectRetrievalFailure, false); assert.equal(parsed.packServerLog, undefined)
+  assert.ok(parseArguments([...base, '--interrupt-runtime-retrieval', '--pack-server-log', 'server.log']).packServerLog.endsWith('server.log'))
+  assert.throws(() => parseArguments([...base, '--interrupt-runtime-retrieval', '--expect-retrieval-failure-then-retry']), /Choose one/)
+  assert.throws(() => parseArguments([...base, '--pack-server-log', 'server.log']), /requires --interrupt-runtime-retrieval or --expect-retrieval-failure/)
+  assert.throws(() => parseArguments([...base, '--expect-retrieval-failure-then-retry', '--expect-retrieval-failure-then-retry']), /Duplicate/)
+  assert.throws(() => parseArguments([...args, '--expect-retrieval-failure-then-retry']), /requires --wizard/)
+  assert.throws(() => parseArguments([...args, '--pack-server-log', 'server.log']), /requires --wizard/)
   for (const extra of [['--runtime-manifest', 'm.json'], ['--download-models'], ['--retained-profile', 'p'], ['--resume'],
     ['--upgrade-from-executable-sha256', 'b'.repeat(64)], ['--expected-source-commit', 'c'.repeat(40)]]) {
     assert.throws(() => parseArguments([...base, ...extra]), /Wizard mode excludes/)
@@ -377,6 +441,20 @@ test('wizard mode is exclusive, fresh-profile only, and requires the expected ru
   assert.throws(() => parseArguments(args.filter((_, i) => i !== 2 && i !== 3)), /Missing --runtime-manifest/)
   assert.equal(parseArguments(args).mode, 'advanced')
   assert.equal(parseArguments([...args.slice(0, -1), '--retained-profile', 'p', '--expected-source-commit', 'a'.repeat(40)]).mode, 'retained')
+})
+
+test('pack server log is read from a physical regular file and parsed strictly', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pack-log-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const text = `${JSON.stringify({ time: '2026-01-01T00:00:00.000Z', listening: 'https://127.0.0.1:8443/' })}\n`
+    + `${JSON.stringify({ started: '2026-01-01T00:00:01.000Z', time: '2026-01-01T00:00:02.000Z', method: 'GET', url: '/a', range: null, status: 200, bytes: 1 })}\n`
+  writeFileSync(join(root, 'server.log'), text)
+  const log = readPackServerLog(join(root, 'server.log'))
+  assert.equal(log.sha256, hash(text)); assert.equal(log.entries.length, 1)
+  symlinkSync(join(root, 'server.log'), join(root, 'link.log'))
+  assert.throws(() => readPackServerLog(join(root, 'link.log')), /linked component/)
+  writeFileSync(join(root, 'bad.log'), '{')
+  assert.throws(() => readPackServerLog(join(root, 'bad.log')), /not JSON/)
 })
 
 test('fresh inference cannot adopt an existing song or job', () => {

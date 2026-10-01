@@ -922,9 +922,16 @@ To continue with a different candidate, add
 `--upgrade-from-executable-sha256 <full original executable hash>`. The
 candidate tuple must then change, and the evidence binds the original and
 current tuples as the upgrade lineage; every later attempt must carry the same
-lineage. Evidence written before candidate tuples were recorded resumes only on
-Windows, where it is compared by executable hash alone and marked as legacy.
-On Linux and macOS such evidence is refused; start a new attempt.
+lineage. On Linux the stock executable hash is shared by every build, so this
+flag selects nothing there: it only confirms the original evidence, and the
+recorded tuples bind the lineage. Evidence written before candidate tuples were
+recorded resumes only on Windows, where it is compared by executable hash alone
+and marked as legacy. Once any later attempt in such a chain records a tuple,
+every other attempt and every non-upgrade resume must match that tuple. On
+Linux and macOS such evidence is refused; start a new attempt.
+
+The candidate tuple is hashed again after every relaunch and after the final
+shutdown; any change fails the run.
 
 #### Retained setup
 
@@ -991,8 +998,23 @@ Wizard mode excludes `--runtime-manifest`, `--download-models`,
 the expected runtime lock, be marked qualified for that lock, and target this
 platform and architecture. The installation plan shown in the wizard must offer
 exactly that catalog runtime (size and sources) and the three default models
-from their upstream sources. Evidence records the plan, the consent screen text
-and its hash, every status transition, and observed time per setup phase.
+from their upstream sources. The harness also recomputes the plan identity the
+application shows the consent screen for, from the catalog runtime and the
+shipped `models.json` policy, the same way the application does. The offered
+components and memory requirements are taken from the plan itself, because the
+application's hardware observation cannot be repeated independently. Evidence
+records the plan and its identity, the consent screen text and its hash, every
+status transition, observed time per setup phase, the `models.json` hash, the
+installed model set identity, every application launch, and the Playwright
+version.
+
+Controls are judged and pressed only after the setup dialog reports
+`aria-busy="false"`; the choice, review and retry screens render before their
+own preflight finishes. Before consent nothing is installed, so the harness may
+read the plan then (only while the wizard is idle). After relaunch it never
+calls the plan read, which would itself re-verify the installed runtime. Setup
+must leave its previous state within 60 seconds of the install click, or the run
+fails with `setup did not start`.
 
 Setup reports runtime transfer, hash verification and the runtime self-test as
 one phase. The evidence splits them at the last observed progress change, which
@@ -1002,40 +1024,86 @@ individually; there is no extraction phase.
 The application exits when its restart control is pressed. The harness records
 the application's relaunch request instead of letting it start an instance the
 harness does not own, then launches the same executable with the same profile
-itself. After relaunch it requires that the setup screens are not shown again,
-setup status is `ready`, the active runtime is the one the plan promised, and
-its installed manifest carries the expected lock. The same processing and
+itself (`restart.initiatedBy` is `application-ui` once the request is recorded).
+After relaunch the setup dialog is expected to reopen while the application
+re-verifies the installed runtime. The harness waits up to 240 seconds for the
+dialog to become idle and settle, recording every distinct step, status and
+heading with timestamps. It passes only if the dialog settles on the ready
+screen, the active runtime is the one the plan promised with the expected lock
+and target, and the installed model set is the one the policy selects. If an
+error or cancelled screen or status appears at any point, the run fails with
+`A verified restart was presented as an interrupted setup (product defect)`;
+current builds that restore the interrupted-setup checkpoint fail here. A
+settled restart, progress or error screen also fails. The same processing and
 shutdown checks as the other modes follow.
 
-`--interrupt-runtime-retrieval` cancels setup from the wizard's own controls once
-at least 5% of the runtime has transferred, records the partial bytes kept on
-disk, retries from the wizard, and classifies the retry as restarted, consistent
-with resume, or indeterminate. Polling cannot prove a resume; correlate with the
-source server's range log.
+The evidence fields are named for what they prove: wizard evidence carries
+`expectedRuntimeLockSha256` from the command line and `runtimeLockSha256` only
+after the installed runtime is verified; `consent.modelRetrieval` is set when the
+consent screen is accepted; `harnessUsedAdvancedRoute` is always `false`; and
+`restart.clickError` is recorded only if no relaunch request was recorded.
+
+Two recovery exercises are available; choose at most one:
+
+- `--interrupt-runtime-retrieval` cancels setup from the wizard's own controls
+  once at least 5% of the runtime has transferred, records the partial bytes
+  kept on disk, and retries with "Review setup and retry". Start the pack server
+  with `--throttle-bytes-per-second` so the 5% point is observable.
+- `--expect-retrieval-failure-then-retry` expects the pack server's
+  `--fail-after-bytes` failure: setup reaches its error screen during runtime
+  retrieval and is retried the same way.
+
+Either retry must offer the same plan. Pass the pack server's standard output,
+saved to a file, as `--pack-server-log <file>` to classify the retry from the
+server's own request records: `resumed` requires the first request for that file
+after the stop to carry `Range: bytes=N-` (N > 0) and receive 206; `restarted`
+means it was requested from the start. Without the log, or without such a
+request, the retry is `unproven`; polling alone never proves a resume.
 
 #### Private test sources
 
 The test-only `test/local-pack-server.mjs` serves the files in one operator
-directory over HTTPS on `127.0.0.1` for a private test catalog (see
-`--private-test-local-sources` above). It serves only flat file names from that
-directory, never follows symbolic links, accepts only `GET` and `HEAD`, and
-supports `Range: bytes=N-` for resume tests. It logs one JSON line per request.
+directory over HTTPS on `127.0.0.1` for a private test catalog. Loopback HTTPS
+URLs already pass production catalog validation; the catalog tool's
+`--private-test-local-sources` admits `file:` URLs only and is not needed here.
+A candidate whose catalog names a loopback, private-range or non-default-port
+runtime source is recorded with `wizard.catalog.privateTestSource: true` and a
+limitation. A catalog qualification without `scope: "full"` also adds a
+limitation; `qualification.scope` is recorded when present.
+
+The server serves only flat file names from that directory (never dot-files),
+never follows symbolic links, accepts only `GET` and `HEAD`, and supports
+`Range: bytes=N-` for resume tests. It refuses to start if the certificate or
+key resolves inside the served directory. It logs one JSON line per request with
+its arrival (`started`) and completion (`time`); `--help` prints the options.
 
 ```sh
 node desktop/test/local-pack-server.mjs --directory /verified-pack/files \
-  --port 8443 --cert server.pem --key server-key.pem [--fail-after-bytes N]
+  --port 8443 --cert /keys/server.pem --key /keys/server-key.pem \
+  [--fail-after-bytes N] [--throttle-bytes-per-second N] > /evidence-logs/pack-server.log
 ```
 
-`--fail-after-bytes` drops the first transfer after that many bytes to exercise
-interruption. `--redirect-via` answers with redirects; the application refuses
-redirects for runtime files, so this only exercises that refusal.
+`--fail-after-bytes` truncates the first GET response longer than N bytes, once;
+a short file, a short range or a `HEAD` does not consume it. The application
+does not retry internally, so this drives setup to its error screen; use it
+with `--expect-retrieval-failure-then-retry`. `--throttle-bytes-per-second`
+(1024 to 1073741824) paces each response body; use it with
+`--interrupt-runtime-retrieval`. `--redirect-via` is manual-only: it answers
+with redirects, the application refuses redirects for runtime files, and no
+harness mode uses it.
 
 To let the packaged application trust a private test certificate authority,
 pass `--extra-ca-cert /absolute/ca.pem` to the processing smoke harness. The
-file must be a regular file containing only PEM certificates and no private
-key. The harness passes it to the application as `NODE_EXTRA_CA_CERTS`, which
-the application's setup downloads use; it records the file's hash in the
-evidence. Inherited trust variables are never passed through. The operating
+path must have no symbolic link in any component (on macOS use `/private/tmp`,
+not `/tmp`). The file must be a regular file containing only PEM certificates,
+each a CA certificate (basic constraints `CA:TRUE`), and no private key. The
+harness copies it into the evidence directory as a read-only `extra-ca.pem`,
+records its hash and each certificate's subject and SHA-256 fingerprint, and
+passes the copy to the application as `NODE_EXTRA_CA_CERTS`, which the
+application's setup downloads use. The variable is inherited by the
+application's child processes (`trust.inheritedByChildren: true`), and it takes
+effect only while Electron's `NodeOptions` fuse is enabled, as it is in current
+builds. Inherited trust variables are never passed through. The operating
 system trust store is not changed, and certificate verification is never
 disabled.
 
@@ -1044,6 +1112,11 @@ disabled.
 The runner requires Electron's host window; it is not a headless backend test.
 Modal, external lyric lookup and external correction remain disabled. None of
 these modes is clean-machine, corpus accuracy, representative memory or
-physical-output qualification. Process-tree evidence lists every descendant
-still running after shutdown. The harness signals only the application process
-it launched, and only after a failed shutdown.
+physical-output qualification. Process ownership is traced by parent lineage
+from the first observation at close time: the application process and every
+process whose parent is owned and that started no earlier. A descendant that was
+reparented before that first observation is not seen. Process-tree evidence
+lists every owned descendant still running after shutdown. Linux zombie
+processes (exited, not yet reaped) are not counted as running; they are listed
+separately as `zombies`. The harness signals only the application process it
+launched, and only after a failed shutdown.

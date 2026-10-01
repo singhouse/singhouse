@@ -60,16 +60,27 @@ export function collectOwned(table, known) {
   return owned
 }
 
+// A Linux zombie (state Z) has exited and holds no resources but its exit
+// status; it is not "still running". Its parent has not reaped it yet.
+export const isZombie = row => row.state === 'Z'
+export const liveProcesses = rows => rows.filter(row => !isZombie(row))
+const zombieProcesses = rows => rows.filter(isZombie)
+
 // Pure mapping from a shutdown report to durable evidence. Process rows keep
 // only {pid, parent}; birth values are ownership internals, not evidence.
+// Zombies are listed separately and only when present.
 // `forced` is true when the retained root was still running at failure, the
 // only case in which closePackagedApplication signals it.
-export function shutdownEvidence({ event, processes, error, closeSettled, exitCode, signalCode, cleanupErrors } = {}) {
+export function shutdownEvidence({ event, processes, zombies, error, closeSettled, exitCode, signalCode, cleanupErrors } = {}) {
   assert.equal(typeof event, 'string', 'Shutdown report requires an event')
   const entry = { event }
   if (Array.isArray(processes)) {
     entry.processCount = processes.length
     entry.processes = processes.map(({ pid, parent }) => ({ pid, parent }))
+  }
+  if (Array.isArray(zombies) && zombies.length) {
+    entry.zombieCount = zombies.length
+    entry.zombies = zombies.map(({ pid, parent }) => ({ pid, parent }))
   }
   if (error !== undefined) entry.error = String(error)
   for (const [key, value] of Object.entries({ closeSettled, exitCode, signalCode })) if (value !== undefined) entry[key] = value
@@ -77,6 +88,9 @@ export function shutdownEvidence({ event, processes, error, closeSettled, exitCo
   return { entry, forced: event === 'shutdown-failed' && exitCode === null && signalCode === null }
 }
 
+// Ownership is traced by parent lineage from the first observation (close
+// time): the root and every process whose parent is owned and born no earlier.
+// A descendant reparented before that first observation is not seen.
 // No launch race: callers must await electron.launch's own timeout and retain
 // the returned application before entering this function. `initiate` starts
 // the shutdown (default: Playwright close). An application that is already
@@ -92,7 +106,7 @@ export async function closePackagedApplication(application, {
     const root = child.exitCode === null && child.signalCode === null && initial.find(row => row.pid === child.pid)
     if (root) known = collectOwned(initial, [root])
     else throw new Error('Cannot establish ownership of packaged application before shutdown')
-    report({ event: 'before-close', processes: known })
+    report({ event: 'before-close', processes: liveProcesses(known), zombies: zombieProcesses(known) })
   } catch (error) { failure = error }
   let settled = false, closeError
   // Rejection is consumed even if close settles after the deadline.
@@ -107,22 +121,26 @@ export async function closePackagedApplication(application, {
       failure = new Error(`Packaged application exited abnormally (code=${child.exitCode}, signal=${child.signalCode})`)
       break
     }
-    if (settled && known.length === 0 && child.exitCode === 0 && child.signalCode === null) {
-      report({ event: 'closed', processes: [] })
+    if (settled && liveProcesses(known).length === 0 && child.exitCode === 0 && child.signalCode === null) {
+      report({ event: 'closed', processes: [], zombies: zombieProcesses(known) })
       return
     }
     await delay(100)
   }
   try { known = collectOwned(await table(), known) } catch (error) { failure ??= error }
   failure ??= new Error(`Packaged application did not shut down cleanly within ${timeout}ms`)
-  report({ event: 'shutdown-failed', error: String(failure), closeSettled: settled, exitCode: child.exitCode, signalCode: child.signalCode, processes: known })
+  report({ event: 'shutdown-failed', error: String(failure), closeSettled: settled, exitCode: child.exitCode, signalCode: child.signalCode,
+    processes: liveProcesses(known), zombies: zombieProcesses(known) })
   // A process-table snapshot cannot safely authorize killing arbitrary PIDs.
   // Force only the retained live ChildProcess; descendants are diagnostic
   // evidence and may remain. Escalation always leaves this smoke test failed.
   const cleanupErrors = []
   try { forceChild(child) } catch (error) { cleanupErrors.push(String(error)) }
   await delay(250)
-  try { report({ event: 'after-forced-cleanup', processes: collectOwned(await table(), known), cleanupErrors }) }
+  try {
+    const after = collectOwned(await table(), known)
+    report({ event: 'after-forced-cleanup', processes: liveProcesses(after), zombies: zombieProcesses(after), cleanupErrors })
+  }
   catch (error) { report({ event: 'cleanup-inspection-failed', error: String(error), cleanupErrors }) }
   throw failure
 }
