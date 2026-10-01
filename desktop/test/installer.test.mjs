@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -175,6 +176,47 @@ test('installer rejects stale native admission policy instead of overlaying it',
     else process.env.KARAOKE_NATIVE_PAYLOAD = previous
     if (previousReleasePolicy === undefined) delete process.env.SINGHOUSE_RELEASE_POLICY
     else process.env.SINGHOUSE_RELEASE_POLICY = previousReleasePolicy
+    await rm(native, { recursive: true, force: true })
+  }
+})
+
+test('only a processing-ready build maps its validated catalog onto the packaged name', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'installer-catalog-'))
+  const previous = process.env.KARAOKE_NATIVE_PAYLOAD
+  process.env.KARAOKE_NATIVE_PAYLOAD = native
+  try {
+    const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
+    await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: pkg.version }))
+    await writeFile(resolve(native, 'files.json'), '{}\n')
+    await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
+    await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
+    for (const policy of ['models.json', 'processing-locks.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
+    const { default: config, stageProcessingCatalog } = await import(`${installer}?catalog=${Date.now()}`)
+    // Neither a stray legacy catalog nor the per-target sources are in the static file list.
+    assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))
+
+    const playback = await stageProcessingCatalog({ mode: 'playback-only', catalogBytes: null, catalogSha256: null })
+    assert.deepEqual(playback.files, [])
+    await playback.cleanup()
+    await assert.rejects(stageProcessingCatalog({ mode: 'playback-only', catalogBytes: Buffer.from('{}') }), /cannot stage/)
+    await assert.rejects(stageProcessingCatalog({}), /requires the validated catalog bytes/)
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes: null }), /requires the validated catalog bytes/)
+
+    const catalogBytes = Buffer.from('{"schema":1}\n')
+    const catalogSha256 = createHash('sha256').update(catalogBytes).digest('hex')
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256: 'b'.repeat(64) }), /differs from the validated source/)
+    const ready = await stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256 })
+    assert.equal(ready.files.length, 1)
+    const [fileSet] = ready.files
+    assert.deepEqual({ to: fileSet.to, filter: fileSet.filter }, { to: '.', filter: ['processing-catalog.json'] })
+    assert.ok(!resolve(fileSet.from).startsWith(resolve(desktop, '..')), 'staged outside the source tree')
+    assert.deepEqual(await readdir(fileSet.from), ['processing-catalog.json'])
+    assert.deepEqual(await readFile(resolve(fileSet.from, 'processing-catalog.json')), catalogBytes)
+    await ready.cleanup()
+    await assert.rejects(readdir(fileSet.from), /ENOENT/)
+  } finally {
+    if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
+    else process.env.KARAOKE_NATIVE_PAYLOAD = previous
     await rm(native, { recursive: true, force: true })
   }
 })

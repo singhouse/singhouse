@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { copyFile, readFile, stat, lstat, mkdir } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assertReleasePolicy, canonicalJson } from '../release.mjs'
 import { createPortablePayload, createReleaseReceipt, deriveIdentityFromApplication, inspectApplicationInventory, verifyPackagingSource, writeImmutableFile } from './release_receipt.mjs'
@@ -13,13 +13,24 @@ import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
-import { assertProcessingCatalog, packagedCatalogIdentity, processingModeFromArgs, readProcessingCatalogInputs } from './processing_catalog_gate.mjs'
+import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord } from './processing_catalog_gate.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
   if (platform === 'darwin') return resolve(application, 'Singhouse.app', 'Contents', 'Resources', 'release.json')
   if (platform === 'linux' || platform === 'win32') return resolve(application, 'resources', 'release.json')
   throw new Error('Unsupported packaged release policy platform')
+}
+
+// Electron's application archive sits beside the packaged release policy.
+export function packagedApplicationArchivePath(applicationDirectory, platform) {
+  return resolve(dirname(packagedReleasePolicyPath(applicationDirectory, platform)), 'app.asar')
+}
+
+// The produced application must carry exactly the gate's validated catalog
+// (processing-ready) or none at all (playback-only). Fails closed.
+export async function verifyPackagedProcessingCatalog({ applicationDirectory, platform, gate }) {
+  return assertPackagedProcessingCatalog(gate, await packagedCatalogSha256(packagedApplicationArchivePath(applicationDirectory, platform)))
 }
 
 export function prepackagedInstallerPath(applicationDirectory, platform) {
@@ -50,7 +61,7 @@ export async function verifyInstallerPreservedApplication({ applicationDirectory
   return installed
 }
 
-export function assertPackagingMode(argv, platform = process.platform) {
+export function assertPackagingMode(argv, platform = process.platform, env = process.env) {
   const signedRelease = argv.includes('--signed-release')
   const signedMacRelease = argv.includes('--signed-macos-release')
   const manualAzureCli = argv.includes('--azure-cli-user')
@@ -60,7 +71,8 @@ export function assertPackagingMode(argv, platform = process.platform) {
   if (signedRelease && !argv.includes('--first-installers')) throw new Error('--signed-release requires --first-installers')
   if (signedMacRelease && (!argv.includes('--first-installers') || signedRelease || manualAzureCli || azureOidc)) throw new Error('--signed-macos-release requires --first-installers and cannot combine with Windows signing')
   if (signedMacRelease && platform !== 'darwin') throw new Error('--signed-macos-release requires macOS')
-  const processingMode = processingModeFromArgs(argv, { signed: signedRelease || signedMacRelease })
+  // Every build, signed or not, names its processing mode explicitly.
+  const processingMode = processingModeFromArgs(argv, env)
   return { signedRelease, signedMacRelease, manualAzureCli, azureOidc, processingMode }
 }
 
@@ -71,7 +83,7 @@ export async function sha256File(path) {
 }
 
 async function main() {
-  const { signedRelease, signedMacRelease, manualAzureCli, azureOidc, processingMode } = assertPackagingMode(process.argv)
+  const { signedRelease, signedMacRelease, manualAzureCli, azureOidc } = assertPackagingMode(process.argv)
   const macSelection = signedMacRelease ? macSigningSelection() : null
   if (manualAzureCli) await verifyAzureCliSession()
   if (azureOidc) await verifyAzureCliSession({ expectedType: 'servicePrincipal', expected: {
@@ -79,7 +91,7 @@ async function main() {
     tenantId: process.env.AZURE_TENANT_ID,
     clientId: process.env.AZURE_CLIENT_ID,
   } })
-  const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot }] = await Promise.all([
+  const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot, stageProcessingCatalog }] = await Promise.all([
     import('electron-builder'),
     import('./installer.mjs'),
   ])
@@ -93,18 +105,25 @@ async function main() {
   if (!platform || !['x64', 'arm64'].includes(nativeManifest.arch) || (nativeManifest.platform === 'win32' && nativeManifest.arch !== 'x64') || (nativeManifest.platform === 'darwin' && nativeManifest.arch !== 'arm64')) throw new Error('Unsupported portable target')
   if (nativeManifest.platform === 'darwin' && process.platform !== 'darwin') throw new Error('Create macOS application payloads on macOS')
   if (signedMacRelease && nativeManifest.platform !== 'darwin') throw new Error('--signed-macos-release requires a macOS native assembly')
-  // Validate the catalog exactly as the packaged application will at launch,
-  // before any installer exists; electron-builder silently skips a missing file.
+  // Validate the target's catalog exactly as the packaged application will at
+  // launch, before any installer exists. `policy` is the release policy
+  // installer.mjs copies into the package (verifyPackagedReleasePolicy re-checks
+  // it below), so its channel is the one the installed application applies.
   const appVersion = JSON.parse(await readFile(resolve(config.directories.app, 'package.json'), 'utf8')).version
-  // `policy` is the release policy installer.mjs copies into the package (and
-  // verifyPackagedReleasePolicy re-checks below), so its channel is the one the
-  // installed application will validate the catalog against.
-  const processing = assertProcessingCatalog({ mode: processingMode, identity: packagedCatalogIdentity(nativeManifest, appVersion),
-    releaseChannel: policy.channel, ...await readProcessingCatalogInputs(config.directories.app) })
-  if (processing.notice) console.warn(processing.notice)
+  const processingGate = await prepareProcessingGate({ desktopDir: config.directories.app, nativeManifest, appVersion,
+    releaseChannel: policy.channel, argv: process.argv, env: process.env })
+  for (const notice of processingGate.notices) console.warn(notice)
+  const processing = processingGate.result
   console.log(`Processing catalog: ${processing.mode}${processing.catalogSha256 ? ` (catalog sha256 ${processing.catalogSha256}, runtime lock sha256 ${processing.runtimeLockSha256})` : ''}`)
 
   const output = resolve(config.directories.output)
+  // The durable mode record is created exclusively next to the receipt; refuse
+  // a reused output directory now rather than after a complete build.
+  const processingRecord = resolve(output, 'processing-mode.json')
+  try {
+    await lstat(processingRecord)
+    throw new Error('Packaging requires an output directory without processing-mode.json; preserve or remove the prior build explicitly')
+  } catch (error) { if (error.code !== 'ENOENT') throw error }
   const completeLinuxInstaller = nativeManifest.platform === 'linux' && process.argv.includes('--first-installers')
   const { files: _files, extraResources: _extraResources, directories, ...installerConfig } = config
   installerConfig.directories = { output: directories.output }
@@ -126,7 +145,11 @@ async function main() {
       throw new Error('Linux first-installer packaging requires a fresh unpacked output directory; preserve or remove the prior build explicitly')
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
-  await build({ config: { ...config, publish: null }, publish: 'never', targets: platform.createTarget('dir', Arch[nativeManifest.arch]) })
+  const stagedCatalog = await stageProcessingCatalog({ mode: processing.mode, catalogBytes: processingGate.catalogBytes, catalogSha256: processing.catalogSha256 })
+  try {
+    await build({ config: { ...config, files: [...config.files, ...stagedCatalog.files], publish: null }, publish: 'never',
+      targets: platform.createTarget('dir', Arch[nativeManifest.arch]) })
+  } finally { await stagedCatalog.cleanup() }
   async function applicationRoot() {
     const name = nativeManifest.platform === 'darwin' ? 'mac-arm64'
       : nativeManifest.platform === 'win32' ? 'win-unpacked'
@@ -160,6 +183,9 @@ async function main() {
       console.log(`AppImage complete-layout preparation: ${appImagePreparation.unsquashfsVersion}`)
       await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: 'linux', selectedPolicy: policy })
     }
+    // Read back the produced app.asar: the validated catalog or none, before
+    // any identity or receipt binds this application.
+    await verifyPackagedProcessingCatalog({ applicationDirectory: application, platform: nativeManifest.platform, gate: processing })
     const identity = await deriveIdentityFromApplication({ applicationDirectory: application, policy, packageLock })
     const target = `${nativeManifest.platform}-${nativeManifest.arch}`
     const payload = resolve(output, `Singhouse-${identity.appVersion}-${target}.shapp`)
@@ -173,6 +199,8 @@ async function main() {
       // the immutable receipt.
       verifySourceBeforePublish: () => verifyPackagingSource({ repositoryDirectory: sourceRoot, provenance }),
     })
+    // Covered by the artifact checksum listing; deliberately not receipt schema.
+    await writeImmutableFile(processingRecord, `${JSON.stringify(processingModeRecord(processing), null, 2)}\n`)
 
     // Native installers remain first-install surfaces. Signing and publication are
     // explicit release gates and are intentionally absent from this build command.
@@ -231,8 +259,7 @@ async function main() {
         }
       }
     }
-    const { notice: _notice, ...processingFacts } = processing
-    console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId, processing: processingFacts }, null, 2))
+    console.log(JSON.stringify({ payload, receipt, processingRecord, releaseId: identity.releaseId, processing }, null, 2))
   } finally { await appImagePreparation?.cleanup() }
 }
 

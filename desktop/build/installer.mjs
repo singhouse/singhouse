@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { readFileSync, existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
+import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY } from './processing_catalog_gate.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const icons = resolve(desktop, 'build/icons')
@@ -30,12 +34,34 @@ for (const policy of ['models.json', 'processing-locks.json']) {
     throw new Error(`Reassemble the native runtime after changing ${policy}`)
   }
 }
+// The processing catalog is never part of the static file list: a stray
+// desktop/processing-catalog.json or the per-target desktop/processing-catalogs/
+// sources are not packed. For a processing-ready build only, the gate's exact
+// validated bytes are staged under the packaged name in a build-owned temporary
+// directory (never the tracked source tree, which packaging requires clean) and
+// added as one FileSet to the application build. Packaging then re-reads the
+// produced app.asar and compares digests.
+export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256 } = {}) {
+  if (mode === PLAYBACK_ONLY) {
+    if (catalogBytes !== null && catalogBytes !== undefined) throw new Error('Playback-only packaging cannot stage a processing catalog')
+    return { files: [], cleanup: async () => {} }
+  }
+  if (mode !== PROCESSING_READY || !Buffer.isBuffer(catalogBytes)) throw new Error('Processing-ready packaging requires the validated catalog bytes')
+  const digest = createHash('sha256').update(catalogBytes).digest('hex')
+  if (digest !== catalogSha256) throw new Error('Staged processing catalog differs from the validated source catalog')
+  const directory = await mkdtemp(join(tmpdir(), 'singhouse-processing-catalog-'))
+  const cleanup = () => rm(directory, { recursive: true, force: true })
+  try { await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' }) }
+  catch (error) { await cleanup(); throw error }
+  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], cleanup }
+}
+
 export default {
   appId: 'org.karaoke.desktop',
   productName: BRAND_NAME,
   executableName: BRAND_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'processing-catalog.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs', 'macos_signing.mjs'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs', 'macos_signing.mjs'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
   asar: true,
   npmRebuild: false,

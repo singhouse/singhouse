@@ -114,3 +114,14 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
 export function createSetupCatalog({ runtime, qualification, models, memory } = {}, options) {
   return validateSetupCatalog({ schema: 1, runtime, qualification, models, ...(memory === undefined ? {} : { memory }) }, options)
 }
+
+// The one validation applied to a release-owner catalog shipped inside the
+// application: the packaging gate and application start both call this, so the
+// catalog a build accepts is exactly the catalog the installed application
+// accepts. Production rules only: private-test local sources are never enabled.
+export function validateShippedCatalog(text, { identity, trustedLocks, modelPolicy, releaseChannel } = {}) {
+  if (typeof text !== 'string') throw new Error('Processing setup catalog must be JSON text')
+  let catalog
+  try { catalog = JSON.parse(text) } catch (error) { throw new Error(`Processing setup catalog is not JSON: ${error.message}`) }
+  return validateSetupCatalog(catalog, { identity, trustedLocks, modelPolicy, releaseChannel, privateTestLocalSources: false })
+}

@@ -2,6 +2,14 @@ name: Private Windows signing candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      processing_mode:
+        description: Whether the candidate packages the committed win32-x64 processing catalog
+        type: choice
+        options:
+          - playback-only
+          - processing-ready
+        default: playback-only
 
 permissions:
   contents: read
@@ -116,11 +124,20 @@ jobs:
           & ./desktop/build/sign_windows.ps1 -ValidateOnly
       - name: Assemble signed Windows application and first installer
         shell: pwsh
+        env:
+          PROCESSING_MODE: ${{ inputs.processing_mode }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # The dispatch choice reaches the shell only as data; a fixed mapping
+          # selects the packaging flag and anything else stops before assembly.
+          switch -Exact -CaseSensitive ($env:PROCESSING_MODE) {
+            'playback-only' { $processingFlag = '--playback-only' }
+            'processing-ready' { $processingFlag = '--processing-ready' }
+            default { throw 'Unknown processing mode.' }
+          }
           python desktop/build/assemble.py --target win32-x64 --output desktop/native
           if ($LASTEXITCODE -ne 0) { throw 'Native assembly failed.' }
-          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc --playback-only
+          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc $processingFlag
           if ($LASTEXITCODE -ne 0) { throw 'Signed installer packaging failed.' }
       - name: Verify signatures and write final SHA-256 inventory
         shell: pwsh

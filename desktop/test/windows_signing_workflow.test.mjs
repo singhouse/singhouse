@@ -8,9 +8,9 @@ const workflowUrl = new URL('../../.github/workflows/desktop-windows-signing.yml
 
 test('Windows signing workflow is manual, private, OIDC-only, and verifies before upload', async () => {
   const workflow = await readFile(workflowUrl, 'utf8')
-  assert.match(workflow, /^on:\n  workflow_dispatch:/m)
+  assert.match(workflow, /^on:\r?\n  workflow_dispatch:/m)
   assert.doesNotMatch(workflow, /^  (push|pull_request|release|schedule):/m)
-  assert.match(workflow, /permissions:\n  contents: read\n  id-token: write/)
+  assert.match(workflow, /permissions:\r?\n  contents: read\r?\n  id-token: write/)
   assert.match(workflow, new RegExp(`environment: windows-${'signing'}`))
   assert.match(workflow, /uses: azure\/login@[0-9a-f]{40}/)
   assert.match(workflow, /--signed-release --azure-oidc/)
@@ -25,7 +25,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-FileHash -Algorithm SHA256/)
   assert.ok(workflow.indexOf('Get-AuthenticodeSignature') < workflow.indexOf('desktop/artifacts/SHA256SUMS'))
   assert.ok(workflow.indexOf('desktop/artifacts/SHA256SUMS') < workflow.indexOf('actions/upload-artifact'))
-  assert.match(workflow, /path: desktop\/artifacts\/\n\s+include-hidden-files: true/)
+  assert.match(workflow, /path: desktop\/artifacts\/\r?\n\s+include-hidden-files: true/)
   assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
   assert.match(workflow, /import \{ WINDOWS_SIGNING \}/)
   assert.match(workflow, /import \{ BRAND_NAME \}/)
@@ -48,7 +48,26 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath \$path/)
   assert.doesNotMatch(workflow, new RegExp(`${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile}`, 'i'))
   assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
-  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc --playback-only\n/)
+  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc \$processingFlag\r?\n/)
+})
+
+test('Windows signing workflow takes the processing mode as a fixed choice passed as data', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  const nl = '\\r?\\n'
+  assert.match(workflow, new RegExp(['^  workflow_dispatch:', '    inputs:', '      processing_mode:',
+    '        description: [^\\r\\n]+', '        type: choice', '        options:', '          - playback-only',
+    '          - processing-ready', '        default: playback-only'].join(nl), 'm'))
+  // The choice is mapped through an environment variable and a fixed switch;
+  // no expression is interpolated into a shell line.
+  assert.match(workflow, new RegExp(['        env:', '          PROCESSING_MODE: \\$\\{\\{ inputs\\.processing_mode \\}\\}'].join(nl)))
+  assert.match(workflow, /switch -Exact -CaseSensitive \(\$env:PROCESSING_MODE\) \{/)
+  assert.match(workflow, /'playback-only' \{ \$processingFlag = '--playback-only' \}/)
+  assert.match(workflow, /'processing-ready' \{ \$processingFlag = '--processing-ready' \}/)
+  assert.match(workflow, /default \{ throw 'Unknown processing mode\.' \}/)
+  assert.ok(workflow.indexOf('switch -Exact -CaseSensitive') < workflow.indexOf('python desktop/build/assemble.py'))
+  const expressionLines = workflow.split(/\r?\n/).filter(line => /\$\{\{/.test(line))
+  for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.processing_mode|github\.sha) \}\}$/, line)
+  assert.doesNotMatch(workflow, /npm[^\r\n]*\$\{\{/)
 })
 
 test('Windows signing documentation binds Azure values to environment secrets', async () => {
