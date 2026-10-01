@@ -353,7 +353,8 @@ test('harness identity hashes every local file the harness loads', () => {
   assert.deepEqual(Object.keys(identity.files), [...HARNESS_FILES])
   for (const [file, digest] of Object.entries(identity.files)) assert.equal(digest, hash(readFileSync(join(desktop, file))))
   assert.deepEqual(identity.playwright, { version: playwrightVersion() })
-  assert.match(identity.playwright.version, /^\d+\.\d+\.\d+/u)
+  // The version is null where the locked desktop dependencies are not installed.
+  if (identity.playwright.version !== null) assert.match(identity.playwright.version, /^\d+\.\d+\.\d+/u)
   // Closure: every relative import or URL reference of a listed module is listed.
   for (const file of HARNESS_FILES.filter(file => file.endsWith('.mjs'))) {
     const source = readFileSync(join(desktop, file), 'utf8')
@@ -510,15 +511,15 @@ test('resume evidence binds to the platform that recorded it', t => {
 })
 
 test('relaunch after resume refuses another platform, architecture or profile', () => {
-  const prior = { platform: 'darwin', arch: 'arm64', userData: '/Users/op/evidence/profile' }
+  const prior = { platform: 'darwin', arch: 'arm64', userData: '/Volumes/op/evidence/profile' }
   validateResumedApplication(prior, { ...prior, packaged: true }, 'darwin')
   assert.throws(() => validateResumedApplication(prior, { ...prior, platform: 'linux' }, 'darwin'), /different platform/)
   assert.throws(() => validateResumedApplication(prior, { ...prior, arch: 'x64' }, 'darwin'), /different architecture/)
-  assert.throws(() => validateResumedApplication(prior, { ...prior, userData: '/Users/op/other/profile' }, 'darwin'), /different profile/)
+  assert.throws(() => validateResumedApplication(prior, { ...prior, userData: '/Volumes/op/other/profile' }, 'darwin'), /different profile/)
   // The default macOS volume folds case; the same comparison on Linux does not.
-  validateResumedApplication(prior, { ...prior, userData: '/Users/op/evidence/Profile' }, 'darwin')
-  const linux = { ...prior, platform: 'linux', userData: '/home/op/evidence/profile' }
-  assert.throws(() => validateResumedApplication(linux, { ...linux, userData: '/home/op/evidence/Profile' }, 'linux'), /different profile/)
+  validateResumedApplication(prior, { ...prior, userData: '/Volumes/op/evidence/Profile' }, 'darwin')
+  const linux = { ...prior, platform: 'linux', userData: '/srv/op/evidence/profile' }
+  assert.throws(() => validateResumedApplication(linux, { ...linux, userData: '/srv/op/evidence/Profile' }, 'linux'), /different profile/)
   assert.throws(() => validateResumedApplication(linux, { ...linux, userData: undefined }, 'linux'), /different profile/)
 })
 
@@ -539,10 +540,10 @@ test('Linux resume does not accept a profile that differs only in case', { skip:
 })
 
 test('launch environment is allowlisted per platform and keeps the profile isolated', () => {
-  const source = { PATH: '/bin', Path: 'C:\\bin', HOME: '/home/op', USERPROFILE: 'C:\\Users\\op', APPDATA: 'C:\\Users\\op\\AppData\\Roaming',
+  const source = { PATH: '/bin', Path: 'C:\\bin', HOME: '/srv/op', USERPROFILE: 'C:\\Users\\op', APPDATA: 'C:\\Users\\op\\AppData\\Roaming',
     LOCALAPPDATA: 'C:\\Users\\op\\AppData\\Local', SystemRoot: 'C:\\Windows', TEMP: 'C:\\Temp', TMPDIR: '/tmp/op', LANG: 'en_US.UTF-8', LC_ALL: 'C',
     DISPLAY: ':99', WAYLAND_DISPLAY: 'wayland-0', XAUTHORITY: '/run/user/1000/xauth', XDG_RUNTIME_DIR: '/run/user/1000',
-    XDG_CONFIG_HOME: '/home/op/.config', XDG_DATA_HOME: '/home/op/.local/share', XDG_CACHE_HOME: '/home/op/.cache',
+    XDG_CONFIG_HOME: '/srv/op/.config', XDG_DATA_HOME: '/srv/op/.local/share', XDG_CACHE_HOME: '/srv/op/.cache',
     ELECTRON_RUN_AS_NODE: '1', ELECTRON_EXTRA_LAUNCH_ARGS: '--no-sandbox', NODE_OPTIONS: '--require x', LD_PRELOAD: '/x.so', LD_LIBRARY_PATH: '/x',
     DYLD_INSERT_LIBRARIES: '/x.dylib', DYLD_LIBRARY_PATH: '/x', KARAOKE_DESKTOP_PYTHON: '/usr/bin/python3', MODAL_TOKEN_ID: 'secret',
     PYTHONPATH: '/x', HF_HOME: '/x', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus', SINGHOUSE_RECOVERY_ANCHOR: '1' }
@@ -566,7 +567,7 @@ test('launch environment is allowlisted per platform and keeps the profile isola
   for (const platform of ['win32', 'darwin', 'linux']) {
     const env = applicationEnvironment(source, platform, '/evidence')
     assert.equal(env.XDG_CONFIG_HOME, '/evidence')
-    if (platform !== 'win32') assert.equal(env.HOME, '/home/op')
+    if (platform !== 'win32') assert.equal(env.HOME, '/srv/op')
   }
   assert.deepEqual(applicationEnvironment({ HOME: undefined, PATH: '/bin' }, 'linux', '/evidence'), { PATH: '/bin', XDG_CONFIG_HOME: '/evidence' })
   assert.throws(() => applicationEnvironment(source, 'freebsd', '/evidence'), /Unsupported/)

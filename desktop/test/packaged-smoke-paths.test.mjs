@@ -39,7 +39,7 @@ test('native layout selects each platform bundled Python and media tools', () =>
 
 test('path identity folds case only where the platform filesystem does', () => {
   assert.equal(samePath('C:\\Evidence\\Profile', 'c:\\evidence\\profile', 'win32'), true)
-  assert.equal(samePath('/Users/Op/Evidence/Profile', '/users/op/evidence/profile', 'darwin'), true)
+  assert.equal(samePath('/Volumes/Op/Evidence/Profile', '/volumes/op/evidence/profile', 'darwin'), true)
   // A Linux directory differing only in case is a different directory.
   assert.equal(samePath('/srv/Evidence/Profile', '/srv/evidence/profile', 'linux'), false)
   assert.equal(samePath('/srv/evidence/profile', '/srv/evidence/./profile/', 'linux'), true)
@@ -51,11 +51,11 @@ test('path identity folds case only where the platform filesystem does', () => {
 
 test('containment folds case on macOS and Windows but not on Linux', () => {
   // A macOS evidence directory differing only in case is the same directory.
-  assert.equal(isInside('/Users/Op/Evidence', '/users/op/evidence/profile', 'darwin'), true)
-  assert.equal(isInside('/Users/Op/Evidence/Profile', '/users/op/evidence', 'darwin'), false)
-  assert.equal(isInside('/Users/Op/Evidence/Profile', '/users/op/evidence/profile/run', 'darwin'), true)
-  assert.equal(isInside('/Users/Op/Evidence', '/users/op/EVIDENCE', 'darwin'), false)
-  assert.equal(isInside('/Users/Op/Profile', '/Users/Op/Evidence', 'darwin'), false)
+  assert.equal(isInside('/Volumes/Op/Evidence', '/volumes/op/evidence/profile', 'darwin'), true)
+  assert.equal(isInside('/Volumes/Op/Evidence/Profile', '/volumes/op/evidence', 'darwin'), false)
+  assert.equal(isInside('/Volumes/Op/Evidence/Profile', '/volumes/op/evidence/profile/run', 'darwin'), true)
+  assert.equal(isInside('/Volumes/Op/Evidence', '/volumes/op/EVIDENCE', 'darwin'), false)
+  assert.equal(isInside('/Volumes/Op/Profile', '/Volumes/Op/Evidence', 'darwin'), false)
   assert.equal(isInside('C:\\Evidence', 'c:\\evidence\\profile', 'win32'), true)
   assert.equal(isInside('c:\\EVIDENCE', 'C:\\Evidence\\Profile', 'win32'), true)
   assert.equal(isInside('/srv/Evidence', '/srv/evidence/profile', 'linux'), false)
