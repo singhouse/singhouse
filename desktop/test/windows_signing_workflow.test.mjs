@@ -65,6 +65,13 @@ test('Windows signing workflow takes the processing mode as a fixed choice passe
   assert.match(workflow, /'processing-ready' \{ \$processingFlag = '--processing-ready' \}/)
   assert.match(workflow, /default \{ throw 'Unknown processing mode\.' \}/)
   assert.ok(workflow.indexOf('switch -Exact -CaseSensitive') < workflow.indexOf('python desktop/build/assemble.py'))
+  // processing-ready stops before native assembly when the target catalog is absent.
+  assert.match(workflow, /if \(\$env:PROCESSING_MODE -ceq 'processing-ready' -and\r?\n\s+-not \(Test-Path -LiteralPath 'desktop\/processing-catalogs\/win32-x64\.json' -PathType Leaf\)\) \{\r?\n\s+throw '[^'\r\n]+'/)
+  assert.ok(workflow.indexOf('switch -Exact -CaseSensitive') < workflow.indexOf("Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json'"))
+  assert.ok(workflow.indexOf("Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json'") < workflow.indexOf('python desktop/build/assemble.py'))
+  // The uploaded artifact names the mode it was packaged in.
+  assert.match(workflow, /^          name: windows-signed-\$\{\{ inputs\.processing_mode \}\}-\$\{\{ github\.sha \}\}$/m)
+  assert.doesNotMatch(workflow, /name: windows-signed-\$\{\{ github\.sha \}\}/)
   const expressionLines = workflow.split(/\r?\n/).filter(line => /\$\{\{/.test(line))
   for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.processing_mode|github\.sha) \}\}$/, line)
   assert.doesNotMatch(workflow, /npm[^\r\n]*\$\{\{/)

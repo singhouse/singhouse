@@ -13,6 +13,8 @@ export const PACKAGED_CATALOG_NAME = 'processing-catalog.json'
 export const CATALOG_DIRECTORY = 'processing-catalogs'
 const MODE_FLAGS = [`--${PROCESSING_READY}`, `--${PLAYBACK_ONLY}`]
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+// The exact serialization desktop/build/setup_catalog.mjs writes.
+export const canonicalCatalogText = catalog => `${JSON.stringify(catalog, null, 2)}\n`
 const regenerate = target => `Regenerate it with desktop/build/setup_catalog.mjs from the runtime, qualification, and terms evidence for ${target}, or package with --${PLAYBACK_ONLY}.`
 
 // Every packaging run states what it ships: exactly one of the two exact flags.
@@ -81,6 +83,10 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
     }
     // The exact validation the installed application applies at start.
     catalog = validateShippedCatalog(text, { identity, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel })
+    // The shipped bytes must be exactly what desktop/build/setup_catalog.mjs
+    // writes for the validated result, so duplicate keys (JSON.parse keeps the
+    // last), unknown fields, or reordered keys cannot ride along unreviewed.
+    if (text !== canonicalCatalogText(catalog)) throw new Error('catalog is not the generator\'s canonical output; regenerate it')
   } catch (error) {
     throw new Error(`${source} would be rejected by the packaged ${target} application: ${error.message}. ${regenerate(target)}`)
   }
@@ -145,7 +151,12 @@ export function assertPackagedProcessingCatalog(gate, packagedSha256) {
 }
 
 // The durable per-build record written next to the release receipt. It is not
-// part of the receipt schema.
-export function processingModeRecord({ mode, catalogSha256, runtimeLockSha256, qualificationScope, target }) {
-  return { schema: 1, mode, catalogSha256, runtimeLockSha256, qualificationScope, target: { platform: target.platform, arch: target.arch } }
+// part of the receipt schema; releaseId and electronAppDigest bind it to the
+// derived identity of the application it describes (the digest is that of the
+// app.asar carrying the catalog), and releaseChannel is the packaged policy's.
+export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target }) {
+  if (!/^[0-9a-f]{64}$/.test(releaseId ?? '') || !/^[0-9a-f]{64}$/.test(electronAppDigest ?? '')
+      || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel ?? '')) throw new Error('Processing mode record requires the derived release identity and packaged release channel')
+  return { schema: 1, mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope,
+    target: { platform: target.platform, arch: target.arch } }
 }

@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createSetupCatalog, SETUP_MODEL_IDS, validateShippedCatalog } from '../setup_catalog.mjs'
+import { prepareSetupCatalog } from '../build/setup_catalog.mjs'
 import { assertPackagingMode, packagedApplicationArchivePath, verifyPackagedProcessingCatalog } from '../build/package.mjs'
 import { assertPackagedProcessingCatalog, assertProcessingCatalog, catalogSourceName, packagedCatalogIdentity, packagedCatalogSha256,
   prepareProcessingGate, processingModeFromArgs, processingModeRecord, readProcessingCatalogInputs } from '../build/processing_catalog_gate.mjs'
@@ -30,9 +31,9 @@ function fixture({ platform = 'linux', arch = 'x64', scope = 'full' } = {}) {
   const qualification = { passed: true, scope, runtimeLockSha256: runtime.provenance.lockSha256, platform, arch, accelerator: 'cpu', evidenceReference: 'fixture-run-1' }
   const modelPolicy = { schema: 1, allowedHosts: ['example.org'], models: SETUP_MODEL_IDS.map(id => ({ id, files: [{ path: `huggingface/${id}`, url: `https://example.org/${id}`, sha256: sha(id), revision: sha(id), size: 1, executable: false }] })) }
   const locks = { schema: 1, lockSha256: [runtime.provenance.lockSha256] }
-  const catalog = createSetupCatalog({ runtime, qualification, models: SETUP_MODEL_IDS.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })) },
-    { identity: target, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel: 'private-test' })
-  return { catalog, locks, modelPolicy, identity: packagedCatalogIdentity(nativeManifest, '1') }
+  const input = structuredClone({ runtime, qualification, models: SETUP_MODEL_IDS.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })) })
+  const catalog = createSetupCatalog(structuredClone(input), { identity: target, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel: 'private-test' })
+  return { catalog, locks, modelPolicy, input, target, identity: packagedCatalogIdentity(nativeManifest, '1') }
 }
 const bytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
 const source = 'desktop/processing-catalogs/linux-x64.json'
@@ -187,12 +188,18 @@ test('the packaging gate selects the target catalog from the native manifest', a
     qualificationScope: 'full', target: { platform: 'linux', arch: 'x64' } })
   assert.deepEqual(ready.catalogBytes, catalogBytes)
   assert.deepEqual(ready.notices, [])
-  assert.deepEqual(processingModeRecord(ready.result), { schema: 1, mode: 'processing-ready', catalogSha256: sha(catalogBytes),
+  const build = { releaseId: 'd'.repeat(64), releaseChannel: 'stable', electronAppDigest: 'e'.repeat(64) }
+  assert.deepEqual(processingModeRecord({ ...ready.result, ...build }), { schema: 1, mode: 'processing-ready', ...build, catalogSha256: sha(catalogBytes),
     runtimeLockSha256: catalog.runtime.provenance.lockSha256, qualificationScope: 'full', target: { platform: 'linux', arch: 'x64' } })
+  // The record is bound to the build it describes; it cannot be written without that identity.
+  for (const missing of ['releaseId', 'releaseChannel', 'electronAppDigest']) {
+    assert.throws(() => processingModeRecord({ ...ready.result, ...build, [missing]: undefined }), /derived release identity and packaged release channel/, missing)
+  }
+  assert.throws(() => processingModeRecord({ ...ready.result, ...build, electronAppDigest: 'E'.repeat(64) }), /derived release identity/)
   const excluded = await prepare(['--playback-only'])
   assert.equal(excluded.catalogBytes, null)
   assert.equal(excluded.notices.length, 1); assert.match(excluded.notices[0], /linux-x64\.json exists but is deliberately excluded/)
-  assert.deepEqual(processingModeRecord(excluded.result), { schema: 1, mode: 'playback-only', catalogSha256: null, runtimeLockSha256: null,
+  assert.deepEqual(processingModeRecord({ ...excluded.result, ...build }), { schema: 1, mode: 'playback-only', ...build, catalogSha256: null, runtimeLockSha256: null,
     qualificationScope: null, target: { platform: 'linux', arch: 'x64' } })
 
   // The arm64 build picks the arm64 file, never the x64 one.
@@ -297,4 +304,59 @@ test('package.mjs validates before electron-builder runs and verifies app.asar b
   assert.ok(at('verifyPackagedProcessingCatalog(') < at('createReleaseReceipt('))
   assert.ok(at('createReleaseReceipt(') < at('writeImmutableFile(processingRecord'))
   assert.match(main, /argv: process\.argv, env: process\.env/)
+  // The staged directory is always removed through the warning-only cleanup helper.
+  assert.match(main, /await withStagedCatalog\(stagedCatalog, \(\) => build\(/)
+  assert.doesNotMatch(main, /stagedCatalog\.cleanup\(/)
+  // The mode record is bound to the derived identity and the packaged policy's channel.
+  assert.match(main, /processingModeRecord\(\{ \.\.\.processing, releaseId: identity\.releaseId,\s+releaseChannel: policy\.channel, electronAppDigest: identity\.electronAppDigest \}\)/)
+  assert.ok(at('deriveIdentityFromApplication(') < at('processingModeRecord('))
+})
+
+test('processing-ready accepts only the generator\'s exact canonical bytes', async t => {
+  const reject = /would be rejected by the packaged linux-x64 application: catalog is not the generator's canonical output; regenerate it/
+  const check = (f, text, releaseChannel) => assertProcessingCatalog({ mode: 'processing-ready', catalogBytes: Buffer.from(text), identity: f.identity,
+    locks: f.locks, modelPolicy: f.modelPolicy, releaseChannel })
+  const channels = ['private-test', 'stable', 'core-private-test', undefined]
+
+  // A duplicated key: JSON.parse keeps the last value, so the parsed catalog is
+  // a valid full-scope one, but the shipped text also claims private-smoke.
+  const full = fixture()
+  const canonical = bytes(full.catalog).toString('utf8')
+  assert.match(canonical, /"scope": "full"/)
+  const duplicate = canonical.replace('"scope": "full"', '"scope": "private-smoke",\n    "scope": "full"')
+  assert.notEqual(duplicate, canonical)
+  assert.equal(JSON.parse(duplicate).qualification.scope, 'full')
+  for (const releaseChannel of channels) {
+    assert.throws(() => check(full, duplicate, releaseChannel), reject, String(releaseChannel))
+    assert.equal(check(full, canonical, releaseChannel).qualificationScope, 'full')
+  }
+  const variants = {
+    'unknown top-level field': `${JSON.stringify({ ...full.catalog, notes: 'unreviewed' }, null, 2)}\n`,
+    'unknown qualification field': `${JSON.stringify({ ...full.catalog, qualification: { ...full.catalog.qualification, scopeNote: 'x' } }, null, 2)}\n`,
+    'unknown model field': `${JSON.stringify({ ...full.catalog, models: full.catalog.models.map(model => ({ ...model, extra: true })) }, null, 2)}\n`,
+    'reordered keys': `${JSON.stringify({ qualification: full.catalog.qualification, ...full.catalog }, null, 2)}\n`,
+    'reordered qualification keys': `${JSON.stringify({ ...full.catalog, qualification: Object.fromEntries(Object.entries(full.catalog.qualification).reverse()) }, null, 2)}\n`,
+    'compact serialization': JSON.stringify(full.catalog),
+    'missing trailing newline': canonical.trimEnd(),
+  }
+  for (const [label, text] of Object.entries(variants)) {
+    assert.notEqual(text, canonical, label)
+    for (const releaseChannel of channels) assert.throws(() => check(full, text, releaseChannel), reject, `${label} ${releaseChannel}`)
+  }
+  assert.throws(() => check(full, `\ufeff${canonical}`, 'stable'), /not JSON/)
+
+  // The real generator's output file passes unchanged, byte for byte.
+  const root = await mkdtemp(join(tmpdir(), 'catalog-generator-')); t.after(() => rm(root, { recursive: true, force: true }))
+  for (const scope of ['full', 'private-smoke']) {
+    const f = fixture({ scope })
+    const entries = { runtime: f.input.runtime, qualification: f.input.qualification, terms: f.input.models, identity: f.target,
+      locks: f.locks, models: f.modelPolicy }
+    const args = []
+    for (const [key, value] of Object.entries(entries)) { const path = join(root, `${scope}-${key}.json`); await writeFile(path, JSON.stringify(value)); args.push(`--${key}`, path) }
+    const output = join(root, `${scope}-linux-x64.json`)
+    await prepareSetupCatalog([...args, '--output', output])
+    const generated = await readFile(output)
+    const result = assertProcessingCatalog({ mode: 'processing-ready', catalogBytes: generated, identity: f.identity, locks: f.locks, modelPolicy: f.modelPolicy, releaseChannel: 'private-test' })
+    assert.deepEqual(result, { mode: 'processing-ready', catalogSha256: sha(generated), runtimeLockSha256: f.catalog.runtime.provenance.lockSha256, qualificationScope: scope })
+  }
 })

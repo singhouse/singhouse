@@ -191,7 +191,7 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
     for (const policy of ['models.json', 'processing-locks.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
-    const { default: config, stageProcessingCatalog } = await import(`${installer}?catalog=${Date.now()}`)
+    const { default: config, stageProcessingCatalog, withStagedCatalog } = await import(`${installer}?catalog=${Date.now()}`)
     // Neither a stray legacy catalog nor the per-target sources are in the static file list.
     assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))
 
@@ -212,8 +212,33 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     assert.ok(!resolve(fileSet.from).startsWith(resolve(desktop, '..')), 'staged outside the source tree')
     assert.deepEqual(await readdir(fileSet.from), ['processing-catalog.json'])
     assert.deepEqual(await readFile(resolve(fileSet.from, 'processing-catalog.json')), catalogBytes)
-    await ready.cleanup()
+    assert.match(ready.label, /^singhouse-processing-catalog-/)
+    assert.equal(await withStagedCatalog(ready, async () => {
+      assert.deepEqual(await readdir(fileSet.from), ['processing-catalog.json']); return 'built'
+    }, { warn: () => assert.fail('no warning expected') }), 'built')
     await assert.rejects(readdir(fileSet.from), /ENOENT/)
+
+    // Cleanup failures warn (temporary directory name only) and never replace a build result or error.
+    const locked = Object.assign(new Error(`EBUSY: resource busy, rmdir '${tmpdir()}/x'`), { code: 'EBUSY' })
+    const staged = (cleanupError) => ({ label: 'singhouse-processing-catalog-abc', cleanup: async () => { if (cleanupError) throw cleanupError } })
+    const warnings = []
+    const warn = message => warnings.push(message)
+    assert.equal(await withStagedCatalog(staged(locked), async () => 'built', { warn }), 'built')
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /Could not remove the temporary processing catalog staging directory singhouse-processing-catalog-abc \(EBUSY\)/)
+    assert.doesNotMatch(warnings[0], /after a failed build|\//)
+    const buildError = new Error('electron-builder failed')
+    await assert.rejects(withStagedCatalog(staged(locked), async () => { throw buildError }, { warn }), error => error === buildError)
+    assert.equal(warnings.length, 2)
+    assert.match(warnings[1], /singhouse-processing-catalog-abc after a failed build \(EBUSY\)/)
+    assert.doesNotMatch(warnings[1], /\//)
+    await assert.rejects(withStagedCatalog(staged(null), async () => { throw buildError }, { warn }), error => error === buildError)
+    assert.equal(warnings.length, 2)
+    const noop = await stageProcessingCatalog({ mode: 'playback-only', catalogBytes: null })
+    assert.equal(await withStagedCatalog(noop, async () => 'built', { warn }), 'built')
+    assert.equal(warnings.length, 2)
+    // Removal retries transient locks before giving up.
+    assert.match(await readFile(new URL(installer), 'utf8'), /rm\(directory, \{ recursive: true, force: true, maxRetries: 5, retryDelay: 200 \}\)/)
   } finally {
     if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
     else process.env.KARAOKE_NATIVE_PAYLOAD = previous

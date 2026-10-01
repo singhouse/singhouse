@@ -115,11 +115,12 @@ export class OnboardingSetup {
         this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
       }
     }
-    return { ...structuredClone(this.state), qualificationScope: this.qualificationScope() }
+    return structuredClone(this.state)
   }
 
-  // The scope the wizard labels: only a scope this build accepts is reported,
-  // so the label can never describe a catalog that selection would refuse.
+  // The scope the wizard labels, carried on the preflight plan only: only a
+  // scope this build accepts is reported, so the label can never describe a
+  // catalog that selection would refuse.
   qualificationScope() {
     const scope = this.catalog?.qualification?.scope
     return !this.catalogError && QUALIFICATION_SCOPES.includes(scope) && !qualificationScopeError(scope, this.releaseChannel) ? scope : null

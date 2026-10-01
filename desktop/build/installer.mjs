@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
@@ -44,16 +44,39 @@ for (const policy of ['models.json', 'processing-locks.json']) {
 export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256 } = {}) {
   if (mode === PLAYBACK_ONLY) {
     if (catalogBytes !== null && catalogBytes !== undefined) throw new Error('Playback-only packaging cannot stage a processing catalog')
-    return { files: [], cleanup: async () => {} }
+    return { files: [], cleanup: async () => {}, label: null }
   }
   if (mode !== PROCESSING_READY || !Buffer.isBuffer(catalogBytes)) throw new Error('Processing-ready packaging requires the validated catalog bytes')
   const digest = createHash('sha256').update(catalogBytes).digest('hex')
   if (digest !== catalogSha256) throw new Error('Staged processing catalog differs from the validated source catalog')
   const directory = await mkdtemp(join(tmpdir(), 'singhouse-processing-catalog-'))
-  const cleanup = () => rm(directory, { recursive: true, force: true })
+  const label = basename(directory)
+  const cleanup = () => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   try { await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' }) }
-  catch (error) { await cleanup(); throw error }
-  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], cleanup }
+  catch (error) {
+    try { await cleanup() } catch (cleanupError) { warnStagingCleanup(label, cleanupError, true) }
+    throw error
+  }
+  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], cleanup, label }
+}
+
+// The staged copy holds only the already-validated catalog, so a directory
+// that cannot be removed (for example, briefly locked on Windows) is reported
+// rather than failing a build. Only the temporary directory's name is logged.
+function warnStagingCleanup(label, error, afterFailure, warn = console.warn) {
+  warn(`Could not remove the temporary processing catalog staging directory ${label}${afterFailure ? ' after a failed build' : ''} (${error?.code || 'error'}); it holds only the packaged catalog and may be deleted manually.`)
+}
+
+// Runs the application build with the staged catalog, then always removes the
+// staging directory. A build error propagates unchanged; a cleanup failure is
+// only a warning, whether or not the build succeeded.
+export async function withStagedCatalog(staged, run, { warn = console.warn } = {}) {
+  let failed = false
+  try { return await run() }
+  catch (error) { failed = true; throw error }
+  finally {
+    try { await staged.cleanup() } catch (cleanupError) { warnStagingCleanup(staged.label ?? 'directory', cleanupError, failed, warn) }
+  }
 }
 
 export default {

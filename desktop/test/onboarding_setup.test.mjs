@@ -381,11 +381,12 @@ test('CUDA memory stays unknown for missing, generic-only, or ambiguous CUDA dev
 
 test('private-smoke qualification is selectable only on the private-test channel and is surfaced for labeling', async () => {
   const full = fixture()
-  assert.equal((await full.setup.getStatus()).qualificationScope, 'full')
+  // Status (and its notifications) never carries the scope; the plan does.
+  assert.equal('qualificationScope' in await full.setup.getStatus(), false)
   assert.equal((await full.setup.preflight()).qualificationScope, 'full')
   const smoke = fixture({ releaseChannel: 'private-test' })
   smoke.setup.catalog.qualification.scope = 'private-smoke'
-  assert.equal((await smoke.setup.getStatus()).qualificationScope, 'private-smoke')
+  assert.equal('qualificationScope' in await smoke.setup.getStatus(), false)
   const plan = await smoke.setup.preflight()
   assert.equal(plan.available, true)
   assert.equal(plan.qualificationScope, 'private-smoke')
@@ -406,7 +407,7 @@ test('private-smoke qualification is selectable only on the private-test channel
     const unknown = fixture({ releaseChannel: 'private-test' })
     unknown.setup.catalog.qualification.scope = scope
     assert.equal((await unknown.setup.preflight()).available, false)
-    assert.equal((await unknown.setup.getStatus()).qualificationScope, null)
+    assert.equal((await unknown.setup.preflight()).qualificationScope, null)
   }
   const failed = fixture({ releaseChannel: 'private-test' })
   failed.setup.catalog.qualification.scope = 'private-smoke'; failed.setup.catalog.qualification.passed = false

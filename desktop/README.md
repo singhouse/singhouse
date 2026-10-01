@@ -107,7 +107,9 @@ On Windows, use `python` instead of `python3` if that is the installed command.
 
 Every packaging command states whether the application can install local song
 processing, by naming exactly one of `--processing-ready` or `--playback-only`.
-There is no default, for signed and unsigned builds alike. Pass the flag after
+The packaging script has no default, for signed and unsigned builds alike (the
+Windows signing workflow below passes one explicitly, from a dispatch choice
+that defaults to `playback-only`). Pass the flag after
 `--` (`npm --prefix desktop run package -- --processing-ready`): without `--`,
 npm consumes it as its own configuration, and packaging refuses to start when it
 sees that. Only the exact flags are accepted; forms such as
@@ -120,7 +122,11 @@ sees that. Only the exact flags are accepted; forms such as
   the native assembly's manifest (`linux-x64`, `linux-arm64`, `darwin-arm64`, or
   `win32-x64`). The catalog is checked against the channel of the release
   policy being packaged, so a `private-smoke` catalog cannot be packaged into a
-  build whose channel is not `private-test`.
+  build whose channel is not `private-test`. The file must also be byte for
+  byte the generator's output for the catalog it validates to (two-space
+  indented JSON with a trailing newline, keys in generator order): duplicate
+  keys, unknown fields, reordered keys, or hand reformatting are refused with
+  "catalog is not the generator's canonical output; regenerate it".
 - `--playback-only` packages no catalog, even when one exists for the target
   (the build output says it is deliberately excluded). Such builds offer
   playback and report local song processing unavailable during setup.
@@ -133,9 +139,12 @@ reads the produced `app.asar` back and fails unless it contains exactly the
 validated catalog bytes (processing-ready) or no catalog (playback-only).
 Packaging writes `desktop/artifacts/processing-mode.json` next to the receipt
 (created exclusively; an output directory that already holds one is refused
-before building). It records `schema`, `mode`, `catalogSha256`,
+before building). It records `schema`, `mode`, `releaseId` and
+`electronAppDigest` (from the identity derived from the produced application,
+the latter being the digest of the `app.asar` that carries the catalog),
+`releaseChannel` (the packaged release policy's channel), `catalogSha256`,
 `runtimeLockSha256`, `qualificationScope`, and `target` (`platform`, `arch`);
-the digests and scope are `null` for playback-only builds. The file is not part
+the catalog digests and scope are `null` for playback-only builds. The file is not part
 of the receipt schema, so it sits under any checksum listing of
 `desktop/artifacts/` rather than inside the receipt.
 The assembler downloads checksum-pinned Python and FFmpeg inputs, builds the two
@@ -274,7 +283,9 @@ workflow diagnostics.
 
 The dispatch form's `processing_mode` choice selects `playback-only` (the
 default) or `processing-ready`; the latter requires a committed
-`desktop/processing-catalogs/win32-x64.json`. The choice reaches the build
+`desktop/processing-catalogs/win32-x64.json`, and the workflow stops before
+native assembly when that file is absent. The uploaded artifact is named
+`windows-signed-<mode>-<commit>`. The choice reaches the build
 script only as an environment variable mapped through a fixed list of flags.
 The workflow only uploads a private Actions artifact. It does not publish a
 release or download, deploy, or change update metadata. Its checksum inventory
@@ -848,7 +859,8 @@ Prepare the catalog with `node desktop/build/setup_catalog.mjs --runtime
 runtime.json --qualification qualification.json --terms terms.json --identity
 identity.json --output desktop/processing-catalogs/<platform>-<arch>.json`
 (create the `desktop/processing-catalogs/` directory first; the tool never
-replaces an existing file). Inputs are explicit;
+replaces an existing file). Commit the file exactly as written: packaging
+accepts only the generator's canonical bytes. Inputs are explicit;
 the tool never manufactures qualification. `--release release.json` names the
 release policy whose channel the catalog is checked against (default
 `desktop/release.json`); the tool refuses to write a `private-smoke` catalog

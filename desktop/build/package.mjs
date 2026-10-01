@@ -91,7 +91,7 @@ async function main() {
     tenantId: process.env.AZURE_TENANT_ID,
     clientId: process.env.AZURE_CLIENT_ID,
   } })
-  const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot, stageProcessingCatalog }] = await Promise.all([
+  const [{ build, Platform, Arch }, { default: config, releasePolicy, sourceRoot, stageProcessingCatalog, withStagedCatalog }] = await Promise.all([
     import('electron-builder'),
     import('./installer.mjs'),
   ])
@@ -146,10 +146,8 @@ async function main() {
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   const stagedCatalog = await stageProcessingCatalog({ mode: processing.mode, catalogBytes: processingGate.catalogBytes, catalogSha256: processing.catalogSha256 })
-  try {
-    await build({ config: { ...config, files: [...config.files, ...stagedCatalog.files], publish: null }, publish: 'never',
-      targets: platform.createTarget('dir', Arch[nativeManifest.arch]) })
-  } finally { await stagedCatalog.cleanup() }
+  await withStagedCatalog(stagedCatalog, () => build({ config: { ...config, files: [...config.files, ...stagedCatalog.files], publish: null }, publish: 'never',
+    targets: platform.createTarget('dir', Arch[nativeManifest.arch]) }))
   async function applicationRoot() {
     const name = nativeManifest.platform === 'darwin' ? 'mac-arm64'
       : nativeManifest.platform === 'win32' ? 'win-unpacked'
@@ -200,7 +198,8 @@ async function main() {
       verifySourceBeforePublish: () => verifyPackagingSource({ repositoryDirectory: sourceRoot, provenance }),
     })
     // Covered by the artifact checksum listing; deliberately not receipt schema.
-    await writeImmutableFile(processingRecord, `${JSON.stringify(processingModeRecord(processing), null, 2)}\n`)
+    await writeImmutableFile(processingRecord, `${JSON.stringify(processingModeRecord({ ...processing, releaseId: identity.releaseId,
+      releaseChannel: policy.channel, electronAppDigest: identity.electronAppDigest }), null, 2)}\n`)
 
     // Native installers remain first-install surfaces. Signing and publication are
     // explicit release gates and are intentionally absent from this build command.
