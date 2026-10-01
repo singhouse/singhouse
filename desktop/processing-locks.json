@@ -1,7 +1,10 @@
 {
   "schema": 1,
-  "status": "Windows x64 CPU pack rebuilt without excluded dependencies and passed its native functional probe; remaining targets require rebuild and requalification",
+  "status": "Windows x64 CPU, Linux x64 CPU, and macOS arm64 CPU and Metal packs were built from their dependency locks, byte-verified against their inventories, and passed their native functional probes; a probe is not release qualification and no target is release-qualified; remaining targets require a build and functional probe",
   "lockSha256": [
-    "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb"
+    "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb",
+    "3698438455749d7eda82a36a51d2229cfe755141654661bbcaf0fdce0f370216",
+    "2c580fe38000c8778e1e4730b322fb462ce7a8bdd2a8bd4134bf15bd08bc9f25",
+    "204c9aabf10c88426276ac8adfb53770b1ff23371845e45489f317972ec81180"
   ]
 }

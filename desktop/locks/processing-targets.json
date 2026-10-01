@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "Prior artifacts invalidated; rebuild and requalify every target after the diffq exclusion",
+  "status": "Targets marked native-passed were rebuilt after the diffq exclusion and passed their native functional probes; a probe is not release qualification and no target is release-qualified; targets marked rebuild-required still need a build and functional probe",
   "inputLockKind": "processing-input",
   "requirementsLockKind": "processing-requirements",
   "builder": "desktop/build/build_processing.py",
@@ -10,7 +10,9 @@
       "platform": "linux",
       "arch": "x64",
       "accelerator": "cpu",
-      "functionalProbe": "rebuild-required"
+      "inputLockSha256": "3698438455749d7eda82a36a51d2229cfe755141654661bbcaf0fdce0f370216",
+      "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
+      "functionalProbe": "native-passed"
     },
     {
       "platform": "linux",
@@ -28,13 +30,17 @@
       "platform": "darwin",
       "arch": "arm64",
       "accelerator": "metal",
-      "functionalProbe": "rebuild-required"
+      "inputLockSha256": "204c9aabf10c88426276ac8adfb53770b1ff23371845e45489f317972ec81180",
+      "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
+      "functionalProbe": "native-passed"
     },
     {
       "platform": "darwin",
       "arch": "arm64",
       "accelerator": "cpu",
-      "functionalProbe": "rebuild-required"
+      "inputLockSha256": "2c580fe38000c8778e1e4730b322fb462ce7a8bdd2a8bd4134bf15bd08bc9f25",
+      "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
+      "functionalProbe": "native-passed"
     },
     {
       "platform": "win32",
