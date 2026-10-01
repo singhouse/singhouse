@@ -246,6 +246,24 @@ describe('desktop setup screens', () => {
     expect(desktop.startSetup).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it('states a private-smoke qualification before consent and nothing extra otherwise', async () => {
+    const notice = 'Private test build: local processing in this build passed a single-song smoke test only.'
+    for (const [qualificationScope, shown] of [['private-smoke', true], ['full', false], [null, false], [undefined, false]]) {
+      const desktop = bridge({
+        getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+        preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: `scope-${qualificationScope}`, qualificationScope,
+          components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
+      })
+      globalThis.window.karaokeDesktop = desktop
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      expect(wrapper.text()).toContain('Install the processing tools and models')
+      expect(wrapper.text().includes(notice), String(qualificationScope)).toBe(shown)
+      expect(wrapper.text().includes('full release qualification'), String(qualificationScope)).toBe(shown)
+      expect(desktop.startSetup).not.toHaveBeenCalled()
+      wrapper.unmount()
+    }
+  })
   it('keeps both cards visible and explains unavailable local setup', async () => {
     const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: false, reason: 'A qualified runtime is unavailable.' }) })
     globalThis.window.karaokeDesktop = desktop

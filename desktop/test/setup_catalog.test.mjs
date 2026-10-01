@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createSetupCatalog, validateSetupCatalog, SETUP_MODEL_IDS } from '../setup_catalog.mjs'
+import { createSetupCatalog, validateSetupCatalog, qualificationScopeError, SETUP_MODEL_IDS } from '../setup_catalog.mjs'
+import { derivePolicyId } from '../release.mjs'
 import { prepareSetupCatalog } from '../build/setup_catalog.mjs'
 const sha = value => createHash('sha256').update(value).digest('hex')
 function fixture() {
@@ -20,7 +21,7 @@ function fixture() {
     sourceCommit: 'a'.repeat(40), packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/package', sha256: sha('package'), notices: ['NOTICE'] }],
     files: runtime.files.map(({ url, ...file }) => file) }
   runtime.provenance = { inputLock: JSON.stringify(lock), lockSha256: sha(JSON.stringify(lock)), sourceCommit: lock.sourceCommit, packages: lock.packages }
-  const qualification = { passed: true, runtimeLockSha256: runtime.provenance.lockSha256, platform: 'linux', arch: 'x64', accelerator: 'cpu', evidenceReference: 'run-2026-09-29-1' }
+  const qualification = { passed: true, scope: 'full', runtimeLockSha256: runtime.provenance.lockSha256, platform: 'linux', arch: 'x64', accelerator: 'cpu', evidenceReference: 'run-2026-09-29-1' }
   const modelPolicy = { schema: 1, allowedHosts: ['example.org'], models: SETUP_MODEL_IDS.map(id => ({ id, files: [{ path: `huggingface/${id}`, url: `https://example.org/${id}`, sha256: sha(id), revision: sha(id), size: 1, executable: false }] })) }
   return { input: { runtime, qualification, models: SETUP_MODEL_IDS.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })) },
     options: { identity, trustedLocks: [runtime.provenance.lockSha256], modelPolicy } }
@@ -67,7 +68,7 @@ test('terms and upstream model inventories are mandatory and immutable', () => {
 })
 test('RAM and VRAM recommendations require separate representative measurements plus 25%', () => {
   const { input, options } = fixture()
-  const { passed, evidenceReference, ...target } = input.qualification
+  const { passed, scope, evidenceReference, ...target } = input.qualification
   const measured = peak => ({ measuredPeakBytes: peak, representativeHardware: { verified: true, description: 'Fixture hardware' }, evidenceReference })
   input.memory = { ...target, ram: measured(101), vram: measured(80) }
   const memory = createSetupCatalog(input, options).memory
@@ -91,4 +92,62 @@ test('CLI requires evidence and writes a concrete exclusively created catalog', 
   await prepareSetupCatalog(args)
   assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), createSetupCatalog(input, options))
   await assert.rejects(prepareSetupCatalog(args), /EEXIST/)
+})
+
+function releasePolicy(channel) {
+  const policy = { schema: 1, channel, edition: 'core', schemaHistory: 1, minimumReadableSchemaHistory: 1,
+    updatesEnabled: false, signatureThreshold: 1, trustedUpdateKeys: [] }
+  return { ...policy, policyId: derivePolicyId(policy) }
+}
+async function releaseFile(root, channel) {
+  const path = join(root, `release-${channel}.json`); await writeFile(path, JSON.stringify(releasePolicy(channel))); return path
+}
+
+test('qualification scope is required and private-smoke is accepted only on the private-test channel', () => {
+  for (const mutate of [q => { delete q.scope }, q => { q.scope = 'smoke' }, q => { q.scope = 'FULL' }, q => { q.scope = null }]) {
+    const { input, options } = fixture(); mutate(input.qualification)
+    for (const releaseChannel of [undefined, 'private-test', 'stable']) {
+      assert.throws(() => createSetupCatalog(input, { ...options, releaseChannel }), /qualification must state its scope/)
+    }
+  }
+  for (const scope of ['full', 'private-smoke']) {
+    const { input, options } = fixture(); input.qualification.scope = scope; input.qualification.passed = false
+    assert.throws(() => createSetupCatalog(input, { ...options, releaseChannel: 'private-test' }), /passed qualification/)
+  }
+  for (const releaseChannel of [undefined, 'private-test', 'stable', 'core-private-test']) {
+    const { input, options } = fixture()
+    const catalog = createSetupCatalog(input, { ...options, releaseChannel })
+    assert.equal(catalog.qualification.scope, 'full')
+    assert.deepEqual(validateSetupCatalog(catalog, { ...options, releaseChannel }), catalog)
+  }
+  const { input, options } = fixture(); input.qualification.scope = 'private-smoke'
+  const smoke = createSetupCatalog(input, { ...options, releaseChannel: 'private-test' })
+  assert.deepEqual(smoke.qualification, input.qualification)
+  assert.deepEqual(validateSetupCatalog(smoke, { ...options, releaseChannel: 'private-test' }), smoke)
+  for (const [releaseChannel, shown] of [[undefined, 'missing'], ['stable', '"stable"'], ['core-private-test', '"core-private-test"'],
+    ['Private-Test', 'missing'], ['private-test ', 'missing'], [{ toString: () => 'private-test' }, 'missing']]) {
+    assert.throws(() => validateSetupCatalog(smoke, { ...options, releaseChannel }),
+      error => error.message === `Private-smoke processing qualification is accepted only by "private-test" channel builds; this build's release channel is ${shown}`, String(releaseChannel))
+  }
+  assert.equal(qualificationScopeError('full', undefined), null)
+  assert.equal(qualificationScopeError('private-smoke', 'private-test'), null)
+})
+test('CLI validates against the release policy channel and refuses private-smoke for other channels', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'setup-catalog-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const { input, options } = fixture(); input.qualification.scope = 'private-smoke'
+  const entries = { runtime: input.runtime, qualification: input.qualification, terms: input.models, identity: options.identity,
+    locks: { lockSha256: options.trustedLocks }, models: options.modelPolicy }
+  const args = []
+  for (const [key, value] of Object.entries(entries)) { const path = join(root, `${key}.json`); await writeFile(path, JSON.stringify(value)); args.push(`--${key}`, path) }
+  const output = join(root, 'processing-catalog.json')
+  for (const channel of ['stable', 'core-private-test']) {
+    await assert.rejects(prepareSetupCatalog([...args, '--output', output, '--release', await releaseFile(root, channel)]), /accepted only by "private-test" channel builds/)
+    await assert.rejects(readFile(output), /ENOENT/)
+  }
+  const invalid = join(root, 'release-invalid.json'); await writeFile(invalid, JSON.stringify({ ...releasePolicy('private-test'), channel: 'other' }))
+  await assert.rejects(prepareSetupCatalog([...args, '--output', output, '--release', invalid]), /Invalid release policy/)
+  await assert.rejects(readFile(output), /ENOENT/)
+  await assert.rejects(prepareSetupCatalog([...args, '--output', output, '--release']), /Invalid setup catalog argument: --release/)
+  await prepareSetupCatalog([...args, '--output', output, '--release', await releaseFile(root, 'private-test')])
+  assert.equal(JSON.parse(await readFile(output, 'utf8')).qualification.scope, 'private-smoke')
 })

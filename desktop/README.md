@@ -100,10 +100,53 @@ Application users do not need these tools.
 ```sh
 npm --prefix desktop ci
 python3 desktop/build/assemble.py --output desktop/native
-npm --prefix desktop run package
+npm --prefix desktop run package -- --playback-only
 ```
 
 On Windows, use `python` instead of `python3` if that is the installed command.
+
+Every packaging command states whether the application can install local song
+processing, by naming exactly one of `--processing-ready` or `--playback-only`.
+The packaging script has no default, for signed and unsigned builds alike (the
+Windows signing workflow below passes one explicitly, from a dispatch choice
+that defaults to `playback-only`). Pass the flag after
+`--` (`npm --prefix desktop run package -- --processing-ready`): without `--`,
+npm consumes it as its own configuration, and packaging refuses to start when it
+sees that. Only the exact flags are accepted; forms such as
+`--processing-ready=true` are rejected.
+
+- `--processing-ready` requires the target's catalog,
+  `desktop/processing-catalogs/<platform>-<arch>.json` (see below), and refuses
+  to package unless it passes the same validation the installed application
+  applies at start for the exact target being built. The target is read from
+  the native assembly's manifest (`linux-x64`, `linux-arm64`, `darwin-arm64`, or
+  `win32-x64`). The catalog is checked against the channel of the release
+  policy being packaged, so a `private-smoke` catalog cannot be packaged into a
+  build whose channel is not `private-test`. The file must also be byte for
+  byte the generator's output for the catalog it validates to (two-space
+  indented JSON with a trailing newline, keys in generator order): duplicate
+  keys, unknown fields, reordered keys, or hand reformatting are refused with
+  "catalog is not the generator's canonical output; regenerate it".
+- `--playback-only` packages no catalog, even when one exists for the target
+  (the build output says it is deliberately excluded). Such builds offer
+  playback and report local song processing unavailable during setup.
+
+Only the selected target's catalog is ever packaged, as `processing-catalog.json`
+inside `app.asar`; catalogs for other targets, the `processing-catalogs/`
+directory itself, and any stray `desktop/processing-catalog.json` are not. After
+Electron packaging and before identity derivation or the receipt, packaging
+reads the produced `app.asar` back and fails unless it contains exactly the
+validated catalog bytes (processing-ready) or no catalog (playback-only).
+Packaging writes `desktop/artifacts/processing-mode.json` next to the receipt
+(created exclusively; an output directory that already holds one is refused
+before building). It records `schema`, `mode`, `releaseId` and
+`electronAppDigest` (from the identity derived from the produced application,
+the latter being the digest of the `app.asar` that carries the catalog),
+`releaseChannel` (the packaged release policy's channel), `catalogSha256`,
+`runtimeLockSha256`, `qualificationScope`, and `target` (`platform`, `arch`);
+the catalog digests and scope are `null` for playback-only builds. The file is not part
+of the receipt schema, so it sits under any checksum listing of
+`desktop/artifacts/` rather than inside the receipt.
 The assembler downloads checksum-pinned Python and FFmpeg inputs, builds the two
 application wheels with a pinned host toolchain, installs locked dependencies,
 and rebuilds the frontend using its npm lockfile. It refuses an existing output
@@ -155,9 +198,9 @@ also reads the current Git `HEAD` and `git status --porcelain=v1
 --untracked-files=all`: the checkout must be clean and must exactly match the
 native provenance both before the build and again immediately before publishing
 the immutable receipt. Source exports without `.git` fail closed because no
-separately authenticated export-manifest verifier is configured. The default
-packaging command creates an explicitly unsigned private-test build and never
-publishes anything. Create macOS artifacts on macOS.
+separately authenticated export-manifest verifier is configured. Without a
+signing flag, packaging creates an explicitly unsigned private-test build and
+never publishes anything. Create macOS artifacts on macOS.
 
 For a private Developer ID macOS candidate, create the intended team's
 Developer ID Application certificate and store notarization credentials in the
@@ -174,7 +217,7 @@ export SINGHOUSE_MAC_TEAM_ID='25Y7U443K6'
 export SINGHOUSE_MAC_IDENTITY='Developer ID Application: MICHAEL ALAN JONES (25Y7U443K6)'
 export SINGHOUSE_MAC_CERT_SHA1='55FEEAA93960DD9E278519CA68338BACFC2A3617'
 export SINGHOUSE_MAC_NOTARY_PROFILE='singhouse-notary'
-npm --prefix desktop run package:first-installers -- --signed-macos-release
+npm --prefix desktop run package:first-installers -- --signed-macos-release --playback-only
 ```
 
 The command verifies the assembled native payload, signs its Mach-O code with
@@ -206,7 +249,7 @@ and validates that module automatically:
 ```powershell
 # First manual release: use the Azure user already granted the signer role.
 az login
-npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user
+npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user --playback-only
 ```
 
 The manual flag first requires a successful `az account show`, then constrains
@@ -238,9 +281,16 @@ protection when supported by the account plan, and inspect those settings rather
 than assuming they exist. Do not add access-token or OIDC-token output to
 workflow diagnostics.
 
+The dispatch form's `processing_mode` choice selects `playback-only` (the
+default) or `processing-ready`; the latter requires a committed
+`desktop/processing-catalogs/win32-x64.json`, and the workflow stops before
+native assembly when that file is absent. The uploaded artifact is named
+`windows-signed-<mode>-<commit>`. The choice reaches the build
+script only as an environment variable mapped through a fixed list of flags.
 The workflow only uploads a private Actions artifact. It does not publish a
 release or download, deploy, or change update metadata. Its checksum inventory
-is generated after signature verification. Every action is referenced by an
+is generated after signature verification and covers every file under
+`desktop/artifacts/`, including `processing-mode.json`. Every action is referenced by an
 immutable reviewed commit ID.
 
 A client-secret service principal remains available as an operator-controlled
@@ -252,7 +302,7 @@ EnvironmentCredential:
 $env:AZURE_TENANT_ID = '<Microsoft Entra tenant ID>'
 $env:AZURE_CLIENT_ID = '<signing application client ID>'
 $env:AZURE_CLIENT_SECRET = '<signing application client secret>'
-npm --prefix desktop run package:first-installers -- --signed-release
+npm --prefix desktop run package:first-installers -- --signed-release --playback-only
 ```
 
 The signing identity must have the Artifact Signing Certificate Profile Signer
@@ -453,7 +503,7 @@ To use a different payload path, set `KARAOKE_NATIVE_PAYLOAD` for packaging:
 
 ```sh
 python3 desktop/build/assemble.py --target linux-arm64 --output /tmp/singhouse-native-arm64
-KARAOKE_NATIVE_PAYLOAD=/tmp/singhouse-native-arm64 npm --prefix desktop run package
+KARAOKE_NATIVE_PAYLOAD=/tmp/singhouse-native-arm64 npm --prefix desktop run package -- --playback-only
 ```
 
 `--target` accepts `linux-x64`, `linux-arm64`, `darwin-arm64`, and `win32-x64`;
@@ -772,14 +822,29 @@ or environment variables. Linux requires a supported system keyring; no
 plaintext fallback exists. Forgetting local credentials works even when the
 keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
-Release builds may supply `desktop/processing-catalog.json` as part of the
-application's verified inventory. The setup engine never accepts a catalog from
-the renderer or saved preferences. Its schema is:
+Release builds may supply one catalog per target,
+`desktop/processing-catalogs/<platform>-<arch>.json` (for example
+`win32-x64.json` or `darwin-arm64.json`), as part of the application's verified
+inventory; package them with `--processing-ready`, which places only that
+target's file in the application as `processing-catalog.json`. Commit the
+catalog before native assembly: all packaging requires a clean checkout whose
+`HEAD` matches the commit recorded in the native provenance, so a catalog added
+after assembly cannot be packaged. The setup engine never accepts a catalog
+from the renderer or saved preferences. Its schema is:
 
 - `schema: 1`, `runtime`: the complete processing manifest accepted by the
   current application's processing lock policy.
-- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, `evidenceReference`, and
-  `accelerator`, matching that exact runtime. Populate only from actual evidence.
+- `qualification`: `passed`, `scope`, `runtimeLockSha256`, `platform`, `arch`,
+  `evidenceReference`, and `accelerator`, matching that exact runtime. Populate
+  only from actual evidence. `scope` is required and states what `passed`
+  covers:
+  - `full`: the complete release qualification passed for this runtime and
+    target. Accepted by builds on any release channel.
+  - `private-smoke`: only a single-song real-processing smoke test passed. This
+    is not release qualification. It is accepted only when the build's release
+    policy (`release.json`) has `channel` exactly `private-test`; every other or
+    missing channel rejects the catalog. The setup wizard tells the user, before
+    consent, that this build's local processing passed a smoke test only.
 - `models`: entries with `id` and `terms: [{label, url}]` for every model in the
   combined installation. Terms URLs are HTTPS source references, not claims
   about checkpoint licensing.
@@ -792,8 +857,15 @@ qualification. Those checks remain necessary before release.
 
 Prepare the catalog with `node desktop/build/setup_catalog.mjs --runtime
 runtime.json --qualification qualification.json --terms terms.json --identity
-identity.json --output desktop/processing-catalog.json`. Inputs are explicit;
-the tool never manufactures qualification. `--memory memory.json` adds measured
+identity.json --output desktop/processing-catalogs/<platform>-<arch>.json`
+(create the `desktop/processing-catalogs/` directory first; the tool never
+replaces an existing file). Commit the file exactly as written: packaging
+accepts only the generator's canonical bytes. Inputs are explicit;
+the tool never manufactures qualification. `--release release.json` names the
+release policy whose channel the catalog is checked against (default
+`desktop/release.json`); the tool refuses to write a `private-smoke` catalog
+for any channel other than `private-test`. Packaging re-checks the catalog
+against the release policy actually packaged. `--memory memory.json` adds measured
 memory evidence. Production catalogs reject local runtime URLs. The explicit
 `--private-test-local-sources` option is only for validating private test inputs;
 the application does not accept those as a production download catalog.
@@ -825,7 +897,8 @@ Debian changes. Packaging performs these checks again and never downloads or
 installs source inputs automatically. DSC signatures are explicitly unverified;
 a matching hash is not described as signature verification.
 
-Run `SINGHOUSE_APPIMAGE_SOURCE_INPUTS=/absolute/prepared-inputs npm run package:first-installers`
+Run `SINGHOUSE_APPIMAGE_SOURCE_INPUTS=/absolute/prepared-inputs npm run
+package:first-installers -- --playback-only` (or `-- --processing-ready`)
 from `desktop/` with the other required native build inputs prepared. The build
 copies exact notices into the application, checks the completed AppImage library
 bytes before creating a receipt, and writes a deterministic uncompressed

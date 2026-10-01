@@ -18,6 +18,7 @@
     "metadata": "node build/update_metadata.mjs"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "electron": "44.3.0",
     "electron-builder": "26.15.3",
     "playwright": "1.63.0"

@@ -253,6 +253,9 @@ onUnmounted(() => clearInterval(poll))
         <p class="lead">
           Install the processing tools and models for separation and timed lyrics. Files are retrieved from the sources below only when you choose to set up.
         </p>
+        <p v-if="plan?.qualificationScope === 'private-smoke'">
+          Private test build: local processing in this build passed a single-song smoke test only. It has not completed full release qualification.
+        </p>
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
           <div v-if="localCopyBytes !== null">
