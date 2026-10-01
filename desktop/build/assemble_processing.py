@@ -19,9 +19,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import struct
-import tempfile
 from urllib.parse import unquote, urlparse
 import zlib
 
@@ -40,7 +40,7 @@ CHUNK = 1024 * 1024
 # Fixed gzip header: deflate, no optional fields, zero mtime, XFL 0, OS unknown.
 GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
 GZIP_TRAILER_SIZE = 8
-ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._-]{1,200}")
+ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._+-]{1,200}")
 
 
 def normalized(value):
@@ -200,7 +200,7 @@ def delivery(base_url=None, blobs=None, archive_base_url=None, archive_part_size
     part_size = DEFAULT_PART_SIZE if archive_part_size is None else archive_part_size
     if type(part_size) is not int or not 1 <= part_size <= MAX_PART_SIZE:
         raise ValueError("Archive part size must be between 1 byte and 2 GiB - 1")
-    if archive_name is not None and (not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", archive_name) or archive_name in {".", ".."}):
+    if archive_name is not None and (not ARCHIVE_NAME.fullmatch(archive_name) or archive_name in {".", ".."}):
         raise ValueError("Archive name must be a flat name of letters, digits, '.', '_' or '-'")
     if archive_base_url is not None:
         parsed = urlparse(archive_base_url)
@@ -381,11 +381,10 @@ def write_output(output, manifest, lock_bytes, files, chunks_for, form, finish=l
     if output.exists() or output.is_symlink():
         raise ValueError("Output exists; choose a fresh output directory")
     output.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".incomplete", dir=output.parent))
+    # mkdir applies the umask itself and fails if the name already exists.
+    staging = output.parent / f".{output.name}.{secrets.token_hex(8)}.incomplete"
+    staging.mkdir(mode=0o777)
     try:
-        umask = os.umask(0)
-        os.umask(umask)
-        staging.chmod(0o777 & ~umask)
         _write_pack(staging, output, manifest, files, chunks_for, form)
         finish()
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

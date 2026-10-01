@@ -918,7 +918,80 @@ test('a malformed archive stream is rejected on every attempt while its parts ar
   }
 })
 
-// Writes `bytes` split at `cuts` as the retrieved parts and decodes them.
+// Fails a test that would otherwise wait forever on an install that never settles.
+const settlesWithin = (promise, ms = 10000) => {
+  let timer
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('install did not settle')), ms) })])
+    .finally(() => clearTimeout(timer))
+}
+
+test('mid-stream deflate errors reject on every attempt instead of stalling the install', { timeout: 60000 }, async t => {
+  const { root } = await fixture(t)
+  const stored = archiveEntries()
+  // Repetitive text so the encoder emits a dynamic Huffman block.
+  const dynamic = [
+    { path: 'python/bin/python3', data: Buffer.from('fixture python'), executable: true },
+    { path: 'NOTICE.fixture', data: Buffer.from('MIT notice'), executable: false },
+    { path: 'lib/text/words.txt', data: Buffer.from('lorem ipsum dolor sit amet '.repeat(200) + 'consectetur adipiscing elit '.repeat(50)), executable: false },
+  ]
+  // The gzip header and trailer stay intact; only the deflate body changes,
+  // and the published part digests are computed over the changed bytes.
+  const corrupt = (entries, mutate) => {
+    const bytes = gzipConcat(Buffer.concat(entries.map(entry => entry.data)))
+    mutate(bytes.subarray(10, bytes.length - 8))
+    return bytes
+  }
+  const cases = [
+    ['invalid block type at the first body byte', stored, body => { body[0] = 0xff }],
+    ['flipped bit in a stored block length', stored, body => { assert.equal(body[0] & 0b110, 0); body[1] ^= 1 }],
+    ['flipped bit in a dynamic block header', dynamic, body => { assert.equal(body[0] & 0b110, 0b100); body[2] ^= 0x10 }],
+  ]
+  for (const [name, entries, mutate] of cases) {
+    const store = join(root, name.replaceAll(' ', '-'))
+    const bad = archiveManifest(entries, { compressed: corrupt(entries, mutate) })
+    for (const attempt of [1, 2]) {
+      const { fetchImpl, requests } = assetServer(bad.urls, bad.parts)
+      const manager = archiveManager(store, fetchImpl)
+      await assert.rejects(settlesWithin(manager.install(bad.manifest)), /truncated or corrupt/, `${name}, attempt ${attempt}`)
+      assert.equal(manager.busy, false, `${name}, attempt ${attempt}`)
+      assert.equal(await manager.active(), null, `${name}, attempt ${attempt}`)
+      assert.deepEqual(await readdir(join(manager.root, 'staging')), [], `${name}, attempt ${attempt}`)
+      assert.deepEqual(requests.map(request => request.url), bad.urls, `${name}, attempt ${attempt}`)
+    }
+  }
+})
+
+test('cancelling during extraction settles promptly and keeps the verified parts', { timeout: 60000 }, async t => {
+  const { root } = await fixture(t)
+  const { manifest, parts, urls, entries } = archiveManifest()
+  const { fetchImpl, requests } = assetServer(urls, parts)
+  const controller = new AbortController()
+  let extracting = false, cancelled = false
+  const manager = archiveManager(root, fetchImpl, { progress: event => {
+    if (event.phase === 'retrieve' && event.part === parts.length && event.received === event.total) extracting = true
+  } })
+  const handle = await open(join(root, 'python'), 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeWrite = prototype.write
+  // Cancel on the first extracted write, while the stream is mid-decode.
+  const mock = t.mock.method(prototype, 'write', function (...args) {
+    if (extracting && !cancelled) { cancelled = true; controller.abort() }
+    return nativeWrite.apply(this, args)
+  })
+  await assert.rejects(settlesWithin(manager.install(manifest, { signal: controller.signal })), { name: 'AbortError' })
+  mock.mock.restore()
+  assert.ok(cancelled)
+  assert.equal(manager.busy, false)
+  assert.equal(await manager.active(), null)
+  const id = sha(JSON.stringify(manifest))
+  assert.equal((await readdir(join(manager.root, 'staging', `${id}.archive`))).length, parts.length)
+  const fetched = requests.length
+  const installed = await settlesWithin(manager.install(manifest))
+  await assertInstalled(manager, installed, entries)
+  assert.equal(requests.length, fetched, 'a cancelled extraction keeps its verified parts')
+})
+
 // Writes `bytes` split at `cuts` as the retrieved parts and decodes them.
 // With `streamOnly`, files count as already staged, so only the stream is checked.
 async function decodeLayout(root, entries, bytes, cuts, { streamOnly = false } = {}) {
