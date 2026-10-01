@@ -1195,23 +1195,29 @@ the application re-verifies the installed runtime. The checking step is never
 treated as settled. The harness waits up to 240 seconds for the dialog to become
 idle and settle, recording every distinct step, status, status phase and
 heading with timestamps. It passes only if the check is observed (the wizard or
-setup status shows `checking` at least once, which is how the restored setup
-checkpoint is exercised), the dialog settles on the ready screen while setup
+setup status shows `checking` at least once, the only observable sign that the
+restored setup checkpoint is exercised), the dialog settles on the ready screen while setup
 status is `ready`, the active runtime is the one the plan promised with the
 expected lock and target, and the installed model set is the one the policy
-selects. Status is polled every 250 ms, so a check that finishes between two
-polls is not observed and fails the run. If a cancelled or generic error screen
-or status appears at any point, the run fails with `A verified restart was
-presented as an interrupted setup (product defect)`; a build that restores the
-finished-setup checkpoint as an interrupted setup fails here. If the wizard
+selects. The wizard and setup status are polled about every 250 ms; the check
+is missed only if it completes entirely before the harness's first poll after
+relaunch, and a missed check fails the run. If a cancelled or generic error
+screen or status appears at any point, the run fails with `A verified restart
+was presented as an interrupted setup (product defect)`; a build that restores
+the finished-setup checkpoint as an interrupted setup fails here. If the wizard
 reports that local processing could not be verified, the run fails with
 `Post-restart verification failed`: when setup status reported a verification
 error the evidence says the installed runtime or models did not pass live
-verification; when status was still checking it says only that the check did
-not complete. An unclassified error screen counts as that failure only with a
-verification error in status, and otherwise fails as unclassifiable. A settled
-restart or progress screen, or a dialog still checking at the timeout, also
-fails. The same processing and shutdown checks as the other modes follow.
+verification; when status was still checking, or could not be read, it says
+only that the check did not complete; with any other status it says the wizard
+showed a failed verification while the setup service reported that status, a
+disagreement that is still a failed run. An unclassified error screen counts as
+that failure only with a verification error in status. Otherwise, if setup
+status is an error outside verification or is cancelled, it fails as
+`presented as an interrupted setup`, and with any other status it fails as an
+error screen the harness cannot classify. A settled restart or progress screen,
+or a dialog still checking at the timeout, also fails. The same processing and
+shutdown checks as the other modes follow.
 
 The evidence fields are named for what they prove: wizard evidence carries
 `expectedRuntimeLockSha256` from the command line and `runtimeLockSha256` only
@@ -1232,13 +1238,26 @@ Two recovery exercises are available; choose at most one:
 Either retry must offer the same plan. Pass the pack server's standard output,
 saved to a file, as `--pack-server-log <file>` to classify the retry from the
 server's own request records: `resumed` requires the first request for that file
-after the stop to carry `Range: bytes=N-` (N > 0) and receive 206; `restarted`
-means it was requested from the start. Without the log, or without such a
+after the stop to carry `Range: bytes=N-` (N > 0), receive 206 and be logged as
+`complete` with exactly the file size minus N bytes served, and no later request
+for that file to fetch it from zero; `restarted` means it was requested from the
+start, either first or after a resume. Without the log, or without such a
 request, the retry is `unproven`; polling alone never proves a resume. For an
-archive-delivered runtime the file is the interrupted part, and its kept bytes
-are read from that part's staged partial file. With the log, an archive retry
-must resume that part with a Range request from the kept bytes, or the run
-fails; for individual files the classification is recorded as evidence only.
+archive-delivered runtime the file is the interrupted part: when setup stops,
+the harness records the staged size of every part
+(`<id>.archive/part-NNN.partial`), and the kept bytes are those of the part the
+retry is judged on (with an injected failure and the log, the part the server
+failed, which may differ from the last part setup progress named). With the
+log, an archive retry passes only when some but not all of that part was kept
+(0 < kept bytes < part size) and the retry resumed it from exactly the kept
+bytes as above; a refetch from zero or a resume from another byte fails the run.
+If the kept bytes are unknown, if nothing was kept (retrieving the part from
+zero is then correct), or if the part was already complete when the stop took
+effect, the run fails as `Unproven`: the harness could not show a resume, which
+says nothing against the product. For individual files the classification is
+recorded as evidence only. A catalog whose archive parts share a file name under
+different paths is refused by the harness, because setup progress names each
+part by its file name alone.
 
 #### Private test sources
 

@@ -13,7 +13,7 @@ import { closePackagedApplication, processTable, shutdownEvidence } from './pack
 import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
   catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, control, createStatusTracker, installedModelsIdentity,
   installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, parsePackServerLog, partialRuntimeBytes,
-  readPlan, readStatus, retryFromUi, runtimeFileForUrlPath, runtimeFileUrlPath, shouldInterrupt, summarizeCatalog, waitForIdle,
+  readPlan, readStatus, resolveRetryTarget, retryFromUi, shouldInterrupt, stagedArchivePartBytes, summarizeCatalog, waitForIdle,
   waitForSetupStart, waitForStep } from './packaged-wizard-driver.mjs'
 
 const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval',
@@ -709,7 +709,12 @@ export async function run(options) {
     let recovery = null, lastRuntimeFile = null
     async function retryAfter(stoppedStep) {
       await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
-      recovery.bytesPresentAfterStop = recovery.file ? partialRuntimeBytes(profile, summary.runtimeId, recovery.file, manifest) : null
+      // Every archive part's staged size, read now: the part the server
+      // failed is known only from its log, after retrieval is over.
+      if (summary.delivery === 'archive') recovery.stagedPartsAfterStop = stagedArchivePartBytes(profile, summary.runtimeId, manifest)
+      recovery.bytesPresentAfterStop = !recovery.file ? null
+        : recovery.stagedPartsAfterStop ? recovery.stagedPartsAfterStop[recovery.file] ?? null
+          : partialRuntimeBytes(profile, summary.runtimeId, recovery.file, manifest)
       tracker.nextAttempt()
       await retryFromUi(host, { timeoutMs: stepTimeout() })
       const retryPlan = await bounded(readPlan(host), 60000)
@@ -766,17 +771,17 @@ export async function run(options) {
       // retrieval is over; without it the retry is unproven.
       const log = options.packServerLog ? readPackServerLog(options.packServerLog) : null
       if (log) wizard.packServerLog = { path: log.path, sha256: log.sha256, requests: log.entries.length }
-      let path, after = recovery.at
-      if (recovery.kind === 'injected-failure' && log) {
-        const injected = log.entries.filter(entry => entry.outcome === 'injected-failure')
-        assert.equal(injected.length, 1, 'The pack server log must record exactly one injected failure')
-        recovery.serverInjectedFailure = injected[0]
-        path = injected[0].url.split('?')[0]; after = injected[0].time
-        recovery.serverFile = runtimeFileForUrlPath(manifest, path)
-      } else if (recovery.file) path = runtimeFileUrlPath(manifest, recovery.file)
-      recovery.retry = classifyRetry({ bytesPresent: recovery.bytesPresentAfterStop,
-        retry: recovery.file ? tracker.fileObservations('runtime', recovery.serverFile ?? recovery.file) : null,
-        log: log?.entries ?? null, path, after })
+      const target = resolveRetryTarget({ runtime: manifest, recovery, log: log?.entries ?? null })
+      if (target.serverInjectedFailure) {
+        recovery.serverInjectedFailure = target.serverInjectedFailure
+        recovery.serverFile = target.file
+      }
+      // The kept bytes of the unit the retry is judged on (the server's
+      // failed part when its log names one).
+      recovery.bytesPresentAfterStop = target.bytesPresent
+      recovery.retry = classifyRetry({ bytesPresent: target.bytesPresent,
+        retry: target.file ? tracker.fileObservations('runtime', target.file) : null,
+        log: log?.entries ?? null, path: target.path, after: target.after, size: target.size })
       save()
       assertArchiveRetryResumed(summary, recovery.retry, { logged: Boolean(log) })
     }

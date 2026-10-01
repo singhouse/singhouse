@@ -344,10 +344,18 @@ const requestPath = url => url.split('?')[0]
 // A retry is classified only from the source server's request log. Polling
 // observations are recorded as supplementary context, never as proof.
 // `path` is the URL path of the interrupted runtime file; `after` is the
-// ISO time of the interruption (cancel click or injected failure).
-export function classifyRetry({ bytesPresent, retry, log, path, after }) {
+// ISO time of the interruption (cancel click or injected failure); `size` is
+// that file's catalog size, when known. A `resumed` classification requires
+// the first request after the interruption to carry `Range: bytes=N-` (N > 0),
+// receive 206 and be logged `complete`, its served byte count to equal
+// size - N (when the size is known), and no later request for the same path
+// to refetch it from zero.
+const fromZero = entry => entry.status === 200 || /^bytes=0-$/u.test(entry.range ?? '')
+const requestRecord = entry => ({ started: entry.started, time: entry.time, range: entry.range, status: entry.status, bytes: entry.bytes,
+  outcome: entry.outcome })
+export function classifyRetry({ bytesPresent, retry, log, path, after, size = null }) {
   const polling = retry ? { firstObservedReceived: retry.firstReceived, minimumObservedReceived: retry.minReceived } : null
-  const base = { bytesPresent: Number.isSafeInteger(bytesPresent) ? bytesPresent : null, polling }
+  const base = { bytesPresent: Number.isSafeInteger(bytesPresent) ? bytesPresent : null, partSize: Number.isSafeInteger(size) ? size : null, polling }
   if (!log) return { ...base, classification: 'unproven', reason: 'No pack server request log was supplied (--pack-server-log)' }
   assert.equal(typeof path, 'string', 'Retry classification requires the interrupted file path')
   const since = Date.parse(after)
@@ -361,11 +369,24 @@ export function classifyRetry({ bytesPresent, retry, log, path, after }) {
   }
   const later = requests.find(entry => Date.parse(entry.started) > since)
   if (!later) return { ...base, classification: 'unproven', reason: 'The log has no request for the interrupted file after the interruption' }
-  const request = { started: later.started, time: later.time, range: later.range, status: later.status, bytes: later.bytes }
+  const request = requestRecord(later)
   const match = /^bytes=(\d+)-$/u.exec(later.range ?? '')
   if (match && Number(match[1]) > 0 && later.status === 206) {
-    return { ...base, classification: 'resumed', resumedFromByte: Number(match[1]), request,
-      ...(base.bytesPresent !== null && { matchesBytesPresent: Number(match[1]) === base.bytesPresent }) }
+    const from = Number(match[1])
+    const resumed = { resumedFromByte: from, request, ...(base.bytesPresent !== null && { matchesBytesPresent: from === base.bytesPresent }) }
+    const refetch = requests.find(entry => Date.parse(entry.started) > Date.parse(later.started) && fromZero(entry))
+    if (refetch) {
+      return { ...base, ...resumed, classification: 'restarted', request: requestRecord(refetch), resumeRequest: request,
+        reason: 'After the resume request, the file was requested again from zero' }
+    }
+    if (later.outcome !== 'complete') {
+      return { ...base, ...resumed, classification: 'unproven', reason: `The resume request was not served completely (outcome ${later.outcome ?? 'not logged'})` }
+    }
+    if (base.partSize !== null && later.bytes !== base.partSize - from) {
+      return { ...base, ...resumed, classification: 'unproven',
+        reason: `The resume request served ${later.bytes ?? 'an unlogged number of'} bytes, not the ${base.partSize - from} bytes after byte ${from}` }
+    }
+    return { ...base, ...resumed, classification: 'resumed' }
   }
   if (later.range === null && later.status === 200) return { ...base, classification: 'restarted', request }
   return { ...base, classification: 'unproven', reason: 'The first retry request is neither a resume (206 with an open range) nor a full restart', request }
@@ -375,13 +396,33 @@ export function classifyRetry({ bytesPresent, retry, log, path, after }) {
 // resumes with `Range: bytes=N-`. With the pack server log, a retry that
 // refetched the interrupted part from zero (or cannot be shown to resume) is
 // a failure; per-file runtimes keep the classification as evidence only.
+// A resume can be shown only when some, but not all, of the part was kept
+// after the stop (0 < kept < part size). Otherwise the run still fails, as
+// unproven: the harness could not show a resume, which says nothing about the
+// product (restarting a part that kept nothing is correct behaviour).
+export const UNPROVEN_RESUME = 'Unproven: the harness could not show a resume of the interrupted runtime archive part'
 export function assertArchiveRetryResumed(summary, retry, { logged }) {
   if (summary.delivery !== 'archive' || !logged) return
+  const kept = retry.bytesPresent, size = retry.partSize
+  assert.ok(Number.isSafeInteger(size) && size > 0, 'Archive retry classification requires the interrupted part size')
+  if (!Number.isSafeInteger(kept)) {
+    throw new Error(`${UNPROVEN_RESUME}: the bytes kept of that part after the stop are unknown, so there is no kept byte count to resume from `
+      + '(a harness observation gap, not a product result)')
+  }
+  if (kept === 0) {
+    throw new Error(`${UNPROVEN_RESUME}: nothing was kept of that part after the stop (0 bytes), so a resume could not be shown; `
+      + 'retrieving it from zero is correct here')
+  }
+  if (kept >= size) {
+    throw new Error(`${UNPROVEN_RESUME}: the part was already complete on disk (${kept} of ${size} bytes) when the stop took effect`
+      + `${retry.request === undefined ? ' and was not requested again' : ''}, so a resume could not be shown`)
+  }
   assert.notEqual(retry.classification, 'restarted',
-    'The retry refetched the interrupted runtime archive part from zero instead of resuming it with a Range request')
+    `The retry refetched the interrupted runtime archive part from zero instead of resuming it with a Range request from the ${kept} bytes kept`
+      + `${retry.reason ? ` (${retry.reason})` : ''}`)
   assert.equal(retry.classification, 'resumed', `The retry of the interrupted runtime archive part could not be shown to resume: ${retry.reason}`)
-  assert.notEqual(retry.matchesBytesPresent, false,
-    `The retry resumed the archive part from byte ${retry.resumedFromByte}, not from the ${retry.bytesPresent} bytes kept after the stop`)
+  assert.equal(retry.matchesBytesPresent, true,
+    `The retry resumed the archive part from byte ${retry.resumedFromByte}, not from the ${kept} bytes kept after the stop`)
 }
 
 // URL path of a catalog runtime transfer unit (a file, or an archive part by
@@ -414,6 +455,38 @@ export function partialRuntimeBytes(profile, runtimeId, file, runtime = null) {
   }
   const info = lstatSync(path, { throwIfNoEntry: false })
   return info?.isFile() && !info.isSymbolicLink() ? info.size : null
+}
+
+// The staged size of every part of an archive runtime, by progress name (null
+// when a part has no staged regular file), read when setup stops. The part
+// that failed is known only later, from the pack server log.
+export function stagedArchivePartBytes(profile, runtimeId, runtime) {
+  assert.ok(runtime?.archive !== undefined, 'Staged archive parts require an archive runtime')
+  return Object.fromEntries(runtimeTransferUnits(runtime).map(unit => [unit.label, partialRuntimeBytes(profile, runtimeId, unit.label, runtime)]))
+}
+
+// What a retry is judged on: the interrupted transfer unit, its URL path and
+// size, the interruption time, and the bytes kept of that unit after the stop.
+// For an injected failure with a server log, the unit is the one the server
+// truncated (which may differ from the last one setup progress named), and
+// for an archive its kept bytes come from the sizes staged at stop time.
+export function resolveRetryTarget({ runtime, recovery, log }) {
+  let file = recovery.file ?? null, after = recovery.at, serverInjectedFailure
+  if (recovery.kind === 'injected-failure' && log) {
+    const injected = log.filter(entry => entry.outcome === 'injected-failure')
+    assert.equal(injected.length, 1, 'The pack server log must record exactly one injected failure')
+    serverInjectedFailure = injected[0]
+    file = runtimeFileForUrlPath(runtime, requestPath(injected[0].url)); after = injected[0].time
+  }
+  const unit = file === null ? null : runtimeTransferUnits(runtime).find(entry => entry.label === file)
+  assert.ok(file === null || unit, `Runtime file ${file} is not in the packaged catalog`)
+  const staged = recovery.stagedPartsAfterStop
+  // Without staged part sizes, the bytes read at stop belong to the unit setup
+  // progress last named; they say nothing about a different unit.
+  const bytesPresent = staged ? (file !== null && Object.hasOwn(staged, file) ? staged[file] : null)
+    : file !== null && file === recovery.file ? recovery.bytesPresentAfterStop ?? null : null
+  return { file, path: unit ? new URL(unit.url).pathname : undefined, size: unit?.size ?? null, after,
+    bytesPresent: Number.isSafeInteger(bytesPresent) ? bytesPresent : null, ...(serverInjectedFailure && { serverInjectedFailure }) }
 }
 
 function regularFile(path, label) {
@@ -486,14 +559,21 @@ export function judgePostRestart({ observations, settled, timedOut, timeoutMs })
   }
   // Only the setup service's own verification-phase error says the installed
   // files failed; a wizard that gave up while the service was still checking
-  // only shows that the check did not complete.
+  // (or unreadable) only shows that the check did not complete. Any other
+  // status beside a failed-verification screen is a disagreement between the
+  // wizard and the setup service. Every one of these is a failed run.
   const failed = observations.find(item => honestFailure(item) && verificationError(item)) ?? observations.find(honestFailure)
   if (failed) {
+    const incomplete = failed.statusState === null || failed.statusState === undefined || failed.statusState === 'checking'
     throw new Error(verificationError(failed)
       ? `Post-restart verification failed: ${where(failed)}; the setup service reported that the installed runtime or models did not pass live verification `
         + `(${JSON.stringify(failed.statusMessage)}); see wizard.postRestart.observations`
-      : `Post-restart verification failed: ${where(failed)}; the post-restart check did not complete (setup status was still `
-        + `${failed.statusState ?? 'unreadable'}), so it does not show whether the installed files pass; see wizard.postRestart.observations`)
+      : incomplete
+        ? `Post-restart verification failed: ${where(failed)}; the post-restart check did not complete (setup status was still `
+          + `${failed.statusState ?? 'unreadable'}), so it does not show whether the installed files pass; see wizard.postRestart.observations`
+        : `Post-restart verification failed: ${where(failed)}; the wizard showed a failed verification while the setup service reported `
+          + `${failed.statusState}/${failed.statusPhase ?? 'unknown'}, a disagreement that does not show whether the installed files pass; `
+          + 'see wizard.postRestart.observations')
   }
   if (timedOut || !settled) {
     const last = observations.at(-1)
@@ -503,7 +583,7 @@ export function judgePostRestart({ observations, settled, timedOut, timeoutMs })
   assert.equal(settled.dialogVisible, true, 'The setup dialog closed after restart before settling on ready')
   assert.equal(settled.step, 'ready', `Setup settled on ${settled.step ?? JSON.stringify(settled.heading)} after restart, not ready`)
   assert.ok(observations.some(item => item.step === 'checking' || item.statusState === 'checking'),
-    'The post-restart check was not observed: neither the wizard nor setup status showed checking, so the restored setup checkpoint was not exercised')
+    'The post-restart check was not observed: neither the wizard nor setup status showed checking, so the harness did not observe the restored setup checkpoint being exercised')
   assert.equal(settled.statusState, 'ready',
     `The post-restart check was not observed to settle: setup status was ${settled.statusState ?? 'unreadable'}, not ready, when the wizard showed ready`)
   return settled
@@ -551,8 +631,11 @@ async function readStep(dialog) {
 
 // Wizard mode drives only candidates that carry the wizard test hooks. A
 // setup dialog without them (or without its `data-step`) fails at once
-// instead of timing out on a step that can never be recognised.
+// instead of timing out on a step that can never be recognised. The other
+// dialog is queried excluding the hooked dialog itself, and the hooked dialog
+// is checked once more before failing: it may open between the two reads.
 export const HOOKLESS_CANDIDATE = 'This candidate predates the wizard test hooks; wizard mode cannot drive it'
+export const NOT_ONBOARDING_DIALOG = ':not([data-testid="onboarding-dialog"])'
 export async function assertWizardHooks(page, { timeoutMs, interval = 250 } = {}) {
   assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0, 'assertWizardHooks requires a timeout')
   const deadline = Date.now() + timeoutMs
@@ -562,7 +645,11 @@ export async function assertWizardHooks(page, { timeoutMs, interval = 250 } = {}
       if (await dialog.getAttribute('data-step', { timeout: 2000 }).catch(() => null)) return
       throw new Error(`${HOOKLESS_CANDIDATE} (the setup dialog has no data-step)`)
     }
-    if (await page.getByRole('dialog').first().isVisible().catch(() => false)) throw new Error(`${HOOKLESS_CANDIDATE} (a dialog without data-testid="onboarding-dialog" is showing)`)
+    const other = page.getByRole('dialog').and(page.locator(NOT_ONBOARDING_DIALOG)).first()
+    if (await other.isVisible().catch(() => false)) {
+      if (await dialog.isVisible()) continue
+      throw new Error(`${HOOKLESS_CANDIDATE} (a dialog without data-testid="onboarding-dialog" is showing)`)
+    }
     if (Date.now() >= deadline) break
     await pause(interval)
   }

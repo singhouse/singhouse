@@ -11,7 +11,7 @@ import { createSetupCatalog, validateSetupCatalog } from '../setup_catalog.mjs'
 import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalizeText, errorOutcomeFromHeading, stepFrom, summarizeCatalog,
   runtimeTransferUnits, formatSize, assertArchiveRetryResumed, assertWizardHooks, HOOKLESS_CANDIDATE, assertCatalogLock,
   assertWizardPlan, assertConsentText, createStatusTracker, shouldInterrupt, classifyRetry, partialRuntimeBytes, installedRuntimeIdentity,
-  installedModelsIdentity, assertPostRestart, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
+  installedModelsIdentity, assertPostRestart, stagedArchivePartBytes, resolveRetryTarget, UNPROVEN_RESUME, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
   parsePackServerLog, runtimeFileUrlPath, runtimeFileForUrlPath, judgePostRestart, observePostRestart, waitForIdle, acceptConsent,
   chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, cancelFromUi, clickRestart } from './packaged-wizard-driver.mjs'
 
@@ -351,7 +351,7 @@ test('retry is classified resumed or restarted only from the server request log'
   // The interrupted transfer started before the cancel and is logged after it.
   const first = logLine('2026-01-01T00:00:05.000Z', '2026-01-01T00:00:10.500Z', { outcome: 'aborted' })
   const log = range => parsePackServerLog([first, logLine('2026-01-01T00:00:20.000Z', '2026-01-01T00:00:21.000Z',
-    range ? { range: `bytes=${range}-`, status: 206 } : {})].join('\n'))
+    range ? { range: `bytes=${range}-`, status: 206, outcome: 'complete' } : { outcome: 'complete' })].join('\n'))
   const retry = { firstReceived: 300, minReceived: 300 }
   const none = classifyRetry({ bytesPresent: 300, retry })
   assert.equal(none.classification, 'unproven'); assert.match(none.reason, /--pack-server-log/)
@@ -578,6 +578,9 @@ test('post-restart: ready without an observed check, or without a ready status, 
   // A checkpoint restore that regressed to idle would go straight to ready.
   const idle = await postRestart([{ ui: ui('ready', 'Let’s add your first song.', false), status: { state: 'idle' } }])
   assert.throws(idle.judge, /post-restart check was not observed: neither the wizard nor setup status showed checking/)
+  // The harness knows only what it observed, never that the checkpoint was not exercised.
+  assert.throws(idle.judge, error => /did not observe the restored setup checkpoint being exercised/.test(error.message)
+    && !/was not exercised/.test(error.message))
   const unsettled = await postRestart([
     { ui: ui('checking', 'Checking your setup.', false), status: { state: 'checking', phase: 'verification' } },
     { ui: ui('ready', 'Let’s add your first song.', false), status: { state: 'idle' } },
@@ -629,6 +632,48 @@ test('post-restart: an honest failed verification is reported as such, not as an
   assert.throws(judge, /presented as an interrupted setup \(product defect\)/)
   const generic = await postRestart([{ ui: ui('error', 'Setup could not finish.', false), status: failure }])
   assert.throws(generic.judge, /product defect/)
+})
+
+test('post-restart: a failed-verification screen is described by what setup status reported beside it', async () => {
+  const shown = 'Local processing could not be verified.'
+  const honest = error => /Post-restart verification failed/.test(error.message) && !/product defect/.test(error.message)
+  const observation = status => ({ elapsedMs: 0, dialogVisible: true, busy: false, step: 'verification-failed', heading: shown,
+    statusState: status.state, statusPhase: status.phase ?? null, statusMessage: null })
+  const judge = status => () => judgePostRestart({ observations: [observation(status)], settled: null, timedOut: true, timeoutMs: 1000 })
+  // Still checking, or unreadable: the check did not complete.
+  assert.throws(judge({ state: 'checking', phase: 'verification' }),
+    error => honest(error) && /check did not complete \(setup status was still checking\)/.test(error.message) && !/disagreement/.test(error.message))
+  assert.throws(judge({ state: null }),
+    error => honest(error) && /check did not complete \(setup status was still unreadable\)/.test(error.message) && !/disagreement/.test(error.message))
+  // Any other status: the wizard and the setup service disagree.
+  for (const status of [{ state: 'ready', phase: 'complete' }, { state: 'error', phase: 'paused' }, { state: 'idle' }]) {
+    assert.throws(judge(status), error => honest(error)
+      && new RegExp(`the wizard showed a failed verification while the setup service reported ${status.state}/${status.phase ?? 'unknown'}, a disagreement`).test(error.message)
+      && !/did not complete/.test(error.message) && !/did not pass live verification/.test(error.message))
+  }
+  const ready = await postRestart([{ ui: ui('verification-failed', shown, false), status: { state: 'ready', phase: 'complete' } }])
+  assert.equal(ready.result.settled.step, 'verification-failed')
+  assert.throws(ready.judge, /reported ready\/complete, a disagreement/)
+})
+
+test('post-restart: the service’s verification error is preferred over an earlier failed-verification screen', () => {
+  const shown = 'Local processing could not be verified.'
+  const observations = [
+    { elapsedMs: 0, dialogVisible: true, busy: false, step: 'verification-failed', heading: shown, statusState: 'checking', statusPhase: 'verification', statusMessage: null },
+    { elapsedMs: 250, dialogVisible: true, busy: false, step: 'verification-failed', heading: shown, statusState: 'error', statusPhase: 'verification',
+      statusMessage: 'Review setup to check and repair the installation.' },
+  ]
+  assert.throws(() => judgePostRestart({ observations, settled: observations[1], timedOut: false, timeoutMs: 1000 }),
+    error => /did not pass live verification/.test(error.message) && /at 250 ms/.test(error.message) && !/did not complete/.test(error.message))
+})
+
+test('post-restart: the checking step in the wizard alone counts as the observed check', async () => {
+  // Setup status never read `checking`; the wizard showed its checking step.
+  const { judge } = await postRestart([
+    { ui: ui('checking', 'Checking your setup.', false), status: { state: 'idle', phase: 'preflight' } },
+    { ui: ui('ready', 'Let’s add your first song.', false), status: { state: 'ready', phase: 'complete' } },
+  ])
+  assert.equal(judge().step, 'ready')
 })
 
 test('post-restart: settled restart, progress or error screens and status errors fail', async () => {
@@ -733,25 +778,149 @@ test('an interrupted archive part must resume with a Range request when the serv
   const path = runtimeFileUrlPath(runtime, 'tools.pack.gz.001'), at = '2026-01-01T00:00:10.000Z'
   const line = (started, fields) => JSON.stringify({ started, time: started, method: 'GET', url: path, range: null, status: 200, bytes: 300, ...fields })
   const first = line('2026-01-01T00:00:05.000Z', { outcome: 'injected-failure', bytes: 120 })
-  const retry = log => classifyRetry({ bytesPresent: 120, log: parsePackServerLog(log.join('\n')), path, after: at })
-  const resumed = retry([first, line('2026-01-01T00:00:20.000Z', { range: 'bytes=120-', status: 206, bytes: 180 })])
+  const retry = log => classifyRetry({ bytesPresent: 120, log: parsePackServerLog(log.join('\n')), path, after: at, size: 300 })
+  const resumed = retry([first, line('2026-01-01T00:00:20.000Z', { range: 'bytes=120-', status: 206, bytes: 180, outcome: 'complete' })])
   assert.equal(resumed.classification, 'resumed')
   assertArchiveRetryResumed(summary, resumed, { logged: true })
-  const restarted = retry([first, line('2026-01-01T00:00:20.000Z', {})])
+  const restarted = retry([first, line('2026-01-01T00:00:20.000Z', { outcome: 'complete' })])
   assert.throws(() => assertArchiveRetryResumed(summary, restarted, { logged: true }), /refetched the interrupted runtime archive part from zero/)
   assert.throws(() => assertArchiveRetryResumed(summary, retry([first]), { logged: true }), /could not be shown to resume/)
-  const offset = retry([first, line('2026-01-01T00:00:20.000Z', { range: 'bytes=60-', status: 206 })])
+  const offset = retry([first, line('2026-01-01T00:00:20.000Z', { range: 'bytes=60-', status: 206, bytes: 240, outcome: 'complete' })])
   assert.throws(() => assertArchiveRetryResumed(summary, offset, { logged: true }), /from byte 60, not from the 120 bytes kept/)
   // Without the log, or for a per-file runtime, the classification stays evidence only.
   assertArchiveRetryResumed(summary, restarted, { logged: false })
   assertArchiveRetryResumed(summarizeCatalog(bytesOf(catalog())), restarted, { logged: true })
 })
 
+test('retry classification requires a complete resume of exactly the remaining bytes and no later refetch from zero', () => {
+  const at = '2026-01-01T00:00:10.000Z'
+  const first = logLine('2026-01-01T00:00:05.000Z', '2026-01-01T00:00:10.500Z', { outcome: 'aborted', bytes: null })
+  const resume = fields => logLine('2026-01-01T00:00:20.000Z', '2026-01-01T00:00:21.000Z', { range: 'bytes=300-', status: 206, bytes: 300, outcome: 'complete', ...fields })
+  const classify = (lines, size = 600) => classifyRetry({ bytesPresent: 300, log: parsePackServerLog([first, ...lines].join('\n')), path: '/a.bin', after: at, size })
+  const ok = classify([resume()])
+  assert.equal(ok.classification, 'resumed'); assert.equal(ok.partSize, 600); assert.equal(ok.request.outcome, 'complete')
+  // The resume request must be served to completion.
+  for (const outcome of ['aborted', 'injected-failure', undefined]) {
+    const result = classify([resume({ outcome })])
+    assert.equal(result.classification, 'unproven'); assert.match(result.reason, /not served completely/)
+  }
+  // It must serve exactly size - N bytes.
+  const short = classify([resume({ bytes: 200 })])
+  assert.equal(short.classification, 'unproven'); assert.match(short.reason, /served 200 bytes, not the 300 bytes after byte 300/)
+  assert.equal(classify([resume({ bytes: null })]).classification, 'unproven')
+  // Without a known size the byte count is not compared.
+  assert.equal(classify([resume({ bytes: 200 })], null).classification, 'resumed')
+  // A later refetch of the same path from zero (200, or bytes=0-) undoes the resume.
+  for (const refetch of [{ range: null, status: 200, bytes: 600 }, { range: 'bytes=0-', status: 206, bytes: 600 }]) {
+    const result = classify([resume(), logLine('2026-01-01T00:00:30.000Z', '2026-01-01T00:00:31.000Z', { outcome: 'complete', ...refetch })])
+    assert.equal(result.classification, 'restarted'); assert.match(result.reason, /requested again from zero/)
+    assert.equal(result.request.started, '2026-01-01T00:00:30.000Z'); assert.equal(result.resumeRequest.started, '2026-01-01T00:00:20.000Z')
+  }
+  // A later request for another path, or a later resume of this one, does not.
+  const other = logLine('2026-01-01T00:00:30.000Z', '2026-01-01T00:00:31.000Z', { url: '/b.bin', outcome: 'complete' })
+  assert.equal(classify([resume(), other]).classification, 'resumed')
+})
+
+test('an archive retry passes only when some but not all of the part was kept and it resumed from exactly there', () => {
+  const summary = summarizeCatalog(bytesOf(archiveCatalog())), runtime = archiveCatalog().runtime
+  const path = runtimeFileUrlPath(runtime, 'tools.pack.gz.001'), at = '2026-01-01T00:00:10.000Z'
+  const line = (started, fields) => JSON.stringify({ started, time: started, method: 'GET', url: path, range: null, status: 200, bytes: 300, outcome: 'complete', ...fields })
+  const first = line('2026-01-01T00:00:05.000Z', { outcome: 'injected-failure', bytes: 120 })
+  const classify = (bytesPresent, lines) => classifyRetry({ bytesPresent, log: parsePackServerLog([first, ...lines].join('\n')), path, after: at, size: 300 })
+  const resumedFrom = from => line('2026-01-01T00:00:20.000Z', { range: `bytes=${from}-`, status: 206, bytes: 300 - from })
+  const fromZero = line('2026-01-01T00:00:20.000Z', {})
+  const unproven = pattern => error => error.message.startsWith(UNPROVEN_RESUME) && pattern.test(error.message) && !/refetched/.test(error.message)
+  // (a) Kept bytes unknown: no resume can be shown, whatever the log says.
+  for (const lines of [[resumedFrom(120)], [fromZero], []]) {
+    assert.throws(() => assertArchiveRetryResumed(summary, classify(null, lines), { logged: true }),
+      unproven(/bytes kept of that part after the stop are unknown/))
+  }
+  // (c) Nothing kept: retrieving from zero is correct, and still unproven.
+  for (const lines of [[fromZero], []]) {
+    assert.throws(() => assertArchiveRetryResumed(summary, classify(0, lines), { logged: true }), unproven(/nothing was kept .*0 bytes.*a resume could not be shown/))
+  }
+  // (c) The part completed before the stop took effect and was not requested again.
+  assert.throws(() => assertArchiveRetryResumed(summary, classify(300, []), { logged: true }),
+    unproven(/already complete on disk \(300 of 300 bytes\) when the stop took effect and was not requested again, so a resume could not be shown/))
+  assert.throws(() => assertArchiveRetryResumed(summary, classify(300, [fromZero]), { logged: true }),
+    error => unproven(/already complete on disk/)(error) && !/not requested again/.test(error.message))
+  // Some bytes kept: the product must resume from exactly them.
+  assertArchiveRetryResumed(summary, classify(120, [resumedFrom(120)]), { logged: true })
+  assert.throws(() => assertArchiveRetryResumed(summary, classify(120, [fromZero]), { logged: true }),
+    /refetched the interrupted runtime archive part from zero instead of resuming it with a Range request from the 120 bytes kept/)
+  assert.throws(() => assertArchiveRetryResumed(summary, classify(120, [resumedFrom(60)]), { logged: true }), /from byte 60, not from the 120 bytes kept/)
+  // The part size must be known to judge an archive retry.
+  assert.throws(() => assertArchiveRetryResumed(summary, { ...classify(120, [resumedFrom(120)]), partSize: null }, { logged: true }), /requires the interrupted part size/)
+})
+
+test('the failed archive part is the one the server log names, with its kept bytes staged at stop time', t => {
+  const runtime = archiveCatalog().runtime, id = 'd'.repeat(64)
+  const profile = realpathSync(mkdtempSync(join(tmpdir(), 'wizard-staged-')))
+  t.after(() => rmSync(profile, { recursive: true, force: true }))
+  const parts = join(profile, 'processing', 'staging', `${id}.archive`)
+  mkdirSync(parts, { recursive: true })
+  writeFileSync(join(parts, 'part-001.partial'), Buffer.alloc(300)); writeFileSync(join(parts, 'part-002.partial'), Buffer.alloc(64))
+  const staged = stagedArchivePartBytes(profile, id, runtime)
+  assert.deepEqual(staged, { 'tools.pack.gz.001': 300, 'tools.pack.gz.002': 64 })
+  rmSync(join(parts, 'part-002.partial'))
+  assert.deepEqual(stagedArchivePartBytes(profile, id, runtime), { 'tools.pack.gz.001': 300, 'tools.pack.gz.002': null })
+  assert.throws(() => stagedArchivePartBytes(profile, id, catalog().runtime), /require an archive runtime/)
+  // Setup progress last named part 1 (complete); the server failed part 2.
+  const failedAt = '2026-01-01T00:00:06.000Z'
+  const log = parsePackServerLog([
+    JSON.stringify({ started: '2026-01-01T00:00:01.000Z', time: '2026-01-01T00:00:02.000Z', method: 'GET', url: '/v1/tools.pack.gz.001', range: null, status: 200, bytes: 300, outcome: 'complete' }),
+    JSON.stringify({ started: '2026-01-01T00:00:03.000Z', time: failedAt, method: 'GET', url: '/v1/tools.pack.gz.002', range: null, status: 200, bytes: 64, outcome: 'injected-failure' }),
+  ].join('\n'))
+  const recovery = { kind: 'injected-failure', at: '2026-01-01T00:00:07.000Z', file: 'tools.pack.gz.001', bytesPresentAfterStop: 300, stagedPartsAfterStop: staged }
+  const target = resolveRetryTarget({ runtime, recovery, log })
+  assert.deepEqual({ ...target, serverInjectedFailure: target.serverInjectedFailure.url },
+    { file: 'tools.pack.gz.002', path: '/v1/tools.pack.gz.002', size: 120, after: failedAt, bytesPresent: 64, serverInjectedFailure: '/v1/tools.pack.gz.002' })
+  // A failed part with no staged file has unknown kept bytes, never another part's.
+  assert.equal(resolveRetryTarget({ runtime, recovery: { ...recovery, stagedPartsAfterStop: { ...staged, 'tools.pack.gz.002': null } }, log }).bytesPresent, null)
+  assert.throws(() => resolveRetryTarget({ runtime, recovery, log: [...log, ...log] }), /exactly one injected failure/)
+  // Without the log (or for a cancel) the unit is the one setup progress named.
+  assert.deepEqual(resolveRetryTarget({ runtime, recovery, log: null }),
+    { file: 'tools.pack.gz.001', path: '/v1/tools.pack.gz.001', size: 300, after: recovery.at, bytesPresent: 300 })
+  assert.deepEqual(resolveRetryTarget({ runtime, recovery: { kind: 'cancel', at: recovery.at, file: null }, log }),
+    { file: null, path: undefined, size: null, after: recovery.at, bytesPresent: null })
+  // Per-file delivery has no staged map: kept bytes belong only to the file progress named.
+  const files = catalog().runtime
+  const fileLog = parsePackServerLog(logLine('2026-01-01T00:00:03.000Z', failedAt, { url: '/b.bin', outcome: 'injected-failure' }))
+  const perFile = { kind: 'injected-failure', at: recovery.at, file: 'runtime/a.bin', bytesPresentAfterStop: 37 }
+  assert.equal(resolveRetryTarget({ runtime: files, recovery: perFile, log: fileLog }).bytesPresent, null)
+  assert.equal(resolveRetryTarget({ runtime: files, recovery: perFile, log: null }).bytesPresent, 37)
+})
+
+// A fake page over the dialogs on screen. The hooked dialog is shown always,
+// never, or only once its first visibility check has returned (it opens right
+// then). Role queries see every dialog; intersected with the exact
+// not-onboarding selector they skip the hooked one, as Playwright would.
+function hooksPage({ hooked = false, opensAfterFirstCheck = false, dataStep = 'welcome', other = false }) {
+  let shown = hooked
+  const dialogs = () => [...(shown ? [{ onboarding: true }] : []), ...(other ? [{ onboarding: false }] : [])]
+  const visible = excludeOnboarding => async () => dialogs().some(item => !(excludeOnboarding && item.onboarding))
+  return {
+    getByTestId: () => ({
+      isVisible: async () => { const now = shown; if (opensAfterFirstCheck) shown = true; return now },
+      getAttribute: async () => dataStep,
+    }),
+    getByRole: () => ({ first: () => ({ isVisible: visible(false) }), and: filter => ({ first: () => ({ isVisible: visible(filter.excludesOnboarding) }) }) }),
+    locator: selector => ({ excludesOnboarding: selector === ':not([data-testid="onboarding-dialog"])' }),
+  }
+}
+
+test('a hooked dialog that opens between the two dialog reads is not taken for a hookless candidate', async () => {
+  // The hooked dialog is invisible on the first check and visible afterwards.
+  await assertWizardHooks(hooksPage({ opensAfterFirstCheck: true }), { timeoutMs: 100, interval: 1 })
+  // Another dialog is showing too: the hooked dialog is checked again before failing.
+  await assertWizardHooks(hooksPage({ opensAfterFirstCheck: true, other: true }), { timeoutMs: 100, interval: 1 })
+  // Without the hooked dialog ever opening, the other dialog still fails the run.
+  await assert.rejects(assertWizardHooks(hooksPage({ other: true }), { timeoutMs: 100, interval: 1 }),
+    error => error.message.startsWith(HOOKLESS_CANDIDATE) && /without data-testid/.test(error.message))
+})
+
 test('a candidate without the wizard hooks fails at once, naming the reason', async () => {
-  const page = ({ hooked = false, dataStep = null, other = false }) => ({
-    getByTestId: () => ({ isVisible: async () => hooked, getAttribute: async () => dataStep }),
-    getByRole: () => ({ first: () => ({ isVisible: async () => other }) }),
-  })
+  const page = ({ hooked = false, dataStep = null, other = false }) => hooksPage({ hooked, dataStep, other })
   await assertWizardHooks(page({ hooked: true, dataStep: 'welcome' }), { timeoutMs: 100, interval: 1 })
   await assert.rejects(assertWizardHooks(page({ other: true }), { timeoutMs: 100, interval: 1 }),
     error => error.message.startsWith(HOOKLESS_CANDIDATE) && /without data-testid/.test(error.message))
