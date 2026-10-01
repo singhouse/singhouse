@@ -12,6 +12,7 @@ const bytes = manifest => manifest.files.reduce((sum, file) => sum + file.size, 
 const complete = manifest => ['transcription', 'separation'].every(id => manifest.capabilities?.includes(id))
   && LOCAL_MODEL_IDS.every(id => manifest.models?.includes(id)
     && manifest.modelCapabilities?.[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
+const REOPEN_MESSAGE = 'Setup is verified. Reopen Singhouse to use local processing.'
 const initial = () => ({ state: 'idle', phase: 'preflight', message: 'Choose local processing or playback.', retryable: false, restartRequired: false })
 
 // These checks compare observations with measured release evidence. They do not
@@ -111,7 +112,12 @@ export class OnboardingSetup {
       const previous = await this.load()
       // A checkpoint records workflow only; it never supplies runnable inputs
       // or proves readiness. Every attempt revalidates the stores and catalog.
-      if (previous && ['running', 'error', 'cancelled', 'restart-required'].includes(previous.state)) {
+      // A finished, verified run awaiting reopening is only re-checked: the
+      // next preflight settles it from live verification. It is not saved, so
+      // an exit while checking leaves the checkpoint to be checked again.
+      if (previous?.state === 'restart-required') {
+        this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
+      } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
         this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
       }
     }
@@ -212,11 +218,28 @@ export class OnboardingSetup {
     }
   }
 
+  // Settles a restored check from this live verification only. A started
+  // setup or a concurrent preflight that settled first takes precedence.
+  async settleCheck(installed) {
+    if (this.state.state !== 'checking') return
+    if (installed?.ready) {
+      await this.update({ state: 'ready', phase: 'complete', message: 'Local processing is ready.', restartRequired: false })
+    } else if (installed?.restartRequired) {
+      await this.update({ state: 'restart-required', phase: 'complete', message: REOPEN_MESSAGE, restartRequired: true })
+    } else {
+      const message = 'Local processing could not be verified. Review setup to repair the saved files.'
+      await this.update({ state: 'error', phase: 'verification', message, error: message, retryable: true, restartRequired: false })
+    }
+  }
+
   async preflight({ signal } = {}) {
     await this.getStatus()
     const offlineDirectory = this.#offlineModelsDirectory
     const modelSource = offlineDirectory === null ? 'upstream' : 'offline'
-    const installed = await this.installed({ signal })
+    let installed
+    try { installed = await this.installed({ signal }) }
+    catch (error) { await this.settleCheck(null); throw error }
+    await this.settleCheck(installed)
     const hardware = await this.hardware()
     signal?.throwIfAborted()
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
@@ -314,7 +337,7 @@ export class OnboardingSetup {
       signal.throwIfAborted()
       if (!result.installed) throw new Error('Complete local processing verification failed. Retry setup to repair the saved files.')
       await this.update({ state: result.ready ? 'ready' : 'restart-required', phase: 'complete',
-        message: result.ready ? 'Local processing is ready.' : 'Setup is verified. Reopen Singhouse to use local processing.', restartRequired: result.restartRequired })
+        message: result.ready ? 'Local processing is ready.' : REOPEN_MESSAGE, restartRequired: result.restartRequired })
     } catch (error) {
       await this.update({ state: signal.aborted ? 'cancelled' : 'error', phase: 'paused', progress: undefined,
         message: signal.aborted ? 'Setup cancelled. Retry to resume saved files.' : error.message,

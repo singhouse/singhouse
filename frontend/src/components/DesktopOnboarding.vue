@@ -47,6 +47,10 @@ function size(bytes) {
   if (!Number.isFinite(bytes)) return 'Not yet known'
   return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(bytes / 1024 ** 2)} MiB`
 }
+// Archive-delivered components retrieve fewer bytes than they install.
+function unpacked(file) {
+  return Number.isFinite(file.bytes) && Number.isFinite(file.installedBytes) && file.installedBytes !== file.bytes
+}
 function describe(value) {
   if (Array.isArray(value)) return value.map(describe).join(', ')
   if (value && typeof value === 'object') return Object.entries(value).map(([key, entry]) => `${humanLabel(key)}: ${describe(entry)}`).join(' · ')
@@ -75,7 +79,9 @@ onUnmounted(() => clearInterval(poll))
     class="onboarding"
     aria-modal="true"
     :aria-label="`${BRAND_NAME} setup`"
-    :aria-busy="busy"
+    data-testid="onboarding-dialog"
+    :data-step="step"
+    :aria-busy="busy || step === 'checking'"
     @cancel.prevent="leave()"
   >
     <header class="setup-header">
@@ -116,6 +122,7 @@ onUnmounted(() => clearInterval(poll))
         <div class="actions">
           <button
             class="primary"
+            data-testid="onboarding-get-started"
             :disabled="busy"
             @click="setup.chooseProcessing"
           >
@@ -154,6 +161,7 @@ onUnmounted(() => clearInterval(poll))
         >
           <button
             class="choice"
+            data-testid="onboarding-choice-local"
             :class="{ chosen: choice === 'local' }"
             :aria-pressed="choice === 'local'"
             :disabled="busy || !localAvailable"
@@ -189,6 +197,7 @@ onUnmounted(() => clearInterval(poll))
         <div class="actions">
           <button
             class="primary"
+            data-testid="onboarding-continue"
             :disabled="busy || (choice === 'local' && !localAvailable)"
             @click="setup.continueChoice"
           >
@@ -298,12 +307,13 @@ onUnmounted(() => clearInterval(poll))
           <ul
             v-if="plan?.components?.length"
             class="components"
+            data-testid="onboarding-consent-components"
           >
             <li
               v-for="file in plan.components"
               :key="file.label"
             >
-              <strong>{{ file.label }}</strong> · {{ size(file.bytes) }} ({{ Number.isFinite(file.bytes) ? `${file.bytes.toLocaleString()} bytes` : 'exact size unavailable' }})<p>Source: {{ describe(file.sources) || 'Not provided' }}</p><p>Terms: {{ describe(file.terms) || 'Not provided' }}</p>
+              <strong>{{ file.label }}</strong> · {{ size(file.bytes) }} ({{ Number.isFinite(file.bytes) ? `${file.bytes.toLocaleString()} bytes` : 'exact size unavailable' }})<template v-if="unpacked(file)"> to retrieve, {{ size(file.installedBytes) }} installed</template><p>Source: {{ describe(file.sources) || 'Not provided' }}</p><p>Terms: {{ describe(file.terms) || 'Not provided' }}</p>
             </li>
           </ul>
           <p v-else>
@@ -313,6 +323,7 @@ onUnmounted(() => clearInterval(poll))
         <div class="actions">
           <button
             class="primary"
+            data-testid="onboarding-install"
             :disabled="!canStart"
             @click="setup.start"
           >
@@ -358,6 +369,27 @@ onUnmounted(() => clearInterval(poll))
         </div>
       </template>
 
+      <template v-else-if="step === 'checking'">
+        <p class="eyebrow">
+          Song processing
+        </p>
+        <h1
+          ref="heading"
+          tabindex="-1"
+        >
+          Checking your setup.
+        </h1>
+        <p class="lead">
+          You can use your library while this check finishes.
+        </p>
+        <div
+          class="panel"
+          role="status"
+        >
+          <p>Checking your local processing setup…</p><progress aria-label="Checking local processing setup" />
+        </div>
+      </template>
+
       <template v-else-if="step === 'progress'">
         <p class="eyebrow">
           Setting up song processing
@@ -386,9 +418,10 @@ onUnmounted(() => clearInterval(poll))
             <template v-if="status?.progress?.phase === 'retrieve'">Retrieving the processing tools archive<template v-if="status.progress.part && status.progress.parts">, part {{ status.progress.part }} of {{ status.progress.parts }}</template></template><template v-else-if="status?.progress?.phase === 'extract'">Unpacking and checking processing tools</template><template v-else>{{ status?.progress?.file }}</template> · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of {{ status?.progress?.phase === 'retrieve' ? 'this part' : status?.progress?.phase === 'extract' ? 'the processing tools' : 'this file' }})
           </p>
         </div>
-        <details>
+        <details data-testid="onboarding-setup-controls">
           <summary>Setup controls</summary><button
             class="text-button"
+            data-testid="onboarding-cancel"
             :disabled="busy"
             @click="setup.cancel"
           >
@@ -405,7 +438,7 @@ onUnmounted(() => clearInterval(poll))
           ref="heading"
           tabindex="-1"
         >
-          {{ status?.state === 'cancelled' ? 'Setup cancelled.' : 'Setup could not finish.' }}
+          {{ status?.state === 'cancelled' ? 'Setup cancelled.' : status?.phase === 'verification' ? 'Setup needs to be verified again.' : 'Setup could not finish.' }}
         </h1>
         <p class="lead">
           {{ status?.error || status?.message || 'Review setup and try again when you are ready.' }}
@@ -414,6 +447,7 @@ onUnmounted(() => clearInterval(poll))
         <div class="actions">
           <button
             class="primary"
+            data-testid="onboarding-retry"
             :disabled="busy"
             @click="setup.chooseProcessing"
           >
@@ -438,6 +472,7 @@ onUnmounted(() => clearInterval(poll))
         <div class="actions">
           <button
             class="primary"
+            data-testid="onboarding-restart"
             :disabled="busy"
             @click="setup.restart"
           >
@@ -488,7 +523,7 @@ onUnmounted(() => clearInterval(poll))
         :disabled="busy"
         @click="leave()"
       >
-        {{ step === 'ready' || step === 'progress' ? 'Open my library →' : 'Skip setup and open my library' }}
+        {{ ['ready', 'progress', 'checking'].includes(step) ? 'Open my library →' : 'Skip setup and open my library' }}
       </button>
     </main>
   </dialog>
