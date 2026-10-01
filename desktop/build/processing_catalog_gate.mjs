@@ -30,11 +30,14 @@ export function packagedCatalogIdentity(nativeManifest, appVersion) {
 // catalogBytes is null when desktop/processing-catalog.json is absent. Locks and
 // model policy are the application's own desktop/processing-locks.json and
 // desktop/models.json, read and checked exactly as main.mjs does at launch.
-export function assertProcessingCatalog({ mode = null, catalogBytes, identity, locks, modelPolicy }) {
+// releaseChannel is the channel of the release policy being packaged: the
+// installed application validates the catalog against that channel, so a
+// private-smoke catalog cannot be packaged under any other channel.
+export function assertProcessingCatalog({ mode = null, catalogBytes, identity, locks, modelPolicy, releaseChannel }) {
   if (![null, PROCESSING_READY, PLAYBACK_ONLY].includes(mode)) throw new Error('Invalid processing packaging mode')
   if (catalogBytes === null || catalogBytes === undefined) {
     if (mode === PROCESSING_READY) throw new Error(`--${PROCESSING_READY} requires desktop/processing-catalog.json. ${regenerate}`)
-    return { mode: PLAYBACK_ONLY, explicit: mode !== null, catalogSha256: null, runtimeLockSha256: null,
+    return { mode: PLAYBACK_ONLY, explicit: mode !== null, catalogSha256: null, runtimeLockSha256: null, qualificationScope: null,
       notice: mode === null ? 'No processing mode named and desktop/processing-catalog.json is absent: this build is playback-only and its first-launch setup will report local song processing unavailable.' : undefined }
   }
   if (mode === PLAYBACK_ONLY) throw new Error(`--${PLAYBACK_ONLY} requires desktop/processing-catalog.json to be absent; remove it or package with --${PROCESSING_READY}`)
@@ -47,11 +50,12 @@ export function assertProcessingCatalog({ mode = null, catalogBytes, identity, l
       throw new Error(`catalog runtime targets ${catalog.runtime.platform}-${catalog.runtime.arch}, not the packaged ${target}`)
     }
     // Production rules: HTTPS-only runtime sources, never private-test local files.
-    catalog = validateSetupCatalog(catalog, { identity, trustedLocks: locks.lockSha256, modelPolicy, privateTestLocalSources: false })
+    catalog = validateSetupCatalog(catalog, { identity, trustedLocks: locks.lockSha256, modelPolicy, privateTestLocalSources: false, releaseChannel })
   } catch (error) {
     throw new Error(`desktop/processing-catalog.json would be rejected by the packaged ${target} application: ${error.message}. ${regenerate}`)
   }
-  return { mode: PROCESSING_READY, explicit: mode !== null, catalogSha256: sha256(catalogBytes), runtimeLockSha256: catalog.runtime.provenance.lockSha256 }
+  return { mode: PROCESSING_READY, explicit: mode !== null, catalogSha256: sha256(catalogBytes), runtimeLockSha256: catalog.runtime.provenance.lockSha256,
+    qualificationScope: catalog.qualification.scope }
 }
 
 export async function readProcessingCatalogInputs(desktopDirectory) {

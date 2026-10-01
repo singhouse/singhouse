@@ -113,8 +113,11 @@ application applies at first launch for the exact target being built.
 and report local song processing unavailable during setup. Signed releases must
 name one of the two. Without either flag, a development build is playback-only
 when the catalog is absent (the build output says so) and still refuses an
-invalid catalog that is present. The final build output records the mode and,
-for processing-ready builds, the catalog and runtime lock SHA-256 digests.
+invalid catalog that is present. The catalog is checked against the channel of
+the release policy being packaged, so a `private-smoke` catalog cannot be
+packaged into a build whose channel is not `private-test`. The final build
+output records the mode and, for processing-ready builds, the catalog and
+runtime lock SHA-256 digests and the catalog's `qualificationScope`.
 The assembler downloads checksum-pinned Python and FFmpeg inputs, builds the two
 application wheels with a pinned host toolchain, installs locked dependencies,
 and rebuilds the frontend using its npm lockfile. It refuses an existing output
@@ -790,8 +793,17 @@ the renderer or saved preferences. Its schema is:
 
 - `schema: 1`, `runtime`: the complete processing manifest accepted by the
   current application's processing lock policy.
-- `qualification`: `passed`, `runtimeLockSha256`, `platform`, `arch`, `evidenceReference`, and
-  `accelerator`, matching that exact runtime. Populate only from actual evidence.
+- `qualification`: `passed`, `scope`, `runtimeLockSha256`, `platform`, `arch`,
+  `evidenceReference`, and `accelerator`, matching that exact runtime. Populate
+  only from actual evidence. `scope` is required and states what `passed`
+  covers:
+  - `full`: the complete release qualification passed for this runtime and
+    target. Accepted by builds on any release channel.
+  - `private-smoke`: only a single-song real-processing smoke test passed. This
+    is not release qualification. It is accepted only when the build's release
+    policy (`release.json`) has `channel` exactly `private-test`; every other or
+    missing channel rejects the catalog. The setup wizard tells the user, before
+    consent, that this build's local processing passed a smoke test only.
 - `models`: entries with `id` and `terms: [{label, url}]` for every model in the
   combined installation. Terms URLs are HTTPS source references, not claims
   about checkpoint licensing.
@@ -805,7 +817,11 @@ qualification. Those checks remain necessary before release.
 Prepare the catalog with `node desktop/build/setup_catalog.mjs --runtime
 runtime.json --qualification qualification.json --terms terms.json --identity
 identity.json --output desktop/processing-catalog.json`. Inputs are explicit;
-the tool never manufactures qualification. `--memory memory.json` adds measured
+the tool never manufactures qualification. `--release release.json` names the
+release policy whose channel the catalog is checked against (default
+`desktop/release.json`); the tool refuses to write a `private-smoke` catalog
+for any channel other than `private-test`. Packaging re-checks the catalog
+against the release policy actually packaged. `--memory memory.json` adds measured
 memory evidence. Production catalogs reject local runtime URLs. The explicit
 `--private-test-local-sources` option is only for validating private test inputs;
 the application does not accept those as a production download catalog.

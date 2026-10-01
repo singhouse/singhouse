@@ -599,12 +599,13 @@ async function start() {
     try {
       if (existsSync(catalogPath)) catalog = validateSetupCatalog(JSON.parse(readFileSync(catalogPath, 'utf8')), {
         identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
+        releaseChannel: releasePolicy.channel,
       })
     } catch {
       catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.'
     }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, catalogError, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
       hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
       diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,

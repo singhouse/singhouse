@@ -96,8 +96,11 @@ async function main() {
   // Validate the catalog exactly as the packaged application will at launch,
   // before any installer exists; electron-builder silently skips a missing file.
   const appVersion = JSON.parse(await readFile(resolve(config.directories.app, 'package.json'), 'utf8')).version
+  // `policy` is the release policy installer.mjs copies into the package (and
+  // verifyPackagedReleasePolicy re-checks below), so its channel is the one the
+  // installed application will validate the catalog against.
   const processing = assertProcessingCatalog({ mode: processingMode, identity: packagedCatalogIdentity(nativeManifest, appVersion),
-    ...await readProcessingCatalogInputs(config.directories.app) })
+    releaseChannel: policy.channel, ...await readProcessingCatalogInputs(config.directories.app) })
   if (processing.notice) console.warn(processing.notice)
   console.log(`Processing catalog: ${processing.mode}${processing.catalogSha256 ? ` (catalog sha256 ${processing.catalogSha256}, runtime lock sha256 ${processing.runtimeLockSha256})` : ''}`)
 

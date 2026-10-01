@@ -24,7 +24,7 @@ function fixture(overrides = {}) {
       pythonVersion: '3', backendVersion: '1', lyricsyncVersion: '1', checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }) }
   const cache = { active: async () => cache.value, validate: value => value,
     install: async value => { calls.push('models'); cache.value = { id: hash(value), manifest: value } } }
-  const catalog = { schema: 1, runtime: manifest, qualification: { passed: true, runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu' },
+  const catalog = { schema: 1, runtime: manifest, qualification: { passed: true, scope: 'full', runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu' },
     models: LOCAL_MODEL_IDS.map(id => ({ id, terms: [{ label: 'Fixture terms', url: 'https://example.org/terms' }] })) }
   const setup = new OnboardingSetup({ runtime, cache, policy, catalog, diskFree: async () => 1e10,
     save: async value => saved.push(value), ...overrides })
@@ -377,4 +377,41 @@ test('CUDA memory stays unknown for missing, generic-only, or ambiguous CUDA dev
     assert.equal((await start(setup, plan.planId)).state, 'error')
   }
   assert.deepEqual(calls, [])
+})
+
+test('private-smoke qualification is selectable only on the private-test channel and is surfaced for labeling', async () => {
+  const full = fixture()
+  assert.equal((await full.setup.getStatus()).qualificationScope, 'full')
+  assert.equal((await full.setup.preflight()).qualificationScope, 'full')
+  const smoke = fixture({ releaseChannel: 'private-test' })
+  smoke.setup.catalog.qualification.scope = 'private-smoke'
+  assert.equal((await smoke.setup.getStatus()).qualificationScope, 'private-smoke')
+  const plan = await smoke.setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.qualificationScope, 'private-smoke')
+  assert.equal((await start(smoke.setup, plan.planId)).state, 'restart-required')
+  assert.deepEqual(smoke.calls, ['runtime', 'models'])
+  for (const releaseChannel of [undefined, 'stable', 'core-private-test']) {
+    const other = fixture({ releaseChannel })
+    other.setup.catalog.qualification.scope = 'private-smoke'
+    const refused = await other.setup.preflight()
+    assert.equal(refused.available, false)
+    assert.equal(refused.qualificationScope, null)
+    assert.match(refused.reason, /processing tools still need to pass the required checks/)
+    assert.throws(() => other.setup.selection(null), /required checks/)
+    assert.equal((await start(other.setup, refused.planId)).state, 'error')
+    assert.deepEqual(other.calls, [])
+  }
+  for (const scope of [undefined, 'smoke']) {
+    const unknown = fixture({ releaseChannel: 'private-test' })
+    unknown.setup.catalog.qualification.scope = scope
+    assert.equal((await unknown.setup.preflight()).available, false)
+    assert.equal((await unknown.setup.getStatus()).qualificationScope, null)
+  }
+  const failed = fixture({ releaseChannel: 'private-test' })
+  failed.setup.catalog.qualification.scope = 'private-smoke'; failed.setup.catalog.qualification.passed = false
+  assert.match((await failed.setup.preflight()).reason, /required checks/)
+  const broken = fixture({ releaseChannel: 'private-test', catalogError: 'The processing installation catalog could not be verified.' })
+  broken.setup.catalog.qualification.scope = 'private-smoke'
+  assert.equal((await broken.setup.preflight()).qualificationScope, null)
 })

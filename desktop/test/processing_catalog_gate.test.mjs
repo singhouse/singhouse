@@ -13,7 +13,7 @@ const sha = value => createHash('sha256').update(value).digest('hex')
 const nativeManifest = { schema: 1, appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', pythonVersion: '3.12.0', platform: 'linux', arch: 'x64', runtimeId: 'f'.repeat(64) }
 
 // Test-only fixture: qualification here is synthetic and never leaves this file.
-function fixture({ platform = 'linux', arch = 'x64' } = {}) {
+function fixture({ platform = 'linux', arch = 'x64', scope = 'full' } = {}) {
   const target = { appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', platform, arch }
   const runtime = { schema: 1, kind: 'processing', ...target, accelerator: 'cpu', python: 'python', pythonVersion: '3.12',
     capabilities: ['transcription', 'separation'], models: [...SETUP_MODEL_IDS],
@@ -25,11 +25,11 @@ function fixture({ platform = 'linux', arch = 'x64' } = {}) {
     sourceCommit: 'a'.repeat(40), packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/package', sha256: sha('package'), notices: ['NOTICE'] }],
     files: runtime.files.map(({ url, ...file }) => file) }
   runtime.provenance = { inputLock: JSON.stringify(lock), lockSha256: sha(JSON.stringify(lock)), sourceCommit: lock.sourceCommit, packages: lock.packages }
-  const qualification = { passed: true, runtimeLockSha256: runtime.provenance.lockSha256, platform, arch, accelerator: 'cpu', evidenceReference: 'fixture-run-1' }
+  const qualification = { passed: true, scope, runtimeLockSha256: runtime.provenance.lockSha256, platform, arch, accelerator: 'cpu', evidenceReference: 'fixture-run-1' }
   const modelPolicy = { schema: 1, allowedHosts: ['example.org'], models: SETUP_MODEL_IDS.map(id => ({ id, files: [{ path: `huggingface/${id}`, url: `https://example.org/${id}`, sha256: sha(id), revision: sha(id), size: 1, executable: false }] })) }
   const locks = { schema: 1, lockSha256: [runtime.provenance.lockSha256] }
   const catalog = createSetupCatalog({ runtime, qualification, models: SETUP_MODEL_IDS.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })) },
-    { identity: target, trustedLocks: locks.lockSha256, modelPolicy })
+    { identity: target, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel: 'private-test' })
   return { catalog, locks, modelPolicy, identity: packagedCatalogIdentity(nativeManifest, '1') }
 }
 const bytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
@@ -39,7 +39,7 @@ test('processing-ready requires a catalog the packaged application accepts and r
   assert.throws(() => assertProcessingCatalog({ mode: 'processing-ready', catalogBytes: null, identity, locks, modelPolicy }), /requires desktop\/processing-catalog\.json.*setup_catalog\.mjs/)
   const catalogBytes = bytes(catalog)
   const result = assertProcessingCatalog({ mode: 'processing-ready', catalogBytes, identity, locks, modelPolicy })
-  assert.deepEqual(result, { mode: 'processing-ready', explicit: true, catalogSha256: sha(catalogBytes), runtimeLockSha256: catalog.runtime.provenance.lockSha256 })
+  assert.deepEqual(result, { mode: 'processing-ready', explicit: true, catalogSha256: sha(catalogBytes), runtimeLockSha256: catalog.runtime.provenance.lockSha256, qualificationScope: 'full' })
 })
 
 test('processing-ready rejects every catalog the packaged application would reject', () => {
@@ -52,6 +52,8 @@ test('processing-ready rejects every catalog the packaged application would reje
     ['private-test local source', f => { f.catalog.runtime.files[0].url = 'file:///tmp/python' }, /private-test/],
     ['qualification not passed', f => { f.catalog.qualification.passed = false }, /qualification/],
     ['qualification absent', f => { delete f.catalog.qualification }, /qualification/],
+    ['qualification scope absent', f => { delete f.catalog.qualification.scope }, /qualification must state its scope/],
+    ['qualification scope unknown', f => { f.catalog.qualification.scope = 'partial' }, /qualification must state its scope/],
     ['model policy drift', f => { f.modelPolicy.models[0].files[0].url = 'https://unapproved.example/model' }, /approved upstream/],
   ]
   for (const [label, mutate, pattern] of cases) {
@@ -71,7 +73,7 @@ test('playback-only forbids a catalog; an unnamed mode follows the file but stil
   const catalogBytes = bytes(catalog)
   assert.throws(() => assertProcessingCatalog({ mode: 'playback-only', catalogBytes, identity, locks, modelPolicy }), /requires desktop\/processing-catalog\.json to be absent/)
   assert.deepEqual(assertProcessingCatalog({ mode: 'playback-only', catalogBytes: null, identity, locks, modelPolicy }),
-    { mode: 'playback-only', explicit: true, catalogSha256: null, runtimeLockSha256: null, notice: undefined })
+    { mode: 'playback-only', explicit: true, catalogSha256: null, runtimeLockSha256: null, qualificationScope: null, notice: undefined })
   const development = assertProcessingCatalog({ mode: null, catalogBytes: null, identity, locks, modelPolicy })
   assert.equal(development.mode, 'playback-only'); assert.equal(development.explicit, false)
   assert.match(development.notice, /playback-only.*processing unavailable/)
@@ -123,4 +125,27 @@ test('catalog identity is the launch-time native manifest validation', () => {
   assert.equal(packagedCatalogIdentity(nativeManifest, '1'), nativeManifest)
   assert.throws(() => packagedCatalogIdentity(nativeManifest, '2'), /does not match this application/)
   assert.throws(() => packagedCatalogIdentity({ ...nativeManifest, extra: 'x' }, '1'), /does not match this application/)
+})
+
+test('packaging records the qualification scope and refuses private-smoke outside the private-test channel', () => {
+  const full = fixture()
+  for (const releaseChannel of ['private-test', 'stable', undefined]) {
+    assert.equal(assertProcessingCatalog({ mode: 'processing-ready', catalogBytes: bytes(full.catalog), identity: full.identity,
+      locks: full.locks, modelPolicy: full.modelPolicy, releaseChannel }).qualificationScope, 'full')
+  }
+  const smoke = fixture({ scope: 'private-smoke' })
+  const catalogBytes = bytes(smoke.catalog)
+  const accepted = assertProcessingCatalog({ mode: 'processing-ready', catalogBytes, identity: smoke.identity,
+    locks: smoke.locks, modelPolicy: smoke.modelPolicy, releaseChannel: 'private-test' })
+  assert.deepEqual(accepted, { mode: 'processing-ready', explicit: true, catalogSha256: sha(catalogBytes),
+    runtimeLockSha256: smoke.catalog.runtime.provenance.lockSha256, qualificationScope: 'private-smoke' })
+  for (const releaseChannel of ['stable', 'core-private-test', undefined]) {
+    for (const mode of ['processing-ready', null]) {
+      assert.throws(() => assertProcessingCatalog({ mode, catalogBytes, identity: smoke.identity, locks: smoke.locks, modelPolicy: smoke.modelPolicy, releaseChannel }),
+        error => /would be rejected by the packaged linux-x64 application: Private-smoke processing qualification is accepted only by "private-test" channel builds/.test(error.message), String(releaseChannel))
+    }
+  }
+  const failed = fixture({ scope: 'private-smoke' }); failed.catalog.qualification.passed = false
+  assert.throws(() => assertProcessingCatalog({ mode: 'processing-ready', catalogBytes: bytes(failed.catalog), identity: failed.identity,
+    locks: failed.locks, modelPolicy: failed.modelPolicy, releaseChannel: 'private-test' }), /passed qualification/)
 })

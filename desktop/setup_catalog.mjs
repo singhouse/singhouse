@@ -43,7 +43,28 @@ export function validateSetupMemory(memory, runtime) {
   return result
 }
 
-export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPolicy, privateTestLocalSources = false } = {}) {
+// `full` means the complete release qualification passed. `private-smoke`
+// means only single-track real-processing smoke evidence passed; it is never
+// release qualification and is accepted only by private-test channel builds.
+export const QUALIFICATION_SCOPES = Object.freeze(['full', 'private-smoke'])
+export const PRIVATE_TEST_CHANNEL = 'private-test'
+
+// Returns the reason a qualification scope is unacceptable for the given
+// release channel, or null when it is acceptable. Channels are the validated
+// release policy's `channel`; anything other than exactly `private-test`
+// (including a missing channel) cannot accept private-smoke evidence.
+export function qualificationScopeError(scope, releaseChannel) {
+  if (!QUALIFICATION_SCOPES.includes(scope)) {
+    return 'Processing setup qualification must state its scope as "full" or "private-smoke"'
+  }
+  if (scope === 'private-smoke' && releaseChannel !== PRIVATE_TEST_CHANNEL) {
+    const channel = typeof releaseChannel === 'string' && /^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel) ? `"${releaseChannel}"` : 'missing'
+    return `Private-smoke processing qualification is accepted only by "${PRIVATE_TEST_CHANNEL}" channel builds; this build's release channel is ${channel}`
+  }
+  return null
+}
+
+export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPolicy, privateTestLocalSources = false, releaseChannel } = {}) {
   if (!catalog || catalog.schema !== 1 || !catalog.runtime) {
     throw new Error('Processing setup catalog is missing; prepare it with an explicit runtime manifest, qualification evidence, and model terms')
   }
@@ -57,6 +78,8 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
       || targetKeys.some(key => q[key] !== runtime[key])) {
     throw new Error('Processing setup requires explicit passed qualification evidence matching the complete runtime lock and target')
   }
+  const scopeError = qualificationScopeError(q.scope, releaseChannel)
+  if (scopeError) throw new Error(scopeError)
   for (const file of runtime.files) source(file.url, privateTestLocalSources)
   for (const entry of runtime.provenance.packages) source(entry.sourceUrl)
   if (!Array.isArray(catalog.models) || catalog.models.length !== SETUP_MODEL_IDS.length
@@ -79,7 +102,7 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
   files.forEach(file => source(file.url))
   const memory = validateSetupMemory(catalog.memory, runtime)
   return { schema: 1, runtime: structuredClone(runtime),
-    qualification: Object.fromEntries(['passed', 'runtimeLockSha256', ...targetKeys, 'evidenceReference'].map(key => [key, q[key]])),
+    qualification: Object.fromEntries(['passed', 'scope', 'runtimeLockSha256', ...targetKeys, 'evidenceReference'].map(key => [key, q[key]])),
     models: catalog.models.map(({ id, terms }) => ({ id, terms: terms.map(({ label, url }) => ({ label, url })) })),
     ...(memory ? { memory } : {}) }
 }

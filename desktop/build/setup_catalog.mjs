@@ -2,10 +2,11 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { assertReleasePolicy } from '../release.mjs'
 import { createSetupCatalog } from '../setup_catalog.mjs'
 
 export async function prepareSetupCatalog(args) {
-  const flags = new Set(['--runtime', '--qualification', '--terms', '--identity', '--output', '--locks', '--models', '--memory'])
+  const flags = new Set(['--runtime', '--qualification', '--terms', '--identity', '--output', '--locks', '--models', '--memory', '--release'])
   const values = {}
   let privateTestLocalSources = false
   for (let i = 0; i < args.length; i++) {
@@ -28,7 +29,13 @@ export async function prepareSetupCatalog(args) {
   const locks = await json(values['--locks'] || new URL('../processing-locks.json', import.meta.url), 'application processing locks')
   const modelPolicy = await json(values['--models'] || new URL('../models.json', import.meta.url), 'application model policy')
   const memory = values['--memory'] ? await json(values['--memory'], 'memory evidence') : undefined
-  const catalog = createSetupCatalog({ runtime, qualification, models, memory }, { identity, trustedLocks: locks.lockSha256, modelPolicy, privateTestLocalSources })
+  // The release policy whose channel decides which qualification scope is
+  // acceptable; packaging re-checks against the policy it actually ships.
+  let releasePolicy
+  try { releasePolicy = assertReleasePolicy(await json(values['--release'] || new URL('../release.json', import.meta.url), 'release policy')) }
+  catch (error) { throw new Error(error.message.startsWith('Cannot read') ? error.message : `Invalid release policy: ${error.message}`) }
+  const catalog = createSetupCatalog({ runtime, qualification, models, memory },
+    { identity, trustedLocks: locks.lockSha256, modelPolicy, privateTestLocalSources, releaseChannel: releasePolicy.channel })
   // Exclusive creation avoids accidentally replacing a reviewed release input.
   await writeFile(resolve(values['--output']), `${JSON.stringify(catalog, null, 2)}\n`, { flag: 'wx' })
   return catalog
