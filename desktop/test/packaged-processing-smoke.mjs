@@ -92,7 +92,9 @@ export const EVIDENCE_SCHEMA = 2
 // Every local file this harness loads, relative to the desktop directory.
 // A unit test checks this list is closed over the harness's relative imports.
 export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
-  'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs'])
+  'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs',
+  // The driver takes the runtime store's directory naming from the store itself.
+  'runtime_manager.mjs', 'processing_probe.py'])
 export function playwrightVersion() {
   try { return createRequire(import.meta.url)('playwright/package.json').version } catch { return null }
 }

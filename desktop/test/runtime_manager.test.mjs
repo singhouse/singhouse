@@ -8,7 +8,7 @@ import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import zlib, { crc32, deflateRawSync, gzipSync } from 'node:zlib'
-import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
+import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
 const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
@@ -77,7 +77,7 @@ test('installs, verifies and persists selection across restart; retains prior ru
   bindProvenance(updated)
   const second = await manager.install(updated)
   assert.notEqual(first.id, second.id)
-  assert.deepEqual((await readdir(join(root, 'processing/packs'))).sort(), [first.id, second.id].sort())
+  assert.deepEqual((await readdir(join(root, 'processing/packs'))).sort(), [first.id, second.id].map(runtimeDirectoryName).sort())
   assert.equal((await new RuntimeManager(join(root, 'processing'), identity).active()).id, second.id)
   await writeFile(join(second.directory, second.manifest.python), 'tampered')
   assert.equal((await manager.active()).id, first.id)
@@ -770,10 +770,10 @@ test('archive extraction resumes after interruption without re-retrieving or rew
   await assert.rejects(manager.install(manifest), /simulated power loss/)
   mock.mock.restore()
   const id = sha(JSON.stringify(manifest))
-  const staged = join(manager.root, 'staging', id)
+  const staged = join(manager.root, 'staging', runtimeDirectoryName(id))
   assert.deepEqual(await readFile(join(staged, 'python/bin/python3')), entries[1].data)
   const earlier = (await stat(join(staged, 'python/bin/python3'))).ino
-  assert.equal((await readdir(join(manager.root, 'staging', `${id}.archive`))).length, parts.length)
+  assert.equal((await readdir(join(manager.root, 'staging', `${runtimeDirectoryName(id)}.archive`))).length, parts.length)
   const fetched = requests.length
   const installed = await manager.install(manifest)
   await assertInstalled(manager, installed, entries)
@@ -788,7 +788,7 @@ test('a staged archive tree activates offline only after its stream was validate
   // Files placed in staging without a validated stream (an older or forged
   // tree) are never activated on their own; the parts must be decoded again.
   const offline = archiveManager(root, async () => { throw new Error('offline') })
-  const staged = join(offline.root, 'staging', id)
+  const staged = join(offline.root, 'staging', runtimeDirectoryName(id))
   for (const entry of entries) {
     await mkdir(join(staged, entry.path, '..'), { recursive: true })
     await writeFile(join(staged, entry.path), entry.data)
@@ -800,14 +800,14 @@ test('a staged archive tree activates offline only after its stream was validate
   let crashed = false
   const crashing = archiveManager(root, assetServer(urls, parts).fetchImpl, { directorySync: async path => {
     if (!crashed && path === staged) {
-      await assert.rejects(stat(join(crashing.root, 'staging', `${id}.archive`)), { code: 'ENOENT' })
+      await assert.rejects(stat(join(crashing.root, 'staging', `${runtimeDirectoryName(id)}.archive`)), { code: 'ENOENT' })
       crashed = true
       throw new Error('simulated power loss')
     }
   } })
   await assert.rejects(crashing.install(manifest), /simulated power loss/)
   assert.ok(crashed)
-  assert.deepEqual((await readdir(join(crashing.root, 'staging'))).sort(), [id, `${id}.stream`])
+  assert.deepEqual((await readdir(join(crashing.root, 'staging'))).sort(), [runtimeDirectoryName(id), `${runtimeDirectoryName(id)}.stream`])
   const installed = await offline.install(manifest)
   await assertInstalled(offline, installed, entries)
 })
@@ -841,7 +841,7 @@ test('corrupt, truncated, padded, multi-member or mislabelled archives fail clos
     const manager = archiveManager(root, assetServer(urls, served).fetchImpl)
     await assert.rejects(manager.install(manifest), expected, name)
     assert.equal((await manager.active()).id, previous.id, name)
-    assert.deepEqual(await readdir(join(manager.root, 'packs')), [previous.id], name)
+    assert.deepEqual(await readdir(join(manager.root, 'packs')), [runtimeDirectoryName(previous.id)], name)
   }
 })
 
@@ -909,7 +909,7 @@ test('a malformed archive stream is rejected on every attempt while its parts ar
       // next attempt retrieves and decodes them again and fails again.
       assert.deepEqual(await readdir(join(manager.root, 'staging')), [], `${name}, attempt ${attempt}`)
       assert.deepEqual(requests.map(request => request.url), bad.urls, `${name}, attempt ${attempt}`)
-      assert.ok(!(await readdir(join(manager.root, 'packs'))).includes(id))
+      assert.ok(!(await readdir(join(manager.root, 'packs'))).includes(runtimeDirectoryName(id)))
     }
     // Once a correct archive is published (new part digests, so a new
     // manifest), the third attempt installs it.
@@ -986,7 +986,7 @@ test('cancelling during extraction settles promptly and keeps the verified parts
   assert.equal(manager.busy, false)
   assert.equal(await manager.active(), null)
   const id = sha(JSON.stringify(manifest))
-  assert.equal((await readdir(join(manager.root, 'staging', `${id}.archive`))).length, parts.length)
+  assert.equal((await readdir(join(manager.root, 'staging', `${runtimeDirectoryName(id)}.archive`))).length, parts.length)
   const fetched = requests.length
   const installed = await settlesWithin(manager.install(manifest))
   await assertInstalled(manager, installed, entries)
@@ -1033,7 +1033,7 @@ test('a tampered file amid overlapping extraction work fails closed without rena
   assert.equal(await openDescriptors(), before, 'every descriptor was closed')
   assert.deepEqual(await readdir(join(root, 'processing', 'staging')), [])
   const later = new Set(entries.slice(bad).map(entry => entry.path))
-  const staged = join(root, 'processing', 'staging', sha(JSON.stringify(manifest)))
+  const staged = join(root, 'processing', 'staging', runtimeDirectoryName(sha(JSON.stringify(manifest))))
   assert.ok(renames.destinations.some(to => to.startsWith(staged)), 'earlier files were renamed into staging')
   assert.deepEqual(renames.destinations.filter(to => to.startsWith(staged) && later.has(to.slice(staged.length + 1).replaceAll('\\', '/'))), [])
 })
@@ -1121,7 +1121,7 @@ test('re-verifying a resumed staged file clears stray special mode bits', { skip
   const { root } = await fixture(t)
   const { manifest, parts, urls, entries } = archiveManifest()
   const id = sha(JSON.stringify(manifest))
-  const staged = join(root, 'processing', 'staging', id)
+  const staged = join(root, 'processing', 'staging', runtimeDirectoryName(id))
   // Stop after the stream validated, leaving a staged tree and its marker.
   let crashed = false
   const crashing = archiveManager(root, assetServer(urls, parts).fetchImpl, { directorySync: async path => {
@@ -1204,4 +1204,106 @@ test('exhaustive small-layout sweep accepts every split of a valid archive and r
     for (let mask = 1; mask < 2 ** 9; mask++) layouts.push(Array.from({ length: 9 }, (_, i) => N - 9 + i).filter((_, i) => mask & (1 << i)))
     for (const cuts of layouts) assert.match(await decodeLayout(root, entries, bytes, cuts, { streamOnly: true }), expected, `${name}: ${cuts}`)
   }
+})
+
+test('processing trees use the short directory name; pointers and results keep the full identity', async t => {
+  const { root, manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  const name = runtimeDirectoryName(installed.id)
+  assert.equal(name, installed.id.slice(0, 16))
+  assert.equal(installed.directory, join(manager.root, 'packs', name))
+  assert.deepEqual(await readdir(join(manager.root, 'packs')), [name])
+  const pointers = await manager.readPointers()
+  assert.deepEqual(pointers.map(pointer => pointer.id), [installed.id])
+  assert.equal(JSON.parse(await readFile(join(manager.root, `active.${pointers[0].slot}.json`), 'utf8')).id, installed.id)
+  const active = await new RuntimeManager(join(root, 'processing'), identity).active()
+  assert.equal(active.id, installed.id)
+  assert.equal(active.directory, installed.directory)
+  assert.throws(() => runtimeDirectoryName(name), /Invalid runtime identity/)
+})
+
+test('a short name held by a different runtime fails closed and is never overwritten', async t => {
+  const { root, source, manifest, manager } = await fixture(t)
+  const first = await manager.install(manifest)
+  await writeFile(source, 'second python!')
+  const updated = structuredClone(manifest)
+  updated.files[0].sha256 = sha('second python!')
+  bindProvenance(updated)
+  const id = sha(JSON.stringify(updated))
+  // Stand in for a prefix collision: another runtime's tree under this name.
+  const occupied = join(manager.root, 'packs', runtimeDirectoryName(id))
+  await fsPromises.cp(first.directory, occupied, { recursive: true })
+  const before = await readFile(join(occupied, 'manifest.json'), 'utf8')
+  await assert.rejects(manager.verify(id), /different or modified runtime/)
+  await assert.rejects(manager.install(updated), /different or modified runtime/)
+  assert.equal(await readFile(join(occupied, 'manifest.json'), 'utf8'), before)
+  assert.equal(sha(before), first.id)
+  assert.deepEqual((await manager.readPointers()).map(pointer => pointer.id), [first.id])
+  assert.equal((await new RuntimeManager(join(root, 'processing'), identity).active()).id, first.id)
+})
+
+test('a runtime installed under the earlier full-length name still loads, verifies and reinstalls in place', async t => {
+  const { root, manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  const legacy = join(manager.root, 'packs', installed.id)
+  await rename(installed.directory, legacy)
+  const reopened = new RuntimeManager(join(root, 'processing'), identity)
+  reopened.probe = async () => {}
+  const active = await reopened.active()
+  assert.equal(active.id, installed.id)
+  assert.equal(active.directory, legacy)
+  assert.equal((await reopened.verify(installed.id)).directory, legacy)
+  // Installing the same manifest again keeps the verified legacy tree.
+  const again = await reopened.install(manifest)
+  assert.equal(again.id, installed.id)
+  assert.equal(again.directory, legacy)
+  assert.deepEqual(await readdir(join(manager.root, 'packs')), [installed.id])
+  // Integrity is still checked against the full identity in the legacy tree.
+  await writeFile(join(legacy, manifest.python), 'tampered')
+  await assert.rejects(reopened.verify(installed.id), /verification failed/)
+  await assert.rejects(reopened.active(), /verification failed/)
+  const modified = JSON.parse(await readFile(join(legacy, 'manifest.json'), 'utf8'))
+  // Delivery URLs are outside the input lock, so this edit still validates.
+  modified.files[1].url += '?moved'
+  await writeFile(join(legacy, 'manifest.json'), JSON.stringify(modified))
+  await assert.rejects(reopened.verify(installed.id), /Runtime manifest was modified/)
+})
+
+test('a current-name tree takes precedence over a legacy full-length tree', async t => {
+  const { manifest, manager } = await fixture(t)
+  const installed = await manager.install(manifest)
+  await fsPromises.cp(installed.directory, join(manager.root, 'packs', installed.id), { recursive: true })
+  assert.equal((await manager.verify(installed.id)).directory, installed.directory)
+})
+
+test('staging left under the earlier full-length name is discarded and retrieved again', async t => {
+  const { manifest, manager } = await fixture(t)
+  const id = sha(JSON.stringify(manifest))
+  const staging = join(manager.root, 'staging')
+  await mkdir(join(staging, id, 'python', 'bin'), { recursive: true })
+  await writeFile(join(staging, id, 'python', 'bin', 'python3.partial'), 'fixture')
+  await mkdir(join(staging, `${id}.archive`))
+  await writeFile(join(staging, `${id}.archive`, 'part-001.partial'), 'stale')
+  await writeFile(join(staging, `${id}.stream`), 'stale')
+  const installed = await manager.install(manifest)
+  assert.equal(installed.id, id)
+  assert.deepEqual(await readdir(staging), [])
+  assert.deepEqual(await readdir(join(manager.root, 'packs')), [runtimeDirectoryName(id)])
+})
+
+test('model cache trees keep the full-length identity as their directory name', async t => {
+  const { root } = await fixture(t)
+  const revision = 'a'.repeat(40)
+  const manifest = { schema: 1, kind: 'models', models: ['whisper'], files: [{ path: 'huggingface/hub/model.bin',
+    url: `https://huggingface.co/upstream/model/resolve/${revision}/model.bin`, revision,
+    sha256: sha('model'), size: 5, executable: false }] }
+  const policy = { schema: 1, allowedHosts: ['huggingface.co'], models: [{ id: 'whisper', files: structuredClone(manifest.files) }] }
+  const cache = new ModelCache(join(root, 'models'), policy, { fetchImpl: async () => new Response('model') })
+  const installed = await cache.install(manifest)
+  assert.equal(installed.id, sha(JSON.stringify(manifest)))
+  assert.equal(cache.directoryName(installed.id), installed.id)
+  assert.equal(installed.directory, join(cache.root, 'packs', installed.id))
+  assert.deepEqual(await readdir(join(cache.root, 'packs')), [installed.id])
+  assert.equal((await cache.selectionForRepair()).directory, installed.directory)
+  assert.equal((await new ModelCache(join(root, 'models'), policy).active()).directory, installed.directory)
 })

@@ -12,6 +12,8 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync } from 'node:fs'
 import { isIP } from 'node:net'
 import { join } from 'node:path'
+// The store's own naming rule, so these paths cannot drift from it.
+import { runtimeDirectoryName } from '../runtime_manager.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 export const RUNTIME_COMPONENT_LABEL = 'Local processing runtime'
@@ -440,18 +442,20 @@ export function runtimeFileForUrlPath(runtime, path) {
 }
 
 // Staging location used by the application's runtime store; read-only stat.
-// A per-file transfer stages `<id>/<path>.partial`; an archive part stages
-// `<id>.archive/part-NNN.partial` beside the tree (runtime_manager.mjs).
+// A per-file transfer stages `<name>/<path>.partial`; an archive part stages
+// `<name>.archive/part-NNN.partial` beside the tree, where `<name>` is the
+// store's short directory name for the full identity (runtime_manager.mjs).
 export function partialRuntimeBytes(profile, runtimeId, file, runtime = null) {
   assert.match(runtimeId, /^[a-f0-9]{64}$/u)
+  const name = runtimeDirectoryName(runtimeId)
   let path
   if (runtime && runtime.archive !== undefined) {
     const unit = runtimeTransferUnits(runtime).find(entry => entry.label === file)
     assert.ok(unit, `Runtime archive part ${file} is not in the packaged catalog`)
-    path = join(profile, 'processing', 'staging', `${runtimeId}.archive`, `part-${String(unit.part).padStart(3, '0')}.partial`)
+    path = join(profile, 'processing', 'staging', `${name}.archive`, `part-${String(unit.part).padStart(3, '0')}.partial`)
   } else {
     assert.ok(typeof file === 'string' && !file.split('/').includes('..') && !file.startsWith('/'), 'Unsafe runtime file path')
-    path = join(profile, 'processing', 'staging', runtimeId, ...file.split('/')) + '.partial'
+    path = join(profile, 'processing', 'staging', name, ...file.split('/')) + '.partial'
   }
   const info = lstatSync(path, { throwIfNoEntry: false })
   return info?.isFile() && !info.isSymbolicLink() ? info.size : null
@@ -499,7 +503,10 @@ function regularFile(path, label) {
 // promised one, read back from the profile's own installed manifest.
 export function installedRuntimeIdentity(profile, runtimeId) {
   assert.match(runtimeId ?? '', /^[a-f0-9]{64}$/u, 'Application reports no active runtime identity')
-  const bytes = regularFile(join(profile, 'processing', 'packs', runtimeId, 'manifest.json'), 'Installed runtime manifest')
+  // As the store resolves it: the short name, else an earlier full-length tree.
+  const packs = join(profile, 'processing', 'packs'), current = join(packs, runtimeDirectoryName(runtimeId))
+  const directory = lstatSync(current, { throwIfNoEntry: false }) ? current : join(packs, runtimeId)
+  const bytes = regularFile(join(directory, 'manifest.json'), 'Installed runtime manifest')
   const manifest = JSON.parse(bytes)
   return { runtimeId, manifestSha256: sha256(bytes), canonicalId: jsonIdentity(manifest),
     runtimeLockSha256: manifest.provenance?.lockSha256 ?? null, target: { platform: manifest.platform, arch: manifest.arch, accelerator: manifest.accelerator } }

@@ -13,6 +13,15 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const hashPattern = /^[a-f0-9]{64}$/
 const token = /^[A-Za-z0-9._+-]{1,128}$/
 const offlineSources = Symbol('verified offline model sources')
+// Processing runtime directories are named by the first 16 hex characters of
+// the manifest digest, which keeps deep runtime trees within Windows path
+// limits. The name only locates a tree: the full digest stays the identity,
+// and every manifest is still checked against the full digest.
+export const RUNTIME_DIRECTORY_NAME_LENGTH = 16
+export const runtimeDirectoryName = id => {
+  if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity')
+  return id.slice(0, RUNTIME_DIRECTORY_NAME_LENGTH)
+}
 // Processing archive delivery. The archive carries no paths or headers of its
 // own: its uncompressed stream is the concatenation of every manifest file's
 // bytes in manifest order, so layout always comes from the validated manifest.
@@ -419,6 +428,21 @@ export class RuntimeManager {
     this.activationHook = activationHook
     this.trustedLocks = trustedLocks
     this.busy = false
+  }
+
+  // The on-disk name for an identity's pack and staging trees (per store).
+  directoryName(id) { return runtimeDirectoryName(id) }
+
+  // Prefer the current name; a tree installed under the earlier full-length
+  // name is used only when no current-name entry exists. Never trusted by name.
+  async packDirectory(id) {
+    const packs = join(this.root, 'packs'), current = join(packs, this.directoryName(id))
+    if (current === join(packs, id)) return current
+    try { await lstat(current); return current }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+    try { await lstat(join(packs, id)); return join(packs, id) }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+    return current
   }
 
   validate(manifest) { return validateProcessingManifest(manifest, this.identity, this.trustedLocks) }
@@ -853,11 +877,17 @@ export class RuntimeManager {
       signal.throwIfAborted()
       const archive = manifest.kind === 'processing' ? manifest.archive : undefined
       const bytes = manifest.files.reduce((sum, file) => sum + file.size, 0)
-      const packs = join(this.root, 'packs'), staging = join(this.root, 'staging', id)
-      // Archive parts live beside, never inside, the pack tree: `<id>.archive`
-      // cannot equal any hex `<id>`, and the staging inventory stays exact.
-      const archiveDirectory = join(this.root, 'staging', `${id}.archive`)
-      const streamMarker = join(this.root, 'staging', `${id}.stream`)
+      const name = this.directoryName(id)
+      const packs = join(this.root, 'packs'), staging = join(this.root, 'staging', name)
+      // Archive parts live beside, never inside, the pack tree: `<name>.archive`
+      // cannot equal any hex `<name>`, and the staging inventory stays exact.
+      const archiveDirectory = join(this.root, 'staging', `${name}.archive`)
+      const streamMarker = join(this.root, 'staging', `${name}.stream`)
+      // Staging left under the earlier full-length name is discarded, not
+      // resumed: it holds only unactivated bytes, which are fetched again.
+      if (name !== id) {
+        for (const legacy of [id, `${id}.archive`, `${id}.stream`]) await rm(join(this.root, 'staging', legacy), { recursive: true, force: true })
+      }
       // Archive form: the remaining compressed parts and the full extracted tree
       // coexist until every file verifies (parts are removed only afterwards);
       // activation renames staging, so no third copy is made. Already retrieved
@@ -906,7 +936,8 @@ export class RuntimeManager {
       })
       if (manifestFile) { try { await manifestFile.writeFile(JSON.stringify(manifest)); await manifestFile.sync() } finally { await manifestFile.close() } }
       await syncTree(staging, this.directorySync)
-      const destination = join(packs, id)
+      // An existing tree under the earlier full-length name keeps that name.
+      const destination = await this.packDirectory(id)
       signal.throwIfAborted()
       let existing = false
       try { await lstat(destination); existing = true }
@@ -915,6 +946,8 @@ export class RuntimeManager {
         let damaged = false
         try { await this.verify(id) }
         catch (error) {
+          // A shortened name shared with a different runtime is never overwritten.
+          if (error.collision) throw error
           if (manifest.kind !== 'models' || (error.code && error.code !== 'ENOENT')) throw error
           // Repair only ordinary model trees. Unsafe links or special files
           // still require operator attention; never move or overwrite them.
@@ -929,7 +962,7 @@ export class RuntimeManager {
           if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Repair inventory does not match its manifest')
           const quarantine = join(this.root, 'quarantine')
           await plainDirectory(quarantine)
-          const retained = await mkdtemp(join(quarantine, `${id}-`))
+          const retained = await mkdtemp(join(quarantine, `${name}-`))
           signal.throwIfAborted()
           // Keep damaged evidence and the previous pointer slots intact. If
           // interrupted here, a retry can finish from the verified staging tree.
@@ -975,14 +1008,20 @@ export class RuntimeManager {
 
   async verify(id) {
     if (!hashPattern.test(id || '')) throw new Error('Invalid active runtime identity')
-    const directory = join(this.root, 'packs', id)
+    const directory = await this.packDirectory(id)
     for (const path of [this.root, join(this.root, 'packs'), directory]) {
       const info = await lstat(path)
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid runtime directory')
     }
     const raw = await checkedRead(join(directory, 'manifest.json'))
-    const manifest = this.validate(JSON.parse(raw))
-    if (digest(JSON.stringify(manifest)) !== id) throw new Error('Runtime manifest was modified')
+    let manifest
+    try { manifest = this.validate(JSON.parse(raw)) }
+    catch (error) { if (directory === join(this.root, 'packs', id)) throw error; manifest = null }
+    // Always compare with the full identity, never the directory name.
+    if (!manifest || digest(JSON.stringify(manifest)) !== id) {
+      if (directory === join(this.root, 'packs', id)) throw new Error('Runtime manifest was modified')
+      throw Object.assign(new Error('Runtime directory holds a different or modified runtime; it was not changed'), { collision: true })
+    }
     const allowed = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
     const present = await inventory(directory)
     if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Runtime file inventory does not match its manifest')
@@ -1114,6 +1153,8 @@ export function validateModelManifest(value, policy) {
 
 export class ModelCache extends RuntimeManager {
   constructor(root, policy, options) { super(root, {}, options); this.policy = policy }
+  // Model cache trees keep the full-length identity as their directory name.
+  directoryName(id) { if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity'); return id }
   validate(manifest) { return validateModelManifest(manifest, this.policy) }
 
   async install(manifest, options = {}) {
@@ -1162,7 +1203,7 @@ export class ModelCache extends RuntimeManager {
       // staging, even though the pointer's original pack path is now absent.
       for (const area of ['packs', 'staging']) {
         try {
-          const directory = join(this.root, area, id)
+          const directory = join(this.root, area, this.directoryName(id))
           for (const path of [this.root, join(this.root, area), directory]) {
             const info = await lstat(path)
             if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid model repair directory')

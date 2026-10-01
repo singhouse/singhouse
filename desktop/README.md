@@ -636,7 +636,7 @@ Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
 
 For archive-form packs, installation retrieves each part into
-`processing/staging/<id>.archive/`, outside the pack tree. It resumes partial
+`processing/staging/<name>.archive/`, outside the pack tree. It resumes partial
 parts with HTTP ranges and checks each part's size and SHA-256. Then it reads
 the parts again (checking their SHA-256 again), streams them through one
 decompressor, and writes the files in manifest order, checking every file's
@@ -648,7 +648,7 @@ member, or any byte beyond the last file. A rejected archive is never
 activated, on that attempt or any later one while the same parts are the
 source: its parts and everything extracted from them are deleted, so a retry
 retrieves and checks them again. Only a stream that passes every check writes
-`processing/staging/<id>.stream`, a marker that the staged files came from a
+`processing/staging/<name>.stream`, a marker that the staged files came from a
 validated stream; staged files are reused without decoding again only when
 that marker is present and every file still verifies. Parts are removed only
 after the marker is written and every staged file verifies. After an
@@ -689,6 +689,14 @@ or filesystem qualification. Cancellation, checksum failures, and interrupted
 transfers preserve the previous selection. Changes take effect on restart, so
 running jobs keep the environment they started with. Old verified packs remain
 in application data under `processing/packs/`; they are not removed automatically.
+A runtime pack's identity is the SHA-256 of its manifest. Its pack and staging
+directories are named `<name>`, the first 16 hex characters of that identity, to
+keep deep runtime trees within Windows path limits; pointers, status, and the
+backend's admission check use the full identity, and every manifest is checked
+against it. A directory under the shortened name whose manifest does not match
+is rejected and left unchanged. Packs installed under the earlier full-length
+name still load, verify, and reinstall in place; staging left under that name is
+discarded and retrieved again. Model cache directories keep the full identity.
 To select a retained version, install its original manifest again. Installation
 locks are held by the operating system through the bundled playback interpreter;
 process death releases them automatically, and retry preserves partial transfers.
@@ -1245,7 +1253,7 @@ start, either first or after a resume. Without the log, or without such a
 request, the retry is `unproven`; polling alone never proves a resume. For an
 archive-delivered runtime the file is the interrupted part: when setup stops,
 the harness records the staged size of every part
-(`<id>.archive/part-NNN.partial`), and the kept bytes are those of the part the
+(`<name>.archive/part-NNN.partial`), and the kept bytes are those of the part the
 retry is judged on (with an injected failure and the log, the part the server
 failed, which may differ from the last part setup progress named). With the
 log, an archive retry passes only when some but not all of that part was kept
