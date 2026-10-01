@@ -247,6 +247,8 @@ export async function checkedFile(path, flags) {
 
 async function fileHash(file, signal) {
   const hash = createHash('sha256')
+  // Callers await before getting here; never build a stream on an aborted signal.
+  signal?.throwIfAborted()
   for await (const chunk of file.createReadStream({ start: 0, autoClose: false, signal })) hash.update(chunk)
   return hash.digest('hex')
 }
@@ -298,7 +300,9 @@ async function stagingAncestors(staging, path) {
     let info
     try { info = await lstat(ancestor) } catch (error) {
       if (error.code !== 'ENOENT') throw error
-      // The parent was just checked, so a non-recursive create cannot follow a link.
+      // Create only this level (its parent was lstat-checked just above), then
+      // lstat what now exists here; a link or non-directory is rejected below.
+      // The check-then-use window is the same as the earlier recursive form's.
       try { await mkdir(ancestor, { mode: 0o700 }) } catch (created) { if (created.code !== 'EEXIST') throw created }
       info = await lstat(ancestor)
     }
@@ -541,6 +545,9 @@ export class RuntimeManager {
         source = offlineSource.createReadStream({ start: offset, autoClose: false, signal })
       } else if (url.protocol === 'file:') {
         localSource = await checkedFile(fileURLToPath(url), constants.O_RDONLY)
+        // A stream built on an already-aborted signal reports the abort twice,
+        // once as an uncaught exception; check synchronously right before it.
+        signal?.throwIfAborted()
         source = localSource.createReadStream({ start: offset, autoClose: false, signal })
       } else {
         const response = await this.fetchSource(url, { signal,
@@ -741,9 +748,14 @@ export class RuntimeManager {
     inflater.on('data', chunk => output.push(chunk))
     inflater.on('error', error => { inflateError ??= error })
     // Cancellation destroys the inflater, which settles every wait below.
-    const cancel = () => inflater.destroy(signal.reason)
+    // Always destroy with a real error: abort reasons may be falsy, and
+    // destroy(null) emits neither 'end' nor 'error'. Each wait then calls
+    // signal.throwIfAborted(), so the caller's own reason is what surfaces.
+    const cancel = () => inflater.destroy(new Error('Runtime archive extraction cancelled'))
     signal.addEventListener('abort', cancel, { once: true })
-    const ended = new Promise(resolveEnd => { inflater.once('end', resolveEnd); inflater.once('error', resolveEnd) })
+    const ended = new Promise(resolveEnd => {
+      inflater.once('end', resolveEnd); inflater.once('error', resolveEnd); inflater.once('close', resolveEnd)
+    })
     const drain = async () => {
       while (output.length) { signal.throwIfAborted(); await consume(output.shift()) }
     }
@@ -773,6 +785,8 @@ export class RuntimeManager {
           if ((await file.stat()).size !== part.size) throw invalidArchive('Runtime archive part changed before extraction')
           const hash = createHash('sha256')
           let read = 0
+          // Synchronously before building the stream (see transfer).
+          signal.throwIfAborted()
           for await (const chunk of file.createReadStream({ start: 0, autoClose: false, signal })) {
             signal.throwIfAborted()
             read += chunk.length
@@ -870,11 +884,13 @@ export class RuntimeManager {
         await rm(destination + '.partial', { force: true })
         const file = await checkedFile(destination, constants.O_RDWR)
         try {
-          if ((await file.stat()).size !== record.size || await fileHash(file) !== record.sha256) throw new Error('Runtime file changed before activation')
+          const info = await file.stat()
+          if (info.size !== record.size || await fileHash(file) !== record.sha256) throw new Error('Runtime file changed before activation')
           // A no-op chmod still dirties the inode (ctime), turning the sync
-          // below into a journal commit per file; the resulting mode is identical.
+          // below into a journal commit per file. Comparing all permission and
+          // special bits (setuid/setgid/sticky) keeps the resulting mode identical.
           const mode = record.executable ? 0o700 : 0o600
-          if (((await file.stat()).mode & 0o777) !== mode) await file.chmod(mode)
+          if ((info.mode & 0o7777) !== mode) await file.chmod(mode)
           await file.sync()
         } finally { await file.close() }
       }

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink, open } from 'node:fs/promises'
+import fsPromises, { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink, open, chmod } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { crc32, deflateRawSync, gzipSync } from 'node:zlib'
+import zlib, { crc32, deflateRawSync, gzipSync } from 'node:zlib'
 import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
@@ -990,6 +991,150 @@ test('cancelling during extraction settles promptly and keeps the verified parts
   const installed = await settlesWithin(manager.install(manifest))
   await assertInstalled(manager, installed, entries)
   assert.equal(requests.length, fetched, 'a cancelled extraction keeps its verified parts')
+})
+
+// Open descriptors of this process, where the platform exposes them cheaply.
+const openDescriptors = async () => process.platform === 'linux' ? (await readdir('/proc/self/fd')).length : 0
+// Deterministic incompressible bytes, distinct per seed (so deflate stores them).
+const seededNoise = (seed, length) => {
+  const out = Buffer.alloc(length)
+  for (let i = 0; i < length; i += 32) createHash('sha256').update(`${seed}:${i}`).digest().copy(out, i)
+  return out
+}
+const manyArchiveEntries = (count, size = index => 500 + (index * 37) % 900) => [
+  { path: 'python/bin/python3', data: Buffer.from('fixture python'), executable: true },
+  { path: 'NOTICE.fixture', data: Buffer.from('MIT notice'), executable: false },
+  ...Array.from({ length: count }, (_, index) => ({ path: `lib/d${index % 5}/sub${index % 3}/f${index}.bin`,
+    data: index % 7 === 3 ? Buffer.alloc(0) : seededNoise(index, size(index)), executable: index % 4 === 0 })),
+]
+// Records every rename destination made through node:fs/promises while active.
+function recordRenames(t) {
+  const destinations = [], nativeRename = fsPromises.rename
+  const mock = t.mock.method(fsPromises, 'rename', function (from, to) { destinations.push(String(to)); return nativeRename.call(this, from, to) })
+  syncBuiltinESMExports()
+  return { destinations, restore: () => { mock.mock.restore(); syncBuiltinESMExports() } }
+}
+// Signals the last retrieved part is complete, i.e. extraction is about to start.
+const extractionStarts = (parts, onStart) => event => {
+  if (event.phase === 'retrieve' && event.part === parts.length && event.received === event.total) onStart()
+}
+
+test('a tampered file amid overlapping extraction work fails closed without renaming it or anything after it', { timeout: 60000 }, async t => {
+  const { root } = await fixture(t)
+  const entries = manyArchiveEntries(60), bad = 32
+  assert.ok(entries[bad].data.length)
+  const tampered = entries.map((entry, index) => index === bad ? { ...entry, data: Buffer.from(entry.data).fill(1, 0, 10) } : entry)
+  const { manifest, parts, urls } = archiveManifest(tampered, { inventory: entries, partSize: 4000 })
+  const before = await openDescriptors()
+  const renames = recordRenames(t)
+  try {
+    await assert.rejects(settlesWithin(archiveManager(root, assetServer(urls, parts).fetchImpl).install(manifest)), /checksum/)
+  } finally { renames.restore() }
+  assert.equal(await openDescriptors(), before, 'every descriptor was closed')
+  assert.deepEqual(await readdir(join(root, 'processing', 'staging')), [])
+  const later = new Set(entries.slice(bad).map(entry => entry.path))
+  const staged = join(root, 'processing', 'staging', sha(JSON.stringify(manifest)))
+  assert.ok(renames.destinations.some(to => to.startsWith(staged)), 'earlier files were renamed into staging')
+  assert.deepEqual(renames.destinations.filter(to => to.startsWith(staged) && later.has(to.slice(staged.length + 1).replaceAll('\\', '/'))), [])
+})
+
+test('deflate data errors deep in a many-file stream discard everything and recur on every attempt', { timeout: 120000 }, async t => {
+  const { root } = await fixture(t)
+  const entries = manyArchiveEntries(120, index => 3000 + index)
+  const honest = gzipConcat(Buffer.concat(entries.map(entry => entry.data)))
+  const body = honest.subarray(10, honest.length - 8)
+  // Walk the stored blocks the encoder chose for incompressible input.
+  const blocks = []
+  for (let at = 0; at < body.length && ((body[at] >> 1) & 3) === 0;) { blocks.push(at); at += 5 + body.readUInt16LE(at + 1) }
+  assert.ok(blocks.length >= 3, `expected several stored blocks, found ${blocks.length}`)
+  for (const which of [1, Math.floor(blocks.length / 2), blocks.length - 1]) {
+    const bytes = Buffer.from(honest)
+    bytes[10 + blocks[which] + 3] ^= 1 // NLEN no longer complements LEN
+    const bad = archiveManifest(entries, { compressed: bytes, partSize: 50000 })
+    const store = join(root, `block-${which}`)
+    for (const attempt of [1, 2]) {
+      const label = `block ${which} of ${blocks.length}, attempt ${attempt}`
+      const { fetchImpl, requests } = assetServer(bad.urls, bad.parts)
+      const manager = archiveManager(store, fetchImpl)
+      const before = await openDescriptors()
+      await assert.rejects(settlesWithin(manager.install(bad.manifest)), /truncated or corrupt/, label)
+      assert.equal(await openDescriptors(), before, label)
+      assert.equal(manager.busy, false, label)
+      assert.deepEqual(await readdir(join(manager.root, 'staging')), [], label)
+      assert.deepEqual(requests.map(request => request.url), bad.urls, label)
+    }
+  }
+})
+
+test('cancelling while the inflater finishes settles as the caller cancel, whatever the reason', { timeout: 60000 }, async t => {
+  for (const reason of [undefined, null]) {
+    const { root } = await fixture(t)
+    const { manifest, parts, urls } = archiveManifest(manyArchiveEntries(10), { partSize: 4000 })
+    const controller = new AbortController()
+    let extracting = false, cancelled = false
+    const manager = archiveManager(root, assetServer(urls, parts).fetchImpl, { progress: extractionStarts(parts, () => { extracting = true }) })
+    const nativeEnd = zlib.InflateRaw.prototype.end
+    // Cancel right after the stream is told its input is complete.
+    const mock = t.mock.method(zlib.InflateRaw.prototype, 'end', function (...args) {
+      const result = nativeEnd.apply(this, args)
+      if (extracting && !cancelled) { cancelled = true; controller.abort(reason) }
+      return result
+    })
+    let outcome
+    try { await settlesWithin(manager.install(manifest, { signal: controller.signal })); outcome = 'installed' } catch (error) { outcome = { error } } finally { mock.mock.restore() }
+    assert.ok(cancelled, String(reason))
+    assert.ok(outcome !== 'installed', String(reason))
+    assert.equal(outcome.error, controller.signal.reason, `abort reason ${String(reason)} surfaces as given`)
+    assert.equal(manager.busy, false)
+  }
+})
+
+test('cancelling between opening a part and reading it raises no uncaught error', { timeout: 60000 }, async t => {
+  const uncaught = [], rejected = []
+  const onUncaught = error => uncaught.push(error), onRejected = error => rejected.push(error)
+  process.on('uncaughtException', onUncaught)
+  process.on('unhandledRejection', onRejected)
+  t.after(() => { process.off('uncaughtException', onUncaught); process.off('unhandledRejection', onRejected) })
+  const { root } = await fixture(t)
+  const { manifest, parts, urls } = archiveManifest(manyArchiveEntries(10), { partSize: 1000 })
+  const controller = new AbortController()
+  let extracting = false, cancelled = false
+  const manager = archiveManager(root, assetServer(urls, parts).fetchImpl, { progress: extractionStarts(parts, () => { extracting = true }) })
+  const nativeOpen = fsPromises.open
+  const mock = t.mock.method(fsPromises, 'open', async function (path, ...rest) {
+    const handle = await nativeOpen.call(this, path, ...rest)
+    if (extracting && !cancelled && String(path).endsWith('part-001.partial')) { cancelled = true; controller.abort() }
+    return handle
+  })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(settlesWithin(manager.install(manifest, { signal: controller.signal })), { name: 'AbortError' })
+  } finally { mock.mock.restore(); syncBuiltinESMExports() }
+  // Give a stray stream error a chance to surface.
+  await new Promise(resolveLater => setTimeout(resolveLater, 200))
+  assert.ok(cancelled)
+  assert.deepEqual(uncaught.map(String), [])
+  assert.deepEqual(rejected.map(String), [])
+})
+
+test('re-verifying a resumed staged file clears stray special mode bits', { skip: process.platform === 'win32' }, async t => {
+  const { root } = await fixture(t)
+  const { manifest, parts, urls, entries } = archiveManifest()
+  const id = sha(JSON.stringify(manifest))
+  const staged = join(root, 'processing', 'staging', id)
+  // Stop after the stream validated, leaving a staged tree and its marker.
+  let crashed = false
+  const crashing = archiveManager(root, assetServer(urls, parts).fetchImpl, { directorySync: async path => {
+    if (!crashed && path === staged) { crashed = true; throw new Error('simulated power loss') }
+  } })
+  await assert.rejects(crashing.install(manifest), /simulated power loss/)
+  const notice = join(staged, 'NOTICE.fixture')
+  await chmod(notice, 0o4600)
+  assert.equal((await stat(notice)).mode & 0o7777, 0o4600)
+  const offline = archiveManager(root, async () => { throw new Error('offline') })
+  const installed = await offline.install(manifest)
+  assert.equal((await stat(join(installed.directory, 'NOTICE.fixture'))).mode & 0o7777, 0o600)
+  await assertInstalled(offline, installed, entries)
 })
 
 // Writes `bytes` split at `cuts` as the retrieved parts and decodes them.

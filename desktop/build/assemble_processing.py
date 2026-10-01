@@ -40,7 +40,7 @@ CHUNK = 1024 * 1024
 # Fixed gzip header: deflate, no optional fields, zero mtime, XFL 0, OS unknown.
 GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
 GZIP_TRAILER_SIZE = 8
-ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._+-]{1,200}")
+ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._-]{1,200}")
 
 
 def normalized(value):
@@ -412,8 +412,12 @@ def _write_pack(staging, output, manifest, files, chunks_for, form):
             manifest["files"].append({**record, "url": base_url + record["sha256"]})
     else:
         base_url = form["baseUrl"] or (output / "archive").as_uri() + "/"
+        # Lock tokens may contain characters a part name must not (e.g. '+',
+        # a hosting hazard in URL paths); map them to '-' so the default name
+        # always satisfies ARCHIVE_NAME.
         name = form["name"] or "singhouse-processing-{}-{}-{}-{}.pack.gz".format(
-            manifest["platform"], manifest["arch"], manifest["accelerator"], manifest["provenance"]["lockSha256"][:16])
+            *(re.sub(r"[^A-Za-z0-9._-]", "-", manifest[key]) for key in ("platform", "arch", "accelerator")),
+            manifest["provenance"]["lockSha256"][:16])
         (staging / "archive").mkdir()
         writer = PartWriter(staging / "archive", name, form["partSize"])
         try:

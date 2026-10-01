@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -389,6 +390,50 @@ class ArchivePackTests(unittest.TestCase):
         self.assertTrue(manifest["archive"]["parts"][0]["url"].startswith((self.root / "out" / "pack" / "archive").absolute().as_uri()))
         with self.assertRaisesRegex(ValueError, "Output exists"):
             builder.assemble(self.payload, self.lock_path, self.root / "out" / "pack")
+
+    def test_default_part_name_is_safe_for_any_lock_token(self):
+        lock = json.loads(self.lock_path.read_text())
+        lock["arch"] = "x64+avx2"
+        self.lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+        lock_sha = hashlib.sha256(self.lock_path.read_bytes()).hexdigest()
+        manifest = builder.assemble(self.payload, self.lock_path, self.root / "plus", archive_part_size=1000)
+        names = [Path(part["url"]).name for part in manifest["archive"]["parts"]]
+        stem = f"singhouse-processing-linux-x64-avx2-cpu-{lock_sha[:16]}.pack.gz"
+        self.assertEqual(names, [f"{stem}.{i:03d}" for i in range(1, len(names) + 1)])
+        self.assertTrue(all(builder.ARCHIVE_NAME.fullmatch(name) for name in names))
+        # The default-named pack re-hosts without the payload.
+        shutil.rmtree(self.payload)
+        rehosted = builder.from_pack(self.root / "plus", self.root / "rehosted", archive_base_url=self.BASE, archive_part_size=1000)
+        self.assertEqual([part["sha256"] for part in rehosted["archive"]["parts"]], [part["sha256"] for part in manifest["archive"]["parts"]])
+        self.assertEqual([part["url"] for part in rehosted["archive"]["parts"]], [self.BASE + name for name in names])
+        # An explicit name keeps the strict alphabet, and says so.
+        with self.assertRaisesRegex(ValueError, r"letters, digits, '\.', '_' or '-'"):
+            builder.from_pack(self.root / "plus", self.root / "never", archive_name="runtime+cpu.pack.gz")
+        self.assertFalse((self.root / "never").exists())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
+    def test_temporary_output_honours_the_umask_and_is_removed_on_failure(self):
+        previous = os.umask(0o077)
+        try:
+            builder.assemble(self.payload, self.lock_path, self.root / "private" / "pack", archive_part_size=4000)
+            self.assertEqual((self.root / "private" / "pack").stat().st_mode & 0o777, 0o700)
+            real, modes = builder.checked_chunks, []
+
+            def failing(record, source):
+                modes.extend(path.stat().st_mode & 0o777 for path in (self.root / "failed").iterdir())
+                raise OSError("simulated read failure")
+                yield b""
+            builder.checked_chunks = failing
+            try:
+                with self.assertRaisesRegex(OSError, "simulated"):
+                    builder.assemble(self.payload, self.lock_path, self.root / "failed" / "pack", archive_part_size=4000)
+            finally:
+                builder.checked_chunks = real
+            # The temporary sibling existed with umask-limited permissions, and nothing remains.
+            self.assertEqual(modes, [0o700])
+            self.assertEqual(list((self.root / "failed").iterdir()), [])
+        finally:
+            os.umask(previous)
 
     def test_delivery_options_are_mutually_exclusive_and_validated(self):
         invalid = [
