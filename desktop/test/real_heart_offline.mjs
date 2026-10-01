@@ -60,14 +60,14 @@ const attestation = processingAttestation(active, probe)
 // starting the real worker. An empty VAD selection loads the real checkpoint and
 // processor without repeating an operator's already completed regeneration.
 const bootstrap = `import importlib.util,json,os,pathlib,subprocess,sys,wave
-native,state,identity,processing,models,probe=sys.argv[1:]
+native,state,identity,processing,models,probe,processing_id,models_id=sys.argv[1:]
 native=pathlib.Path(native)
 spec=importlib.util.spec_from_file_location('desktop_bootstrap',native/'backend.py')
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 identity=json.loads(identity)
 assert module.validate_native(native)==identity, 'Assembled native identity failed validation'
 state=pathlib.Path(state)
-env=module.processing_environment(state/'backend',identity,pathlib.Path(processing),pathlib.Path(models),json.loads(probe))
+env=module.processing_environment(state/'backend',identity,pathlib.Path(processing),pathlib.Path(models),json.loads(probe),processing_id=processing_id,models_id=models_id)
 assert env['KARAOKE_PROCESSING_PYTHON']
 checkpoint=pathlib.Path(env['KARAOKE_HEART_CKPT'])
 assert checkpoint.is_dir()
@@ -87,7 +87,7 @@ assert value['transcriber']=='heart' and value['segments']==[]
 print(json.dumps({'checkpointLoaded':True,'worker':'heart','regenerationRepeated':False,'modelRevision':json.loads(env['KARAOKE_HEART_MODEL_STATUS_JSON'])['revision']}))
 `
 const result = await new Promise((resolveRun, reject) => {
-  const child = spawn(python, ['-I', '-B', '-c', bootstrap, native, state, JSON.stringify(identity), active.directory, models.directory, JSON.stringify(attestation)],
+  const child = spawn(python, ['-I', '-B', '-c', bootstrap, native, state, JSON.stringify(identity), active.directory, models.directory, JSON.stringify(attestation), active.id, models.id],
     { stdio: ['ignore', 'pipe', 'pipe'] })
   let output = '', error = ''
   child.stdout.on('data', chunk => { output += chunk })

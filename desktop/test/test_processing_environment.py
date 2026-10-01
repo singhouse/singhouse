@@ -38,7 +38,7 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         manifest["provenance"] = dict(inputLock=raw_lock, lockSha256=self.lock_hash,
                                       packages=[], sourceCommit="a" * 40)
         raw = json.dumps(manifest).encode()
-        identifier = hashlib.sha256(raw).hexdigest()
+        identifier = self.identifier = hashlib.sha256(raw).hexdigest()
         self.processing = self.root / "processing" / "packs" / identifier
         for relative, data in {**payloads, "manifest.json": raw}.items():
             path = self.native(self.processing / relative)
@@ -58,9 +58,16 @@ class ProcessingEnvironmentTests(unittest.TestCase):
     def native(path):
         return _windows_extended_path(path) if os.name == "nt" else path
 
-    def admit(self, **changes):
+    def admit(self, processing_id=None, **changes):
         return processing_environment(self.runtime, self.identity, self.processing, None,
-                                      {**self.probe, **changes}, trusted_locks=[self.lock_hash])
+                                      {**self.probe, **changes}, trusted_locks=[self.lock_hash],
+                                      processing_id=processing_id or self.identifier)
+
+    def rename_pack(self, name):
+        moved = self.processing.with_name(name)
+        self.native(self.processing).rename(self.native(moved))
+        self.processing = moved
+        self.probe["pythonPath"] = str(self.native(moved / "python/python.exe"))
 
     def test_long_inventory_and_exact_worker_attestation(self):
         self.assertGreater(len(str(self.processing / self.relative)), 300)
@@ -108,6 +115,49 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         payload.symlink_to(target)
         with self.assertRaisesRegex(RuntimeError, "symbolic links"):
             self.admit()
+
+    def test_short_directory_name_is_admitted_under_the_full_identity(self):
+        self.rename_pack(self.identifier[:16])
+        env = self.admit()
+        self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], self.probe["pythonPath"])
+        self.assertEqual(json.loads(env["KARAOKE_DESKTOP_PROCESSING_JSON"])["runtimeManifestId"], self.identifier)
+        self.assertEqual(json.loads(env["KARAOKE_DESKTOP_MODEL_SETS_JSON"])["runtimeManifestId"], self.identifier)
+        # Evidence naming the directory instead of the identity is not accepted.
+        self.assertEqual(self.admit(runtimeManifestId=self.identifier[:16])["KARAOKE_PROCESSING_PYTHON"], "")
+
+    def test_full_length_directory_name_is_still_admitted(self):
+        env = self.admit()
+        self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], self.probe["pythonPath"])
+        self.assertEqual(json.loads(env["KARAOKE_DESKTOP_MODEL_SETS_JSON"])["runtimeManifestId"], self.identifier)
+
+    def test_manifest_must_hash_to_the_full_identity(self):
+        # Same 16-character name, different full identity: a shortened-name collision.
+        self.rename_pack(self.identifier[:16])
+        other = self.identifier[:16] + ("0" if self.identifier[16] != "0" else "1") + self.identifier[17:]
+        with self.assertRaisesRegex(RuntimeError, "manifest was modified"):
+            self.admit(processing_id=other)
+        manifest = self.native(self.processing / "manifest.json")
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+        with self.assertRaisesRegex(RuntimeError, "manifest was modified"):
+            self.admit()
+
+    def test_directory_name_must_be_the_identity_or_its_first_16_characters(self):
+        other = hashlib.sha256(b"another runtime").hexdigest()
+        for name in (self.identifier[:15], self.identifier[:17], self.identifier[:32],
+                     self.identifier[1:17], other[:16], other):
+            with self.subTest(name=name):
+                self.rename_pack(name)
+                with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+                    self.admit()
+
+    def test_missing_or_malformed_identity_is_rejected(self):
+        for name in (self.identifier, self.identifier[:16]):
+            self.rename_pack(name)
+            for identifier in (None, "", self.identifier[:16], self.identifier.upper(), 7):
+                with self.subTest(name=name, identifier=identifier):
+                    with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+                        processing_environment(self.runtime, self.identity, self.processing, None, self.probe,
+                                               trusted_locks=[self.lock_hash], processing_id=identifier)
 
 
 if __name__ == "__main__":

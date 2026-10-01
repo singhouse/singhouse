@@ -328,14 +328,14 @@ class IsolationTests(unittest.TestCase):
                 invalid_pack.mkdir()
                 (invalid_pack / "manifest.json").write_bytes(invalid_raw)
                 with self.assertRaisesRegex(RuntimeError, "file path"):
-                    backend.processing_environment(root / "backend", identity, invalid_pack, None)
-            missing_probe = backend.processing_environment(root / "backend", identity, pack, None)
+                    backend.processing_environment(root / "backend", identity, invalid_pack, None, processing_id=invalid_pack.name)
+            missing_probe = backend.processing_environment(root / "backend", identity, pack, None, processing_id=pack.name)
             self.assertEqual(missing_probe["KARAOKE_PROCESSING_PYTHON"], "")
             probe = {"runtimeManifestId": pack.name, "pythonPath": str(pack / "python/bin/python3"),
                      "pythonSha256": manifest["files"][0]["sha256"], "probePassed": True,
                      "accelerator": "cpu", "components": {"faster_whisper": "1.2.3"},
                      "verifiedCapabilities": [], "capabilitiesReady": False}
-            env = backend.processing_environment(root / "backend", identity, pack, None, probe)
+            env = backend.processing_environment(root / "backend", identity, pack, None, probe, processing_id=pack.name)
             self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
             self.assertEqual(env["KARAOKE_PROCESSING_ACCELERATOR"], "")
             self.assertEqual(env["KARAOKE_AUDIO_SEPARATOR_DEVICE"], "")
@@ -359,12 +359,12 @@ class IsolationTests(unittest.TestCase):
                               {**probe, "components": {}},
                               {**probe, "accelerator": "cuda"},
                               {**probe, "unexpected": True}):
-                rejected = backend.processing_environment(root / "backend", identity, pack, None, bad_probe)
+                rejected = backend.processing_environment(root / "backend", identity, pack, None, bad_probe, processing_id=pack.name)
                 self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
                 self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["probePassed"])
             (pack / "unlisted.pth").write_text("unexpected")
             with self.assertRaisesRegex(RuntimeError, "inventory"):
-                backend.processing_environment(root / "backend", identity, pack, None, probe)
+                backend.processing_environment(root / "backend", identity, pack, None, probe, processing_id=pack.name)
             (pack / "unlisted.pth").unlink()
 
             revision = "a" * 40
@@ -379,20 +379,20 @@ class IsolationTests(unittest.TestCase):
             (model_pack / "huggingface/model.bin").write_bytes(b"model")
             policy = {"schema": 1, "allowedHosts": ["huggingface.co"],
                       "models": [{"id": "whisper", "files": [model_file]}]}
-            ready = json.loads(backend.processing_environment(root / "backend", identity, pack, model_pack, probe, policy)["KARAOKE_DESKTOP_PROCESSING_JSON"])
+            ready = json.loads(backend.processing_environment(root / "backend", identity, pack, model_pack, probe, policy, processing_id=pack.name, models_id=model_pack.name)["KARAOKE_DESKTOP_PROCESSING_JSON"])
             self.assertFalse(ready["capabilitiesReady"])
             self.assertEqual(set(ready), {"runtimeManifestId", "pythonPath", "pythonSha256",
                                          "probePassed", "accelerator", "components",
                                          "verifiedCapabilities", "capabilitiesReady"})
             with self.assertRaisesRegex(RuntimeError, "not defined"):
-                backend.processing_environment(root / "backend", identity, pack, model_pack, probe)
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe, processing_id=pack.name, models_id=model_pack.name)
             wrong_policy = json.loads(json.dumps(policy))
             wrong_policy["models"][0]["files"][0]["size"] = 6
             with self.assertRaisesRegex(RuntimeError, "immutable application policy"):
-                backend.processing_environment(root / "backend", identity, pack, model_pack, probe, wrong_policy)
+                backend.processing_environment(root / "backend", identity, pack, model_pack, probe, wrong_policy, processing_id=pack.name, models_id=model_pack.name)
             (pack / "python/bin/python3").write_bytes(b"changed")
             with self.assertRaisesRegex(RuntimeError, "verification"):
-                backend.processing_environment(root / "backend", identity, pack, None)
+                backend.processing_environment(root / "backend", identity, pack, None, processing_id=pack.name)
 
     def test_functional_processing_admission_requires_trust_and_exact_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -426,7 +426,7 @@ class IsolationTests(unittest.TestCase):
                      "accelerator": "cpu", "components": {module: "1.0" for module in modules},
                      "verifiedCapabilities": ["transcription"], "capabilitiesReady": True,
                      "probeSchema": 2, "checks": {"deviceTensor": True, "nativeAudio": True, "transcription": True}}
-            selected = backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[lock_hash])
+            selected = backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[lock_hash], processing_id=pack.name)
             self.assertEqual(selected["KARAOKE_PROCESSING_PYTHON"], str(pack / "python/bin/python3"))
             self.assertEqual(selected["KARAOKE_PROCESSING_ACCELERATOR"], "cpu")
             attestation = json.loads(selected["KARAOKE_DESKTOP_PROCESSING_JSON"])
@@ -446,15 +446,16 @@ class IsolationTests(unittest.TestCase):
                             {"capabilitiesReady": 1}, {"probePassed": 1}, {"probeSchema": 2.0},
                             {"pythonPath": "/unmanaged/python"}, {"components": {}}, {"extra": True}):
                 rejected = backend.processing_environment(root / "backend", identity, pack, None,
-                                                          {**probe, **changes}, trusted_locks=[lock_hash])
+                                                          {**probe, **changes}, trusted_locks=[lock_hash], processing_id=pack.name)
                 self.assertEqual(rejected["KARAOKE_PROCESSING_PYTHON"], "")
                 self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["capabilitiesReady"])
             with self.assertRaisesRegex(RuntimeError, "not trusted"):
-                backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[])
+                backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[], processing_id=pack.name)
             changed = json.loads(json.dumps(manifest))
             changed["probe"]["modules"] = ["faster_whisper"]
+            changed_pack = write_pack(changed)
             with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
-                backend.processing_environment(root / "backend", identity, write_pack(changed), None, probe, trusted_locks=[lock_hash])
+                backend.processing_environment(root / "backend", identity, changed_pack, None, probe, trusted_locks=[lock_hash], processing_id=changed_pack.name)
 
     def test_processing_path_case_collisions_follow_target(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -473,10 +474,10 @@ class IsolationTests(unittest.TestCase):
                 for name in ("2621A", "2621a"):
                     (pack / name).write_bytes(b"fixture")
                 if platform == "linux":
-                    backend.processing_environment(root / "backend", identity, pack, None)
+                    backend.processing_environment(root / "backend", identity, pack, None, processing_id=pack.name)
                 else:
                     with self.assertRaisesRegex(RuntimeError, "Duplicate"):
-                        backend.processing_environment(root / "backend", identity, pack, None)
+                        backend.processing_environment(root / "backend", identity, pack, None, processing_id=pack.name)
 
     def test_missing_processing_preserves_playback_environment(self):
         env = backend.processing_environment(Path("/app/backend"), {}, None, None)
@@ -504,7 +505,7 @@ class IsolationTests(unittest.TestCase):
             (pack / directory / "config.json").write_bytes(b"{}")
             (pack / directory / "model.safetensors").write_bytes(b"fixture")
             for app_version in ("1", "2"):
-                env = backend.processing_environment(root / "backend", {"appVersion": app_version}, None, pack, model_policy=policy)
+                env = backend.processing_environment(root / "backend", {"appVersion": app_version}, None, pack, model_policy=policy, models_id=pack.name)
                 self.assertEqual(env["KARAOKE_HEART_CKPT"], str(pack / directory))
                 self.assertEqual(json.loads(env["KARAOKE_HEART_MODEL_STATUS_JSON"]),
                                  {"installed": True, "modelId": "heart-transcriptor", "revision": revision})
@@ -512,9 +513,13 @@ class IsolationTests(unittest.TestCase):
                 self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "0")
                 self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
                 self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
+            # The identity comes from the parent, never from the directory name.
+            for models_id in (None, pack.name[:16], "0" * 64):
+                with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+                    backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy, models_id=models_id)
             (pack / directory / "model.safetensors").write_bytes(b"corrupt")
             with self.assertRaisesRegex(RuntimeError, "verification failed"):
-                backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy)
+                backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy, models_id=pack.name)
 
     @unittest.skipIf(os.name == "nt", "POSIX session ownership; Windows needs native job-object validation")
     def test_owned_tree_kill_closes_descendant_pipe(self):

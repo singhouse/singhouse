@@ -193,9 +193,10 @@ async function launchBackend() {
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
-  if (activeProcessing) args.push('--processing', activeProcessing.directory)
+  // Directory names may be shortened; the backend checks each manifest against the full identity.
+  if (activeProcessing) args.push('--processing', activeProcessing.directory, '--processing-id', activeProcessing.id)
   if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
-  if (activeModels) args.push('--models', activeModels.directory)
+  if (activeModels) args.push('--models', activeModels.directory, '--models-id', activeModels.id)
   let privateModal = null
   if (packaged) {
     args.push('--desktop-config-stdin')

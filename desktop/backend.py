@@ -835,7 +835,9 @@ def persistent_environment(runtime: Path, origin: str, password: str, native: Pa
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
-                           trusted_locks: list[str] | None = None) -> dict[str, str]:
+                           trusted_locks: list[str] | None = None, *,
+                           processing_id: str | None = None,
+                           models_id: str | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
     # Keep inventory access, parent containment, attestation equality, and the
     # interpreter paths inherited by managed workers in one Windows namespace.
@@ -858,9 +860,14 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
            "TORCHINDUCTOR_CACHE_DIR": str(runtime / "cache/torchinductor"),
            "KARAOKE_MODEL_DIR": str(runtime / "cache/audio-separator")}
 
-    def verify(directory: Path, store: str, kind: str):
+    def verify(directory: Path, identifier: str | None, store: str, kind: str):
+        # The parent passes the full manifest digest as the identity. The
+        # directory may be named by that digest or by its first 16 characters;
+        # either way the manifest is checked against the full digest.
         expected_parent = runtime.parent / store / "packs"
-        if directory.parent != expected_parent or not re.fullmatch(r"[a-f0-9]{64}", directory.name):
+        if (directory.parent != expected_parent or not isinstance(identifier, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", identifier)
+                or directory.name not in (identifier, identifier[:16])):
             raise RuntimeError("Invalid managed processing path")
         for ancestor in (expected_parent.parent, expected_parent, directory):
             if ancestor.is_symlink():
@@ -870,7 +877,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise RuntimeError("Managed processing manifest must be a regular file")
             raw = stream.read()
-        if hashlib.sha256(raw).hexdigest() != directory.name:
+        if hashlib.sha256(raw).hexdigest() != identifier:
             raise RuntimeError("Managed processing manifest was modified")
         manifest = json.loads(raw)
         if manifest.get("schema") != 1 or manifest.get("kind") != kind:
@@ -914,7 +921,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             raise RuntimeError("Invalid or duplicate managed model IDs")
         return manifest
 
-    model_manifest = verify(models, "model-cache", "models") if models else None
+    model_manifest = verify(models, models_id, "model-cache", "models") if models else None
     if model_manifest:
         from urllib.parse import urlparse
         if model_policy is None:
@@ -957,7 +964,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                 "installed": True, "modelId": "heart-transcriptor", "revision": revisions.pop(),
             })
     if processing:
-        manifest = verify(processing, "processing", "processing")
+        manifest = verify(processing, processing_id, "processing", "processing")
         for key in ("appVersion", "backendVersion", "lyricsyncVersion", "platform", "arch"):
             if manifest.get(key) != identity[key]:
                 raise RuntimeError("Processing runtime is incompatible with this app")
@@ -1004,7 +1011,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                         manifest.get("modelCapabilities", {}).get(model) == "transcription" and model != "heart-transcriptor"
                         for model in manifest["models"]))):
                 raise RuntimeError("Unsupported functional processing probe")
-        fixed_probe = {"runtimeManifestId": processing.name, "pythonPath": python_path,
+        fixed_probe = {"runtimeManifestId": processing_id, "pythonPath": python_path,
                        "pythonSha256": python_record["sha256"], "probePassed": True,
                        "accelerator": manifest["accelerator"],
                        "verifiedCapabilities": capabilities if functional else [],
@@ -1038,8 +1045,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         env["KARAOKE_DESKTOP_PROCESSING_JSON"] = json.dumps(
             {key: value for key, value in attestation.items() if key not in {"probeSchema", "checks"}})
         env["KARAOKE_DESKTOP_MODEL_SETS_JSON"] = json.dumps({
-            "schema": 1, "runtimeManifestId": processing.name,
-            "modelManifestId": models.name if model_manifest else None,
+            "schema": 1, "runtimeManifestId": processing_id,
+            "modelManifestId": models_id if model_manifest else None,
             "requiredModels": {
                 capability: sorted(model for model in manifest["models"]
                                    if manifest.get("modelCapabilities", {}).get(model) == capability) if functional else []
@@ -1242,7 +1249,8 @@ def runtime_directory(supplied: Path | None = None):
 
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
-        desktop_config_stdin: bool = False) -> None:
+        desktop_config_stdin: bool = False, processing_id: str | None = None,
+        models_id: str | None = None) -> None:
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1281,7 +1289,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                                                secrets.token_urlsafe(48))
             environment = persistent_environment(runtime, origin, password, native) if native else isolated_environment(runtime, origin, password)
             if native:
-                environment.update(processing_environment(runtime, identity, processing, models, processing_probe))
+                environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
+                                                          processing_id=processing_id, models_id=models_id))
             os.environ.clear()
             os.environ.update(environment)
             if native:
@@ -1450,7 +1459,9 @@ if __name__ == "__main__":
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--runtime", type=Path, help="Empty private directory created by the parent")
     parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
+    parser.add_argument("--processing-id", help="Full manifest identity of the selected processing pack")
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
+    parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
@@ -1483,7 +1494,8 @@ if __name__ == "__main__":
                 raise RuntimeError("Invalid recovery arguments")
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
-            run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin)
+            run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
+                args.processing_id, args.models_id)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
