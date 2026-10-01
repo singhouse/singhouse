@@ -7,6 +7,9 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { packagedLayout, samePath } from './packaged-smoke-paths.mjs'
+import { closePackagedApplication, processTable } from './packaged-smoke-shutdown.mjs'
+
 export function parseArguments(args) {
   const options = {}, valued = new Set(['--executable', '--runtime-manifest', '--audio', '--output', '--timeout-seconds', '--upgrade-from-executable-sha256', '--retained-profile', '--expected-source-commit'])
   for (let i = 0; i < args.length; i++) {
@@ -41,17 +44,51 @@ export function parseArguments(args) {
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const pause = ms => new Promise(resolveWait => setTimeout(resolveWait, ms))
 const MODEL_IDS = ['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer']
+const PLATFORMS = ['win32', 'darwin', 'linux']
+
+// Allowlisted launch environment. Windows keeps its established set unchanged.
+// POSIX hosts need HOME and, on Linux, the display/session socket variables;
+// service, loader, Node/Electron and backend overrides never pass through.
+// --user-data-dir remains the only profile selector and is asserted after launch.
+export function applicationEnvironment(source, platform, output) {
+  assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
+  const allowed = {
+    win32: /^(PATH|Path|SystemRoot|SYSTEMROOT|WINDIR|windir|COMSPEC|ComSpec|PATHEXT|TEMP|TMP|TMPDIR|USERPROFILE|APPDATA|LOCALAPPDATA|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u,
+    darwin: /^(PATH|HOME|TMPDIR|LANG|LC_[A-Z_]+)$/u,
+    linux: /^(PATH|HOME|TMPDIR|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u,
+  }[platform]
+  const env = Object.fromEntries(Object.entries(source).filter(([key, value]) => allowed.test(key) && typeof value === 'string'))
+  env.XDG_CONFIG_HOME = output
+  return env
+}
+
+// Windows retains its established owned-child close. POSIX packaged apps put
+// the backend and runtime children in a detached process group, so a clean
+// Electron exit alone is not shutdown; observe the owned tree to completion.
+export const shutdownStrategy = platform => {
+  assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
+  return platform === 'win32' ? 'owned-child' : 'owned-process-tree'
+}
+
+// A resume relaunches in the original profile on the same OS and architecture
+// that recorded it; other hosts are a new qualification, never a continuation.
+export function validateResumedApplication(prior, identity) {
+  assert.equal(identity.platform, prior.platform, 'Resume evidence was recorded on a different platform')
+  assert.equal(identity.arch, prior.arch, 'Resume evidence was recorded on a different architecture')
+  assert.equal(prior.userData, identity.userData)
+}
 
 // Resumption only continues installation in the original empty qualification
 // profile. A submitted inference is never silently adopted or declared passed.
-export function validateResume(output, expected, upgradeFromExecutableSha256) {
+export function validateResume(output, expected, upgradeFromExecutableSha256, platform = process.platform) {
+  assert.ok(PLATFORMS.includes(platform), 'Unsupported processing smoke platform')
   if (upgradeFromExecutableSha256 !== undefined) {
     assert.match(upgradeFromExecutableSha256, /^[a-f0-9]{64}$/, 'Invalid upgrade prior executable SHA-256')
     assert.notEqual(upgradeFromExecutableSha256, expected.executableSha256, 'Executable upgrade must change the candidate')
   }
   const physicalDirectory = path => {
     assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink(), 'Resume directory must not be a link')
-    assert.equal(resolve(realpathSync(path)).toLowerCase(), resolve(path).toLowerCase(), 'Resume path must be physical')
+    assert.ok(samePath(realpathSync(path), path), 'Resume path must be physical')
   }
   physicalDirectory(output)
   const profile = join(output, 'profile')
@@ -72,8 +109,8 @@ export function validateResume(output, expected, upgradeFromExecutableSha256) {
     assert.equal(prior.input?.sha256, expected.input.sha256, 'Resume audio changed')
     assert.equal(prior.input?.bytes, expected.input.bytes, 'Resume audio size changed')
     assert.equal(prior.application?.packaged, true)
-    assert.equal(prior.application?.platform, 'win32')
-    assert.equal(resolve(prior.application.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Prior profile identity does not match isolated profile')
+    assert.equal(prior.application?.platform, platform, 'Resume evidence was recorded on a different platform')
+    assert.ok(samePath(prior.application.userData, profile), 'Prior profile identity does not match isolated profile')
     return { prior, sha256: hash(bytes) }
   }
   const original = readAttempt(output), attempts = []
@@ -108,9 +145,10 @@ export function reusableRuntime(readiness, manifest) {
     && readiness.runtime.accelerator === manifest.accelerator
 }
 
-export function validateRetainedCandidate(executable, expectedSourceCommit) {
+export function validateRetainedCandidate(executable, expectedSourceCommit, platform = process.platform) {
   assert.match(expectedSourceCommit ?? '', /^[a-f0-9]{40}$/, 'Expected full source identity required')
-  const resources = join(dirname(executable), 'resources'), records = {}
+  // A signed macOS bundle keeps its receipt outside the sealed bundle; it fails closed here.
+  const { resources } = packagedLayout(executable, platform), records = {}
   for (const [name, path] of Object.entries({ provenance: join(resources, 'native', 'provenance.json'),
     nativeManifest: join(resources, 'native', 'manifest.json'), receipt: join(resources, 'release-receipt.json') })) {
     const bytes = readFileSync(path)
@@ -129,8 +167,8 @@ export function validateRetainedCandidate(executable, expectedSourceCommit) {
 export function validateRetainedProfile(profile, output) {
   const info = lstatSync(profile)
   assert.ok(info.isDirectory() && !info.isSymbolicLink(), 'Retained profile must be a physical directory')
-  assert.equal(realpathSync(profile).toLowerCase(), resolve(profile).toLowerCase(), 'Retained profile must be physical')
-  assert.equal(realpathSync(dirname(output)).toLowerCase(), resolve(dirname(output)).toLowerCase(), 'Evidence parent must be physical')
+  assert.ok(samePath(realpathSync(profile), profile), 'Retained profile must be physical')
+  assert.ok(samePath(realpathSync(dirname(output)), dirname(output)), 'Evidence parent must be physical')
   for (const [parent, child] of [[profile, output], [output, profile]]) {
     const path = relative(parent, child)
     assert.ok(path && (path === '..' || path.startsWith('../') || path.startsWith('..\\') || isAbsolute(path)),
@@ -184,11 +222,11 @@ export function auditRetainedDatabase(baseline, current) {
 
 export async function run(options) {
   assert.ok(!options.upgradeFromExecutableSha256 || options.resume, 'Executable upgrade requires --resume')
-  assert.equal(process.platform, 'win32', 'This qualification harness requires the Windows packaged application')
+  assert.ok(PLATFORMS.includes(process.platform), 'This qualification harness supports Windows, macOS and Linux packaged applications')
   assert.ok(statSync(options.executable).isFile(), 'Packaged executable is required')
-  const nativeBin = join(dirname(options.executable), 'resources', 'native', 'ffmpeg', 'bin')
-  const ffmpeg = join(nativeBin, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
-  const ffprobe = join(nativeBin, process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
+  const layout = packagedLayout(options.executable)
+  assert.ok(statSync(layout.resources).isDirectory(), 'Packaged resources are required; pass the unpacked or installed application executable')
+  const { ffmpeg, ffprobe, python: nativePython } = layout
   const inputProbe = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', options.audio], { timeout: 30000, encoding: 'utf8' }))
   const inputDuration = Number(inputProbe.format?.duration)
   assert.ok(Number.isFinite(inputDuration) && inputDuration > 0 && inputDuration <= 120, 'Supply a vocal excerpt no longer than 120 seconds')
@@ -205,7 +243,8 @@ export async function run(options) {
   if (!options.resume) mkdirSync(options.output) // Never adopt an existing output implicitly.
   const started = Date.now(), deadline = started + options.timeoutMs
   const evidence = { schema: 1, kind: 'packaged-local-processing-smoke', startedAt: new Date(started).toISOString(),
-    status: 'running', input: { sha256: hash(input), bytes: input.length, durationSeconds: inputDuration },
+    status: 'running', platform: process.platform, arch: process.arch,
+    layout: { kind: layout.kind, resources: layout.resources, python: layout.python, ffmpeg: layout.ffmpeg, ffprobe: layout.ffprobe }, input: { sha256: hash(input), bytes: input.length, durationSeconds: inputDuration },
     executableSha256: hash(readFileSync(options.executable)),
     runtimeManifestSha256: hash(manifestBytes), runtimeLockSha256: manifest.provenance?.lockSha256,
     consent: { modelRetrieval: !options.retainedProfile, localInference: true }, timingsMs: {}, transitions: [],
@@ -236,11 +275,8 @@ export async function run(options) {
   }
   const save = () => writeFileSync(join(artifactDirectory, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`)
   save()
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    /^(PATH|Path|SystemRoot|SYSTEMROOT|WINDIR|windir|COMSPEC|ComSpec|PATHEXT|TEMP|TMP|TMPDIR|USERPROFILE|APPDATA|LOCALAPPDATA|DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|XDG_RUNTIME_DIR|LANG|LC_[A-Z_]+)$/u.test(key)))
-  env.XDG_CONFIG_HOME = options.output
+  const env = applicationEnvironment(process.env, process.platform, options.output)
   let application, host, databaseBaseline
-  const nativePython = join(dirname(options.executable), 'resources', 'native', 'python', 'python.exe')
   const database = join(profile, 'backend', 'desktop.db')
   const remaining = () => { const value = deadline - Date.now(); assert.ok(value > 0, 'Total processing smoke deadline exceeded'); return value }
   const bounded = async (operation, milliseconds = remaining()) => {
@@ -259,6 +295,15 @@ export async function run(options) {
     if (!application) return
     const owned = application; application = null
     const child = owned.process()
+    if (shutdownStrategy(process.platform) === 'owned-process-tree') {
+      evidence.shutdown ??= []
+      // Same bounded close as the packaged smoke; it forces only the retained child.
+      return closePackagedApplication(owned, { timeout: 30000, table: () => processTable({ python: nativePython }),
+        report: ({ event, processes, error, exitCode, signalCode }) => {
+          if (event === 'shutdown-failed' && exitCode === null && signalCode === null) evidence.forcedShutdown = true
+          evidence.shutdown.push({ event, processes: processes?.length, ...(error && { error }) })
+        } })
+    }
     let timer, onExit
     const exited = child.exitCode !== null || child.signalCode !== null
       ? Promise.resolve()
@@ -294,14 +339,15 @@ export async function run(options) {
       sandboxBypassSwitches: ['no-sandbox', 'disable-sandbox', 'disable-setuid-sandbox', 'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-namespace-sandbox', 'single-process', 'in-process-gpu'].filter(flag => app.commandLine.hasSwitch(flag)),
       ownsInstance: app.hasSingleInstanceLock(), userData: app.getPath('userData'), appVersion: app.getVersion(), platform: process.platform, arch: process.arch })))
     assert.equal(identity.packaged, true)
+    assert.equal(identity.platform, process.platform, 'Packaged application platform differs from the harness host')
     assert.deepEqual(identity.sandboxBypassSwitches, [], 'Electron must run without sandbox bypass switches')
     assert.equal(identity.ownsInstance, true, 'Qualification profile is already in use')
-    assert.equal(resolve(identity.userData).toLowerCase(), resolve(profile).toLowerCase(), 'Application selected a different profile')
+    assert.ok(samePath(identity.userData, profile), 'Application selected a different profile')
     if (!options.retainedProfile) {
       const child = relative(options.output, identity.userData)
       assert.ok(child && !child.startsWith('..') && !isAbsolute(child), 'Application profile escaped the isolated directory')
     }
-    if (evidence.application) assert.equal(evidence.application.userData, identity.userData)
+    if (evidence.application) validateResumedApplication(evidence.application, identity)
     evidence.application = identity
     const launchDeadline = Date.now() + Math.min(300000, remaining())
     while (!(host = application.windows().find(window => /^http:\/\/127\.0\.0\.1:\d+\//.test(window.url())))) {

@@ -865,6 +865,12 @@ node desktop/test/packaged-processing-smoke.mjs `
   --timeout-seconds 7200
 ```
 
+The same options run on macOS with `--executable /path/to/Singhouse.app/Contents/MacOS/Singhouse`
+and on Linux with the unpacked application's executable (for example
+`desktop/artifacts/linux-unpacked/Singhouse`, under `xvfb-run -a` without a display).
+Pass physical paths: on macOS, use `/private/tmp` rather than `/tmp`. A signed macOS
+bundle keeps its release receipt outside the bundle, so this retained mode refuses it.
+
 Use an unused evidence directory outside the retained profile. This mode excludes
 `--resume`, executable-upgrade options and `--download-models`. Candidate native
 provenance and release receipt must agree with the full expected source commit;

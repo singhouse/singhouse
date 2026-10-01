@@ -2,11 +2,12 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase } from './packaged-processing-smoke.mjs'
+import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase,
+  applicationEnvironment, shutdownStrategy, validateResumedApplication } from './packaged-processing-smoke.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
@@ -18,12 +19,13 @@ test('resume is explicit and retains model retrieval consent requirement', () =>
 })
 
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), 'processing-resume-'))
+  // Physical root: macOS temporary directories are reached through /var links.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'processing-resume-')))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const output = join(root, 'evidence'); mkdirSync(output); mkdirSync(join(output, 'profile'))
   const expected = { executableSha256: 'a'.repeat(64), runtimeManifestSha256: 'b'.repeat(64), input: { sha256: 'c'.repeat(64), bytes: 123 } }
   const prior = { schema: 1, kind: 'packaged-local-processing-smoke', status: 'running', ...expected,
-    application: { packaged: true, platform: 'win32', userData: join(output, 'profile') } }
+    application: { packaged: true, platform: process.platform, arch: process.arch, userData: join(output, 'profile') } }
   const save = () => writeFileSync(join(output, 'evidence.json'), JSON.stringify(prior))
   save(); return { root, output, expected, prior, save }
 }
@@ -228,4 +230,79 @@ test('preservation audit permits new records but rejects changed or missing orig
   assert.equal(auditRetainedDatabase(baseline, { songs: [...baseline.songs, { id: 2, sha256: 'new' }], jobs: baseline.jobs }).status, 'passed')
   assert.throws(() => auditRetainedDatabase(baseline, { songs: [], jobs: baseline.jobs }), /disappeared/)
   assert.throws(() => auditRetainedDatabase(baseline, { songs: baseline.songs, jobs: [{ id: 'old', sha256: 'changed' }] }), /changed/)
+})
+
+test('resume evidence binds to the platform that recorded it', t => {
+  const f = fixture(t)
+  for (const recorded of ['win32', 'darwin', 'linux']) {
+    f.prior.application.platform = recorded; f.save()
+    for (const current of ['win32', 'darwin', 'linux']) {
+      if (recorded === current) assert.equal(validateResume(f.output, f.expected, undefined, current).prior.application.platform, recorded)
+      else assert.throws(() => validateResume(f.output, f.expected, undefined, current), /different platform/)
+    }
+  }
+  delete f.prior.application.platform; f.save()
+  assert.throws(() => validateResume(f.output, f.expected), /different platform/)
+  assert.throws(() => validateResume(f.output, f.expected, undefined, 'freebsd'), /Unsupported/)
+})
+
+test('relaunch after resume refuses another platform, architecture or profile', () => {
+  const prior = { platform: 'darwin', arch: 'arm64', userData: '/Users/op/evidence/profile' }
+  validateResumedApplication(prior, { ...prior, packaged: true })
+  assert.throws(() => validateResumedApplication(prior, { ...prior, platform: 'linux' }), /different platform/)
+  assert.throws(() => validateResumedApplication(prior, { ...prior, arch: 'x64' }), /different architecture/)
+  assert.throws(() => validateResumedApplication(prior, { ...prior, userData: '/Users/op/evidence/Profile' }))
+})
+
+test('Linux resume does not accept a profile that differs only in case', { skip: process.platform !== 'linux' }, t => {
+  const f = fixture(t)
+  f.prior.application.userData = join(f.output, 'Profile'); f.save()
+  assert.throws(() => validateResume(f.output, f.expected), /profile identity/)
+  mkdirSync(join(f.output, 'Profile'))
+  assert.throws(() => validateResume(f.output, f.expected), /profile identity/)
+})
+
+test('launch environment is allowlisted per platform and keeps the profile isolated', () => {
+  const source = { PATH: '/bin', Path: 'C:\\bin', HOME: '/home/op', USERPROFILE: 'C:\\Users\\op', APPDATA: 'C:\\Users\\op\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\op\\AppData\\Local', SystemRoot: 'C:\\Windows', TEMP: 'C:\\Temp', TMPDIR: '/tmp/op', LANG: 'en_US.UTF-8', LC_ALL: 'C',
+    DISPLAY: ':99', WAYLAND_DISPLAY: 'wayland-0', XAUTHORITY: '/run/user/1000/xauth', XDG_RUNTIME_DIR: '/run/user/1000',
+    XDG_CONFIG_HOME: '/home/op/.config', XDG_DATA_HOME: '/home/op/.local/share', XDG_CACHE_HOME: '/home/op/.cache',
+    ELECTRON_RUN_AS_NODE: '1', ELECTRON_EXTRA_LAUNCH_ARGS: '--no-sandbox', NODE_OPTIONS: '--require x', LD_PRELOAD: '/x.so', LD_LIBRARY_PATH: '/x',
+    DYLD_INSERT_LIBRARIES: '/x.dylib', DYLD_LIBRARY_PATH: '/x', KARAOKE_DESKTOP_PYTHON: '/usr/bin/python3', MODAL_TOKEN_ID: 'secret',
+    PYTHONPATH: '/x', HF_HOME: '/x', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus', SINGHOUSE_RECOVERY_ANCHOR: '1' }
+  const keys = platform => Object.keys(applicationEnvironment(source, platform, '/evidence')).sort()
+  assert.deepEqual(keys('win32'), ['APPDATA', 'DISPLAY', 'LANG', 'LC_ALL', 'LOCALAPPDATA', 'PATH', 'Path', 'SystemRoot', 'TEMP', 'TMPDIR',
+    'USERPROFILE', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'])
+  assert.deepEqual(keys('darwin'), ['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'XDG_CONFIG_HOME'])
+  assert.deepEqual(keys('linux'), ['DISPLAY', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'])
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const env = applicationEnvironment(source, platform, '/evidence')
+    assert.equal(env.XDG_CONFIG_HOME, '/evidence')
+    if (platform !== 'win32') assert.equal(env.HOME, '/home/op')
+  }
+  assert.deepEqual(applicationEnvironment({ HOME: undefined, PATH: '/bin' }, 'linux', '/evidence'), { PATH: '/bin', XDG_CONFIG_HOME: '/evidence' })
+  assert.throws(() => applicationEnvironment(source, 'freebsd', '/evidence'), /Unsupported/)
+})
+
+test('shutdown keeps the Windows owned-child close and observes POSIX process trees', () => {
+  assert.equal(shutdownStrategy('win32'), 'owned-child')
+  assert.equal(shutdownStrategy('darwin'), 'owned-process-tree')
+  assert.equal(shutdownStrategy('linux'), 'owned-process-tree')
+  assert.throws(() => shutdownStrategy('sunos'), /Unsupported/)
+})
+
+test('retained candidate identity reads macOS bundle resources', t => {
+  const root = mkdtempSync(join(tmpdir(), 'retained-mac-candidate-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const contents = join(root, 'Test Singhouse.app', 'Contents'), expected = 'a'.repeat(40), runtimeId = 'b'.repeat(64)
+  mkdirSync(join(contents, 'MacOS'), { recursive: true }); mkdirSync(join(contents, 'Resources', 'native'), { recursive: true })
+  writeFileSync(join(contents, 'Resources', 'native', 'provenance.json'), JSON.stringify({ sourceCommit: expected, sourceDirty: false, sourceExport: false }))
+  writeFileSync(join(contents, 'Resources', 'native', 'manifest.json'), JSON.stringify({ runtimeId }))
+  writeFileSync(join(contents, 'Resources', 'app.asar'), 'bundle archive')
+  const executable = join(contents, 'MacOS', 'Singhouse')
+  // Signed bundles keep the receipt outside the sealed bundle; retained mode refuses them.
+  assert.throws(() => validateRetainedCandidate(executable, expected, 'darwin'), /ENOENT/)
+  writeFileSync(join(contents, 'Resources', 'release-receipt.json'), JSON.stringify({ identity: { sourceCommit: expected, nativeRuntimeId: runtimeId } }))
+  assert.equal(validateRetainedCandidate(executable, expected, 'darwin').applicationArchiveSha256, hash('bundle archive'))
+  assert.throws(() => validateRetainedCandidate(join(root, 'Singhouse'), expected, 'darwin'), /MacOS/)
 })

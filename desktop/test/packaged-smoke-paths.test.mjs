@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { packagedResources } from './packaged-smoke-paths.mjs'
+import { packagedLayout, packagedResources, samePath } from './packaged-smoke-paths.mjs'
 
 test('Mac application resources are a sibling of MacOS, including paths with spaces', () => {
   assert.equal(packagedResources('/Applications/Test Singhouse.app/Contents/MacOS/Singhouse', 'darwin'),
@@ -16,4 +16,35 @@ test('Windows and Linux packaged resources retain their existing location', () =
   assert.equal(packagedResources('/opt/Singhouse/Singhouse', 'linux'), '/opt/Singhouse/resources')
   assert.throws(() => packagedResources('relative/Singhouse', 'linux'), /absolute/)
   assert.throws(() => packagedResources('/app/Singhouse', 'unsupported'), /Unsupported/)
+})
+
+test('native layout selects each platform bundled Python and media tools', () => {
+  assert.deepEqual(packagedLayout('C:\\Program Files\\Singhouse\\Singhouse.exe', 'win32'), { kind: 'resources-beside-executable',
+    resources: 'C:\\Program Files\\Singhouse\\resources', native: 'C:\\Program Files\\Singhouse\\resources\\native',
+    python: 'C:\\Program Files\\Singhouse\\resources\\native\\python\\python.exe',
+    ffmpeg: 'C:\\Program Files\\Singhouse\\resources\\native\\ffmpeg\\bin\\ffmpeg.exe',
+    ffprobe: 'C:\\Program Files\\Singhouse\\resources\\native\\ffmpeg\\bin\\ffprobe.exe' })
+  assert.deepEqual(packagedLayout('/Applications/Singhouse.app/Contents/MacOS/Singhouse', 'darwin'), { kind: 'application-bundle-contents-resources',
+    resources: '/Applications/Singhouse.app/Contents/Resources', native: '/Applications/Singhouse.app/Contents/Resources/native',
+    python: '/Applications/Singhouse.app/Contents/Resources/native/python/bin/python3',
+    ffmpeg: '/Applications/Singhouse.app/Contents/Resources/native/ffmpeg/bin/ffmpeg',
+    ffprobe: '/Applications/Singhouse.app/Contents/Resources/native/ffmpeg/bin/ffprobe' })
+  assert.deepEqual(packagedLayout('/opt/linux-unpacked/Singhouse', 'linux'), { kind: 'resources-beside-executable',
+    resources: '/opt/linux-unpacked/resources', native: '/opt/linux-unpacked/resources/native',
+    python: '/opt/linux-unpacked/resources/native/python/bin/python3',
+    ffmpeg: '/opt/linux-unpacked/resources/native/ffmpeg/bin/ffmpeg', ffprobe: '/opt/linux-unpacked/resources/native/ffmpeg/bin/ffprobe' })
+  assert.throws(() => packagedLayout('/Applications/Singhouse', 'darwin'), /MacOS/)
+  assert.throws(() => packagedLayout('/opt/Singhouse', 'freebsd'), /Unsupported/)
+})
+
+test('path identity folds case only where the platform filesystem does', () => {
+  assert.equal(samePath('C:\\Evidence\\Profile', 'c:\\evidence\\profile', 'win32'), true)
+  assert.equal(samePath('/Users/Op/Evidence/Profile', '/users/op/evidence/profile', 'darwin'), true)
+  // A Linux directory differing only in case is a different directory.
+  assert.equal(samePath('/srv/Evidence/Profile', '/srv/evidence/profile', 'linux'), false)
+  assert.equal(samePath('/srv/evidence/profile', '/srv/evidence/./profile/', 'linux'), true)
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    assert.equal(samePath(platform === 'win32' ? 'C:\\a\\profile' : '/a/profile', platform === 'win32' ? 'C:\\a\\other' : '/a/other', platform), false)
+  }
+  assert.throws(() => samePath('/a', '/a', 'aix'), /Unsupported/)
 })
