@@ -48,7 +48,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath \$path/)
   assert.doesNotMatch(workflow, new RegExp(`${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile}`, 'i'))
   assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
-  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc/)
+  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc --playback-only\n/)
 })
 
 test('Windows signing documentation binds Azure values to environment secrets', async () => {

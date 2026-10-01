@@ -120,7 +120,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python desktop/build/assemble.py --target win32-x64 --output desktop/native
           if ($LASTEXITCODE -ne 0) { throw 'Native assembly failed.' }
-          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc
+          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc --playback-only
           if ($LASTEXITCODE -ne 0) { throw 'Signed installer packaging failed.' }
       - name: Verify signatures and write final SHA-256 inventory
         shell: pwsh

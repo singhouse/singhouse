@@ -104,6 +104,17 @@ npm --prefix desktop run package
 ```
 
 On Windows, use `python` instead of `python3` if that is the installed command.
+
+Packaging states whether the application can install local song processing.
+`--processing-ready` requires `desktop/processing-catalog.json` (see below) and
+refuses to package unless the catalog passes the same checks the installed
+application applies at first launch for the exact target being built.
+`--playback-only` requires the catalog to be absent; such builds offer playback
+and report local song processing unavailable during setup. Signed releases must
+name one of the two. Without either flag, a development build is playback-only
+when the catalog is absent (the build output says so) and still refuses an
+invalid catalog that is present. The final build output records the mode and,
+for processing-ready builds, the catalog and runtime lock SHA-256 digests.
 The assembler downloads checksum-pinned Python and FFmpeg inputs, builds the two
 application wheels with a pinned host toolchain, installs locked dependencies,
 and rebuilds the frontend using its npm lockfile. It refuses an existing output
@@ -174,7 +185,7 @@ export SINGHOUSE_MAC_TEAM_ID='25Y7U443K6'
 export SINGHOUSE_MAC_IDENTITY='Developer ID Application: MICHAEL ALAN JONES (25Y7U443K6)'
 export SINGHOUSE_MAC_CERT_SHA1='55FEEAA93960DD9E278519CA68338BACFC2A3617'
 export SINGHOUSE_MAC_NOTARY_PROFILE='singhouse-notary'
-npm --prefix desktop run package:first-installers -- --signed-macos-release
+npm --prefix desktop run package:first-installers -- --signed-macos-release --playback-only
 ```
 
 The command verifies the assembled native payload, signs its Mach-O code with
@@ -206,7 +217,7 @@ and validates that module automatically:
 ```powershell
 # First manual release: use the Azure user already granted the signer role.
 az login
-npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user
+npm --prefix desktop run package:first-installers -- --signed-release --azure-cli-user --playback-only
 ```
 
 The manual flag first requires a successful `az account show`, then constrains
@@ -252,7 +263,7 @@ EnvironmentCredential:
 $env:AZURE_TENANT_ID = '<Microsoft Entra tenant ID>'
 $env:AZURE_CLIENT_ID = '<signing application client ID>'
 $env:AZURE_CLIENT_SECRET = '<signing application client secret>'
-npm --prefix desktop run package:first-installers -- --signed-release
+npm --prefix desktop run package:first-installers -- --signed-release --playback-only
 ```
 
 The signing identity must have the Artifact Signing Certificate Profile Signer
@@ -773,7 +784,8 @@ plaintext fallback exists. Forgetting local credentials works even when the
 keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
 Release builds may supply `desktop/processing-catalog.json` as part of the
-application's verified inventory. The setup engine never accepts a catalog from
+application's verified inventory; package them with `--processing-ready`. The
+file must be committed, since release packaging requires a clean checkout. The setup engine never accepts a catalog from
 the renderer or saved preferences. Its schema is:
 
 - `schema: 1`, `runtime`: the complete processing manifest accepted by the

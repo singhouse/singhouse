@@ -13,6 +13,7 @@ import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
+import { assertProcessingCatalog, packagedCatalogIdentity, processingModeFromArgs, readProcessingCatalogInputs } from './processing_catalog_gate.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -59,7 +60,8 @@ export function assertPackagingMode(argv, platform = process.platform) {
   if (signedRelease && !argv.includes('--first-installers')) throw new Error('--signed-release requires --first-installers')
   if (signedMacRelease && (!argv.includes('--first-installers') || signedRelease || manualAzureCli || azureOidc)) throw new Error('--signed-macos-release requires --first-installers and cannot combine with Windows signing')
   if (signedMacRelease && platform !== 'darwin') throw new Error('--signed-macos-release requires macOS')
-  return { signedRelease, signedMacRelease, manualAzureCli, azureOidc }
+  const processingMode = processingModeFromArgs(argv, { signed: signedRelease || signedMacRelease })
+  return { signedRelease, signedMacRelease, manualAzureCli, azureOidc, processingMode }
 }
 
 export async function sha256File(path) {
@@ -69,7 +71,7 @@ export async function sha256File(path) {
 }
 
 async function main() {
-  const { signedRelease, signedMacRelease, manualAzureCli, azureOidc } = assertPackagingMode(process.argv)
+  const { signedRelease, signedMacRelease, manualAzureCli, azureOidc, processingMode } = assertPackagingMode(process.argv)
   const macSelection = signedMacRelease ? macSigningSelection() : null
   if (manualAzureCli) await verifyAzureCliSession()
   if (azureOidc) await verifyAzureCliSession({ expectedType: 'servicePrincipal', expected: {
@@ -91,6 +93,13 @@ async function main() {
   if (!platform || !['x64', 'arm64'].includes(nativeManifest.arch) || (nativeManifest.platform === 'win32' && nativeManifest.arch !== 'x64') || (nativeManifest.platform === 'darwin' && nativeManifest.arch !== 'arm64')) throw new Error('Unsupported portable target')
   if (nativeManifest.platform === 'darwin' && process.platform !== 'darwin') throw new Error('Create macOS application payloads on macOS')
   if (signedMacRelease && nativeManifest.platform !== 'darwin') throw new Error('--signed-macos-release requires a macOS native assembly')
+  // Validate the catalog exactly as the packaged application will at launch,
+  // before any installer exists; electron-builder silently skips a missing file.
+  const appVersion = JSON.parse(await readFile(resolve(config.directories.app, 'package.json'), 'utf8')).version
+  const processing = assertProcessingCatalog({ mode: processingMode, identity: packagedCatalogIdentity(nativeManifest, appVersion),
+    ...await readProcessingCatalogInputs(config.directories.app) })
+  if (processing.notice) console.warn(processing.notice)
+  console.log(`Processing catalog: ${processing.mode}${processing.catalogSha256 ? ` (catalog sha256 ${processing.catalogSha256}, runtime lock sha256 ${processing.runtimeLockSha256})` : ''}`)
 
   const output = resolve(config.directories.output)
   const completeLinuxInstaller = nativeManifest.platform === 'linux' && process.argv.includes('--first-installers')
@@ -219,7 +228,8 @@ async function main() {
         }
       }
     }
-    console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId }, null, 2))
+    const { notice: _notice, ...processingFacts } = processing
+    console.log(JSON.stringify({ payload, receipt, releaseId: identity.releaseId, processing: processingFacts }, null, 2))
   } finally { await appImagePreparation?.cleanup() }
 }
 

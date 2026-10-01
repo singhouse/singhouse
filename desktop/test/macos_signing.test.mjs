@@ -40,7 +40,8 @@ test('macOS signing flag fails closed across platform and release modes', () => 
   assert.throws(() => assertPackagingMode(['--signed-macos-release'], 'darwin'), /requires --first-installers/)
   assert.throws(() => assertPackagingMode(['--signed-macos-release', '--first-installers'], 'linux'), /requires macOS/)
   assert.throws(() => assertPackagingMode(['--signed-macos-release', '--first-installers', '--signed-release'], 'darwin'), /cannot combine/)
-  assert.equal(assertPackagingMode(['--signed-macos-release', '--first-installers'], 'darwin').signedMacRelease, true)
+  assert.throws(() => assertPackagingMode(['--signed-macos-release', '--first-installers'], 'darwin'), /must name --processing-ready or --playback-only/)
+  assert.equal(assertPackagingMode(['--signed-macos-release', '--first-installers', '--playback-only'], 'darwin').signedMacRelease, true)
 })
 
 test('signed marker is canonical, non-self-referential, and rejects Rack publisher', () => {
