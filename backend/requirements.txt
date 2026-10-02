@@ -18,7 +18,7 @@ uvicorn[standard]==0.32.1
 itsdangerous==2.2.0      # backs starlette.middleware.sessions (signed cookies)
 
 # --- File uploads ---
-python-multipart==0.0.12
+python-multipart==0.0.32
 
 # --- Authentication ---
 bcrypt==4.2.1
