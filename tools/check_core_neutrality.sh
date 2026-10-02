@@ -25,8 +25,10 @@
 # PATTERN SUPPLEMENT: two checks below (brand, private-infra) OR additional
 # match alternatives onto their built-in default from an optional data file,
 # tools/private-patterns.txt, keyed by check. When that file is absent the
-# built-in default is what runs. The file is loaded once, reported, and
-# validated before any check consumes it — see the load block below.
+# built-in default is what runs. The vendor check has no built-in default: its
+# names come only from that file, and without it the check reports itself off
+# rather than passing as if it had looked. The file is loaded once, reported,
+# and validated before any check consumes it — see the load block below.
 #
 # The script must run BOTH from this repo root AND from a repo root where
 # premium/, keep-private.txt, and private-patterns.txt do not exist:
@@ -63,6 +65,7 @@ fi
 # they name a server the user runs themselves, holding music the user already
 # has, and a source that reads it is core rather than a provider. Changing that
 # distinction changes product scope and requires an explicit policy decision.
+# The names themselves live under the supplement's `vendor:` key (load below).
 VENDOR_PATTERN=''
 
 # --- Optional pattern-supplement load ---
@@ -195,14 +198,17 @@ fi
 # strength label.
 BRAND_PRIVATE="$(private_patterns brand)"
 INFRA_PRIVATE="$(private_patterns infra)"
+VENDOR_PATTERN="$(private_patterns vendor)"
+[ -z "$VENDOR_PATTERN" ] || validate_ere "the vendor pattern" "$VENDOR_PATTERN"
 
 if [ -f "$PRIVATE_FILE" ]; then
   BRAND_N=$(count_alts "$BRAND_PRIVATE")
   INFRA_N=$(count_alts "$INFRA_PRIVATE")
-  echo "OK: pattern supplement loaded (brand: $BRAND_N, infra: $INFRA_N)"
-  if [ "$BRAND_N" -eq 0 ] || [ "$INFRA_N" -eq 0 ]; then
+  VENDOR_N=$(count_alts "$VENDOR_PATTERN")
+  echo "OK: pattern supplement loaded (brand: $BRAND_N, infra: $INFRA_N, vendor: $VENDOR_N)"
+  if [ "$BRAND_N" -eq 0 ] || [ "$INFRA_N" -eq 0 ] || [ "$VENDOR_N" -eq 0 ]; then
     echo "FAIL: pattern supplement is present but a key loaded zero alternatives"
-    echo "      (brand: $BRAND_N, infra: $INFRA_N) — a mistyped key name silently"
+    echo "      (brand: $BRAND_N, infra: $INFRA_N, vendor: $VENDOR_N) — a mistyped key name silently"
     echo "      drops that key's alternatives and weakens the check it feeds"
     FAIL=1
   fi
@@ -238,7 +244,7 @@ fi
 # the keep-private list. Root files (README.md, PROJECT_DOCS.md, configs),
 # tools/ and docs/ are in scope — a vendor literal in a doc or script leaks
 # exactly as hard as one in src. Enumerated exception ONLY:
-#   - tools/check_core_neutrality.sh — this script (carries the patterns)
+#   - tools/check_core_neutrality.sh — this script (self-exempt)
 CORE_ALLOW='^tools/check_core_neutrality\.sh$'
 HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
   | grep -v '^premium/' \
@@ -254,6 +260,8 @@ if [ -n "$HITS" ]; then
   echo "FAIL: vendor literals in core tracked files:"
   echo "$HITS"
   FAIL=1
+elif [ -z "$VENDOR_PATTERN" ]; then
+  echo "OK: vendor check off (no vendor: names loaded)"
 else
   echo "OK: no vendor literals in core tracked files"
 fi
@@ -262,7 +270,7 @@ fi
 # vendor-literal bar as core. What follows grades premium paths THIS repo
 # tracks; where it tracks none, the enumeration is empty and the success
 # line says so rather than implying otherwise. Exceptions ONLY:
-#   - tools/check_core_neutrality.sh — this script (carries the pattern).
+#   - tools/check_core_neutrality.sh — this script (self-exempt).
 #     It lives core-side since the move, so `ls-files -- premium/` can never
 #     emit it; the entry is defensive, kept so the allowlist stays the
 #     complete statement of what may carry the pattern.
@@ -298,6 +306,8 @@ if [ -n "$PREMIUM_HITS" ]; then
   echo "FAIL: vendor literals in premium tracked files:"
   echo "$PREMIUM_HITS"
   FAIL=1
+elif [ -z "$VENDOR_PATTERN" ]; then
+  echo "OK: premium vendor check off (no vendor: names loaded; $PREMIUM_N in scope, allowlist: $PREMIUM_ALLOW_N)"
 else
   echo "OK: no vendor literals in premium tracked files ($PREMIUM_N in scope, allowlist: $PREMIUM_ALLOW_N)"
 fi
@@ -421,7 +431,7 @@ fi
 # Enumerated exceptions ONLY:
 #   - frontend/src/brand.js                   — the frontend source of truth
 #   - backend/src/karaoke_backend/branding.py — the backend source of truth
-#   - tools/check_core_neutrality.sh          — this script (carries the pattern)
+#   - tools/check_core_neutrality.sh          — this script (self-exempt)
 #   - README.md, PROJECT_DOCS.md              — the product name (Singhouse)
 #     is settled and allowed in the two root docs
 #   - desktop/                                — product-delivery code and

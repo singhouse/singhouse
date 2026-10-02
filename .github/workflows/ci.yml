@@ -50,7 +50,9 @@ jobs:
 
   # The brand/vendor/private-infra gate. This is what makes the project's
   # bright lines structural rather than a matter of reviewer attention, so it
-  # is a hard failure and must stay one.
+  # is a hard failure and must stay one. Vendor names load only from the
+  # untracked tools/private-patterns.txt, so here the vendor check reports off;
+  # it runs where a maintainer keeps that file.
   neutrality:
     name: Neutrality gate
     runs-on: ubuntu-latest

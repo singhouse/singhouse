@@ -76,6 +76,9 @@ backend/certs/*.pem
 .DS_Store
 *.swp
 
+# Neutrality-gate pattern supplement: private names, never committed
+tools/private-patterns.txt
+
 # Local-only scratch / experimentation surfaces
 backend/test_ui/
 backend/api/test.py

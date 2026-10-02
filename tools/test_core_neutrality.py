@@ -33,7 +33,7 @@ VENDOR_SAMPLE = "fixture_vendor"
 class LegalLiteralTests(unittest.TestCase):
     def check_gate(
         self, filename, content, *, private_brand=None, private_infra=None,
-        extra_files=None,
+        private_vendor=None, extra_files=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -46,12 +46,13 @@ class LegalLiteralTests(unittest.TestCase):
             subprocess.run(
                 ["git", "-C", directory, "add", "--", *files], check=True,
             )
-            if private_brand or private_infra:
+            if private_brand or private_infra or private_vendor:
                 (root / "tools").mkdir(exist_ok=True)
                 supplement = root / "tools" / ("private-" + "patterns.txt")
                 supplement.write_text(
                     f"brand:{private_brand or PRIVATE_BRAND}\n"
                     + f"infra:{private_infra or 'fixture_infra'}\n"
+                    + f"vendor:{private_vendor or VENDOR_SAMPLE}\n"
                 )
             result = subprocess.run(
                 ["bash", str(GATE), directory], capture_output=True, text=True,
@@ -95,7 +96,9 @@ class LegalLiteralTests(unittest.TestCase):
                 self.assertIn("FAIL: brand literals", output)
 
     def test_desktop_brand_exception_does_not_disable_other_gates(self):
-        output = self.assert_gate("desktop/main.mjs", VENDOR_SAMPLE, 1)
+        output = self.assert_gate(
+            "desktop/main.mjs", VENDOR_SAMPLE, 1, private_vendor=VENDOR_SAMPLE,
+        )
         self.assertIn("FAIL: vendor literals", output)
         output = self.assert_gate("desktop/main.mjs", HOME_SAMPLE, 1)
         self.assertIn("FAIL: private-infra literals", output)
@@ -119,9 +122,29 @@ class LegalLiteralTests(unittest.TestCase):
         content = PRODUCT.title() + " " + VENDOR_SAMPLE + " " + HOME_SAMPLE
         for filename in PUBLIC_BRAND_DOCS:
             with self.subTest(filename=filename):
-                output = self.assert_gate(filename, content, 1)
+                output = self.assert_gate(
+                    filename, content, 1, private_vendor=VENDOR_SAMPLE,
+                )
                 self.assertIn("FAIL: vendor literals", output)
                 self.assertIn("FAIL: private-infra literals", output)
+
+    def test_vendor_check_reports_off_without_supplement(self):
+        output = self.assert_gate("docs/guide.md", VENDOR_SAMPLE, 0)
+        self.assertIn("OK: vendor check off", output)
+        self.assertIn("OK: premium vendor check off", output)
+
+    def test_supplement_without_vendor_key_fails(self):
+        output = self.assert_gate(
+            "docs/guide.md", "text", 1,
+            extra_files={"tools/private-" + "patterns.txt": "brand:retired_fixture\ninfra:fixture_infra"},
+        )
+        self.assertIn("vendor: 0", output)
+
+    def test_vendor_entry_starting_with_dash_is_still_matched(self):
+        private = "-dash_vendor"
+        output = self.assert_gate("docs/guide.md", private, 1, private_vendor=private)
+        self.assertIn("FAIL: vendor literals", output)
+        self.assertNotIn("invalid option", output)
 
     def test_exact_lookup_url_allowed(self):
         for content in (LOOKUP, "`" + LOOKUP + "`", LOOKUP + " followed by text"):
@@ -165,7 +188,9 @@ class LegalLiteralTests(unittest.TestCase):
         )
         for filename, content, failure in cases:
             with self.subTest(filename=filename):
-                output = self.assert_gate(filename, content, 1)
+                output = self.assert_gate(
+                    filename, content, 1, private_vendor=VENDOR_SAMPLE,
+                )
                 self.assertIn(filename + ":1:" + content, output)
                 self.assertIn(failure, output)
                 self.assertNotIn("sed:", output)
