@@ -67,7 +67,7 @@ Homepage = "https://github.com/singhouse/singhouse"
 # Keep the alternate Whisper transcriber explicitly installable for environments
 # that run it; Heart's separate processing environment remains unchanged.
 whisper = ["lyricsync[whisper]>=0.1,<0.2"]
-dev = ["pytest==8.3.3", "pytest-asyncio==0.24.0", "Pillow>=10.0"]
+dev = ["pytest==9.1.1", "pytest-asyncio==0.24.0", "Pillow>=10.0"]
 modal = ["modal>=0.66"]
 # Text rasterisation for CD+G export. Optional: without it the export routes
 # answer 501 and everything else runs unchanged.
