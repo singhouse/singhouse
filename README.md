@@ -1,25 +1,28 @@
 # Singhouse
 
-A self-hosted karaoke suite for your own music library — GPU stem separation,
+A self-hosted karaoke suite for your own music library — Local stem separation (CUDA / Metal / CPU),
 word-level synced lyrics, and a web player with real-time vocal/instrumental
 mixing, key shift, and a popout projector display.
 
 ## What It Does
 
 1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG,
-   a bare CDG, or a same-basename MP3+G ZIP
-2. **Two-pass stem separation** — Demucs (`mdx_extra`) splits vocals vs.
-   instrumental, then mel_band_roformer splits lead vs. backing vocals.
-   Runs locally on your GPU (CPU fallback), or on your own Modal deployment
-3. **Synced lyrics** — paste your own reference lyrics, or enable the
-   optional lrclib.net lookup (opt-in, off by default)
-4. **Word-level highlighting** — ML transcription aligned to your
-   reference lyrics, with a built-in lyric timing editor
-5. **Real-time mixer** — per-stem volume and mute, per-voice vocal lanes,
-   and key shift (pitch transposition without tempo change)
-6. **Stage display** — a canvas lyrics renderer with a popout projector
+   CDG, or MP3+G
+2. **Backing vocal stem seperation** — Demucs splits vocals and
+   instrumentals, then mel_band_roformer splits lead and backing vocals.
+   Runs locally on your own hardware, or optionally on your own Modal account
+   for faster processing.
+4. **Generate synced lyrics** — paste your own reference lyrics, or enable 
+   automatic lrclib.net lookup. With accurate source lyrics, transcriptions are
+   generally quite usable on a single pass.
+6. **Word-level highlighting** — Whisper + heart-transcriptor lyrics transcription 
+   aligned to your reference lyrics, with a built-in lyric timing editor
+7. **Real-time mixer** — Built-in key shift, and individual volume sliders
+   for instrumental, backing vocals, and lead vocals. Additional voices are
+   also supported for imported tracks
+9. **Stage display** — a canvas lyrics renderer with a pop-out projector/TV
    window for the second screen
-7. **Host queue** — a simple, manually ordered "who sings next" list built
+10. **Host queue** — a simple, manually ordered "who sings next" list built
    from your library, plus a flat play history
 
 ## Scope — what this is, and what it isn't
