@@ -1,2 +1,4 @@
 # Preserve exact upstream bytes verified by native notice hashes.
 desktop/licenses/uv-* -text
+# Packaging compares catalogs byte-for-byte with the generator output.
+desktop/processing-catalogs/*.json -text
