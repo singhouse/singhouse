@@ -112,7 +112,7 @@ We are under no obligation to accept, merge, use, distribute, maintain, or conti
 
 ## 10. Notification
 
-You agree to notify Us in writing at `jonesy@jonesy.sh` if You become aware of any fact or circumstance that would make any representation in Section 6 inaccurate in any respect.
+You agree to notify Us in writing at `admin@sing.house` if You become aware of any fact or circumstance that would make any representation in Section 6 inaccurate in any respect.
 
 ## 11. Term and survival
 
@@ -128,7 +128,7 @@ This agreement takes effect on the date You accept it and continues until termin
 
 **No relationship.** This agreement does not create an employment, partnership, agency, or joint venture relationship between You and Us, and does not entitle You to any compensation.
 
-**Notices.** Notices under this agreement must be in writing and are effective on receipt: to Us, at `jonesy@jonesy.sh`; to You, at the email address in Your signature or signature record.
+**Notices.** Notices under this agreement must be in writing and are effective on receipt: to Us, at `admin@sing.house`; to You, at the email address in Your signature or signature record.
 
 **Trademarks.** This agreement grants no rights to use either party's names, logos, or trademarks, except that We may credit You as described in Section 7.
 
@@ -140,7 +140,7 @@ You may accept this agreement by either:
 
 **(a) Electronic acceptance.** Opening a pull request against the Singhouse repository that adds an entry for Yourself to `CLA-SIGNATURES.json` and changes nothing else, from the account You use to Submit, using the exact phrase set out in `CONTRIBUTING.md` as the commit message. That commit records Your full name, Your account identity, the timestamp, and the version of this agreement, and constitutes Your signature. Your acceptance takes effect when We merge it.
 
-**(b) Signature.** Completing and returning the block below to `jonesy@jonesy.sh`. Your acceptance takes effect when We receive the completed block. We will then record an entry for You in `CLA-SIGNATURES.json` so the automated check, when enabled, recognizes Your account.
+**(b) Signature.** Completing and returning the block below to `admin@sing.house`. Your acceptance takes effect when We receive the completed block. We will then record an entry for You in `CLA-SIGNATURES.json` so the automated check, when enabled, recognizes Your account.
 
 ---
 

@@ -20,7 +20,7 @@ Singhouse uses an **open core** structure, split across two repositories:
 
 **Premium add-ons** are proprietary and are developed in a separate private repository that is not published. They install alongside the Core and extend it through its documented extension points. Using them requires a paid licence.
 
-**Commercial licences for the Core** are available on request for organizations seeking alternative terms for the code Bones Consulting LLC is authorized to license. Separately licensed components and dependencies retain their applicable terms; a commercial Core licence does not replace them. Contact `jonesy@jonesy.sh`.
+**Commercial licences for the Core** are available on request for organizations seeking alternative terms for the code Bones Consulting LLC is authorized to license. Separately licensed components and dependencies retain their applicable terms; a commercial Core licence does not replace them. Contact `admin@sing.house`.
 
 ## Why the CLA is required
 
