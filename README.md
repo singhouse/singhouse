@@ -1,14 +1,27 @@
-# Singhouse
+<p align="center">
+  <img src="docs/images/singhouse-logo.png" alt="Singhouse" width="425" height="180">
+</p>
 
-**Karaoke for your own music library.**
+**Turn your music into karaoke with AI.**
 
-A desktop app for preparing and playing karaoke on your own machine. Separate
-lead and backing vocals, fine-tune synced lyrics, adjust the mix and key, and
-run a queue with a dedicated projector window.
+Singhouse automatically generates karaoke tracks from your own audio files:
+AI separates the vocals, transcribes the lyrics, and synchronizes the words
+for sing-along highlighting. Generate and play on your own machine in one
+desktop app.
 
 **[Download v0.1.0](https://github.com/singhouse/singhouse/releases/tag/v0.1.0)**
 · [Installation guide](docs/install-desktop.md)
 · [Documentation](#documentation)
+
+## From music to karaoke
+
+1. **Import your music.** Choose an audio file from your library.
+2. **Let AI prepare it.** Separate instrumental, lead, and backing vocals,
+   then generate lyrics with word-level timing. Reference lyrics are optional.
+3. **Sing.** Turn down the lead vocal, keep as much backing vocal as you like,
+   adjust the key, and put the lyrics on the projector window.
+
+AI results can need corrections; use the lyric editor to fix words and timing.
 
 ## Download
 
@@ -32,11 +45,8 @@ checksums, then follow the [installation guide](docs/install-desktop.md).
 
 - **Bring your library.** Import your own FLAC, MP3, WAV, M4A, or OGG files,
   plus CD+G files and MP3+G ZIPs.
-- **Shape the sound.** Separate instrumental, lead, and backing vocals;
-  adjust their volumes and mute them independently. Change key without
-  changing the tempo.
-- **Get the words in time.** Align your reference lyrics to the vocals for
-  word-level highlighting, then refine the results in the lyric timing editor.
+- **Shape the sound.** Adjust vocal and instrumental volumes independently.
+  Change key without changing the tempo.
 - **Run the queue.** Manually arrange who sings next and revisit play history.
 - **Give singers a screen.** Open the popout projector window on a second
   display while keeping the host controls on your main screen.
@@ -44,16 +54,17 @@ checksums, then follow the [installation guide](docs/install-desktop.md).
 ## Your first song
 
 1. Install and launch the desktop app.
-2. **Already have prepared karaoke media?** Import it and skip to playback in
-   step 5. You don't need an AI processing pack.
-3. **Preparing an audio track?** First install the processing runtime and models
-   through **Set up song processing**. These separate downloads require your
-   consent; availability depends on your platform.
-4. Select your audio file and paste your reference lyrics in the import form
-   before submitting it for processing. Once it finishes, check the generated
-   timing in the lyric editor.
-5. Add the song to the queue, set the mix and key, and open the projector
+2. Install the processing runtime and models through **Set up song processing**.
+   These separate downloads require your consent; availability depends on
+   your platform.
+3. Select your audio file, optionally paste reference lyrics to guide
+   generation, and submit it for processing. Once it finishes, check the
+   generated lyrics and timing in the lyric editor.
+4. Add the song to the queue, set the mix and key, and open the projector
    window if you have a second display.
+
+Already have prepared karaoke media? Import it and go straight to playback;
+you don't need an AI processing pack.
 
 Singhouse runs on one host machine. The projector is a window on that
 machine; this release does not include a guest-phone interface.
