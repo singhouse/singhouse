@@ -158,8 +158,8 @@ frequently GitHub `noreply` addresses and aren't verified in any case.
 
 - Branch from `main`, keep the change focused, and describe what it does and
   why in the PR body.
-- Add or update tests for behaviour changes. Setup for the backend and
-  frontend suites is in [README.md](README.md).
+- Add or update tests for behaviour changes. See the
+  [backend](backend/README.md) and [frontend](frontend/README.md) setup guides.
 - Match the surrounding code — its naming, its structure, and its comment
   style. Comments here tend to explain *why*, not *what*.
 - Don't reformat unrelated code in the same PR.
