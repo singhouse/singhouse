@@ -78,7 +78,7 @@ We are under no obligation to accept, merge, use, distribute, or maintain any Co
 
 ## 9. Schedule A maintenance and notifications
 
-The Corporation will keep Schedule A accurate and will notify Us in writing at `jonesy@jonesy.sh` to add or remove Designated Contributors, or when any representation in Section 6 becomes inaccurate.
+The Corporation will keep Schedule A accurate and will notify Us in writing at `admin@sing.house` to add or remove Designated Contributors, or when any representation in Section 6 becomes inaccurate.
 
 Removing an individual from Schedule A takes effect only for Contributions Submitted after We receive the notice. **It does not affect the licences already granted for earlier Contributions**, which remain irrevocable.
 
@@ -98,7 +98,7 @@ This agreement takes effect on the date of signature and continues until termina
 
 **No relationship.** This agreement creates no employment, partnership, agency, or joint venture relationship between the parties.
 
-**Notices.** Notices under this agreement must be in writing and are effective on receipt: to Us, at `jonesy@jonesy.sh`; to the Corporation, at the contact email in its signature block.
+**Notices.** Notices under this agreement must be in writing and are effective on receipt: to Us, at `admin@sing.house`; to the Corporation, at the contact email in its signature block.
 
 **Trademarks.** This agreement grants no rights to use either party's name, logo, or trademarks, except that We may list the Corporation as a contributor in Project documentation and release notes.
 
