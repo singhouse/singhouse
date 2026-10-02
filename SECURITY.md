@@ -14,4 +14,4 @@ fix, and credit you in the advisory unless you prefer otherwise.
 
 ## Supported versions
 
-Singhouse is in pre-release. Fixes go into the newest release only.
+This project is in pre-release. Fixes go into the newest release only.
