@@ -1,4 +1,4 @@
-# Singhouse desktop
+# singhouse desktop
 
 The desktop application bundles Electron, Python, the core backend, the frontend,
 and FFmpeg/FFprobe. It opens an authenticated private loopback service and a
@@ -8,7 +8,7 @@ restarts; the source-development shell uses a disposable library.
 Release operators should use the [qualification
 harness](qualification/README.md) and the checked-in [release
 checklist](../docs/release-checklist.md). User installation and diagnostic
-instructions live in [Install Singhouse Core](../docs/install-desktop.md) and
+instructions live in [Install singhouse Core](../docs/install-desktop.md) and
 [Support diagnostics](../docs/support-diagnostics.md).
 
 The bundled runtime supports prepared-media playback. It does not bundle model
@@ -81,11 +81,11 @@ under `backend/` in Electron's per-user application-data directory, outside the
 installed binaries. The settings file contains a persistent session secret;
 keep it private. Normal shutdown preserves this data, and the Windows
 uninstaller is configured to preserve application data. Back up the complete
-application-data directory while Singhouse is closed before replacing a build;
+application-data directory while singhouse is closed before replacing a build;
 retaining data is not a guarantee that every older build can read a newer schema.
 
 Only one application instance and one backend may own the library. If the
-backend stops unexpectedly, quit and reopen Singhouse. Its operating-system lock
+backend stops unexpectedly, quit and reopen singhouse. Its operating-system lock
 is released when the process exits; do not delete the lock file to bypass a
 running owner. Desktop configuration uses `settings.json`, not a `.env` file in
 the backend data directory.
@@ -351,11 +351,11 @@ separate publication gate.
 
 NSIS, DMG, and AppImage/archive outputs remain first-install surfaces. Later
 updates do not overwrite those installations. From **Application release**, an
-operator selects locally supplied, signed update metadata; Singhouse retrieves
+operator selects locally supplied, signed update metadata; singhouse retrieves
 the exact target and rollback `.shapp` files named by it. An adjacent local
-artifact is preferred. Only when that exact filename is absent may Singhouse
+artifact is preferred. Only when that exact filename is absent may singhouse
 use the artifact's signed HTTPS URL; unsafe local entries and other local read
-failures are rejected rather than hidden by a network fallback. Singhouse verifies the
+failures are rejected rather than hidden by a network fallback. singhouse verifies the
 signature and complete inventories, and safely extracts them into private,
 managed release slots in application data. Archive traversal, devices, unsafe
 links, case collisions, omitted files, extra files, and changed bytes are
@@ -369,7 +369,7 @@ identity mismatch; the launcher does not retain or walk a handoff chain.
 
 Activation is allowed only after playback is silent, the projector is closed,
 jobs and installers are idle, the backend is ready, and the database can be
-quiesced. Singhouse then creates and verifies a SQLite recovery point, persists
+quiesced. singhouse then creates and verifies a SQLite recovery point, persists
 an authenticated handoff, stops the old backend, and atomically selects the new
 slot. A small bootstrap waits for the old process to exit and launches only that
 verified selection. A stale old process may redirect only for the handoff's
@@ -730,7 +730,7 @@ are accepted. The policy includes the pinned Heart inventory below;
 a user-created manifest cannot declare another model ready. Each non-executable model file
 must exactly match its policy's upstream revision or content-digest identity,
 HTTPS URL, size and SHA-256. Legacy fixed release assets use the full file digest
-as their identity; changed upstream bytes fail verification. Singhouse does not
+as their identity; changed upstream bytes fail verification. singhouse does not
 host model copies.
 The manifest's `models` array identifies the unique policy-defined model sets it contains.
 Paths begin with `huggingface/`, `torch/`, or `audio-separator/` and must reproduce

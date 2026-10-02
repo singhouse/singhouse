@@ -19,7 +19,7 @@ export const releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(release
 const manifest = JSON.parse(readFileSync(resolve(native, 'manifest.json'), 'utf8'))
 const assembly = JSON.parse(readFileSync(resolve(native, 'assembly.json'), 'utf8'))
 const pkg = JSON.parse(readFileSync(resolve(desktop, 'package.json'), 'utf8'))
-const { BRAND_NAME } = await import(pathToFileURL(resolve(desktop, '../frontend/src/brand.js')))
+const { BRAND_INSTALLED_NAME } = await import(pathToFileURL(resolve(desktop, '../frontend/src/brand.js')))
 const signedRelease = process.argv.includes('--signed-release')
 const manualAzureCli = process.argv.includes('--azure-cli-user')
 const azureOidc = process.argv.includes('--azure-oidc')
@@ -81,8 +81,8 @@ export async function withStagedCatalog(staged, run, { warn = console.warn } = {
 
 export default {
   appId: 'org.karaoke.desktop',
-  productName: BRAND_NAME,
-  executableName: BRAND_NAME,
+  productName: BRAND_INSTALLED_NAME,
+  executableName: BRAND_INSTALLED_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
   files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs', 'macos_signing.mjs'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
@@ -120,7 +120,7 @@ export default {
     deleteAppDataOnUninstall: false,
     useZip: true,
     differentialPackage: false,
-    // Updates use the authenticated Singhouse payload flow. Do not let the
+    // Updates use the authenticated singhouse payload flow. Do not let the
     // NSIS pass add an updater helper after release receipt derivation.
     packElevateHelper: false,
   },

@@ -2,7 +2,7 @@
 
 The source-install backend can send stem separation and Heart transcription
 jobs to a Modal app that you deploy and pay for in your own account. This path
-is optional and off by default. Singhouse does not provide a shared Modal
+is optional and off by default. singhouse does not provide a shared Modal
 deployment, receive the audio, or manage your Modal account.
 
 Desktop setup can save credentials using operating-system encryption and check
@@ -18,7 +18,7 @@ deployment. Do not deploy it solely to clear a desktop setup warning.
 
 Deploying builds a remote image and can create billable work. Review Modal's
 current pricing and account limits before running a deploy or a job. The setup
-below does not require changing Singhouse's local-processing configuration.
+below does not require changing singhouse's local-processing configuration.
 
 ## Install and authenticate the CLI
 
@@ -61,7 +61,7 @@ audio-separator models into the remote image. Those downloads are initiated by
 you and remain subject to their upstream terms. Re-run the deploy after changing
 the app name, GPU class, model, dependencies, or deploy script.
 
-Configure the Singhouse backend separately:
+Configure the singhouse backend separately:
 
 ```sh
 export KARAOKE_MODAL=1
@@ -74,7 +74,7 @@ credentials. `KARAOKE_MODAL_GPU` and `KARAOKE_MODEL` do not reconfigure an
 already deployed image when they are placed only in `backend/.env`.
 
 For each offloaded job, the backend sends the imported audio to your Modal app.
-The app returns separated stems and Heart transcription results; Singhouse then
+The app returns separated stems and Heart transcription results; singhouse then
 stores and processes them on the local machine. Disable offload by removing
 `KARAOKE_MODAL` or setting it to a value other than `1`, `true`, `yes`, or `on`.
 

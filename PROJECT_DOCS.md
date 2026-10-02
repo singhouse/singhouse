@@ -1,8 +1,8 @@
-# Singhouse — Project Documentation
+# singhouse — Project Documentation
 
 ## 1. Overview
 
-Singhouse is a self-hosted karaoke suite for your own music library. It
+singhouse is a self-hosted karaoke suite for your own music library. It
 combines GPU-accelerated stem separation, word-level lyric transcription and
 sync, a real-time web player with vocal/instrumental mixing and key shift, a
 canvas stage renderer with a popout projector window, a simple host-managed
@@ -698,7 +698,7 @@ The backend can run as a systemd user service:
 ```ini
 # ~/.config/systemd/user/karaoke-backend.service
 [Unit]
-Description=Singhouse Backend
+Description=singhouse Backend
 After=default.target
 
 [Service]

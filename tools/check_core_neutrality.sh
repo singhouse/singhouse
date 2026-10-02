@@ -432,7 +432,7 @@ fi
 #   - frontend/src/brand.js                   — the frontend source of truth
 #   - backend/src/karaoke_backend/branding.py — the backend source of truth
 #   - tools/check_core_neutrality.sh          — this script (self-exempt)
-#   - README.md, PROJECT_DOCS.md              — the product name (Singhouse)
+#   - README.md, PROJECT_DOCS.md              — the product name (singhouse)
 #     is settled and allowed in the two root docs
 #   - desktop/                                — product-delivery code and
 #     packaging must name the installed public product. This is a content-level

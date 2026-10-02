@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Regenerate desktop icons from the existing Singhouse SVG brand mark.
+"""Regenerate desktop icons from the existing singhouse SVG brand mark.
 
 Requires librsvg's rsvg-convert. Run from any directory; output is deterministic.
 """

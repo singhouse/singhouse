@@ -202,10 +202,10 @@ def launch_recovery_kit(root: Path, expected_manifest_sha256: str,
     if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256):
         raise RuntimeError("Invalid recovery kit identity")
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
-        raise RuntimeError("Recovery kit is unavailable; reinstall Singhouse for recovery")
+        raise RuntimeError("Recovery kit is unavailable; reinstall singhouse for recovery")
     manifest_path = root / "manifest.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise RuntimeError("Recovery kit is unavailable; reinstall Singhouse for recovery")
+        raise RuntimeError("Recovery kit is unavailable; reinstall singhouse for recovery")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     canonical = json.dumps(manifest, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     if hashlib.sha256(canonical.encode()).hexdigest() != expected_manifest_sha256:

@@ -1,6 +1,6 @@
 # Native release qualification
 
-This directory records repeatable evidence for a Singhouse desktop release.
+This directory records repeatable evidence for a singhouse desktop release.
 It does not turn an automated smoke test, virtual machine, or remote desktop
 session into physical audio, display, GPU, or clean-machine evidence.
 

@@ -93,13 +93,13 @@ test('standalone recovery requires the intact recorded stable trust anchor', asy
   const { stateRoot, anchorPath, components } = await fixedAnchorFixture(root)
   assert.equal((await verifyRecoveryAnchor(anchorPath, { ...components, platformTrust: async () => true })).kind, 'recovery-anchor')
   await assert.rejects(() => verifyRecoveryAnchor(`${stateRoot}/recovery-tool/./anchor.json`,
-    { ...components, platformTrust: async () => true }), /reinstall Singhouse|canonical/)
+    { ...components, platformTrust: async () => true }), /reinstall singhouse|canonical/)
   const stateAlias = join(root, 'state-alias'); await symlink(stateRoot, stateAlias)
   await assert.rejects(() => verifyRecoveryAnchor(join(stateAlias, 'recovery-tool', 'anchor.json'),
-    { ...components, platformTrust: async () => true }), /reinstall Singhouse|canonical/)
+    { ...components, platformTrust: async () => true }), /reinstall singhouse|canonical/)
   await writeFile(anchorPath, '{}\n')
-  await assert.rejects(() => verifyRecoveryAnchor(anchorPath, { ...components, platformTrust: async () => true }), /reinstall Singhouse/)
-  await assert.rejects(() => verifyRecoveryAnchor(join(root, 'missing.json'), { ...components, platformTrust: async () => true }), /reinstall Singhouse/)
+  await assert.rejects(() => verifyRecoveryAnchor(anchorPath, { ...components, platformTrust: async () => true }), /reinstall singhouse/)
+  await assert.rejects(() => verifyRecoveryAnchor(join(root, 'missing.json'), { ...components, platformTrust: async () => true }), /reinstall singhouse/)
 })
 
 test('stable anchor delegates kit verification to its bundled native helper before runtime execution', async () => {

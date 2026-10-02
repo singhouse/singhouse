@@ -287,9 +287,9 @@ function recoveryAnchorInvocation(anchorPath, anchor) {
   const quotedAnchor = anchorPath.replaceAll("'", "'\\''"), quotedExecutable = anchor.executablePath.replaceAll("'", "'\\''")
   if (anchor.platform === 'win32') {
     const cmdAnchor = cmdQuotedLiteral(anchorPath), cmdExecutable = cmdQuotedLiteral(anchor.executablePath)
-    return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not exist ${cmdExecutable} goto missing\r\nif not exist ${cmdAnchor} goto missing\r\nset ELECTRON_RUN_AS_NODE=\r\nset SINGHOUSE_RECOVERY_ANCHOR=1\r\n${cmdExecutable} --recovery-anchor ${cmdAnchor} %*\r\nexit /b %errorlevel%\r\n:missing\r\necho Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery. 1>&2\r\nexit /b 1\r\n`
+    return `@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not exist ${cmdExecutable} goto missing\r\nif not exist ${cmdAnchor} goto missing\r\nset ELECTRON_RUN_AS_NODE=\r\nset SINGHOUSE_RECOVERY_ANCHOR=1\r\n${cmdExecutable} --recovery-anchor ${cmdAnchor} %*\r\nexit /b %errorlevel%\r\n:missing\r\necho Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery. 1>&2\r\nexit /b 1\r\n`
   }
-  return `#!/bin/sh\nset -eu\nANCHOR='${quotedAnchor}'\nEXECUTABLE='${quotedExecutable}'\nif [ ! -f "$EXECUTABLE" ] || [ ! -f "$ANCHOR" ]; then\n  echo 'Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery.' >&2\n  exit 1\nfi\nunset ELECTRON_RUN_AS_NODE\nexport SINGHOUSE_RECOVERY_ANCHOR=1\nexec "$EXECUTABLE" --recovery-anchor "$ANCHOR" "$@"\n`
+  return `#!/bin/sh\nset -eu\nANCHOR='${quotedAnchor}'\nEXECUTABLE='${quotedExecutable}'\nif [ ! -f "$EXECUTABLE" ] || [ ! -f "$ANCHOR" ]; then\n  echo 'Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery.' >&2\n  exit 1\nfi\nunset ELECTRON_RUN_AS_NODE\nexport SINGHOUSE_RECOVERY_ANCHOR=1\nexec "$EXECUTABLE" --recovery-anchor "$ANCHOR" "$@"\n`
 }
 
 export function recoveryAnchorInvocationPath(anchorPath, platform) {
@@ -385,7 +385,7 @@ export function readRecoveryAnchor(path) {
     if (resolve(path) !== canonical) throw new Error('alias')
     record = readJSONFile(path, 'Recovery anchor').value
   } catch {
-    throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
   }
   const expectedStateRoot = dirname(dirname(canonical))
   if (record?.schema !== 3 || record.kind !== 'recovery-anchor' || !['linux', 'win32', 'darwin'].includes(record.platform) ||
@@ -395,7 +395,7 @@ export function readRecoveryAnchor(path) {
       !record.digests || !['executablePath', 'bootstrapPath', 'pythonPath', 'helperPath'].every(name => /^[a-f0-9]{64}$/.test(record.digests[name] || '')) ||
       (record.platform === 'linux' && !/^[a-f0-9]{64}$/.test(record.digests.actualExecutablePath || '')) ||
       record.digests.anchorPath !== sha256(Buffer.from(canonical))) {
-    throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
   }
   const layout = record.componentLayout
   if (!layout || (record.platform === 'linux'
@@ -403,7 +403,7 @@ export function readRecoveryAnchor(path) {
       Object.keys(layout).sort().join(',') !== ['actualExecutablePath', 'bootstrapPath', 'helperPath', 'kind', 'pythonPath'].sort().join(',')
     : layout.kind !== 'fixed-v1' || !['executablePath', 'bootstrapPath', 'pythonPath', 'helperPath'].every(name =>
       isAbsolute(layout[name] || '') && layout[name] === resolve(layout[name])))) {
-    throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
   }
   return record
 }
@@ -497,8 +497,8 @@ export function installRecoveryKit({ recoveryRoot, targetRoot, files, target, bi
   const anchorPath = resolve(dirname(parent), 'anchor.json')
   const invocationPath = recoveryAnchorInvocationPath(anchorPath, target.platform)
   const launcher = target.platform === 'win32'
-    ? `@echo off\r\nsetlocal DisableDelayedExpansion\r\nfor %%I in ("%~dp0.") do set "KIT=%%~fI"\r\nif not exist ${cmdQuotedLiteral(invocationPath)} goto missing\r\n${cmdQuotedLiteral(invocationPath)} "%KIT%" %*\r\nexit /b %errorlevel%\r\n:missing\r\necho Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery. 1>&2\r\nexit /b 1\r\n`
-    : `#!/bin/sh\nset -eu\nKIT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nINVOKE='${invocationPath.replaceAll("'", "'\\''")}'\nif [ ! -f "$INVOKE" ]; then\n  echo 'Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery.' >&2\n  exit 1\nfi\nexec "$INVOKE" "$KIT" "$@"\n`
+    ? `@echo off\r\nsetlocal DisableDelayedExpansion\r\nfor %%I in ("%~dp0.") do set "KIT=%%~fI"\r\nif not exist ${cmdQuotedLiteral(invocationPath)} goto missing\r\n${cmdQuotedLiteral(invocationPath)} "%KIT%" %*\r\nexit /b %errorlevel%\r\n:missing\r\necho Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery. 1>&2\r\nexit /b 1\r\n`
+    : `#!/bin/sh\nset -eu\nKIT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nINVOKE='${invocationPath.replaceAll("'", "'\\''")}'\nif [ ! -f "$INVOKE" ]; then\n  echo 'Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery.' >&2\n  exit 1\nfi\nexec "$INVOKE" "$KIT" "$@"\n`
   const launcherPath = resolve(temporaryRoot, launcherName), launcherMode = target.platform === 'win32' ? 0o600 : 0o700
   writeFileSync(launcherPath, launcher, { mode: launcherMode }); const launcherDescriptor = openSync(launcherPath, 'r')
   try { fsyncSync(launcherDescriptor) } finally { closeSync(launcherDescriptor) }

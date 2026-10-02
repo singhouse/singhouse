@@ -49,7 +49,7 @@ test('only a verified first installer repairs or rotates the recovery anchor wit
   const library = resolve(root, 'backend', 'desktop.db'); mkdirSync(dirname(library), { recursive: true }); writeFileSync(library, 'user library')
 
   writeFileSync(anchorPath, '{corrupt\n')
-  assert.throws(() => readRecoveryAnchor(anchorPath), /reinstall Singhouse/)
+  assert.throws(() => readRecoveryAnchor(anchorPath), /reinstall singhouse/)
   assert.throws(() => ensureRecoveryAnchor(anchorPath, expected), /verified first installer/)
   assert.deepEqual(ensureRecoveryAnchor(anchorPath, expected, { verifiedFirstInstaller: true }), original)
 
