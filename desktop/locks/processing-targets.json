@@ -18,7 +18,9 @@
       "platform": "linux",
       "arch": "x64",
       "accelerator": "cuda",
-      "functionalProbe": "rebuild-required"
+      "functionalProbe": "native-passed",
+      "inputLockSha256": "9bed42cea996204c52159380b2141dbe3056abe2e189858ef81746b701bd85a1",
+      "sourceCommit": "dd9ebe77d3c8044f7e681815d182357ce0c7129c"
     },
     {
       "platform": "linux",
