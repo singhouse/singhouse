@@ -81,6 +81,28 @@ function memoryAssessment(catalog, runtime, hardware) {
   return result
 }
 
+// Advisory planning ranges, never readiness or memory requirements. Evidence,
+// assumptions, and deliberately broad bands are documented in README.md.
+function processingEstimate(runtime, hardware = {}) {
+  const unknown = { level: null, label: 'Not enough information', minutes: null,
+    basis: 'A matching supported processing pack and computer details are needed for an estimate.' }
+  if (!runtime || !complete(runtime) || runtime.models.length !== LOCAL_MODEL_IDS.length
+      || !runtime.provenance?.lockSha256
+      || !['cpu', 'metal'].includes(runtime.accelerator)
+      || runtime.platform !== hardware.platform || runtime.arch !== hardware.arch
+      || !Number.isSafeInteger(hardware.cpuCount) || hardware.cpuCount < 1
+      || !Number.isSafeInteger(hardware.totalMemoryBytes) || hardware.totalMemoryBytes <= 0) return unknown
+  if (runtime.accelerator === 'metal'
+      && (hardware.platform !== 'darwin' || hardware.arch !== 'arm64' || hardware.unifiedMemory !== true)) return unknown
+  const limited = hardware.cpuCount < 8 || hardware.totalMemoryBytes < 16 * 1024 ** 3
+  return { level: limited ? 1 : 2, label: limited ? 'Slower' : 'Moderate',
+    minutes: limited ? [45, 180] : [20, 90],
+    basis: runtime.accelerator === 'metal'
+      ? 'This pack uses Apple Metal. The range is conservative; no measured Metal speedup is assumed.'
+      : 'This pack uses the CPU, even if your computer has a graphics card.',
+  }
+}
+
 // Catalog, policy, and qualification are release-owned inputs. Never populate
 // these from renderer messages, persisted progress, or an unsigned remote feed.
 export class OnboardingSetup {
@@ -259,8 +281,9 @@ export class OnboardingSetup {
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
-    if (installed.installed) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+      processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+    if (installed.installed) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
+      || hash(installed.runtime.manifest) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
       const selected = this.selection(installed.models)
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
@@ -296,7 +319,7 @@ export class OnboardingSetup {
       if (!Number.isSafeInteger(diskFreeBytes) || diskFreeBytes < diskRequiredBytes) {
         return { ...result, reason: diskFreeBytes === null ? 'Available disk space could not be checked.' : 'Not enough free disk space for complete local setup.' }
       }
-      return { ...result, available: true }
+      return { ...result, processingEstimate: processingEstimate(selected.runtime, hardware), available: true }
     } catch (error) { signal?.throwIfAborted(); return { ...base, reason: error.message } }
   }
 

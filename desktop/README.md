@@ -524,12 +524,12 @@ packages, and licenses. Preserve these with the artifact.
 
 ## Optional processing packs and offline models
 
-The packaged application's Processing menu reports playback, transcription,
-separation, and user-owned Modal readiness separately. Choose “Install processing
-runtime or model cache…” to select an explicit local JSON manifest. Runtime
-manifests authorize executable code: obtain them from a source you trust and
-review the displayed size before installation. No production download catalog,
-publication service, or signing trust root is configured by this prototype.
+Open Settings → Song processing… in the packaged application to review and
+set up local processing or user-owned Modal. The setup flow shows download sizes
+and installation notices before consent. Settings also provides library database
+backup and restore; these backups do not include audio files. Update staging,
+recovery diagnostics, and arbitrary manifest installation are not everyday menu
+actions.
 
 Processing uses a separate relocatable Python environment. CPU, CUDA, and Metal
 are separate pack variants; platform, architecture, and application package
@@ -714,14 +714,11 @@ not provide a portable directory-descriptor-relative `openat` traversal, so the
 app does not claim protection from a malicious process running as the same user
 that concurrently replaces ancestor directories or installed binaries.
 
-The first explicit Heart transcription or audio-upload action opens Heart setup.
-You can also open Processing → Set up Heart transcription. The dialog shows the
-exact size and upstream source before you choose to retrieve files or select an
-existing complete Heart model folder. Cancel keeps the operation unsubmitted.
-Progress appears in the application taskbar/dock; Processing → Cancel installation
-interrupts setup, and retry resumes verified partial transfers. Insufficient disk
-space, interrupted transfers and checksum failures preserve the prior cache.
-After installation, reopen the application and retry the original action.
+Open Settings → Song processing… to install the processing pack. The setup flow
+shows download sizes and upstream sources before consent. Installation progress
+includes a cancel action, and retry resumes verified partial transfers.
+Insufficient disk space, interrupted transfers, and checksum failures preserve
+the prior cache. Queued songs wait for the processing pack to become available.
 Prepared playback remains available while setting up models.
 
 `models.json` defines the upstream allowlist and offline cache contract.
@@ -814,8 +811,7 @@ shell. Linux graphical smoke tests can run under `xvfb-run -a`.
 
 ## Playback qualification
 
-Use the host's projector button to open the display; the Projector menu controls
-fullscreen and display placement. Opening the projector requests prevention of
+Use the host's lyrics-display controls to open and manage the display. Opening the projector requests prevention of
 display sleep. Closing the host closes its projector and backend.
 
 The output selector routes the show player's audio and reapplies the selection
@@ -871,8 +867,8 @@ bytes or establish remote weight equality by metadata alone.
 # Song processing setup
 
 The installed desktop opens a welcome flow with an option to go straight to
-the library. “Set up song processing” reopens it from the library or Processing
-menu. Download consent is separate from choosing local processing. Setup must
+the library. “Set up song processing” reopens it from the library; the menu entry
+is Settings → Song processing…. Download consent is separate from choosing local processing. Setup must
 verify a compatible processing runtime, both separation models, and Heart
 together before reporting local processing ready. A saved wizard step is never
 readiness evidence. Verified model files are reused when expanding a cache.
@@ -897,6 +893,53 @@ be selected in setup: its layout and sizes are inspected before consent, then
 its contents are verified during cancellable installation. Missing or changed
 files never trigger a silent model download. The separate processing runtime
 may still require downloading; this is shown in the installation plan.
+
+### Advisory processing speed estimate
+
+The wizard offers a deliberately broad **planning heuristic**, not a benchmark
+or qualification result, for one three-minute track after setup and queue wait.
+The default workflow runs the four-checkpoint Demucs `mdx_extra` ensemble,
+`mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956`, and HeartTranscriptor
+(Whisper-derived, batch size one, including word timing). It does not assume
+newer upstream inference optimizations are in the pinned processing pack.
+
+Research checked 2026-10-02:
+
+- [Demucs upstream documentation](https://github.com/facebookresearch/demucs#memory-requirements-for-gpu-acceleration)
+  gives a generic CPU baseline around 1.5 times track duration. This does not
+  measure our four-checkpoint ensemble or the complete workflow.
+- [Karaoke-maker's own model comparison](https://github.com/CarlosGabrielMoralesUmasi/karaoke-maker#choosing-a-model)
+  reports 10–20 minutes for karaoke Mel-RoFormer on CPU. Its hardware and input
+  duration are unspecified, so this is an order-of-magnitude reference only.
+- [HeartTranscriptor's model card](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss)
+  identifies the Whisper-based implementation but gives no full-workflow speed
+  benchmark. Transcription, timing, loading, and retries need additional time.
+- [Audio Separator's upstream documentation](https://github.com/nomadkaraoke/python-audio-separator#-apple-silicon-macos-sonoma-with-m1-or-newer-coreml-and-mps-acceleration)
+  documents MPS execution, but does not establish a timing multiplier for our
+  pinned pack. CUDA reports and newer optimized implementations are not used
+  as Metal measurements.
+
+These references motivate a **20–90 minute** total planning band, allowing
+substantial room beyond the separation reference for the ensemble, transcription,
+loading, and timing. **45–180 minutes** is a conservative lower-resource band
+when fewer than eight logical processors or less than 16 GiB total RAM are
+observed. Those thresholds and band endpoints are product heuristics, not
+measured hardware requirements, confidence intervals, or an upper bound.
+More RAM and more logical processors do not guarantee faster inference. Model
+retries, dense vocals, thermal throttling, competing applications, memory
+pressure, and slow storage can push times outside these ranges.
+
+The three-position bar says Slower / Moderate / Faster. Current unbenchmarked
+CPU and Metal targets use only Slower or Moderate; Faster is not awarded merely
+because a graphics adapter is present. Metal conservatively shares the CPU
+bands until matching end-to-end measurements justify a speedup. The selected,
+validated pack supplies the execution device. Windows/Linux CPU packs therefore
+remain CPU estimates even on NVIDIA-equipped machines. Unknown accelerators,
+missing hardware observations, mismatched targets, incomplete or extended model sets, and
+blocked installation plans display no numeric range. The estimate applies only to
+the default three-model workflow from the selected validated catalog; an installed
+runtime with a different manifest from that catalog receives no estimate. Existing measured memory
+checks and runtime attestation remain authoritative and independent of this UI.
 
 Hardware details report observations rather than inferred processing support.
 Unknown graphics memory remains unknown, and Apple silicon unified memory is
@@ -1050,21 +1093,20 @@ certificate verification; fix the host instead.
 
 | Mode | Selected by | Installs | Model retrieval consent |
 |---|---|---|---|
-| Fresh install | `--runtime-manifest` and `--download-models` | Through the advanced manifest installer | `--download-models` |
-| Resume | Fresh install options plus `--resume`, same `--output` | Continues the interrupted attempt | `--download-models` |
 | Retained setup | `--runtime-manifest`, `--retained-profile`, `--expected-source-commit` | Nothing | Not applicable |
 | Wizard | `--wizard` and `--expected-runtime-lock-sha256` | Through the first-launch setup screens | The application's own consent screen |
 
-Fresh install, resume and wizard modes use a new profile inside the evidence
-directory. For example, on Linux:
+Wizard mode uses a new profile inside the evidence directory. Legacy manifest
+installation and resume modes are retired; use the catalog shipped in the
+candidate and the wizard. For example, on Linux:
 
 ```sh
 xvfb-run -a node desktop/test/packaged-processing-smoke.mjs \
   --executable desktop/artifacts/linux-unpacked/Singhouse \
-  --runtime-manifest /verified-pack/manifest.json \
+  --wizard \
+  --expected-runtime-lock-sha256 FULL_64_HEX_RUNTIME_LOCK \
   --audio /licensed-excerpt.wav \
-  --output /evidence/new-attempt \
-  --download-models
+  --output /evidence/new-attempt
 ```
 
 #### Candidate identity
@@ -1080,28 +1122,9 @@ architecture is authoritative; if it differs from the Node architecture running
 the harness (for example an x64 Node under translation on Apple silicon), the
 run fails before processing.
 
-#### Resume and upgrades
-
-`--resume` continues an interrupted fresh-install attempt in the same evidence
-directory. Earlier evidence is hash linked and never modified. Resume refuses
-evidence from another platform or architecture, evidence recorded in retained
-or wizard mode, and any change to the candidate tuple. Profile paths are
-compared case-insensitively on macOS and Windows and exactly on Linux.
-
-To continue with a different candidate, add
-`--upgrade-from-executable-sha256 <full original executable hash>`. The
-candidate tuple must then change, and the evidence binds the original and
-current tuples as the upgrade lineage; every later attempt must carry the same
-lineage. On Linux the stock executable hash is shared by every build, so this
-flag selects nothing there: it only confirms the original evidence, and the
-recorded tuples bind the lineage. Evidence written before candidate tuples were
-recorded resumes only on Windows, where it is compared by executable hash alone
-and marked as legacy. Once any later attempt in such a chain records a tuple,
-every other attempt and every non-upgrade resume must match that tuple. On
-Linux and macOS such evidence is refused; start a new attempt.
-
 The candidate tuple is hashed again after every relaunch and after the final
-shutdown; any change fails the run.
+shutdown; any change fails the run. Existing resume and upgrade evidence remains
+preserved, but new attempts must use wizard or retained-setup mode.
 
 #### Retained setup
 

@@ -13,9 +13,9 @@ import { parseArguments, reusableRuntime, validateResume, validateRetainedCandid
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
-test('resume is explicit and retains model retrieval consent requirement', () => {
-  assert.equal(parseArguments(args).resume, false)
-  assert.equal(parseArguments([...args, '--resume']).resume, true)
+test('legacy fresh and resume qualification direct operators to wizard setup', () => {
+  assert.throws(() => parseArguments(args), /retired.*--wizard/)
+  assert.throws(() => parseArguments([...args, '--resume']), /retired.*--wizard/)
   assert.throws(() => parseArguments([...args, '--resume', '--resume']), /Duplicate/)
   assert.throws(() => parseArguments([...args.slice(0, -1), '--resume']), /consent/)
 })
@@ -118,7 +118,7 @@ test('executable upgrade requires explicit resume and a full original hash', () 
   const flag = '--upgrade-from-executable-sha256', digest = 'a'.repeat(64)
   assert.throws(() => parseArguments([...args, flag, digest]), /requires --resume/)
   assert.throws(() => parseArguments([...args, '--resume', flag, 'abc']), /64 hex/)
-  assert.equal(parseArguments([...args, '--resume', flag, digest.toUpperCase()]).upgradeFromExecutableSha256, digest)
+  assert.throws(() => parseArguments([...args, '--resume', flag, digest.toUpperCase()]), /retired.*--wizard/)
 })
 
 test('explicit upgrade preserves original evidence and binds original and current candidate tuples', t => {
@@ -440,7 +440,7 @@ test('wizard mode is exclusive, fresh-profile only, and requires the expected ru
   assert.throws(() => parseArguments([...args, '--interrupt-runtime-retrieval']), /requires --wizard/)
   assert.throws(() => parseArguments([...args, '--expected-runtime-lock-sha256', 'a'.repeat(64)]), /requires --wizard/)
   assert.throws(() => parseArguments(args.filter((_, i) => i !== 2 && i !== 3)), /Missing --runtime-manifest/)
-  assert.equal(parseArguments(args).mode, 'advanced')
+  assert.throws(() => parseArguments(args), /retired.*--wizard/)
   assert.equal(parseArguments([...args.slice(0, -1), '--retained-profile', 'p', '--expected-source-commit', 'a'.repeat(40)]).mode, 'retained')
 })
 

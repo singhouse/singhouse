@@ -634,7 +634,7 @@ describe('optional lookup and background setup', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid=onboarding-lrclib]').element.checked).toBe(false)
     expect(desktop.setLyricsLookup).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('Your audio is not uploaded')
+    expect(wrapper.text()).toContain('LRCLIB is a third-party lyrics service.')
     await wrapper.find('[data-testid=onboarding-lrclib]').setValue(true)
     desktop.setLyricsLookup.mockRejectedValueOnce(new Error('Could not save preference'))
     await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
@@ -688,5 +688,31 @@ it('refreshes lookup preferences even when the following installation preflight 
   expect(desktop.setLyricsLookup).toHaveBeenCalledWith(true)
   expect(wrapper.emitted('lyrics-saved')).toHaveLength(1)
   expect(wrapper.text()).toContain('Disk unavailable')
+  wrapper.unmount()
+})
+
+it('shows a qualitative machine rating and rough three-minute-track range with the real settings path', async () => {
+  globalThis.window.karaokeDesktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
+    preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
+      processingEstimate: { level: 2, label: 'Moderate', minutes: [20, 90], basis: 'This pack uses the CPU.' } }),
+  })
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  expect(wrapper.find('[aria-label="Local processing estimate"]').text()).toContain('20–90 minutes to prepare a 3-minute track')
+  expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
+  expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
+  expect(wrapper.text()).toContain('Actual processing times may vary.')
+  expect(wrapper.text()).toContain('You can enable Modal later via Settings → Song processing… → My Modal account.')
+  wrapper.unmount()
+})
+
+it('does not invent a range when the desktop supplies no estimate', async () => {
+  globalThis.window.karaokeDesktop = bridge({ getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }) })
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(0)
+  expect(wrapper.find('.estimate-range').exists()).toBe(false)
+  expect(wrapper.text()).toContain('A time estimate is unavailable for this setup.')
   wrapper.unmount()
 })

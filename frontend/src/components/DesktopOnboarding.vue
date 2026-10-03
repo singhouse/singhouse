@@ -265,6 +265,9 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         >
           ← Back to welcome
         </button>
+        <p class="quiet">
+          You can enable Modal later via Settings → Song processing… → My Modal account.
+        </p>
         <details>
           <summary>Computer details and processing estimates</summary>
           <template v-if="plan?.hardware">
@@ -278,14 +281,48 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           <p v-else>
             Hardware information is not available.
           </p>
-          <dl class="estimates">
-            <div
-              v-for="phase in ['Lead vocal separation', 'Backing vocal separation', 'Transcription', 'Alignment']"
-              :key="phase"
-            >
-              <dt>{{ phase }}</dt><dd>Not yet measured on this hardware</dd>
+          <section
+            class="speed-estimate"
+            aria-label="Local processing estimate"
+          >
+            <div class="speed-heading">
+              <strong>Estimated processing speed</strong>
+              <span>{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
             </div>
-          </dl><p>Processing times have not yet been measured on this computer.</p>
+            <div
+              class="speed-bar"
+              role="img"
+              :aria-label="`Estimated processing speed: ${plan?.processingEstimate?.label || 'not enough information'}`"
+            >
+              <i
+                v-for="level in 3"
+                :key="level"
+                :class="{ filled: level <= (plan?.processingEstimate?.level || 0) }"
+              />
+            </div>
+            <div
+              class="speed-labels"
+              aria-hidden="true"
+            >
+              <span>Slower</span><span>Moderate</span><span>Faster</span>
+            </div>
+            <p
+              v-if="plan?.processingEstimate?.minutes"
+              class="estimate-range"
+            >
+              <strong>{{ plan.processingEstimate.minutes[0] }}–{{ plan.processingEstimate.minutes[1] }} minutes</strong> to prepare a 3-minute track
+            </p>
+            <p v-else>
+              A time estimate is unavailable for this setup.
+            </p>
+            <p>{{ plan?.processingEstimate?.basis }}</p>
+            <p class="quiet">
+              Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
+            </p>
+            <p class="quiet">
+              Actual processing times may vary.
+            </p>
+          </section>
           <template v-if="plan?.memoryRequirements?.evidenceAvailable">
             <p>Measured memory requirement, including headroom: {{ size(plan.memoryRequirements.ramBytes) }} RAM<span v-if="plan.memoryRequirements.dedicatedVideoMemoryBytes"> and {{ size(plan.memoryRequirements.dedicatedVideoMemoryBytes) }} dedicated graphics memory</span>.</p>
             <p>{{ plan.memoryQualification?.reason }}</p>
@@ -646,4 +683,5 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
 <style scoped>
 .onboarding{position:fixed;inset:0;margin:0;width:100vw;height:100dvh;max-width:none;max-height:none;border:0;overflow-y:auto;z-index:1000;box-sizing:border-box;background:#0e1118;color:#f7eee2;padding:30px 40px 60px;font-family:inherit;color-scheme:dark}.setup-header{max-width:1020px;margin:auto;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:22px;font-weight:750;letter-spacing:-.7px}nav{display:flex;gap:20px;color:#8992a4;font-size:12px}nav>span{display:flex;align-items:center;gap:7px}nav b{display:grid;place-items:center;width:23px;height:23px;border:1px solid #465063;border-radius:50%}nav .active{color:#f7e7c8}nav .active b{border-color:#e23e57;background:#e23e5722}.focused{max-width:620px;margin:60px auto 0}h1{font-size:42px;line-height:1.12;letter-spacing:-1.4px;font-weight:650;margin:16px 0 22px}h1:focus{outline:none}h2{font-size:19px;margin:0 0 8px}p{color:#a9afbd;line-height:1.7;font-size:14px}.lead{font-size:16px;margin-bottom:28px}.eyebrow{color:#e98694;font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}.quiet{font-size:12px;color:#9ba4b4}.actions{display:flex;flex-direction:column;align-items:flex-start;gap:7px;margin-top:28px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.65}button:focus-visible,summary:focus-visible{outline:3px solid #f2cf7a;outline-offset:4px}.primary{background:#e23e57;border:1px solid #e23e57;border-radius:7px;color:white;font-weight:600;padding:15px 23px;font-size:14px;min-width:210px}.text-button{border:0;background:none;color:#bbc3d2;padding:10px 0;font-size:12px;text-align:left}.library{margin-top:12px}.wave{height:140px;display:flex;align-items:center;gap:9px;margin:20px 0 30px}.wave i{width:10px;border-radius:8px;background:linear-gradient(#eb6c80,#e23e57)}.choices{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:28px 0}.choice{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#191e29;color:#eee8df;border:1px solid #3b4353;border-radius:12px;padding:22px;gap:16px}.choice.chosen{border-color:#e23e57;box-shadow:0 0 0 1px #e23e57;background:#e23e570b}.choice strong{font-size:18px}.choice>span:not(.badge):not(.choice-symbol){color:#b4bbc9;font-size:13px;line-height:1.65}.choice small{color:#a4adbd;font-size:12px;line-height:1.7}.choice-symbol{font-size:25px}.badge{font-size:10px;color:#bcddc0;background:#294034;padding:5px 8px;border-radius:4px;margin-top:auto}.badge.neutral{background:#282f3d;color:#b8c0ce}details{margin-top:20px;font-size:12px;color:#b8c0d0}summary{cursor:pointer}details p{font-size:12px;overflow-wrap:anywhere}details li{margin:12px 0;line-height:1.7}.facts{display:flex;gap:32px;border-block:1px solid #323947;padding:25px 0;margin:20px 0}.facts dt{color:#9ba4b4;font-size:12px;margin-bottom:9px}.facts dd{margin:0;font-size:20px}.panel{padding:24px;background:#191e29;border:1px solid #323947;border-radius:12px}.panel p:last-child{margin-bottom:0}.alert{border-left:3px solid #e8bc6f;padding:12px 16px;background:#e8bc6f0b;color:#e9d3ad}.ready-mark{display:grid;place-items:center;border:1px solid #53664e;border-radius:50%;width:76px;height:76px;color:#d9e6b1;font-size:30px;margin:32px 0}progress{width:100%;accent-color:#e23e57;margin-top:16px}.components{padding-left:20px}@media(max-width:600px){.onboarding{padding:24px 18px 40px}.focused{margin-top:38px}h1{font-size:34px}.lead{font-size:14px}nav{gap:8px}nav>span>span{display:none}.choices{grid-template-columns:1fr}.facts{flex-wrap:wrap;gap:20px}.wave{gap:6px}.wave i{width:8px}}
 .compact{inset:auto 20px 20px auto;width:min(390px,calc(100vw - 40px));height:auto;max-height:45vh;padding:18px 22px;border:1px solid #3b4353;border-radius:12px;box-shadow:0 8px 30px #0006;z-index:100}.compact .focused{margin:0}.compact h1{font-size:20px;letter-spacing:-.3px;margin:6px 0 10px}.compact .eyebrow,.compact .ready-mark{display:none}.compact .lead,.compact p{font-size:12px;line-height:1.5;margin:8px 0}.compact .panel{padding:12px}.compact h2{font-size:13px}.compact .actions{margin-top:12px}.compact .primary{padding:10px 14px;min-width:0}.compact details{margin-top:8px}.compact .library{margin-top:4px}.lookup-option{display:flex;align-items:center;gap:10px}
+.speed-estimate{margin:22px 0;padding:18px;border:1px solid #3b4353;border-radius:10px;background:#191e29}.speed-heading,.speed-labels{display:flex;justify-content:space-between;gap:12px}.speed-heading{color:#eee8df}.speed-labels{color:#9ba4b4;font-size:11px}.speed-bar{display:flex;gap:5px;margin:14px 0 7px}.speed-bar i{height:9px;flex:1;background:#343b48;border-radius:4px}.speed-bar i.filled{background:#e23e57}.speed-estimate .estimate-range{font-size:14px;margin-top:20px}.estimate-range strong{color:#f7eee2}
 </style>

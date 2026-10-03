@@ -711,3 +711,47 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
   assert.equal((await setup.preflight()).available, true)
   assert.equal((await setup.getStatus()).state, 'idle')
 })
+
+test('processing planning estimate follows the selected pack, never the display GPU', async () => {
+  const hardware = { platform: 'linux', arch: 'x64', cpuCount: 16, totalMemoryBytes: 32 * 1024 ** 3,
+    gpu: 'NVIDIA RTX 5090', cudaDevices: [{ name: 'NVIDIA RTX 5090' }] }
+  const { setup } = fixture({ hardware: async () => hardware })
+  const plan = await setup.preflight()
+  assert.deepEqual(plan.processingEstimate.minutes, [20, 90])
+  assert.equal(plan.processingEstimate.label, 'Moderate')
+  assert.match(plan.processingEstimate.basis, /uses the CPU/)
+  hardware.cpuCount = 4
+  assert.deepEqual((await setup.preflight()).processingEstimate.minutes, [45, 180])
+  hardware.cpuCount = 16
+  hardware.totalMemoryBytes = 8 * 1024 ** 3
+  assert.equal((await setup.preflight()).processingEstimate.label, 'Slower')
+})
+
+test('unknown, mismatched, incomplete, and blocked plans never get a speed estimate', async () => {
+  const hardware = { platform: 'linux', arch: 'x64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3 }
+  for (const change of [
+    setup => { setup.catalog = null },
+    setup => { setup.catalog.qualification.passed = false },
+    setup => { setup.catalog.runtime.models = ['heart-transcriptor'] },
+    setup => { setup.catalog.runtime.models = [...LOCAL_MODEL_IDS, 'unknown-model'] },
+    setup => { setup.hardware = async () => ({ ...hardware, arch: 'arm64' }) },
+    setup => { setup.hardware = async () => ({ ...hardware, cpuCount: null }) },
+    setup => { setup.diskFree = async () => 0 },
+  ]) {
+    const { setup } = fixture({ hardware: async () => hardware })
+    change(setup)
+    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+  }
+})
+
+test('Metal planning range assumes no measured speedup and rejects other device targets', async () => {
+  const hardware = { platform: 'darwin', arch: 'arm64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3, unifiedMemory: true }
+  const { setup } = fixture({ hardware: async () => hardware })
+  Object.assign(setup.catalog.runtime, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(setup.catalog.qualification, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  const plan = await setup.preflight()
+  assert.deepEqual(plan.processingEstimate.minutes, [20, 90])
+  assert.match(plan.processingEstimate.basis, /no measured Metal speedup/)
+  hardware.unifiedMemory = false
+  assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+})

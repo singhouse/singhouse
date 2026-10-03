@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
+import { app, BrowserWindow, session, dialog, Menu, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
@@ -399,43 +399,11 @@ async function showUpdateRecovery() {
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ label: brand, submenu: [{ role: 'quit' }] }] : []),
-    { label: 'Projector', submenu: [
-      { label: 'Toggle fullscreen', accelerator: 'F11', click: () => { if (projector) projector.setFullScreen(!projector.isFullScreen()) } },
-      { label: 'Move to next display', click: () => {
-        if (!projector) return
-        const displays = screen.getAllDisplays()
-        const current = screen.getDisplayMatching(projector.getBounds())
-        const target = displays[(displays.findIndex(display => display.id === current.id) + 1) % displays.length]
-        projector.setFullScreen(false)
-        projector.setBounds(target.workArea)
-      } },
-      { label: 'Close projector', click: () => projector?.close() },
-    ] },
-    ...(packaged ? [{ label: 'Release', submenu: [
-      { label: 'Stage an update…', click: () => runUpdateOperation(stageUpdate) },
-      { label: 'Review and apply staged update…', click: () => runUpdateOperation(applyUpdate) },
+    ...(packaged ? [{ label: 'Settings', submenu: [
+      { label: 'Song processing…', click: () => host?.webContents.send('setup:open') },
+      { type: 'separator' },
       { label: 'Back up library database', click: () => runUpdateOperation(backupLibrary) },
-      { label: 'Restore manual database backup…', click: () => runUpdateOperation(restoreLibrary) },
-      { label: 'Show update recovery information…', click: () => runUpdateOperation(showUpdateRecovery) },
-    ] }] : []),
-    ...(packaged ? [{ label: 'Processing', submenu: [
-      { label: 'Processing readiness', click: async () => {
-        try {
-          const status = processingStatus ? await processingStatus() : { playback: { ready: true } }
-          const labels = { playback: 'Playback', transcription: 'Transcription', separation: 'Stem separation', modal: 'User-owned Modal' }
-          const detail = Object.entries(labels).map(([key, label]) => {
-            const value = status[key]
-            return `${label}: ${value?.ready ? 'Ready' : 'Not ready'}${value?.reason ? ` — ${value.reason}` : ''}`
-          }).join('\n\n')
-          await dialog.showMessageBox(host, { type: 'info', title: 'Processing readiness',
-            message: processingError || 'Processing capabilities', detail })
-        } catch (error) { dialog.showErrorBox('Processing readiness', error.message) }
-      } },
-      { label: 'Advanced: install runtime or model manifest…', click: () => {
-        runProcessingOperation('processing or model installation', installProcessing)
-      } },
-      { label: 'Set up song processing…', click: () => host?.webContents.send('setup:open') },
-      { label: 'Cancel installation', click: () => { installation?.abort(); heartSetup?.cancel(); onboardingSetup?.cancel() } },
+      { label: 'Restore library database…', click: () => runUpdateOperation(restoreLibrary) },
     ] }] : []),
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'quit' }] },
   ]))
