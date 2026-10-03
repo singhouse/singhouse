@@ -101,6 +101,18 @@ function appImageMount(mountInfo, executablePath) {
   return matches[0] || null
 }
 
+// Every mount point listed in a mountinfo table, whatever its filesystem.
+function mountPoints(mountInfo) {
+  const points = []
+  for (const line of mountInfo.split('\n')) {
+    const separator = line.indexOf(' - ')
+    if (separator < 0) continue
+    const before = line.slice(0, separator).split(' ')
+    if (before.length >= 6) points.push(procMountValue(before[4]))
+  }
+  return points
+}
+
 function procParent(stat) {
   const end = stat.lastIndexOf(')')
   if (end < 0) throw new Error('Invalid Linux process ancestry')
@@ -134,12 +146,10 @@ function ancestorImageBytes(procExecutable, outerPath) {
   }
 }
 
-// Bind the running Electron executable to the immutable outer AppImage using
-// kernel-owned process ancestry and mount-table evidence. APPIMAGE and APPDIR
-// are deliberately not consulted: either can be replaced by the caller.
-export function verifiedAppImageRuntime({ platform = process.platform, executablePath = process.execPath,
-  procRoot = '/proc', maximumAncestors = 64 } = {}) {
-  if (platform !== 'linux') return null
+// Kernel evidence that this process executes the AppImage layout's canonical
+// executable from the root of a read-only FUSE mount. It never consults
+// APPIMAGE/APPDIR and never reads the outer image.
+function appImageMountEvidence(executablePath, procRoot) {
   let actualExecutablePath, selfExecutable
   try {
     actualExecutablePath = realpathSync(executablePath)
@@ -152,11 +162,45 @@ export function verifiedAppImageRuntime({ platform = process.platform, executabl
   // ordinary desktop user mounts and launches the image. The read-only FUSE
   // mount and authenticated outer-image ancestry provide ownership here.
   canonicalFile(actualExecutablePath, 'AppImage runtime executable', { requireOwner: false })
-  let mount
-  try { mount = appImageMount(readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8'), actualExecutablePath) } catch {}
+  let mount, mountInfo
+  try {
+    mountInfo = readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8')
+    mount = appImageMount(mountInfo, actualExecutablePath)
+  } catch {}
   if (!mount || mount.mountPath !== dirname(actualExecutablePath) || basename(actualExecutablePath) !== APPIMAGE_LAYOUT.actualExecutablePath) {
     throw new Error('AppImage runtime is not executing from its read-only FUSE root')
   }
+  return { mount, actualExecutablePath, mountInfo }
+}
+
+// Whether the running application sits in a read-only FUSE mount, from the
+// same kernel evidence as verifiedAppImageRuntime() but without reading or
+// authenticating the outer image. It establishes only that the mounted files
+// cannot change underneath this process; it confers no installer or recovery
+// trust. Any other mount stacked on, or nested beneath, that mount point could
+// expose writable files, so it also yields null, as does any missing or
+// contrary evidence. A read-only FUSE view of a writable directory (a bindfs
+// or rclone mount the same user created) is indistinguishable here.
+export function readOnlyAppImageMount({ platform = process.platform, executablePath = process.execPath, procRoot = '/proc' } = {}) {
+  if (platform !== 'linux') return null
+  try {
+    const { mount, actualExecutablePath, mountInfo } = appImageMountEvidence(executablePath, procRoot)
+    const covering = mountPoints(mountInfo).filter(point => {
+      const inside = relative(mount.mountPath, point)
+      return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+    })
+    if (covering.length !== 1) return null
+    return { readOnly: true, mountPath: mount.mountPath, actualExecutablePath }
+  } catch { return null }
+}
+
+// Bind the running Electron executable to the immutable outer AppImage using
+// kernel-owned process ancestry and mount-table evidence. APPIMAGE and APPDIR
+// are deliberately not consulted: either can be replaced by the caller.
+export function verifiedAppImageRuntime({ platform = process.platform, executablePath = process.execPath,
+  procRoot = '/proc', maximumAncestors = 64 } = {}) {
+  if (platform !== 'linux') return null
+  const { mount, actualExecutablePath } = appImageMountEvidence(executablePath, procRoot)
   let pid
   try { pid = procParent(readFileSync(join(procRoot, 'self', 'stat'), 'utf8')) } catch {
     throw new Error('AppImage runtime ancestry is unavailable')
