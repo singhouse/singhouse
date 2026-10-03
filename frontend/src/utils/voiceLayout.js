@@ -40,14 +40,15 @@
 // the font size from line.height). Horizontal geometry is never touched.
 
 import { STAGE_HEIGHT, isFiniteNumber } from '@/stage/frame.mjs'
+import { ACTIVE_COLOR, ACTIVE_BORDER } from '@/stage/colors.mjs'
 
 // Per-voice active colors, applied by roster position. The first voice keeps
-// the established stage amber so a duet reads as "normal, plus a second part"
+// the default stage coral so a duet reads as "normal, plus a second part"
 // rather than two unfamiliar colors. Chosen for legibility on the dark stage
 // rather than to match any source document's own palette.
 const VOICE_COLORS = [
+  { activeColor: ACTIVE_COLOR, activeBorder: ACTIVE_BORDER },
   { activeColor: '#ffdd66', activeBorder: '#332200' },
-  { activeColor: '#77d8ff', activeBorder: '#05283a' },
   { activeColor: '#ff9ad5', activeBorder: '#3a0526' },
   { activeColor: '#9df0a8', activeBorder: '#0a3312' },
 ]
@@ -93,7 +94,7 @@ export function rosterIds(doc) {
 
 // Well-known unnamed stems (no roster) still get stable, distinct colors so a
 // standard lead/backing pair doesn't collapse to one hue: lead→slot 0 (stage
-// amber), backing→slot 1 (blue) — matching the first two roster colors.
+// coral), backing→slot 1 (amber) — matching the first two roster colors.
 const WELL_KNOWN_COLOR_INDEX = { lead: 0, backing: 1 }
 
 function stableIndexFor(key) {

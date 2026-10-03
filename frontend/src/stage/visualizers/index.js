@@ -23,6 +23,8 @@
 import aurora from './aurora.js'
 import particles from './particles.js'
 import waveform from './waveform.js'
+import tidal from './tidal.js'
+import ember from './ember.js'
 
 // Optional local visualizers are discovered rather than statically imported,
 // so an installation with no local modules builds with only the standard
@@ -42,7 +44,7 @@ const PRIVATE = Object.entries(import.meta.glob('./private/*.viz.js', { eager: t
   .filter(v => v && typeof v.id === 'string' && typeof v.draw === 'function')
 
 // Order here is the order shown in the host picker; local entries come last.
-const REGISTRY = [aurora, particles, waveform, ...PRIVATE]
+const REGISTRY = [aurora, particles, waveform, tidal, ember, ...PRIVATE]
 const BY_ID = new Map(REGISTRY.map(v => [v.id, v]))
 
 export function getVisualizer(id) {
