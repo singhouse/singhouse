@@ -23,7 +23,7 @@ async function recoveryEntry(platform, { invalidArguments = false, runtimeError 
   if (invalidArguments) args.pop()
   const fakeProcess = { platform, arch: 'x64', execPath: '/fixture/Singhouse', resourcesPath: '/fixture/resources',
     argv: ['/fixture/Singhouse', ...args], env: { SINGHOUSE_RECOVERY_ANCHOR: '1' }, on() {} }
-  const context = vm.createContext({ process: fakeProcess, console, URL, Buffer })
+  const context = vm.createContext({ process: fakeProcess, console, URL, Buffer, AbortController })
   const overrides = {
     electron: { app: { isPackaged: true, getName: () => 'Singhouse', requestSingleInstanceLock: () => true,
       getPath: () => '/state', on() {}, whenReady: () => Promise.resolve(), quit: () => finish() },
