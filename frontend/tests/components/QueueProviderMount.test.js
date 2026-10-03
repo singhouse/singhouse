@@ -64,6 +64,12 @@ const AudioPlayerStub = {
   emits: ['ended'],
   template: '<div class="audio-player-stub" />',
 }
+// Renders the header slots HostShell fills, so the brand-mark account
+// popover (where the status pill now lives) is reachable.
+const SongListStub = {
+  name: 'SongListStub',
+  template: '<div class="song-list-stub"><slot name="lead" /><slot name="actions" /></div>',
+}
 const QueuePanelStub = {
   name: 'QueuePanelStub',
   template: '<div class="core-queue-panel" />',
@@ -78,7 +84,8 @@ function mountShell() {
         AudioPlayer: AudioPlayerStub,
         QueuePanel: QueuePanelStub,
         ScreenStage: true,
-        SongList: true,
+        SongList: SongListStub,
+        teleport: true,
         UploadZone: true,
         Modal: true,
         BrandLogo: true,
@@ -119,8 +126,10 @@ describe('with a queue provider registered', () => {
     expect(wrapper.find('.core-queue-panel').exists()).toBe(false)
   })
 
-  it('renders the provider status pill', () => {
+  it('renders the provider status pill in the account popover', async () => {
     wrapper = mountShell()
+    expect(wrapper.find('.provider-pill').exists()).toBe(false)
+    await wrapper.find('.brand-btn').trigger('click')
     expect(wrapper.find('.provider-pill').exists()).toBe(true)
   })
 
