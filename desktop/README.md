@@ -191,9 +191,25 @@ Missing, changed, or malformed entries fail packaging; rebuild the assembly
 from clean inputs instead of regenerating its expected hashes. The receipt re-inspects that payload instead of trusting neighboring
 build files and records the modeled application subtree. `npm --prefix desktop
 run package:first-installers` embeds that receipt in the native first-install
-app. On first launch, every modeled file, directory, and internal link is
-checked. Any injected entry is rejected; the only non-modeled entries are the
-canonical receipt itself and the exact Windows uninstaller wrapper. Packaging
+app. At every launch, every modeled file, directory, and internal link is
+checked against the receipt by type and link target. Any missing, retyped or
+injected entry is rejected; the only non-modeled entries are the canonical
+receipt itself and the exact Windows uninstaller wrapper. File contents are
+hashed at packaging and wherever the installed files could change underneath
+the receipt: a writable installation (Windows, the Linux archive, an unsigned
+macOS bundle) is hashed in full on its first launch, and again whenever its
+launch inventory (each file's size, modification and change times, inode and
+device, taken from the descriptor that was hashed, kept in the
+application-data directory and bound to the receipt and canonical installation
+path) is missing or no longer matches. An AppImage whose application root lies
+in a kernel-reported read-only FUSE mount, with no other mount stacked on or
+nested beneath it, carries its receipt in the same immutable image, so its
+launch takes file digests from the receipt. This check reads mount evidence
+only, not the outer image; a read-only FUSE view of a writable directory that
+the same user mounts (for example with bindfs or rclone) is indistinguishable
+from an AppImage mount and is within that user's own trust boundary. The
+signed macOS bundle keeps a full content walk, and managed update
+slots keep hashing their native payload, at every launch. Packaging
 also reads the current Git `HEAD` and `git status --porcelain=v1
 --untracked-files=all`: the checkout must be clean and must exactly match the
 native provenance both before the build and again immediately before publishing
@@ -433,8 +449,8 @@ additionally checks current-user ownership and private permission bits. The
 native-verified stable installer owns that anchor and atomically repairs a
 corrupt anchor or rotates one whose installed executable/helper digests have
 changed during a verified reinstall; managed update targets can only read and
-verify it. A bundled release receipt authenticates modeled inner files but
-cannot authenticate the wrapper that supplied it. Linux and Windows anchor
+verify it. A bundled release receipt describes the modeled inner files (see
+the launch checks above) but cannot authenticate the wrapper that supplied it. Linux and Windows anchor
 rotation remain disabled unless their qualified platform trust hooks are
 enabled; macOS additionally requires its enabled `codesign` gate. An explicitly
 update-disabled build leaves anchor state untouched, so
@@ -539,8 +555,24 @@ that its drivers or hardware work. Installing a pack never changes the small
 playback environment or installs packages into it.
 
 After hash verification, the application runs its fixed `python-functional-v1`
-self-test through the selected interpreter before activation and on startup.
-It checks exact Python/application versions, native audio operations, selected
+self-test through the selected interpreter before activation. The accepted
+result is recorded beside the packs, in `processing/probe-results/<identity>.json`,
+bound to the full pack identity, the bundled native runtime and the
+application's self-test source. The record also marks that the pack passed a
+full hash verification when it was installed or activated (model caches, which
+run no self-test, keep an equivalent record in `model-cache/verified/`). Startup
+reuses that record only after applying the same acceptance checks a fresh result
+must pass. With a usable record, startup checks the pack structurally: the
+manifest still matches the full identity, the file inventory is exact with no
+links or special files, and every file is a regular file of its recorded size.
+Without one (for example, for a pack installed by an earlier version, or one
+whose record was withdrawn), startup verifies every file's hash, runs the
+self-test once and records the result. Any failed full verification or
+self-test withdraws the pack's record, so damage found during a reinstall,
+repair or setup check is verified again in full at the next startup and the
+pack is rejected there. Payload bytes are otherwise hashed at installation,
+repair, and activation, not at every startup.
+The self-test checks exact Python/application versions, native audio operations, selected
 device execution, and small synthetic architecture operations. The process has
 a 120-second default bound to accommodate cold native imports and cannot retrieve
 models. Explicit caller timeouts remain honored. Failure, invalid output, or timeout
@@ -706,8 +738,9 @@ mean an installation is running. Never delete or replace a lock file to bypass a
 running owner: the next attempt acquires the same inode only after its prior
 kernel lock has been released.
 
-Runtime file access uses no-follow descriptors where the platform supports them,
-with descriptor-based type, size, hash, write, and mode checks. This rejects
+During installation, runtime file access uses no-follow descriptors where the
+platform supports them, with descriptor-based type, size, hash, write, and mode
+checks (startup's structural check uses no-follow metadata only). This rejects
 symbolic-link files and avoids redirecting writes when a leaf path is replaced.
 The installation store remains inside the user's local trust boundary: Node does
 not provide a portable directory-descriptor-relative `openat` traversal, so the

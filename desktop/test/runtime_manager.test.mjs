@@ -3,12 +3,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fsPromises, { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, rename, symlink, open, chmod } from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import zlib, { crc32, deflateRawSync, gzipSync } from 'node:zlib'
-import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
+import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, launchSelection, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
 const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
@@ -550,6 +551,297 @@ test('verification preserves long nested paths, detects subsequent corruption an
   await writeFile(path, 'MIT notice')
   await writeFile(join(installed.directory, 'unexpected'), 'extra')
   await assert.rejects(manager.verify(installed.id), /inventory/)
+})
+
+test('launch-time verification is structural: size, inventory, links and manifest fail closed without reading payload bytes', async t => {
+  const { root, manifest, manager } = await fixture(t)
+  manifest.files.push({ ...manifest.files[1], path: 'lib/nested/NOTICE.copy' })
+  bindProvenance(manifest)
+  const installed = await manager.install(manifest)
+  // This fixture stubs the self-test, so no record exists; treat the pack's
+  // full verification as on record (the record itself is tested below).
+  manager.verifiedOnRecord = async () => true
+  const python = join(installed.directory, manifest.python), notice = join(installed.directory, 'lib/nested/NOTICE.copy')
+  const handle = await open(python, 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStream = prototype.createReadStream
+  let reads = 0
+  t.mock.method(prototype, 'createReadStream', function (...args) { reads++; return nativeStream.apply(this, args) })
+  // Same-size content changes are not detected at launch: payload hashes are
+  // checked when a pack is installed, repaired or activated.
+  await writeFile(python, 'x'.repeat(manifest.files[0].size))
+  assert.equal((await manager.verify(installed.id, { quick: true })).id, installed.id)
+  assert.equal((await manager.active({ launch: true })).id, installed.id)
+  assert.equal(reads, 0, 'The launch check must not read payload bytes')
+  // Full verification, and so every install and activation path, still does.
+  await assert.rejects(manager.verify(installed.id), /verification failed/)
+  assert.ok(reads > 0)
+  await assert.rejects(manager.install(manifest), /verification failed/)
+  await writeFile(python, 'fixture python')
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+  const damages = [
+    [() => writeFile(python, 'fixture python, longer'), /verification failed/],
+    [() => rm(notice), /inventory/],
+    [() => writeFile(join(installed.directory, 'lib/extra'), 'extra'), /inventory/],
+    [async () => { await rm(notice); await mkdir(notice) }, /inventory|verification failed/],
+    [() => writeFile(join(installed.directory, 'manifest.json'), JSON.stringify({ ...manifest, appVersion: '9.9.9' })), /invalid|incompatible|modified|different/i],
+  ]
+  if (process.platform !== 'win32') {
+    damages.push([async () => { await rm(notice); await symlink(python, notice) }, /symbolic link/])
+    damages.push([async () => {
+      await rename(join(installed.directory, 'lib/nested'), join(root, 'moved-nested'))
+      await symlink(join(root, 'moved-nested'), join(installed.directory, 'lib/nested'))
+    }, /symbolic link|Invalid runtime directory/])
+  }
+  for (const [damage, expected] of damages) {
+    await rm(installed.directory, { recursive: true, force: true })
+    await rm(join(root, 'moved-nested'), { recursive: true, force: true })
+    await manager.install(manifest)
+    assert.equal((await manager.verify(installed.id, { quick: true })).id, installed.id)
+    await damage()
+    await assert.rejects(manager.verify(installed.id, { quick: true }), expected)
+    assert.equal(await manager.active({ launch: true }).catch(() => null), null)
+  }
+})
+
+for (const schema of [1, 2]) test(`launch reuses the self-test result recorded for the exact pack (probe schema ${schema})`, { skip: process.platform === 'win32' }, async t => {
+  const { root, source, manifest } = await fixture(t)
+  if (schema === 2) manifest.probe = { ...manifest.probe, schema: 2, type: 'python-functional-v1' }
+  const protocol = { schema, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
+    lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
+    capabilities: manifest.capabilities, hardwareAvailable: true,
+    components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])),
+    ...(schema === 2 ? { checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } } : {}) }
+  const spawns = join(root, 'spawns')
+  const script = `#!/bin/sh\nprintf x >> '${spawns}'\nprintf '%s\\n' '${JSON.stringify(protocol)}'\n`
+  await writeFile(source, script)
+  manifest.files[0].size = Buffer.byteLength(script)
+  manifest.files[0].sha256 = sha(script)
+  bindProvenance(manifest)
+  const count = async () => (await readFile(spawns, 'utf8').catch(() => '')).length
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  const installed = await manager.install(manifest)
+  assert.equal(await count(), 1, 'Installation runs the self-test once')
+  const recorded = join(root, 'processing', 'probe-results', `${installed.id}.json`)
+  const record = JSON.parse(await readFile(recorded, 'utf8'))
+  assert.equal(record.schema, 1)
+  assert.equal(record.runtimeManifestId, installed.id)
+  // The record lives beside the pack; the pack inventory stays exact.
+  assert.equal((await manager.verify(installed.id)).id, installed.id)
+
+  const launch = async () => {
+    const restarted = new RuntimeManager(join(root, 'processing'), identity)
+    const active = await restarted.active({ launch: true })
+    return { active, result: await restarted.launchProbe(active) }
+  }
+  const reused = await launch()
+  assert.equal(await count(), 1, 'Launch reuses the recorded result without running the probe')
+  assert.equal(reused.result.capabilitiesReady, schema === 2)
+  assert.deepEqual(reused.result.verifiedCapabilities, schema === 2 ? manifest.capabilities : [])
+  const fresh = await new RuntimeManager(join(root, 'processing'), identity).probe(installed)
+  assert.equal(await count(), 2)
+  assert.deepEqual(reused.result, fresh)
+  assert.deepEqual(processingAttestation(reused.active, reused.result), processingAttestation(installed, fresh))
+
+  // Each unusable record is replaced by one fresh run, which is recorded again.
+  const replacements = [
+    () => rm(recorded),
+    () => writeFile(recorded, '{'),
+    () => writeFile(recorded, JSON.stringify({ ...record, runtimeManifestId: 'e'.repeat(64) })),
+    () => writeFile(recorded, JSON.stringify({ ...record, probeSourceSha256: 'e'.repeat(64) })),
+    () => writeFile(recorded, JSON.stringify({ ...record, extra: true })),
+    () => writeFile(recorded, JSON.stringify({ ...record, result: { ...record.result, hardwareAvailable: false } })),
+    () => writeFile(recorded, JSON.stringify({ ...record, result: { ...record.result, components: {} } })),
+    () => writeFile(recorded, JSON.stringify({ ...record, result: { ...record.result, accelerator: 'cuda' } })),
+  ]
+  if (schema === 2) replacements.push(() => writeFile(recorded, JSON.stringify({ ...record, result: { ...record.result, checks: { ...protocol.checks, transcription: false } } })))
+  else replacements.push(() => writeFile(recorded, JSON.stringify({ ...record, result: { ...record.result, schema: 2 } })))
+  for (const replace of replacements) {
+    await rm(recorded, { recursive: true, force: true })
+    await writeFile(recorded, JSON.stringify(record))
+    await replace()
+    const before = await count()
+    const { result } = await launch()
+    assert.equal(await count(), before + 1, 'An unusable record runs the probe once')
+    assert.deepEqual(result, fresh)
+    assert.deepEqual(JSON.parse(await readFile(recorded, 'utf8')), record)
+    await launch()
+    assert.equal(await count(), before + 1, 'The fresh result is recorded for the next launch')
+  }
+
+  // A record that cannot be read or replaced only costs a probe at each launch.
+  await rm(recorded)
+  await mkdir(recorded)
+  const blocked = await count()
+  assert.deepEqual((await launch()).result, fresh)
+  assert.deepEqual((await launch()).result, fresh)
+  assert.equal(await count(), blocked + 2)
+
+  // Without a record, launch verifies the pack in full before any probe, so a
+  // same-size interpreter change is rejected, never run and never recorded.
+  await rm(recorded, { recursive: true })
+  const unrecorded = await count()
+  await writeFile(join(installed.directory, manifest.python), script.replace('"schema"', '"schemX"'))
+  await assert.rejects(launch(), /verification failed/)
+  assert.equal(await count(), unrecorded)
+  await assert.rejects(readFile(recorded))
+})
+
+// A pack whose interpreter records each run, fails while `fail` exists and
+// stalls while `slow` exists; all three paths are outside the pack.
+async function controllablePack(t, options = {}) {
+  const { root, source, manifest } = await fixture(t)
+  const protocol = { schema: 1, pythonVersion: manifest.pythonVersion, backendVersion: manifest.backendVersion,
+    lyricsyncVersion: manifest.lyricsyncVersion, accelerator: manifest.accelerator,
+    capabilities: manifest.capabilities, hardwareAvailable: true,
+    components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1.0'])) }
+  const spawns = join(root, 'spawns'), fail = join(root, 'fail'), slow = join(root, 'slow')
+  const script = `#!/bin/sh\nprintf x >> '${spawns}'\n[ -e '${fail}' ] && exit 9\n[ -e '${slow}' ] && exec /bin/sleep 5\nprintf '%s\\n' '${JSON.stringify(protocol)}'\n`
+  await writeFile(source, script)
+  manifest.files[0].size = Buffer.byteLength(script)
+  manifest.files[0].sha256 = sha(script)
+  bindProvenance(manifest)
+  const manager = new RuntimeManager(join(root, 'processing'), identity, options)
+  const installed = await manager.install(manifest)
+  const count = async () => (await readFile(spawns, 'utf8').catch(() => '')).length
+  const recorded = join(root, 'processing', 'probe-results', `${installed.id}.json`)
+  const launch = async (launchOptions = options) => {
+    const restarted = new RuntimeManager(join(root, 'processing'), identity, launchOptions)
+    const active = await restarted.active({ launch: true })
+    return processingAttestation(active, await restarted.launchProbe(active))
+  }
+  return { root, manifest, manager, installed, count, recorded, launch, fail, slow }
+}
+
+test('a failed fresh self-test withdraws the recorded success; cancellation keeps it', { skip: process.platform === 'win32' }, async t => {
+  const { manager, installed, count, recorded, launch, fail, slow } = await controllablePack(t)
+  assert.equal(await count(), 1)
+  await readFile(recorded)
+  // A later check (onboarding, reinstall) fails: the record must not survive.
+  await writeFile(fail, '')
+  await assert.rejects(manager.probe(installed), /could not be loaded/)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  await assert.rejects(launch(), /could not be loaded/)
+  assert.equal(await count(), 3, 'Launch ran the self-test again instead of admitting the pack')
+  await assert.rejects(manager.install(installed.manifest), /could not be loaded/)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  // A timeout is a failure too.
+  await rm(fail)
+  await manager.probe(installed)
+  await writeFile(slow, '')
+  await assert.rejects(manager.probe(installed, { timeout: 50 }), /timed out/)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  // Cancellation says nothing about the pack.
+  await rm(slow)
+  await manager.probe(installed)
+  await writeFile(slow, '')
+  const controller = new AbortController()
+  const cancelled = manager.probe(installed, { signal: controller.signal })
+  setTimeout(() => controller.abort(), 100)
+  await assert.rejects(cancelled, /cancelled/)
+  await readFile(recorded)
+  await rm(slow)
+  const before = await count()
+  assert.equal((await launch()).probePassed, true)
+  assert.equal(await count(), before)
+})
+
+test('the recorded self-test result is bound to the bundled native runtime and a plain record directory', { skip: process.platform === 'win32' }, async t => {
+  const nativeA = 'a'.repeat(64), nativeB = 'b'.repeat(64)
+  const { root, installed, count, recorded, launch } = await controllablePack(t, { nativeRuntimeId: nativeA })
+  assert.equal(JSON.parse(await readFile(recorded, 'utf8')).nativeRuntimeId, nativeA)
+  await launch()
+  assert.equal(await count(), 1, 'The same native runtime reuses the record')
+  await launch({ nativeRuntimeId: nativeB })
+  assert.equal(await count(), 2, 'Another native runtime runs the self-test again')
+  assert.equal(JSON.parse(await readFile(recorded, 'utf8')).nativeRuntimeId, nativeB)
+  await launch({ nativeRuntimeId: nativeB })
+  assert.equal(await count(), 2)
+  // A symlinked record directory is never read, even if it holds a valid record.
+  const elsewhere = join(root, 'elsewhere')
+  await rename(join(root, 'processing', 'probe-results'), elsewhere)
+  await symlink(elsewhere, join(root, 'processing', 'probe-results'))
+  await readFile(join(elsewhere, `${installed.id}.json`))
+  await launch({ nativeRuntimeId: nativeB })
+  assert.equal(await count(), 3)
+})
+
+test('launch takes the structural path only for a pack whose full verification is on record', { skip: process.platform === 'win32' }, async t => {
+  const { root, manifest, manager, installed, count, recorded, launch } = await controllablePack(t)
+  // A second, newer pack differing only in its notice.
+  const notice = join(root, 'NOTICE.second')
+  await writeFile(notice, 'BSD notice')
+  const second = structuredClone(manifest)
+  second.files[1] = { ...second.files[1], url: pathToFileURL(notice).href, size: 10, sha256: sha('BSD notice') }
+  bindProvenance(second)
+  const newer = await manager.install(second)
+  const damaged = join(newer.directory, 'NOTICE.fixture')
+  const newerRecord = join(root, 'processing', 'probe-results', `${newer.id}.json`)
+  await readFile(newerRecord)
+  const probes = await count()
+
+  // With its record, a same-size change passes the structural launch check.
+  await writeFile(damaged, 'xxx notice')
+  assert.equal((await launch()).runtimeManifestId, newer.id)
+  assert.equal(await count(), probes)
+
+  // A reinstall attempt detects it: the full verification fails and the
+  // record is withdrawn, so the next launch verifies in full, rejects the
+  // pack and falls back to the earlier pointer, as an intact launch would.
+  await assert.rejects(manager.install(second), /verification failed/)
+  await assert.rejects(readFile(newerRecord), /ENOENT/)
+  assert.equal((await launch()).runtimeManifestId, installed.id)
+  assert.equal(await count(), probes, 'The earlier pack is admitted from its own record')
+  await assert.rejects(readFile(newerRecord), /ENOENT/)
+
+  // Restoring the bytes makes the newer pack verify in full once more; that
+  // launch probes it and records the result for later structural launches.
+  await writeFile(damaged, 'BSD notice')
+  assert.equal((await launch()).runtimeManifestId, newer.id)
+  assert.equal(await count(), probes + 1)
+  await readFile(newerRecord)
+
+  // A pack with no record (for example one installed by an earlier release)
+  // is verified in full at launch: same-size damage is found then.
+  await rm(newerRecord)
+  await rm(recorded)
+  await writeFile(damaged, 'xxx notice')
+  const restarted = new RuntimeManager(join(root, 'processing'), identity)
+  const handle = await open(damaged, 'r')
+  const prototype = Object.getPrototypeOf(handle)
+  await handle.close()
+  const nativeStream = prototype.createReadStream
+  let reads = 0
+  t.mock.method(prototype, 'createReadStream', function (...args) { reads++; return nativeStream.apply(this, args) })
+  assert.equal((await restarted.active({ launch: true })).id, installed.id)
+  assert.ok(reads > 0, 'A launch without a record hashes payload bytes')
+})
+
+test('a FIFO in place of a recorded self-test result is rejected without waiting', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+  const { count, recorded, launch } = await controllablePack(t)
+  await rm(recorded)
+  const made = spawnSync('mkfifo', [recorded])
+  assert.equal(made.status, 0)
+  const started = Date.now()
+  assert.equal((await launch()).probePassed, true)
+  assert.ok(Date.now() - started < 10000)
+  assert.equal(await count(), 2, 'The FIFO was not used as a record; the probe ran')
+})
+
+test('launch selection keeps the processing-then-models error order and clears only a failed processing selection', () => {
+  const ok = value => ({ status: 'fulfilled', value }), failed = message => ({ status: 'rejected', reason: new Error(message) })
+  const active = { id: 'p' }, probe = { probePassed: true }, models = { id: 'm' }
+  assert.deepEqual(launchSelection(ok({ active, probe }), ok(models)),
+    { activeProcessing: active, processingProbe: probe, activeModels: models, processingError: undefined })
+  assert.deepEqual(launchSelection(ok({ active: null }), ok(null)),
+    { activeProcessing: null, processingProbe: undefined, activeModels: null, processingError: undefined })
+  assert.deepEqual(launchSelection(failed('processing broke'), ok(models)),
+    { activeProcessing: null, processingProbe: null, activeModels: models, processingError: 'processing broke' })
+  assert.deepEqual(launchSelection(ok({ active, probe }), failed('models broke')),
+    { activeProcessing: active, processingProbe: probe, activeModels: undefined, processingError: 'models broke' })
+  assert.deepEqual(launchSelection(failed('processing broke'), failed('models broke')),
+    { activeProcessing: null, processingProbe: null, activeModels: undefined, processingError: 'processing broke\nmodels broke' })
 })
 
 // ---- Archive delivery (concat-gzip-v1) ----------------------------------
