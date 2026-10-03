@@ -194,6 +194,15 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     const { default: config, stageProcessingCatalog, withStagedCatalog } = await import(`${installer}?catalog=${Date.now()}`)
     // Neither a stray legacy catalog nor the per-target sources are in the static file list.
     assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))
+    // Runtime imports and worker entry points must survive the explicit ASAR
+    // allowlist. Checking dependencies catches missing modules before assembly.
+    for (const file of config.files.filter(file => file.endsWith('.mjs'))) {
+      const source = await readFile(resolve(desktop, file), 'utf8')
+      const dependencies = source.matchAll(/(?:from\s+|new URL\(\s*)['"]\.\/([^'"]+)['"]/g)
+      for (const [, dependency] of dependencies) {
+        if (/\.(mjs|cjs)$/.test(dependency)) assert.ok(config.files.includes(dependency), `${file} needs packaged ${dependency}`)
+      }
+    }
     // The installed name is fixed: packaging, signing and recovery match these files by exact name.
     assert.equal(config.productName, 'Singhouse')
     assert.equal(config.executableName, 'Singhouse')

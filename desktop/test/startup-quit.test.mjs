@@ -76,6 +76,7 @@ async function exercise(phase, intentionalQuit, failure = 'renderer') {
       return value
     } },
     runtime: { remove() { calls.push('runtime-cleanup') } },
+    startupVerification: new AbortController(),
     startupSurface: { close() { calls.push('splash-close') } },
     blocker: { stop() {} }, installMenu() {}, launch: { origin: 'http://127.0.0.1:1234/' },
     presentAndCompleteStartup, confirmRenderedFrame, stopRuntime,
@@ -96,6 +97,7 @@ async function exercise(phase, intentionalQuit, failure = 'renderer') {
       await new Promise(resolve => setImmediate(resolve))
     })(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Startup shutdown did not finish')), 2000) })])
   } finally { clearTimeout(timer) }
+  assert.equal(context.startupVerification.signal.aborted, true)
   assert.equal(host.destroyed, true)
   assert.equal(backend.exitCode, 0)
   assert.equal(calls.includes('complete-startup'), phase === 'presented')

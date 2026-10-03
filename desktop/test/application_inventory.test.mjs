@@ -276,3 +276,48 @@ test('the hashed walk reads each file through the descriptor it checked', { skip
     assert.throws(() => observeReceiptApplication({ rootDirectory: root, physicalFs: fs, receipt, target }), /unsupported entry/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('worker inventory preserves physical archive identity and cache/security checks', async () => {
+  const { observeReceiptApplicationOffThread } = await import('../application_inventory_worker.mjs')
+  const root = await mkdtemp(join(tmpdir(), 'worker-inventory-'))
+  try {
+    const { receipt } = await receiptFixture(root)
+    const options = { rootDirectory: root, receipt, target: { platform: 'linux', arch: 'x64' } }
+    const expected = observeReceiptApplication({ ...options, physicalFs: fs })
+    const phases = []
+    const actual = await observeReceiptApplicationOffThread(options, { diagnostic: event => phases.push(event) })
+    assert.equal(actual.mode, 'hashed')
+    assert.deepEqual(actual.identity, expected.identity)
+    assert.deepEqual(actual.launchInventory, expected.launchInventory)
+    assert.deepEqual(phases.map(event => event.status), ['started', 'complete'])
+    assert.ok(phases.every(event => !JSON.stringify(event).includes(root)))
+    assert.equal((await observeReceiptApplicationOffThread({ ...options, launchInventory: actual.launchInventory })).mode, 'cached')
+    await writeFile(join(root, 'resources', 'app.asar'), 'tampered physical archive')
+    await assert.rejects(observeReceiptApplicationOffThread({ ...options, launchInventory: actual.launchInventory }), /Installed application changed/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('inventory worker leaves main-thread timers responsive and cancellation prevents admission', async () => {
+  const { observeReceiptApplicationOffThread } = await import('../application_inventory_worker.mjs')
+  const root = await mkdtemp(join(tmpdir(), 'cancel-inventory-'))
+  try {
+    const { receipt } = await receiptFixture(root)
+    // Enough physical files to keep the serial worker busy past its first message.
+    for (let index = 0; index < 1000; index++) fs.writeFileSync(join(root, 'resources', `extra-${index}`), 'x')
+    const controller = new AbortController()
+    let timerRan = false, admitted = false
+    const phases = []
+    const pending = observeReceiptApplicationOffThread({ rootDirectory: root, receipt, target: { platform: 'linux', arch: 'x64' } }, {
+      signal: controller.signal,
+      diagnostic: event => {
+        phases.push(event)
+        if (event.status === 'started') setTimeout(() => { timerRan = true; controller.abort() }, 0)
+      },
+    }).then(() => { admitted = true })
+    await assert.rejects(pending, { name: 'AbortError' })
+    assert.equal(timerRan, true)
+    assert.equal(admitted, false)
+    assert.equal(phases.at(-1).status, 'cancelled')
+    assert.throws(() => observeReceiptApplicationOffThread({}, { signal: controller.signal }), { name: 'AbortError' })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

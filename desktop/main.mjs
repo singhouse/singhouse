@@ -23,7 +23,8 @@ import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleas
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
 import { ensureRecoveryAnchor, installRecoveryKit, readOnlyAppImageMount, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
-import { assertNativeInventoryDeclared, declaredApplicationDigest, observeReceiptApplication, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
+import { assertNativeInventoryDeclared, declaredApplicationDigest, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
+import { observeReceiptApplicationOffThread } from './application_inventory_worker.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
 import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
 
@@ -59,6 +60,7 @@ if (!ownsInstance) app.quit()
 app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.restore(); host.show(); host.focus() } })
 let backend, host, projector, quitting = false, shutdownComplete = false, handingOff = false
 let recoveryKitDurability = null, recoveryAnchor = null
+const startupVerification = new AbortController()
 const operationGate = new OperationGate()
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
@@ -138,9 +140,11 @@ async function installedReleaseIdentity() {
   // The cache is bound to the canonical root, so a different installation
   // reached through the same path never matches it.
   const inventoryRoot = physicalFs.realpathSync.native(applicationRoot)
-  const observed = observeReceiptApplication({ rootDirectory: applicationRoot, current: bundle, leading, physicalFs, receipt,
+  const observed = await observeReceiptApplicationOffThread({ rootDirectory: applicationRoot, current: bundle, leading, receipt,
     target: { platform: process.platform, arch: process.arch }, readOnly, inventoryRoot,
-    launchInventory: readOnly ? null : await readLaunchInventory(launchInventoryPath) })
+    launchInventory: readOnly ? null : await readLaunchInventory(launchInventoryPath) },
+    { signal: startupVerification.signal, diagnostic: event => console.info(JSON.stringify(event)) })
+  startupVerification.signal.throwIfAborted()
   const identity = observed.identity
   if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
   const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
@@ -484,6 +488,7 @@ async function start() {
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
     releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
     productRelease = await installedReleaseIdentity()
+    if (quitting) return
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')
       if (managedReleaseSlot) recoveryAnchor = readRecoveryAnchor(anchorPath)
@@ -767,6 +772,7 @@ app.on('before-quit', event => {
     return
   }
   quitting = true
+  startupVerification.abort()
   installation?.abort()
   heartSetup?.cancel()
   onboardingSetup?.cancel()
