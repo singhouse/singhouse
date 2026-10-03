@@ -832,6 +832,25 @@ def persistent_environment(runtime: Path, origin: str, password: str, native: Pa
     return env
 
 
+def processing_memory_policy(lock_hash: str) -> str:
+    """Return only release-owned evidence bound to this exact runtime lock.
+
+    Missing or stale evidence disables guarded processing, never playback.
+    Workers independently validate model envelopes before loading checkpoints.
+    """
+    try:
+        value = json.loads(Path(__file__).with_name("processing-memory.json").read_text())
+        if (type(value.get("schema")) is not int or value["schema"] != 1
+                or value.get("runtimeLockSha256") != lock_hash
+                or not isinstance(value.get("evidenceReference"), str)
+                or not value["evidenceReference"].strip()
+                or not isinstance(value.get("models"), dict)):
+            return ""
+        return json.dumps(value)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""
+
+
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
@@ -846,7 +865,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         runtime = _windows_extended_path(runtime)
         processing = _windows_extended_path(processing) if processing is not None else None
         models = _windows_extended_path(models) if models is not None else None
-    env = {"KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
+    env = {"KARAOKE_PROCESSING_MEMORY_JSON": "", "KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
            "KARAOKE_HEART_CKPT": "",
@@ -1032,6 +1051,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                         and set(probe["components"]) == expected_component_keys
                         and all(isinstance(value, str) and value for value in probe["components"].values()))
         capabilities_ready = probe_passed and functional
+        if capabilities_ready:
+            env["KARAOKE_PROCESSING_MEMORY_JSON"] = processing_memory_policy(lock_hash)
         env["KARAOKE_PROCESSING_PYTHON"] = python_path if capabilities_ready else ""
         env["KARAOKE_DEMUCS_PYTHON"] = env["KARAOKE_PROCESSING_PYTHON"]
         env["KARAOKE_PROCESSING_ACCELERATOR"] = manifest["accelerator"] if capabilities_ready else ""

@@ -895,6 +895,35 @@ installation is blocked when required capacity cannot be verified or is too
 small. Low currently available RAM produces a warning; prepared-media playback
 remains available.
 
+CUDA processing additionally requires a runtime-bound worker memory policy in
+`desktop/processing-memory/<platform>-<arch>.json`. Native assembly includes
+only the selected target's policy as `processing-memory.json`. Its schema is
+`1`, with `runtimeLockSha256`, `evidenceReference`, `executionProfile` set to
+`bounded-v1`, and `models` keyed by the three installed model IDs. Each model
+declares `maxDurationSeconds`, `maxSampleRate`, `maxChannels`, and `devices`:
+`cuda` needs `ramBytes` and `vramBytes`; an optional `cpu` entry needs its own
+`ramBytes`. Requirements include headroom and must be supported by recorded
+measurements; a CPU entry explicitly permits slower CPU execution in the same
+runtime. The initial CUDA functional probe must still pass before activation.
+
+Workers check fresh available RAM, the selected CUDA device's free VRAM, and
+audio metadata before loading checkpoints. Missing evidence, unknown memory,
+out-of-envelope audio, or insufficient memory for both routes refuses the job.
+Guarded workers serialize processing and never restart failed inference on a
+different device. The bounded profile uses six-second Demucs segments,
+Roformer segment size 256 with batch size one and CUDA autocast, and HEART's
+30-second chunks with batch size one. Managed HEART VAD runs inside admission.
+These checks cannot reserve memory against other applications or establish
+support for hardware that has not been tested.
+
+`desktop/qualification/profile_processing.py --help` describes the explicit
+Linux measurement harness. It verifies runtime files, records model/input
+identities, monitors only the owned worker group, and stops the experiment if
+the chosen host RAM reserve is threatened. Its candidate budgets are experiment
+inputs, and its sampled peaks are raw lower bounds, not release qualification
+or automatically generated memory minima. Keep audio and transcription logs
+local; publish only sanitized technical evidence.
+
 Desktop Modal setup saves credentials with operating-system encryption and
 performs a bounded, explicit metadata check using the pinned client. No audio
 upload, function invocation, deployment, or resource creation occurs in that

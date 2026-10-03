@@ -26,6 +26,13 @@ DESKTOP = ROOT / "desktop"
 LOCKS = DESKTOP / "locks"
 
 
+def copy_processing_memory_policy(target, output):
+    """Select only this native target's release-owned measurements."""
+    memory_policy = DESKTOP / "processing-memory" / f"{target}.json"
+    if memory_policy.is_file():
+        shutil.copyfile(memory_policy, output / "processing-memory.json")
+
+
 def run(*args, cwd=ROOT, env=None):
     subprocess.run([str(a) for a in args], cwd=cwd, env=env, check=True)
 
@@ -292,6 +299,7 @@ def main():
     # native inventory so direct native boot and installer boot use one policy.
     for policy in ("models.json", "processing-locks.json"):
         shutil.copyfile(DESKTOP / policy, output / policy)
+    copy_processing_memory_policy(target, output)
     shutil.copyfile(ROOT / "frontend/src/brand.js", output / "brand.mjs")
     for source in DESKTOP.glob("runtime*.py"):
         shutil.copyfile(source, output / source.name)

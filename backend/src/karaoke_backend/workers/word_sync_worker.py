@@ -143,13 +143,15 @@ def _make_transcriber(
                 "fail (set KARAOKE_DEMUCS_PYTHON or create .venv-demucs)",
                 DEMUCS_PYTHON,
             )
+        accelerator = _attested_accelerator(whisper_model)
         return HeartTranscriber(
             python_path=DEMUCS_PYTHON,
             script_path=HEART_SCRIPT,
             use_vad=use_vad,
             allow_temperature_fallback=allow_temperature_fallback,
             cancel_event=cancel_event,
-            accelerator=_attested_accelerator(whisper_model),
+            accelerator=accelerator,
+            managed_vad=accelerator == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")),
         )
     accelerator = _attested_accelerator(whisper_model)
     if accelerator == "mps":

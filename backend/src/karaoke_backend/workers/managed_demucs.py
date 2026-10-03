@@ -36,18 +36,22 @@ def main(argv=None):
     from karaoke_backend.workers.managed_audio_separator import disable_mps_fallback, deny_network
     disable_mps_fallback()
     sys.addaudithook(deny_network)
-    import torch
-    import demucs.separate
-    # Refuse unavailable selected hardware before loading a checkpoint. MPS
-    # fallback was disabled before torch import, so this cannot silently use CPU.
-    torch.empty(1, device=args.device)
-    original_save = demucs.separate.save_audio
-    demucs.separate.save_audio = save_float_wav
-    try:
-        demucs.separate.main(["-n", args.name, "--device", args.device,
-                              "--float32", "-o", args.out, *args.tracks])
-    finally:
-        demucs.separate.save_audio = original_save
+    from karaoke_backend.workers.memory_admission import admit, DEMUCS_SEGMENT_SECONDS
+    with admit("demucs-mdx-extra" if args.name == "mdx_extra" else args.name, args.device, args.tracks) as device:
+        import torch
+        import demucs.separate
+        # Refuse unavailable selected hardware before loading a checkpoint. MPS
+        # fallback was disabled before torch import, so this cannot silently use CPU.
+        torch.empty(1, device=device)
+        original_save = demucs.separate.save_audio
+        demucs.separate.save_audio = save_float_wav
+        try:
+            demucs.separate.main(["-n", args.name, "--device", device,
+                                  "--segment", str(DEMUCS_SEGMENT_SECONDS), "--jobs", "0",
+                                  "--float32", "-o", args.out, *args.tracks])
+        finally:
+            demucs.separate.save_audio = original_save
+
 
 
 if __name__ == "__main__":
