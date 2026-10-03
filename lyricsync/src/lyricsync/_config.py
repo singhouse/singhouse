@@ -72,53 +72,10 @@ class PostProcessConfig:
 
 
 @dataclass(frozen=True)
-class CorrectionConfig:
-    """LLM-assisted alignment correction.
-
-    Off by default; ``enabled`` + ``base_url`` gate the whole pass. The
-    endpoint speaks OpenAI chat completions, so a local llama-server/ollama
-    and any hosted OpenAI-compatible API are interchangeable. Every failure
-    mode (endpoint down, bad JSON after one retry, low confidence) falls
-    back to the deterministic heuristic for that region — a dead endpoint
-    yields the exact same word timing as ``enabled=False``.
-    """
-    enabled: bool = False
-    base_url: str = ""              # e.g. "http://127.0.0.1:11435/v1"
-    model: str = "local"
-    api_key: str = ""               # never persisted (redacted by the backend)
-    # Per-call seconds. Generous because local thinking models burn 2-3.5k
-    # reasoning tokens per region at ~8-13 tok/s (measured: Qwen3.6-35B-A3B
-    # UD-IQ3_XXS on an M2 through ollama — up to ~5 min a call, and
-    # disabling thinking measurably wrecks its timing judgement).
-    timeout: float = 600.0
-    # Region triggering. Experiment 1: the heuristic ties the LLM in tight
-    # gaps, so only garble clusters (any corrected word), wide gaps, and
-    # phrase-opening runs are worth a call.
-    tight_gap_sec: float = 0.6
-    wide_gap_sec: float = 1.0
-    # A silence gap longer than this before a line-opening interpolated run
-    # marks a phrase entry: unlock the line's first exact words (Whisper's
-    # first matched word tends to absorb the pickup word's onset).
-    phrase_gap_sec: float = 2.0
-    unlock_words: int = 2
-    # Exact runs of at least this length bound suspect regions; shorter
-    # exact islands inside a cluster are absorbed but locked.
-    min_anchor_run: int = 2
-    # Mappings self-rated below this are dropped (experiment 1: the only
-    # bad mapping was self-rated "low").
-    confidence_gate: str = "medium"
-    window_slack_sec: float = 0.1
-    # Whisper catches consonant onsets ~0.25s before sung-vowel authoring.
-    # Global shift applied to accepted spans; never per-word.
-    calibration_offset: float = 0.0
-
-
-@dataclass(frozen=True)
 class PipelineConfig:
     vad: VadConfig = field(default_factory=VadConfig)
     matching: MatchConfig = field(default_factory=MatchConfig)
     postprocess: PostProcessConfig = field(default_factory=PostProcessConfig)
-    correction: CorrectionConfig = field(default_factory=CorrectionConfig)
     # When True, the plain-lyrics path uses anchor-and-gap alignment instead of
     # global Needleman-Wunsch. Anchor regions preserve whisper-native timing.
     use_anchor_gap_alignment: bool = False

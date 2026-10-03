@@ -208,7 +208,6 @@ background.
 | `artist`         | string  | ❌       | Artist name (metadata) |
 | `title`          | string  | ❌       | Song title (metadata) |
 | `plain_lyrics`   | string  | ❌       | Pasted reference lyrics; anchors alignment and skips any lyrics lookup |
-| `llm_correction` | boolean | ❌       | Enable LLM lyric correction (default `false`) |
 | `llm_paging`     | boolean | ❌       | Enable LLM page structuring (default `false`) |
 
 If `artist`/`title` are omitted, they are inferred from an

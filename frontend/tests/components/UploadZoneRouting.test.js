@@ -20,10 +20,12 @@ vi.mock('@/api/client', () => ({
   default: { get: vi.fn(), post: vi.fn() },
   songApi: { list: vi.fn(async () => ({ data: { songs: [] } })) },
   lyricsSetsApi: {},
+  featuresApi: { get: vi.fn(async () => ({ data: { llm_paging: false } })) },
 }))
 
 import UploadZone from '@/components/UploadZone.vue'
 import { useSongsStore } from '@/stores/songs'
+import { useFeaturesStore } from '@/stores/features'
 
 let store
 let wrapper
@@ -184,6 +186,8 @@ describe('the ingest options', () => {
   })
 
   it('are not sent with a video import', async () => {
+    await flushPromises()
+    useFeaturesStore().llmPaging = true
     await drop(file('track.mp3', 'audio/mpeg'), file('clip.mp4', 'video/mp4'))
     await wrapper.find('.ingest-options input[type="checkbox"]').setValue(true)
     await wrapper.findAll('.btn-upload')[1].trigger('click')
@@ -196,4 +200,15 @@ describe('the ingest options', () => {
     // Three arguments only — no options bag rides along.
     expect(store.importVideoSong.mock.calls[0]).toHaveLength(3)
   })
+})
+
+
+it('shows page grouping only after endpoint configuration is reported', async () => {
+  await drop(file('song.mp3', 'audio/mpeg'))
+  await flushPromises()
+  expect(wrapper.text()).not.toContain('LLM paging')
+  expect(wrapper.text()).not.toContain('LLM correction')
+  useFeaturesStore().llmPaging = true
+  await flushPromises()
+  expect(wrapper.text()).toContain('LLM paging')
 })

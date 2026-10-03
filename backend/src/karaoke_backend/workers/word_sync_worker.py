@@ -135,7 +135,7 @@ def _make_transcriber(
             # Run the Heart model on a Modal GPU container.
             return modal_offload.ModalHeartTranscriber(
                 use_vad=use_vad,
-                allow_temperature_fallback=allow_temperature_fallback,
+            allow_temperature_fallback=allow_temperature_fallback,
             )
         if not DEMUCS_PYTHON.exists():
             logger.warning(
@@ -164,59 +164,11 @@ def _make_transcriber(
     )
 
 
-def _read_api_key() -> str:
-    """Resolve the LLM API key: env var first, then key-file."""
-    key = os.environ.get("KARAOKE_LLM_API_KEY", "").strip()
-    if key:
-        return key
-    key_file = os.environ.get("KARAOKE_LLM_API_KEY_FILE", "").strip()
-    if key_file:
-        try:
-            return Path(key_file).expanduser().read_text().strip()
-        except OSError as e:
-            logger.warning("Cannot read KARAOKE_LLM_API_KEY_FILE: %s", e)
-    return ""
-
-
-def _with_env_correction(cfg: PipelineConfig) -> PipelineConfig:
-    """No longer auto-enables correction from env.
-
-    Correction is now per-request (upload UI toggle → ``make_correction_config``).
-    Env vars supply creds only; they no longer imply intent. This function is
-    kept as a passthrough so existing callers are unchanged.
-    """
-    return cfg
-
-
-def make_correction_config(cfg: PipelineConfig) -> PipelineConfig:
-    """Enable LLM correction on ``cfg`` using env-configured endpoint creds.
-
-    Used when the request explicitly toggles correction on (the env vars
-    supply the endpoint/key; the toggle supplies the intent).
-    """
-    if cfg.correction.enabled:
-        return cfg
-    base_url = os.environ.get("KARAOKE_LLM_BASE_URL", "").strip()
-    if not base_url:
-        logger.warning("LLM correction requested but KARAOKE_LLM_BASE_URL is unset")
-        return cfg
-    correction = dataclasses.replace(
-        cfg.correction,
-        enabled=True,
-        base_url=base_url,
-        model=os.environ.get("KARAOKE_LLM_MODEL", "local"),
-        api_key=_read_api_key(),
-        timeout=float(os.environ.get("KARAOKE_LLM_TIMEOUT", "600")),
-    )
-    return dataclasses.replace(cfg, correction=correction)
-
-
 def _make_pipeline(
     whisper_model: str,
     *,
     use_vad: bool = True,
     config: Optional[PipelineConfig] = None,
-    correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
     cancel_event: threading.Event | None = None,
 ) -> SyncPipeline:
@@ -232,10 +184,9 @@ def _make_pipeline(
         allow_temperature_fallback=allow_temperature_fallback,
         cancel_event=cancel_event,
     )
-    cfg = _with_env_correction(config or PipelineConfig())
+    cfg = config or PipelineConfig()
     return SyncPipeline(
         transcriber=transcriber, config=cfg,
-        correction_progress_fn=correction_progress_fn,
     )
 
 
@@ -267,9 +218,6 @@ def _result_to_dict(
     ]
 
     cfg_dict = dataclasses.asdict(pipeline_config)
-    # The stored metadata is user-visible; a bearer token must never land
-    # in the DB no matter how the config reached us.
-    cfg_dict.get("correction", {}).pop("api_key", None)
 
     return {
         "segments": result.segments,
@@ -345,7 +293,6 @@ def _run_blocking(
     use_vad: bool,
     song_id: Optional[int],
     pipeline_config: PipelineConfig,
-    correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
@@ -384,7 +331,6 @@ def _run_blocking(
         cached = transcription_cache.load(cache_file) if cache_file else None
     pipeline = _make_pipeline(
         whisper_model, use_vad=use_vad, config=pipeline_config,
-        correction_progress_fn=correction_progress_fn,
         allow_temperature_fallback=allow_temperature_fallback,
         cancel_event=cancel_event,
     )
@@ -462,7 +408,6 @@ async def generate_word_sync(
     use_vad: bool = True,
     song_id: Optional[int] = None,
     pipeline_config: Optional[PipelineConfig] = None,
-    correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
@@ -515,7 +460,6 @@ async def generate_word_sync(
             use_vad=use_vad,
             song_id=song_id,
             pipeline_config=cfg,
-            correction_progress_fn=correction_progress_fn,
             allow_temperature_fallback=allow_temperature_fallback,
             force_transcribe=force_transcribe,
             cache_write_guard=cache_write_guard,
@@ -548,7 +492,6 @@ def _realign_blocking(
     use_vad: bool,
     pipeline_config: PipelineConfig,
     vocals_path: Optional[str],
-    correction_progress_fn=None,
 ) -> Optional[dict]:
     label = describe_run(whisper_model, use_vad=use_vad)
     cache_file = transcription_cache.cache_path(song_id, label)
@@ -562,7 +505,6 @@ def _realign_blocking(
 
     pipeline = _make_pipeline(
         whisper_model, use_vad=use_vad, config=pipeline_config,
-        correction_progress_fn=correction_progress_fn,
     )
     result = pipeline.align_only(
         whisper_result=cached,
@@ -599,22 +541,12 @@ async def realign_only(
     use_vad: bool = True,
     pipeline_config: Optional[PipelineConfig] = None,
     vocals_path: Optional[str] = None,
-    correction_progress_fn=None,
 ) -> Optional[dict]:
     """Realign cached transcription against new reference lyrics.
 
     ``vocals_path`` enables the onset-trim pass (word starts that sit in
     silence get pushed to the next voice onset). The cache stores raw
     transcription timestamps, so the trim re-applies on every realign.
-
-    ``correction_progress_fn`` is reported for the same reason the transcribe
-    path reports it: LLM correction is an ALIGNMENT-stage pass, so a config
-    with correction enabled makes this call spend minutes inside the aligner,
-    and a job that publishes nothing for that long looks wedged. It only fires
-    on a PLAIN-TEXT reference: a synced (LRC) reference is aligned by the
-    LRC-anchored aligner, which holds no corrector, and an unanchored realign
-    reaches no aligner at all. In either of those a correction-enabled config
-    is honoured in the sense that nothing rejects it — and corrects nothing.
 
     Raises ``FileNotFoundError`` if no cache exists for the given
     ``(song_id, whisper_model, use_vad)`` triple.
@@ -641,6 +573,5 @@ async def realign_only(
             use_vad=use_vad,
             pipeline_config=cfg,
             vocals_path=vocals_path,
-            correction_progress_fn=correction_progress_fn,
         ),
     )

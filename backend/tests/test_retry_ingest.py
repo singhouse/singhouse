@@ -226,7 +226,6 @@ async def test_retry_requeues_with_the_original_options(client: AsyncClient):
     song_id, first_job_id = await _failed_song(
         client,
         karaoke_model="mdxnet_kara2",
-        llm_correction="true",
         llm_paging="true",
         plain_lyrics="pasted reference",
     )
@@ -240,7 +239,6 @@ async def test_retry_requeues_with_the_original_options(client: AsyncClient):
 
     payload = await _queued_ingest_payload(song_id)
     assert payload["karaoke_model"] == "mdxnet_kara2"
-    assert payload["llm_correction"] is True
     assert payload["llm_paging"] is True
     assert payload["pasted_lyrics"] == "pasted reference"
     # The upload on disk is named after the FIRST job, so the retry has to
@@ -321,7 +319,6 @@ async def test_retry_without_a_recoverable_payload_uses_defaults(client: AsyncCl
 
     payload = await _queued_ingest_payload(song_id)
     assert payload["karaoke_model"] == "roformer"       # the server default
-    assert payload["llm_correction"] is False
     assert payload["llm_paging"] is False
     assert payload["artist"] == "Test"
     assert payload["title"] == "Retry"
@@ -485,7 +482,6 @@ PLEX_PAYLOAD = {
     "artist": "Stale Artist",
     "title": "Stale Title",
     "has_lyrics": True,
-    "llm_correction": True,
     "llm_paging": False,
     "karaoke_model": "mdxnet_kara2",
 }
@@ -525,7 +521,6 @@ async def test_retry_of_a_plex_import_requeues_a_plex_import(
     payload = queue.payload_of(job)
     assert payload["rating_key"] == "5501"
     assert payload["has_lyrics"] is True
-    assert payload["llm_correction"] is True
     assert payload["llm_paging"] is False
     assert payload["karaoke_model"] == "mdxnet_kara2"
     assert payload["artist"] == "Ackerman"

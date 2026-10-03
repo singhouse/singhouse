@@ -334,7 +334,6 @@ async def _ingest_fixture(tmp_path_unused=None) -> tuple[JobContext, Path, Path]
             "artist": "A",
             "title": "B",
             "pasted_lyrics": None,
-            "llm_correction": False,
             "llm_paging": False,
         },
     )
@@ -914,7 +913,6 @@ async def test_the_drain_helper_runs_a_queued_ingest_to_done():
                 "artist": "A",
                 "title": "B",
                 "pasted_lyrics": None,
-                "llm_correction": False,
                 "llm_paging": False,
             },
         )

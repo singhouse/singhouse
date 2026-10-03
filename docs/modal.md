@@ -95,6 +95,10 @@ generates a bearer token in `~/.config/karaoke/modal-llm-token` with mode `0600`
 It injects that value into the remote container as `VLLM_API_KEY`; you do not set
 `VLLM_API_KEY` in `backend/.env` or in the deploy shell.
 
+This endpoint is only used for optional page grouping. It does not alter word timings.
+Modal separation/transcription configuration alone does not enable paging: deploy
+a separate chat-completions endpoint and configure the backend explicitly.
+
 After deployment, point the backend at the printed HTTPS endpoint:
 
 ```sh
@@ -107,3 +111,20 @@ The endpoint scales to zero after 15 idle minutes, but persistent volumes and
 GPU execution may still incur charges under your Modal plan. Deleting or
 redeploying resources is an account operation; use Modal's dashboard or current
 CLI documentation to inspect the resources in your account before changing them.
+
+Paging also supports user-selected OpenAI-compatible HTTP(S) endpoints. Set
+`KARAOKE_LLM_BASE_URL` to the API root (usually ending in `/v1`); requests go to
+`/chat/completions`. Set `KARAOKE_LLM_MODEL` to the endpoint's model identifier
+(default `local`). Authentication is optional: `KARAOKE_LLM_API_KEY` takes
+precedence over `KARAOKE_LLM_API_KEY_FILE` (whose `~` is expanded).
+`KARAOKE_LLM_TIMEOUT` is a positive finite number of seconds, default `600`.
+These variables belong to the backend process environment; restart your own
+installation after changing them. Credentials are never included in capability
+responses or saved lyric metadata.
+
+Paging controls appear only when the URL, model and timeout configuration are
+valid. This indicates configuration, not remote connectivity: endpoint failures
+fall back to ordinary lyric display during processing, and standalone re-page
+jobs report failure without replacing the existing set. Paging is off per
+request until selected. Regular non-LLM paging and alignment work without an
+endpoint.

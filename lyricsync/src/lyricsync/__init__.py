@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 from lyricsync._config import (
-    CorrectionConfig,
     MatchConfig,
     PipelineConfig,
     PostProcessConfig,
@@ -17,7 +16,6 @@ __all__ = [
     "VadConfig",
     "MatchConfig",
     "PostProcessConfig",
-    "CorrectionConfig",
     "TimedWord",
     "TranscriptionResult",
     "SyncResult",

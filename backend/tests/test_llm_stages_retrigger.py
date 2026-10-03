@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""LLM correction and paging, reachable after ingest.
-
-Both stages used to be upload-time-only choices: the flags were read by
-``run_ingest`` and by nothing else, so re-transcribing a paged song dropped
-its pages and there was no way at all to add correction to a song already in
-the library. These pin the three routes that fixed that — ``/transcribe``,
-``/realign`` and the standalone ``/lyrics/{lid}/page`` — at the two places the
-wiring can silently rot: the flag reaching the worker, and the result of
-paging being told apart from its absence.
-
-Same drain-the-queue style as ``test_lyrics_sets_realign``: the routes only
-enqueue, so a test that wants the outcome runs the worker itself.
-"""
+"""Optional paging on sync routes and existing lyric sets."""
 
 import io
 import json
@@ -39,7 +27,8 @@ WAV = (
 
 
 @pytest.fixture(autouse=True)
-def clean_stems_root():
+def clean_stems_root(monkeypatch):
+    monkeypatch.setenv("KARAOKE_LLM_BASE_URL", "http://llm.invalid/v1")
     """A song directory per test, not per session.
 
     ``STEMS_DIR`` is one temp directory for the whole run while the database
@@ -126,65 +115,8 @@ async def _newest_set(client: AsyncClient, song_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_transcribe_forwards_llm_correction_to_the_pipeline_config(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
-):
-    """`llm_correction: true` must reach the aligner as an ENABLED correction
-    config — the flag travelling as far as the payload proves nothing."""
-    monkeypatch.setenv("KARAOKE_LLM_BASE_URL", "http://llm.invalid/v1")
-    song_id = await _create_song(client)
-    _ensure_vocals(song_id)
-
-    mock_gws = AsyncMock(return_value=_canned_word_data())
-    with patch("karaoke_backend.jobs.transcribe.generate_word_sync", new=mock_gws):
-        resp = await client.post(
-            f"/api/songs/{song_id}/lyrics/transcribe",
-            json={"whisper_model": "heart", "llm_correction": True},
-        )
-        assert resp.status_code == 202
-        assert await run_queued_jobs_once() == 1
-
-    kwargs = mock_gws.call_args.kwargs
-    assert kwargs["pipeline_config"].correction.enabled is True
-    assert kwargs["pipeline_config"].correction.base_url == "http://llm.invalid/v1"
-    # The progress bridge is what keeps a multi-minute correction pass from
-    # looking like a wedged job.
-    assert kwargs["correction_progress_fn"] is not None
 
 
-@pytest.mark.asyncio
-async def test_realign_forwards_llm_correction_too(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
-):
-    """Correction is an alignment-stage pass, so /realign can run it.
-
-    This is the finding the ticket asked about: the corrector is built by
-    ``SyncPipeline`` and held by the aligners, which ``align_only`` reaches —
-    so a realign with correction on really does correct.
-    """
-    monkeypatch.setenv("KARAOKE_LLM_BASE_URL", "http://llm.invalid/v1")
-    song_id = await _create_song(client)
-    _ensure_vocals(song_id)
-    _write_cache(song_id)
-
-    mock_realign = AsyncMock(return_value=_canned_word_data())
-    with patch("karaoke_backend.jobs.transcribe.realign_only", new=mock_realign):
-        resp = await client.post(
-            f"/api/songs/{song_id}/lyrics/realign",
-            json={
-                "whisper_model": "heart",
-                "reference_mode": "paste",
-                "plain_lyrics": "hello world\nsecond line",
-                "llm_correction": True,
-            },
-        )
-        assert resp.status_code == 202
-        assert await run_queued_jobs_once() == 1
-
-    kwargs = mock_realign.call_args.kwargs
-    assert kwargs["pipeline_config"].correction.enabled is True
-    assert kwargs["correction_progress_fn"] is not None
 
 
 @pytest.mark.asyncio
@@ -204,8 +136,8 @@ async def test_llm_flags_default_off(client: AsyncClient):
         assert resp.status_code == 202
         assert await run_queued_jobs_once() == 1
 
-    assert mock_gws.call_args.kwargs["pipeline_config"].correction.enabled is False
-    assert mock_gws.call_args.kwargs["correction_progress_fn"] is None
+    assert not hasattr(mock_gws.call_args.kwargs["pipeline_config"], "correction")
+    assert "correction_progress_fn" not in mock_gws.call_args.kwargs
     mock_paging.assert_not_called()
 
 
@@ -437,95 +369,3 @@ async def test_page_uses_the_transcription_lines_when_the_set_has_no_reference(
 
 
 # ---------------------------------------------------------------------------
-# Where correction actually runs
-# ---------------------------------------------------------------------------
-
-
-def _pipeline_with_correction(monkeypatch: pytest.MonkeyPatch):
-    """A real ``SyncPipeline`` whose corrector records instead of calling an LLM.
-
-    The correction stage is reached through the ALIGNER a pipeline picks, so
-    nothing short of building the real pipeline and letting it dispatch tells
-    you which references it fires on. Only the network call is stood in for.
-    """
-    import dataclasses
-
-    import lyricsync.correction as correction_pkg
-    from lyricsync._config import PipelineConfig
-    from lyricsync._pipeline import SyncPipeline
-
-    calls: list = []
-
-    class RecordingCorrector:
-        def __init__(self, config, progress_fn=None):
-            pass
-
-        def correct(self, *args, **kwargs):
-            calls.append(kwargs or args)
-            raise AssertionError("correction should not have been reached")
-
-    monkeypatch.setattr(correction_pkg, "RegionCorrector", RecordingCorrector)
-
-    base = PipelineConfig()
-    cfg = dataclasses.replace(
-        base,
-        correction=dataclasses.replace(
-            base.correction, enabled=True, base_url="http://llm.invalid/v1"
-        ),
-    )
-    return SyncPipeline(transcriber=None, config=cfg), calls
-
-
-def _transcription(words):
-    from lyricsync._types import TranscriptionResult, TranscriptionSegment
-
-    return TranscriptionResult(
-        segments=[
-            TranscriptionSegment(
-                start=w.start, end=w.end, text=w.text, words=[w]
-            )
-            for w in words
-        ],
-        language="en",
-        full_text=" ".join(w.text for w in words),
-    )
-
-
-def test_a_synced_reference_never_reaches_the_corrector(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """``llm_correction`` is accepted on every route, but only the plain-text
-    aligners hold a corrector. A synced reference is dispatched to the
-    LRC-anchored aligner, which is built without one — so asking for correction
-    alongside an LRC reference is a silent no-op, and the UI says so."""
-    pipeline, calls = _pipeline_with_correction(monkeypatch)
-
-    # The structural fact the dispatch rests on, read off the real pipeline.
-    assert pipeline._nw_aligner.corrector is not None
-    assert pipeline._anchor_gap_aligner.corrector is not None
-    assert not hasattr(pipeline._lrc_aligner, "corrector")
-
-    from lyricsync._types import TimedWord
-
-    words = [
-        TimedWord(text="hello", start=0.0, end=0.5),
-        TimedWord(text="world", start=0.6, end=1.0),
-    ]
-    result = pipeline.align_only(
-        _transcription(words),
-        plain_lyrics=None,
-        synced_lyrics="[00:00.00] hello world\n",
-    )
-
-    # It aligned, and the recording corrector — which raises if called — was
-    # never touched.
-    assert result is not None
-    assert calls == []
-
-    # Positive control, so the assertion above cannot pass by the corrector
-    # simply never being wired: the SAME pipeline, given the SAME words with a
-    # plain-text reference, does reach it.
-    with pytest.raises(AssertionError, match="should not have been reached"):
-        pipeline.align_only(
-            _transcription(words), plain_lyrics="hello world\n", synced_lyrics=None
-        )

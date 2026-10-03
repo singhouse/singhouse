@@ -1317,7 +1317,7 @@ disabled.
 #### Limits
 
 The runner requires Electron's host window; it is not a headless backend test.
-Modal, external lyric lookup and external correction remain disabled. None of
+Modal, external lyric lookup and external paging remain disabled. None of
 these modes is clean-machine, corpus accuracy, representative memory or
 physical-output qualification. Process ownership is traced by parent lineage
 from the first observation at close time: the application process and every
