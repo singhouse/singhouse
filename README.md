@@ -35,12 +35,6 @@ mixing, key shift, and a popout projector display.
 
 ## Download
 
-**v0.1.0 is a prerelease.** It has been tested on one machine per platform,
-but not at a live show with a physical projector. CUDA processing is untested.
-Read the
-[release notes and known limitations](https://github.com/singhouse/singhouse/releases/tag/v0.1.0)
-before relying on it for a show.
-
 | Platform | Download from the release page |
 | --- | --- |
 | Windows 11, x64 | [.exe installer](https://github.com/singhouse/singhouse/releases/tag/v0.1.0) |
