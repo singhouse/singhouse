@@ -168,17 +168,22 @@ export class OnboardingSetup {
     return this.getStatus()
   }
 
-  async installed({ signal } = {}) {
+  // Navigation may reuse the launch checks. Installation and restored completion
+  // checks retain full file verification and a fresh native probe.
+  async installed({ signal, advisory = false } = {}) {
     signal?.throwIfAborted()
-    const [runtime, models] = await Promise.all([this.runtime.active().catch(() => null), this.cache.active().catch(() => null)])
+    const [runtime, models] = await Promise.all([this.runtime.active({ launch: advisory }).catch(() => null), this.cache.active({ launch: advisory }).catch(() => null)])
     signal?.throwIfAborted()
     let functional = false
     if (runtime && complete(runtime.manifest)) {
-      try { functional = processingAttestation(runtime, await this.runtime.probe(runtime, { signal })).capabilitiesReady === true }
+      try { functional = processingAttestation(runtime, await (advisory ? this.runtime.launchProbe(runtime, { signal }) : this.runtime.probe(runtime, { signal }))).capabilitiesReady === true }
       catch { /* Failed or import-only probes never satisfy local readiness. */ }
     }
     signal?.throwIfAborted()
-    const installed = functional && LOCAL_MODEL_IDS.every(id => models?.manifest.models.includes(id))
+    // A usable older pack does not satisfy consent for a different selected pack.
+    const selectedRuntime = this.catalog?.runtime
+    const matchesSelection = !selectedRuntime || runtime?.id === hash(selectedRuntime)
+    const installed = functional && matchesSelection && LOCAL_MODEL_IDS.every(id => models?.manifest.models.includes(id))
     const ready = installed && this.loaded.runtimeId === runtime.id && this.loaded.modelsId === models.id
     return { runtime, models, installed, ready, restartRequired: installed && !ready }
   }
@@ -261,7 +266,7 @@ export class OnboardingSetup {
     }
   }
 
-  async preflight({ signal } = {}) {
+  async preflight({ signal, advisory = true } = {}) {
     await this.getStatus()
     const offlineDirectory = this.#offlineModelsDirectory
     const modelSource = offlineDirectory === null ? 'upstream' : 'offline'
@@ -275,7 +280,7 @@ export class OnboardingSetup {
       ).finally(() => { this.check = null })
       installed = await this.check
       signal?.throwIfAborted()
-    } else installed = await this.installed({ signal })
+    } else installed = await this.installed({ signal, advisory })
     const hardware = await this.hardware()
     signal?.throwIfAborted()
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
@@ -341,7 +346,7 @@ export class OnboardingSetup {
     const originalRuntimeProgress = this.runtime.progress, originalModelProgress = this.cache.progress
     try {
       await this.update({ state: 'running', phase: 'preflight', message: 'Verifying the complete local setup.', error: undefined, progress: undefined, retryable: false })
-      const plan = await this.preflight({ signal })
+      const plan = await this.preflight({ signal, advisory: false })
       signal.throwIfAborted()
       if (!plan.available) throw new Error(plan.reason)
       if (plan.planId !== planId) throw new Error('The setup plan changed. Review the complete installation plan again.')

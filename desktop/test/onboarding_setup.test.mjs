@@ -25,6 +25,7 @@ function fixture(overrides = {}) {
     probe: async () => ({ schema: 2, accelerator: 'cpu', components: { module: '1' }, capabilitiesReady: true,
       verifiedCapabilities: manifest.capabilities, capabilities: manifest.capabilities, hardwareAvailable: true,
       pythonVersion: '3', backendVersion: '1', lyricsyncVersion: '1', checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }) }
+  runtime.launchProbe = (...args) => runtime.probe(...args)
   const cache = { active: async () => cache.value, validate: value => value,
     install: async value => { calls.push('models'); cache.value = { id: hash(value), manifest: value } } }
   const catalog = { schema: 1, runtime: manifest, qualification: { passed: true, scope: 'full', runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu' },
@@ -776,4 +777,59 @@ test('hardware-test requires private channel and false status, and cannot skip f
   const misleading = fixture({ releaseChannel: 'private-test' })
   misleading.setup.catalog.qualification.scope = 'hardware-test'
   assert.equal((await misleading.setup.preflight()).available, false)
+})
+
+test('navigation reuses launch verification while consent still requires full verification', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  const modes = []
+  runtime.active = async options => { modes.push(['runtime', options?.launch]); return runtime.value }
+  cache.active = async options => { modes.push(['models', options?.launch]); return cache.value }
+  const accepted = await runtime.probe()
+  runtime.launchProbe = async () => { modes.push(['cached']); return accepted }
+  runtime.probe = async () => { modes.push(['fresh']); throw new Error('native check failed') }
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, true)
+  assert.deepEqual(modes, [['runtime', true], ['models', true], ['cached']])
+  modes.length = 0
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.ok(modes.some(([kind, launch]) => kind === 'runtime' && launch === false))
+  assert.ok(modes.some(([kind]) => kind === 'fresh'))
+})
+
+test('a usable CPU installation offers the selected CUDA upgrade and reuses models', async () => {
+  const { setup, runtime, cache, calls } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  setup.catalog.runtime = structuredClone(setup.catalog.runtime)
+  setup.catalog.runtime.accelerator = 'cuda'
+  setup.catalog.qualification.accelerator = 'cuda'
+  const probe = runtime.probe
+  runtime.probe = async active => ({ ...await probe(), accelerator: active.manifest.accelerator })
+  calls.length = 0
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, false)
+  assert.equal(plan.restartRequired, false)
+  assert.equal(plan.runtimeTransferRequired, true)
+  assert.equal(plan.components[0].label, 'Local processing runtime')
+  assert.ok(plan.components.slice(1).every(component => component.bytes === 0))
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime'])
+  assert.equal(runtime.value.manifest.accelerator, 'cuda')
+  setup.loaded.runtimeId = runtime.value.id
+  assert.equal((await setup.preflight()).ready, true)
+})
+
+test('falling back to CPU after a CUDA installation never completes the upgrade', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  setup.catalog.runtime = structuredClone(setup.catalog.runtime)
+  setup.catalog.runtime.accelerator = 'cuda'
+  setup.catalog.qualification.accelerator = 'cuda'
+  runtime.install = async () => {} // The manager returned the older usable pointer.
+  assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
+  assert.equal((await setup.preflight()).ready, false)
 })
