@@ -4,24 +4,34 @@
 
 **Turn your music into karaoke with AI.**
 
-Singhouse automatically generates karaoke tracks from your own audio files:
-AI separates the vocals, transcribes the lyrics, and synchronizes the words
-for sing-along highlighting. Generate and play on your own machine in one
-desktop app.
+A self-hosted karaoke suite for your own music library — Local stem separation (CUDA / Metal / CPU),
+word-level synced lyrics, and a web player with real-time vocal/instrumental
+mixing, key shift, and a popout projector display.
 
 **[Download v0.1.0](https://github.com/singhouse/singhouse/releases/tag/v0.1.0)**
 · [Installation guide](docs/install-desktop.md)
 · [Documentation](#documentation)
 
-## From music to karaoke
+## What It Does
 
-1. **Import your music.** Choose an audio file from your library.
-2. **Let AI prepare it.** Separate instrumental, lead, and backing vocals,
-   then generate lyrics with word-level timing. Reference lyrics are optional.
-3. **Sing.** Turn down the lead vocal, keep as much backing vocal as you like,
-   adjust the key, and put the lyrics on the projector window.
-
-AI results can need corrections; use the lyric editor to fix words and timing.
+1. **Import a track from your library** — FLAC, MP3, WAV, M4A, OGG,
+   CDG, or MP3+G
+2. **Backing vocal stem seperation** — Demucs splits vocals and
+   instrumentals, then mel_band_roformer splits lead and backing vocals.
+   Runs locally on your own hardware, or optionally on your own Modal account
+   for faster processing.
+4. **Generate synced lyrics** — paste your own reference lyrics, or enable 
+   automatic lrclib.net lookup. With accurate source lyrics, transcriptions are
+   generally quite usable on a single pass.
+6. **Word-level highlighting** — Whisper + heart-transcriptor lyrics transcription 
+   aligned to your reference lyrics, with a built-in lyric timing editor
+7. **Real-time mixer** — Built-in key shift, and individual volume sliders
+   for instrumental, backing vocals, and lead vocals. Additional voices are
+   also supported for imported tracks
+9. **Stage display** — a canvas lyrics renderer with a pop-out projector/TV
+   window for the second screen
+10. **Host queue** — a simple, manually ordered "who sings next" list built
+   from your library, plus a flat play history
 
 ## Download
 
@@ -40,16 +50,6 @@ before relying on it for a show.
 The desktop app includes Python and FFmpeg. You don't need Docker, Node.js,
 or a system Python installation. Check the release's platform notes and
 checksums, then follow the [installation guide](docs/install-desktop.md).
-
-## What you can do
-
-- **Bring your library.** Import your own FLAC, MP3, WAV, M4A, or OGG files,
-  plus CD+G files and MP3+G ZIPs.
-- **Shape the sound.** Adjust vocal and instrumental volumes independently.
-  Change key without changing the tempo.
-- **Run the queue.** Manually arrange who sings next and revisit play history.
-- **Give singers a screen.** Open the popout projector window on a second
-  display while keeping the host controls on your main screen.
 
 ## Your first song
 
