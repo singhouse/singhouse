@@ -144,6 +144,7 @@ def _make_transcriber(
                 DEMUCS_PYTHON,
             )
         accelerator = _attested_accelerator(whisper_model)
+        guarded = accelerator is not None and (accelerator == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
         return HeartTranscriber(
             python_path=DEMUCS_PYTHON,
             script_path=HEART_SCRIPT,
@@ -151,7 +152,10 @@ def _make_transcriber(
             allow_temperature_fallback=allow_temperature_fallback,
             cancel_event=cancel_event,
             accelerator=accelerator,
-            managed_vad=accelerator == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")),
+            managed_vad=guarded,
+            # The child may select CPU after its fresh memory check. Allow that
+            # slower route without changing bounded cancellation or retrying.
+            timeout=3600 if guarded else 600,
         )
     accelerator = _attested_accelerator(whisper_model)
     if accelerator == "mps":
