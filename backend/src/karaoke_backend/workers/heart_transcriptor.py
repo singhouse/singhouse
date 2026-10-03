@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--language", default="en", help="Language code")
     parser.add_argument("--model-path", default=None, help="Path to checkpoint dir")
     parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=None)
+    parser.add_argument("--managed-vad-config", default=None, help="Run RMS VAD inside the admitted managed worker using this JSON configuration")
     parser.add_argument(
         "--vad-segments",
         default=None,
@@ -79,6 +80,32 @@ def main():
         print(json.dumps({"error": f"Checkpoint not found: {ckpt_dir}"}))
         sys.exit(1)
 
+    from contextlib import nullcontext
+    guarded = (os.getenv("KARAOKE_PROCESSING_ACCELERATOR") == "cuda"
+               or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
+    if guarded:
+        from karaoke_backend.workers.memory_admission import admit
+    if args.managed_vad_config is not None and (not guarded or args.vad_segments):
+        raise ValueError("Managed VAD requires a managed worker and cannot combine with external segments")
+    with (admit("heart-transcriptor", args.device, [args.audio_path]) if guarded else nullcontext(args.device)) as selected:
+        args.device = selected
+        args.managed_vad_segments = (managed_vad_segments(args.audio_path, args.managed_vad_config)
+                                     if args.managed_vad_config is not None else None)
+        run_inference(args, ckpt_dir)
+
+
+def managed_vad_segments(audio_path, configuration):
+    """Decode managed PCM/FLOAT WAV after admission, preserving RMS segmentation."""
+    from lyricsync._config import VadConfig
+    import soundfile
+    from lyricsync.audio.vad import rms_vad_segments
+    config = VadConfig(**json.loads(configuration))
+    samples, sample_rate = soundfile.read(audio_path, dtype="float32", always_2d=True)
+    samples = samples.mean(axis=1)
+    return rms_vad_segments(samples, sample_rate, config)
+
+
+def run_inference(args, ckpt_dir):
     import torch
     from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
 
@@ -116,12 +143,15 @@ def main():
     full_text_parts: list[str] = []
     words: list[dict] = []
 
-    if args.vad_segments:
+    if args.vad_segments or getattr(args, "managed_vad_segments", None) is not None:
         import librosa
         import numpy as np
 
-        with open(args.vad_segments) as f:
-            vad_segs = json.load(f)
+        if getattr(args, "managed_vad_segments", None) is not None:
+            vad_segs = args.managed_vad_segments
+        else:
+            with open(args.vad_segments) as f:
+                vad_segs = json.load(f)
         sys.stderr.write(
             f"VAD pre-segmentation: {len(vad_segs)} segments from {args.audio_path}\n"
         )

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend import _windows_extended_path, isolated_environment, processing_environment
+from backend import _windows_extended_path, isolated_environment, processing_environment, processing_memory_policy
 
 
 class ProcessingEnvironmentTests(unittest.TestCase):
@@ -68,6 +68,26 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         self.native(self.processing).rename(self.native(moved))
         self.processing = moved
         self.probe["pythonPath"] = str(self.native(moved / "python/python.exe"))
+
+    def test_memory_policy_is_bound_to_exact_runtime_and_cannot_break_playback(self):
+        policy = dict(schema=1, runtimeLockSha256=self.lock_hash,
+                      evidenceReference="synthetic-test-only", models={})
+        with patch.object(Path, "read_text", return_value=json.dumps(policy)):
+            self.assertEqual(json.loads(processing_memory_policy(self.lock_hash)), policy)
+            self.assertEqual(processing_memory_policy("other-runtime"), "")
+        for invalid in ("{", "null", "[]", json.dumps({**policy, "schema": True})):
+            with patch.object(Path, "read_text", return_value=invalid):
+                self.assertEqual(processing_memory_policy(self.lock_hash), "")
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError):
+            self.assertEqual(processing_memory_policy(self.lock_hash), "")
+
+    def test_memory_policy_only_forwarded_after_runtime_attestation(self):
+        with patch("backend.processing_memory_policy", return_value="measured-policy") as load:
+            self.assertEqual(self.admit()["KARAOKE_PROCESSING_MEMORY_JSON"], "measured-policy")
+            load.assert_called_once_with(self.lock_hash)
+        with patch("backend.processing_memory_policy") as load:
+            self.assertEqual(self.admit(pythonPath="changed")["KARAOKE_PROCESSING_MEMORY_JSON"], "")
+            load.assert_not_called()
 
     def test_long_inventory_and_exact_worker_attestation(self):
         self.assertGreater(len(str(self.processing / self.relative)), 300)

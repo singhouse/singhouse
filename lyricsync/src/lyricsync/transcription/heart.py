@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 from __future__ import annotations
 
+from dataclasses import asdict
 import importlib.resources
 import json
 import logging
@@ -48,7 +49,9 @@ class HeartTranscriber:
     HeartTranscriptor is a fine-tuned Whisper model for lyrics transcription.
     It runs in a separate Python environment (e.g., a venv with torch+transformers).
 
-    With ``use_vad=True``, RMS-VAD is run in the parent process and the resulting
+    With ``use_vad=True``, RMS-VAD normally runs in the parent process.
+    Managed workers defer it to the admitted child with ``managed_vad=True``.
+    The resulting
     segments are passed to the subprocess so the HF pipeline runs per segment
     (no whole-file 30s chunking — first-chunk word smear and line-boundary jumps
     go away, at the cost of one model forward per VAD segment).
@@ -64,6 +67,7 @@ class HeartTranscriber:
         allow_temperature_fallback: bool = False,
         cancel_event: threading.Event | None = None,
         accelerator: str | None = None,
+        managed_vad: bool = False,
     ):
         self.python_path = Path(python_path)
         self.timeout = timeout
@@ -74,6 +78,7 @@ class HeartTranscriber:
         self.allow_temperature_fallback = allow_temperature_fallback
         self.cancel_event = cancel_event
         self.accelerator = accelerator
+        self.managed_vad = managed_vad
 
         if script_path is not None:
             self.script_path = Path(script_path)
@@ -104,7 +109,9 @@ class HeartTranscriber:
             cmd.extend(["--device", self.accelerator])
 
         vad_tmp: Optional[str] = None
-        if self.use_vad:
+        if self.use_vad and self.managed_vad:
+            cmd.extend(["--managed-vad-config", json.dumps(asdict(self.vad_config or VadConfig()))])
+        elif self.use_vad:
             from lyricsync.audio.io import read_wav_mono
             from lyricsync.audio.vad import rms_vad_segments
 
