@@ -29,15 +29,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from karaoke_backend.api.auth import require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
+from karaoke_backend.search import search_predicate
 from karaoke_backend.models.history import PlayHistory
 from karaoke_backend.models.settings import (
     DEFAULT_RETENTION_DAYS,
@@ -217,7 +218,7 @@ async def complete_play(
 
 @router.get("", response_model=HistoryListResponse, summary="List play history, newest first")
 async def list_history(
-    search: Optional[str] = None,
+    search: Optional[str] = Query(None, max_length=200),
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
@@ -231,14 +232,9 @@ async def list_history(
 
     base = select(PlayHistory)
     if search:
-        term = f"%{search.strip()}%"
-        base = base.where(
-            or_(
-                PlayHistory.title.ilike(term),
-                PlayHistory.artist.ilike(term),
-                PlayHistory.singer_name.ilike(term),
-            )
-        )
+        base = base.where(search_predicate(
+            search, PlayHistory.title, PlayHistory.artist, PlayHistory.singer_name,
+        ))
 
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))

@@ -26,7 +26,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from karaoke_backend.api.auth import get_current_user, get_host_id, require_user
@@ -35,6 +35,7 @@ from karaoke_backend.database import get_db
 from karaoke_backend import stem_layout, stem_storage
 from karaoke_backend.jobs import queue
 from karaoke_backend.models.song import Job, JobKind, LyricsSet, Song, SongStatus
+from karaoke_backend.search import search_predicate
 from karaoke_backend.workers import karaoke_models, modal_worker
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,18 @@ class SongDetail(SongSummary):
 
 class SongListResponse(BaseModel):
     songs: list[SongSummary]
+    total: int
+    page: int
+    page_size: int
+
+
+class ArtistSummary(BaseModel):
+    artist: str
+    count: int
+
+
+class ArtistListResponse(BaseModel):
+    items: list[ArtistSummary]
     total: int
     page: int
     page_size: int
@@ -482,8 +495,9 @@ async def list_songs(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(20, ge=1, le=500, description="Items per page"),
     status: Optional[str] = Query(None, description="Filter by status: processing|ready|failed"),
-    artist: Optional[str] = Query(None, description="Filter by artist (partial match)"),
-    search: Optional[str] = Query(None, description="Free-text search across title, artist, and filename"),
+    artist: Optional[str] = Query(None, max_length=200, description="Filter by artist (partial match)"),
+    artist_exact: Optional[str] = Query(None, description="Exact artist name for browsing"),
+    search: Optional[str] = Query(None, max_length=200, description="Free-text search across title, artist, and filename"),
     db: AsyncSession = Depends(get_db),
     host_id: int = Depends(get_host_id),
     user: Optional[Identity] = Depends(get_current_user),
@@ -513,14 +527,14 @@ async def list_songs(
     if status:
         query = query.where(Song.status == status)
     if artist:
-        query = query.where(Song.artist.ilike(f"%{artist}%"))
+        query = query.where(search_predicate(artist, Song.artist))
+    if artist_exact is not None:
+        query = query.where(Song.artist == artist_exact)
     if search:
-        needle = f"%{search.strip()}%"
-        if search.strip():
-            fields = [Song.title.ilike(needle), Song.artist.ilike(needle)]
-            if not is_guest:
-                fields.append(Song.filename.ilike(needle))
-            query = query.where(or_(*fields))
+        fields = [Song.title, Song.artist]
+        if not is_guest:
+            fields.append(Song.filename)
+        query = query.where(search_predicate(search, *fields))
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
@@ -528,7 +542,8 @@ async def list_songs(
 
     # Paginate
     offset = (page - 1) * page_size
-    query = query.order_by(Song.created_at.desc()).offset(offset).limit(page_size)
+    ordering = (func.lower(Song.title), Song.title, Song.id) if artist_exact is not None else (Song.created_at.desc(), Song.id.desc())
+    query = query.order_by(*ordering).offset(offset).limit(page_size)
     rows = (await db.execute(query)).scalars().all()
 
     jobs_by_id = await _fetch_jobs_for(db, list(rows))
@@ -559,6 +574,31 @@ async def list_songs(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/artists", response_model=ArtistListResponse, summary="Browse library artists")
+async def list_artists(
+    search: Optional[str] = Query(None, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(40, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    host_id: int = Depends(get_host_id),
+) -> ArtistListResponse:
+    # Group exact stored names, keeping collaborations and similarly named
+    # artists distinct. Only playable rows contribute to the guest browser.
+    query = select(Song.artist, func.count(Song.id).label("count")).where(
+        Song.owner_id == host_id, Song.status == "ready",
+    )
+    if search and search.strip():
+        query = query.where(search_predicate(search, Song.artist))
+    query = query.group_by(Song.artist)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+    rows = (await db.execute(query.order_by(func.lower(Song.artist), Song.artist)
+                            .offset((page - 1) * page_size).limit(page_size))).all()
+    return ArtistListResponse(
+        items=[ArtistSummary(artist=artist, count=count) for artist, count in rows],
+        total=total, page=page, page_size=page_size,
     )
 
 
