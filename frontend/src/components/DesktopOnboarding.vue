@@ -397,6 +397,12 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         <p v-if="plan?.qualificationScope === 'private-smoke'">
           Private test build: local processing in this build passed a single-song smoke test only. It has not completed full release qualification.
         </p>
+        <p
+          v-if="plan?.qualificationScope === 'hardware-test'"
+          role="alert"
+        >
+          Experimental hardware test: local processing in this build has not passed a real-song test or release qualification. Setup checks the processing runtime on your computer before enabling it. Processing may fail; use this build only for testing.
+        </p>
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
           <div v-if="localCopyBytes !== null">

@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { checkedFile, processingAttestation } from './runtime_manager.mjs'
-import { QUALIFICATION_SCOPES, qualificationScopeError, validateSetupMemory } from './setup_catalog.mjs'
+import { QUALIFICATION_SCOPES, qualificationScopeError, qualificationStatusMatches, validateSetupMemory } from './setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -189,7 +189,7 @@ export class OnboardingSetup {
     if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
-    if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
+    if (!complete(runtime) || runtime.probe.schema !== 2 || !qualificationStatusMatches(q)
         || q.runtimeLockSha256 !== runtime.provenance.lockSha256 || qualificationScopeError(q.scope, this.releaseChannel)
         || ['platform', 'arch', 'accelerator'].some(key => q[key] !== runtime[key])) {
       throw new Error('Local song processing is not available in this version yet. Its processing tools still need to pass the required checks.')

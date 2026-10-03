@@ -1039,7 +1039,19 @@ from the renderer or saved preferences. Its schema is:
 - `qualification`: `passed`, `scope`, `runtimeLockSha256`, `platform`, `arch`,
   `evidenceReference`, and `accelerator`, matching that exact runtime. Populate
   only from actual evidence. `scope` is required and states what `passed`
-  covers:
+  covers (`passed: true` for `full` and `private-smoke`):
+  - `hardware-test`: an experimental candidate awaiting real-song testing;
+    `passed` must be exactly `false`. Accepted only on the `private-test`
+    channel. The evidence reference identifies its build/inventory evidence,
+    never a claimed inference result. Setup displays an explicit experimental
+    warning before consent. Hash trust, download consent, and the mandatory
+    on-device functional probe before runtime activation remain required.
+    This scope is suitable for sending a CUDA candidate to a hardware tester;
+    it does not establish memory suitability or release qualification.
+    CUDA candidates still require a successful CUDA functional probe before
+    activation. CPU fallback within that pack is available only after this
+    initial CUDA check succeeds; machines without a working CUDA device need
+    a CPU pack. This catalog does not automatically select between packs.
   - `full`: the complete release qualification passed for this runtime and
     target. Accepted by builds on any release channel.
   - `private-smoke`: only a single-song real-processing smoke test passed. This

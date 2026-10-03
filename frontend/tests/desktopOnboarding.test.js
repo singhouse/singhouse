@@ -267,6 +267,20 @@ describe('desktop setup screens', () => {
       wrapper.unmount()
     }
   })
+  it('warns before consenting to an unqualified hardware test without starting setup', async () => {
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+      preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'hardware-test', qualificationScope: 'hardware-test',
+        components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('has not passed a real-song test or release qualification')
+    expect(wrapper.text()).toContain('before enabling it')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('keeps both cards visible and explains unavailable local setup', async () => {
     const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: false, reason: 'A qualified runtime is unavailable.' }) })
     globalThis.window.karaokeDesktop = desktop

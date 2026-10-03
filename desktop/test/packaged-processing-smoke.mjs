@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { assertReleasePolicy } from '../release.mjs'
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
 import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
@@ -95,7 +96,7 @@ export const EVIDENCE_SCHEMA = 2
 export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
   'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs',
   // The driver takes the runtime store's directory naming from the store itself.
-  'runtime_manager.mjs', 'processing_probe.py'])
+  'runtime_manager.mjs', 'processing_probe.py', 'setup_catalog.mjs', 'release.mjs'])
 export function playwrightVersion() {
   try { return createRequire(import.meta.url)('playwright/package.json').version } catch { return null }
 }
@@ -632,7 +633,19 @@ export async function run(options) {
     const catalogBytes = Buffer.from(catalogEncoded, 'base64'), summary = summarizeCatalog(catalogBytes)
     wizard.catalog = summary
     evidence.limitations.push(...catalogLimitations(summary)); save()
-    assertCatalogLock(summary, expectedLock, evidence.application)
+    let releaseChannel
+    if (summary.qualification.scope === 'hardware-test') {
+      const { resources } = packagedLayout(options.executable)
+      const policyBytes = readFileSync(join(resources, 'release.json'))
+      const policy = assertReleasePolicy(JSON.parse(policyBytes))
+      const receipt = JSON.parse(readFileSync(join(resources, 'release-receipt.json')))
+      // policyId hashes the complete release policy and is bound into the
+      // recorded receipt identity; a loose channel string is not evidence.
+      assert.equal(policy.policyId, receipt.identity.policyId, 'Packaged release policy differs from its receipt identity')
+      releaseChannel = policy.channel
+      wizard.releasePolicy = { channel: releaseChannel, policyId: policy.policyId, sha256: hash(policyBytes) }
+    }
+    assertCatalogLock(summary, expectedLock, evidence.application, releaseChannel)
     manifest = JSON.parse(catalogBytes.toString('utf8')).runtime
     const policyEncoded = await readArchive('models.json')
     assert.ok(policyEncoded, 'This candidate ships no model policy')

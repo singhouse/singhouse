@@ -178,3 +178,23 @@ test('archive-form runtimes source-check every part URL with the per-file rule',
   mixed.input.runtime.files[0].url = 'https://example.org/python'
   assert.throws(() => createSetupCatalog(mixed.input, mixed.options), /mixes/)
 })
+
+test('hardware-test is explicitly unqualified, private-test only, and retains lock and target validation', () => {
+  const { input, options } = fixture()
+  input.qualification.scope = 'hardware-test'
+  input.qualification.passed = false
+  const privateOptions = { ...options, releaseChannel: 'private-test' }
+  assert.deepEqual(createSetupCatalog(input, privateOptions).qualification, input.qualification)
+  for (const releaseChannel of [undefined, 'stable', 'beta', 'core-private-test']) {
+    assert.throws(() => createSetupCatalog(input, { ...options, releaseChannel }), /accepted only by "private-test"/)
+  }
+  for (const passed of [true, undefined, null, 0, 'false']) {
+    const invalid = structuredClone(input); invalid.qualification.passed = passed
+    assert.throws(() => createSetupCatalog(invalid, privateOptions), /qualification evidence/)
+  }
+  assert.throws(() => createSetupCatalog(input, { ...privateOptions, trustedLocks: [] }), /not trusted/)
+  for (const mutate of [q => { q.runtimeLockSha256 = 'b'.repeat(64) }, q => { q.platform = 'win32' }, q => { delete q.evidenceReference }]) {
+    const invalid = structuredClone(input); mutate(invalid.qualification)
+    assert.throws(() => createSetupCatalog(invalid, privateOptions), /qualification evidence/)
+  }
+})

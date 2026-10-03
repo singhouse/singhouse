@@ -46,22 +46,30 @@ export function validateSetupMemory(memory, runtime) {
 // `full` means the complete release qualification passed. `private-smoke`
 // means only single-track real-processing smoke evidence passed; it is never
 // release qualification and is accepted only by private-test channel builds.
-export const QUALIFICATION_SCOPES = Object.freeze(['full', 'private-smoke'])
+// `hardware-test` explicitly has NOT passed qualification and is likewise private-test only.
+export const QUALIFICATION_SCOPES = Object.freeze(['full', 'private-smoke', 'hardware-test'])
 export const PRIVATE_TEST_CHANNEL = 'private-test'
 
 // Returns the reason a qualification scope is unacceptable for the given
 // release channel, or null when it is acceptable. Channels are the validated
 // release policy's `channel`; anything other than exactly `private-test`
-// (including a missing channel) cannot accept private-smoke evidence.
+// (including a missing channel) cannot accept either private-only scope.
 export function qualificationScopeError(scope, releaseChannel) {
   if (!QUALIFICATION_SCOPES.includes(scope)) {
-    return 'Processing setup qualification must state its scope as "full" or "private-smoke"'
+    return 'Processing setup qualification must state its scope as "full", "private-smoke", or "hardware-test"'
   }
-  if (scope === 'private-smoke' && releaseChannel !== PRIVATE_TEST_CHANNEL) {
+  if (['private-smoke', 'hardware-test'].includes(scope) && releaseChannel !== PRIVATE_TEST_CHANNEL) {
     const channel = typeof releaseChannel === 'string' && /^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel) ? `"${releaseChannel}"` : 'missing'
-    return `Private-smoke processing qualification is accepted only by "${PRIVATE_TEST_CHANNEL}" channel builds; this build's release channel is ${channel}`
+    return `${scope === 'hardware-test' ? 'Hardware-test' : 'Private-smoke'} processing qualification is accepted only by "${PRIVATE_TEST_CHANNEL}" channel builds; this build's release channel is ${channel}`
   }
   return null
+}
+
+// An experimental candidate explicitly records that qualification has not passed.
+// This changes catalog eligibility only; installation still requires the fixed
+// functional probe on the user's device before the runtime can become active.
+export function qualificationStatusMatches(qualification) {
+  return qualification?.passed === (qualification?.scope === 'hardware-test' ? false : true)
 }
 
 export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPolicy, privateTestLocalSources = false, releaseChannel } = {}) {
@@ -74,9 +82,9 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
   if (runtime.probe.schema !== 2 || !['transcription', 'separation'].every(id => runtime.capabilities.includes(id))
       || !SETUP_MODEL_IDS.every(id => runtime.models.includes(id)
         && runtime.modelCapabilities[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
-      || q?.passed !== true || !evidenceReference(q.evidenceReference) || q.runtimeLockSha256 !== runtime.provenance.lockSha256
+      || !qualificationStatusMatches(q) || !evidenceReference(q.evidenceReference) || q.runtimeLockSha256 !== runtime.provenance.lockSha256
       || targetKeys.some(key => q[key] !== runtime[key])) {
-    throw new Error('Processing setup requires explicit passed qualification evidence matching the complete runtime lock and target')
+    throw new Error('Processing setup requires explicit passed qualification evidence (or an unqualified hardware-test candidate) matching the complete runtime lock and target')
   }
   const scopeError = qualificationScopeError(q.scope, releaseChannel)
   if (scopeError) throw new Error(scopeError)
