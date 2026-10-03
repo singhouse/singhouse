@@ -1,4 +1,4 @@
-# singhouse development
+# Development guide
 
 Read `CONTRIBUTING.md` before changing contribution or licensing behavior.
 External contributor intake is currently inactive; public source availability
@@ -48,7 +48,7 @@ Do not run deployment scripts against an existing installation as a test.
 
 ## Product boundaries
 
-singhouse works with the user's own library. Do not add music acquisition,
+The application works with the user's own library. Do not add music acquisition,
 a centralized catalog, bundled lyrics, or services that host user songs,
 stems, or synced lyrics. Lyrics lookup remains opt-in and default-off; local
 processing remains the default. Optional cloud processing uses the user's
