@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "runtimeLockSha256": "9bed42cea996204c52159380b2141dbe3056abe2e189858ef81746b701bd85a1",
-  "evidenceReference": "https://github.com/singhouse/singhouse/pull/72 - bounded-v1 Linux test budgets, 2026-10-03",
+  "runtimeLockSha256": "a16ffa5f9c60962d1178b4d87f526705e5c78a246fe420e028bf12fdbf846324",
+  "evidenceReference": "Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/72; release-candidate pack validation pending",
   "executionProfile": "bounded-v1",
   "models": {
     "demucs-mdx-extra": {

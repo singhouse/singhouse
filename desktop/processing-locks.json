@@ -1,12 +1,14 @@
 {
   "schema": 1,
-  "status": "Existing CPU/Metal entries retain their native-probe evidence. Linux CUDA passed exact-archive installation, activation, native CUDA probing and bounded model inference on one host. Windows CUDA passed native CPU dependency probing and is provided for experimental GPU hardware testing; native Windows CUDA inference and memory qualification remain pending. No target is release-qualified.",
+  "status": "CPU/Metal and prior CUDA identities retained for existing installations. Release-candidate CUDA packs rebuild the integrated application source with experimental bounded-v1 memory budgets. Catalogs disclose pending hardware qualification; no target is release-qualified.",
   "lockSha256": [
     "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb",
     "3698438455749d7eda82a36a51d2229cfe755141654661bbcaf0fdce0f370216",
     "2c580fe38000c8778e1e4730b322fb462ce7a8bdd2a8bd4134bf15bd08bc9f25",
     "204c9aabf10c88426276ac8adfb53770b1ff23371845e45489f317972ec81180",
     "9bed42cea996204c52159380b2141dbe3056abe2e189858ef81746b701bd85a1",
-    "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59"
+    "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
+    "a16ffa5f9c60962d1178b4d87f526705e5c78a246fe420e028bf12fdbf846324",
+    "f9b5abdef71e69c16ffab6799de3841ec863f1785b066cd5259224998fc52458"
   ]
 }

@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "runtimeLockSha256": "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
-  "evidenceReference": "https://github.com/singhouse/singhouse/pull/73 - experimental Windows estimates derived from Linux bounded-v1 measurements; native Windows inference pending",
+  "runtimeLockSha256": "f9b5abdef71e69c16ffab6799de3841ec863f1785b066cd5259224998fc52458",
+  "evidenceReference": "Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/73; native Windows CUDA inference pending",
   "executionProfile": "bounded-v1",
   "models": {
     "demucs-mdx-extra": {
