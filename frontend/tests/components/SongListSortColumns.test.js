@@ -47,12 +47,20 @@ function titles() {
 }
 
 async function mountList(songs = LIBRARY) {
-  const w = mount(SongList)
+  // The ⋯ popover teleports to <body>; stubbed so its panel renders in place
+  // and stays reachable through the wrapper.
+  const w = mount(SongList, { global: { stubs: { teleport: true } } })
   const store = useSongsStore()
   store.songs = [...songs]
   store.loading = false
   await w.vm.$nextTick()
   return w
+}
+
+// The column chooser is the library ⋯ menu's second face.
+async function openColumns() {
+  await wrapper.find('.lib-menu__btn').trigger('click')
+  await wrapper.find('.lib-menu__columns').trigger('click')
 }
 
 function headerFor(label) {
@@ -120,7 +128,7 @@ describe('library sorting', () => {
       { id: 9, title: 'Late Add', artist: 'X', duration: 10, status: 'ready',
         created_at: '2026-08-11T01:35:18' },
     ])
-    await wrapper.find('.col-menu__btn').trigger('click')
+    await openColumns()
     const addedBox = wrapper.findAll('.col-menu__item')
       .find(l => l.text().toLowerCase().includes('added'))
       .find('input')
@@ -169,7 +177,7 @@ describe('table structure', () => {
   // shift against the header. Pin the parity rather than trusting the order.
   it('emits the same cell count in the header and every row, for any column set', async () => {
     wrapper = await mountList()
-    await wrapper.find('.col-menu__btn').trigger('click')   // open once; re-clicking would close it
+    await openColumns()   // open once; re-clicking would close it
 
     for (const col of ['added', 'status', 'artist']) {
       const box = wrapper.findAll('.col-menu__item')
@@ -201,7 +209,7 @@ describe('column visibility', () => {
 
   it('hides a column when it is unchecked, and persists that across remounts', async () => {
     wrapper = await mountList()
-    await wrapper.find('.col-menu__btn').trigger('click')
+    await openColumns()
 
     const artistBox = wrapper.findAll('.col-menu__item')
       .find(l => l.text().toLowerCase().includes('artist'))
@@ -217,7 +225,7 @@ describe('column visibility', () => {
 
   it('can switch a hidden column back on', async () => {
     wrapper = await mountList()
-    await wrapper.find('.col-menu__btn').trigger('click')
+    await openColumns()
 
     const addedBox = wrapper.findAll('.col-menu__item')
       .find(l => l.text().toLowerCase().includes('added'))
@@ -229,7 +237,7 @@ describe('column visibility', () => {
 
   it('refuses to hide the title column', async () => {
     wrapper = await mountList()
-    await wrapper.find('.col-menu__btn').trigger('click')
+    await openColumns()
 
     const titleItem = wrapper.findAll('.col-menu__item')
       .find(l => l.text().toLowerCase().includes('title'))
@@ -248,7 +256,7 @@ describe('column visibility', () => {
 
   it('closes the column menu on Escape', async () => {
     wrapper = await mountList()
-    await wrapper.find('.col-menu__btn').trigger('click')
+    await openColumns()
     expect(wrapper.find('.col-menu__pop').exists()).toBe(true)
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))

@@ -151,3 +151,21 @@ describe('QueuePanel', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 })
+
+// Core play history moved here from the retired sidebar footer. This
+// panel only mounts when no queue provider is registered, so the button needs
+// no gate of its own; the modal mounts lazily so the list fetches on open.
+describe('play history entry point', () => {
+  it('opens the history modal from the header', async () => {
+    wrapper = mount(QueuePanel, {
+      global: { stubs: { HistoryModal: { template: '<div class="history-stub" />' }, teleport: true } },
+    })
+    const btn = wrapper.find('.queue-panel__history')
+    expect(btn.exists()).toBe(true)
+    expect(btn.attributes('title')).toBe('Play history')
+    expect(wrapper.find('.history-stub').exists()).toBe(false)
+
+    await btn.trigger('click')
+    expect(wrapper.find('.history-stub').exists()).toBe(true)
+  })
+})

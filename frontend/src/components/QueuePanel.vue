@@ -7,14 +7,26 @@
         🎤 Up Next
         <span v-if="queue.count" class="queue-panel__count">{{ queue.count }}</span>
       </h2>
-      <button
-        v-if="queue.count"
-        class="queue-panel__clear"
-        title="Remove every entry from the queue"
-        @click="onClear"
-      >
-        Clear
-      </button>
+      <div class="queue-panel__header-actions">
+        <!-- Play history belongs to this basic queue: a registered queue
+             provider replaces this whole panel (and brings its own history,
+             if any), so the button needs no gate of its own. -->
+        <button
+          class="queue-panel__history"
+          title="Play history"
+          @click="historyOpen = true"
+        >
+          🕘 History
+        </button>
+        <button
+          v-if="queue.count"
+          class="queue-panel__clear"
+          title="Remove every entry from the queue"
+          @click="onClear"
+        >
+          Clear
+        </button>
+      </div>
     </div>
 
     <!-- Add row: optional singer name + a library pick -->
@@ -89,6 +101,12 @@
     <p v-else-if="queue.fetchedOnce" class="queue-panel__empty">
       The queue is empty — add a song from your library above.
     </p>
+
+    <!-- Play-history modal. Rendered lazily so the list only fetches when
+         opened. -->
+    <Modal :visible="historyOpen" size="lg" @close="historyOpen = false">
+      <HistoryModal v-if="historyOpen" />
+    </Modal>
   </div>
 </template>
 
@@ -98,6 +116,8 @@
 // dequeue-on-play. No fairness, shows, or guest self-service.
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import SongPicker from '@/components/SongPicker.vue'
+import HistoryModal from '@/components/HistoryModal.vue'
+import Modal from '@/components/ui/Modal.vue'
 import { useQueueStore } from '@/stores/queue'
 import { useSongsStore } from '@/stores/songs'
 import { useHistoryStore } from '@/stores/history'
@@ -115,6 +135,7 @@ onBeforeUnmount(() => queue.stopPolling())
 const singerName = ref('')
 const adding = ref(false)
 const pickHint = ref(null)
+const historyOpen = ref(false)
 
 async function onPick(text, songId) {
   // Freehand text has no library row to point at (queue_entries FKs songs.id).
@@ -184,6 +205,26 @@ function onClear() {
   background: rgba(226, 62, 87, 0.15);
   color: #e23e57;
   border: 1px solid rgba(226, 62, 87, 0.4);
+}
+
+.queue-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.queue-panel__history {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.7);
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.queue-panel__history:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
 }
 
 .queue-panel__clear {
