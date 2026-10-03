@@ -57,7 +57,6 @@ from typing import Optional
 from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
-from karaoke_backend.jobs._llm import make_correction_progress_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import Job, JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import page_word_sync
@@ -73,7 +72,6 @@ from karaoke_backend.workers.word_sync_worker import (
     DEFAULT_MODEL,
     describe_run,
     generate_word_sync,
-    make_correction_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,7 +184,6 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
     artist: str = payload.get("artist") or "Unknown Artist"
     title: str = payload.get("title") or ""
     pasted_lyrics: Optional[str] = payload.get("pasted_lyrics")
-    llm_correction: bool = bool(payload.get("llm_correction"))
     llm_paging: bool = bool(payload.get("llm_paging"))
     # Pass-2 lead/backing model for this song, as an ID from
     # karaoke_models.CHOICES. It is absent on legacy jobs and on uploads that
@@ -331,17 +328,6 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
         await set_phase(
             JobPhase.TRANSCRIBING.value, 0, f"Transcribing vocals with {DEFAULT_MODEL}"
         )
-        pipeline_config = None
-        correction_progress_fn = None
-        if llm_correction:
-            from lyricsync import PipelineConfig
-            pipeline_config = make_correction_config(PipelineConfig())
-            correction_progress_fn = make_correction_progress_callback(
-                ctx.job_id,
-                ctx.worker_id,
-                asyncio.get_running_loop(),
-            )
-
         # song_id is what writes the transcription cache — and a cache hit on a
         # later attempt is what makes the transcription phase resume as
         # align-only. Omitting it (as the pre-queue call did) meant ingest
@@ -355,8 +341,6 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
             whisper_model=DEFAULT_MODEL,
             use_vad=True,
             song_id=song_id,
-            pipeline_config=pipeline_config,
-            correction_progress_fn=correction_progress_fn,
         )
         if word_data is None:
             raise IngestError("Transcription returned no result")

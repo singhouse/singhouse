@@ -98,7 +98,7 @@ No processing catalog qualification is created or bypassed.
 Run only when the runtime installation, upstream model retrieval and local
 inference are authorized. The existing advanced route retrieves models from
 upstream; `--download-models` is mandatory and explicitly consents to this
-multi-gigabyte transfer. It does not enable Modal or external correction.
+multi-gigabyte transfer. It does not enable Modal or external paging.
 A combined offline folder picker is not exposed by that application route;
 `--model-folder` is rejected rather than copying cache activation pointers.
 
@@ -151,8 +151,7 @@ file hashes, installation and processing wall
 times, job phase transitions, readiness, output hashes/format/decode checks,
 and transcription count/timing checks without copying transcript text. The
 harness strips inherited service configuration, requires external lyric lookup
-to be off, verifies Modal is unselected, and requests both external correction
-and paging off. The ingest API selects Heart internally; output metadata must
+to be off, verifies Modal is unselected, and requests external paging off. The ingest API selects Heart internally; output metadata must
 confirm Heart. No cloud deployment or cloud inference is performed.
 
 The default overall deadline is one hour, configurable from 60 to 14,400

@@ -35,27 +35,18 @@ class SyncPipeline:
         self,
         transcriber: Transcriber,
         config: PipelineConfig | None = None,
-        correction_progress_fn=None,
     ):
         self.transcriber = transcriber
         self.config = config or PipelineConfig()
-        corrector = None
-        if self.config.correction.enabled and self.config.correction.base_url:
-            from lyricsync.correction import RegionCorrector
-            corrector = RegionCorrector(
-                self.config.correction, progress_fn=correction_progress_fn,
-            )
         self._nw_aligner = NeedlemanWunschAligner(
             match_config=self.config.matching,
             post_config=self.config.postprocess,
-            corrector=corrector,
         )
         self._anchor_gap_aligner = AnchorGapAligner(
             match_config=self.config.matching,
             post_config=self.config.postprocess,
             min_anchor_length=self.config.anchor_gap_min_length,
             gap_handler_chain=self.config.gap_handler_chain,
-            corrector=corrector,
         )
         self._lrc_aligner = LrcAnchoredAligner(
             match_config=self.config.matching,
@@ -175,14 +166,8 @@ class SyncPipeline:
                     len(whisper_words), len(ref_lines),
                     "anchor-gap" if self.config.use_anchor_gap_alignment else "needleman-wunsch",
                 )
-                # Transcription segments are VAD segments when VAD is on —
-                # phrase-onset evidence for the correction pass.
-                vad_segments = [
-                    (s.start, s.end) for s in transcription.segments
-                ]
                 result = aligner.align(
                     whisper_words, PlainLyricsReference(lines=ref_lines),
-                    vad_segments=vad_segments,
                 )
                 self._annotate_metadata(result, transcription)
                 return result

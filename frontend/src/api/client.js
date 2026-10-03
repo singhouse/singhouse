@@ -157,7 +157,6 @@ export const songApi = {
     if (artist) form.append('artist', artist)
     if (title) form.append('title', title)
     if (opts.plainLyrics) form.append('plain_lyrics', opts.plainLyrics)
-    if (opts.llmCorrection) form.append('llm_correction', 'true')
     if (opts.llmPaging) form.append('llm_paging', 'true')
     // Pass-2 lead/backing model ID. Sent only when the operator moved the
     // picker off its default, so a stock upload is the exact request it was

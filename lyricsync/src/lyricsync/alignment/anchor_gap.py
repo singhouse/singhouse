@@ -177,8 +177,7 @@ class AnchorGapAligner:
 
     When ``gap_handler_chain`` is set, gaps first go through an ordered
     first-match-wins chain (word-count match, then no-space/punctuation match)
-    with NW as the fallback. An optional ``corrector`` handles LLM-driven
-    region correction.
+    with NW as the fallback.
     """
 
     def __init__(
@@ -187,19 +186,16 @@ class AnchorGapAligner:
         post_config: PostProcessConfig | None = None,
         min_anchor_length: int = 3,
         gap_handler_chain: bool = False,
-        corrector=None,   # lyricsync.correction.RegionCorrector | None
     ):
         self.match_config = match_config or MatchConfig()
         self.post_config = post_config or PostProcessConfig()
         self.min_anchor_length = min_anchor_length
         self.gap_handler_chain = gap_handler_chain
-        self.corrector = corrector
 
     def align(
         self,
         whisper_words: List[TimedWord],
         reference: AlignmentReference,
-        vad_segments: Optional[List[tuple[float, float]]] = None,
     ) -> SyncResult:
         if not isinstance(reference, PlainLyricsReference):
             raise TypeError("AnchorGapAligner requires PlainLyricsReference")
@@ -232,9 +228,6 @@ class AnchorGapAligner:
 
         # ref_idx -> {start, end} from anchors and gap-local NW.
         ref_to_timing: dict[int, dict] = {}
-        # ref idx -> "exact" | "corrected"; absent = interpolated.
-        classes: dict[int, str] = {}
-        whisper_to_ref: dict[int, int] = {}
         num_corrected = 0
         num_anchored = 0
 
@@ -242,8 +235,6 @@ class AnchorGapAligner:
             for k in range(a.length):
                 w = whisper_words[a.trans_start + k]
                 ref_to_timing[a.ref_start + k] = {"start": w.start, "end": w.end}
-                classes[a.ref_start + k] = "exact"
-                whisper_to_ref[a.trans_start + k] = a.ref_start + k
                 num_anchored += 1
 
         # Build gap ranges between anchors (in both trans and ref indices).
@@ -272,16 +263,10 @@ class AnchorGapAligner:
                         is_diff = normalize(whisper_slice[k].text) != normalize(ref_word)
                         if is_diff:
                             num_corrected += 1
-                        classes[ref_lo + k] = "corrected" if is_diff else "exact"
-                        whisper_to_ref[trans_lo + k] = ref_lo + k
                     continue
                 if _gap_no_space_punct_match(whisper_slice, ref_slice, ref_lo, ref_to_timing):
                     gap_handler_hits["no_space_punct"] += 1
                     num_corrected += len(ref_slice)
-                    # Char-proportional distribution over a join/split — a
-                    # fuzzy assignment, so leave it open to correction.
-                    for k in range(len(ref_slice)):
-                        classes[ref_lo + k] = "corrected"
                     continue
 
             gap_handler_hits["nw"] += 1
@@ -295,23 +280,7 @@ class AnchorGapAligner:
                 is_diff = normalize(w.text) != normalize(ref_words[abs_ref])
                 if is_diff:
                     num_corrected += 1
-                classes[abs_ref] = "corrected" if is_diff else "exact"
-                whisper_to_ref[trans_lo + whisper_idx] = abs_ref
                 ref_to_timing[abs_ref] = {"start": w.start, "end": w.end}
-
-        llm_stats = None
-        if self.corrector is not None:
-            # ref_line_boundaries carries a trailing sentinel here; regions
-            # only test membership of line-opening indices, so it's harmless.
-            ref_to_timing, llm_stats = self.corrector.correct(
-                ref_words=ref_words,
-                ref_to_timing=ref_to_timing,
-                classes=classes,
-                line_starts=ref_line_boundaries[:-1],
-                whisper_words=whisper_words,
-                whisper_to_ref=whisper_to_ref,
-                vad_segments=vad_segments,
-            )
 
         # Place any remaining unmatched ref words (run-aware, line-anchored).
         all_words = fill_unmatched_words(
@@ -360,7 +329,6 @@ class AnchorGapAligner:
                     "anchor_word_coverage": n_anchor_words / max(1, len(ref_norm)),
                     "gap_handler_chain": self.gap_handler_chain,
                     "gap_handler_hits": gap_handler_hits,
-                    **({"llm_correction": llm_stats} if llm_stats else {}),
                 },
             ),
         )

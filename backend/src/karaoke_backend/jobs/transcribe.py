@@ -11,8 +11,7 @@ touches ``Song.status`` — a re-transcription of a song that is already `ready`
 must not knock it out of the library if it fails, and that is the pre-queue
 semantic these preserve.
 
-All three can run the same optional LLM stages as the upload path. This keeps
-correction and paging as explicit choices when a song's lyrics are redone.
+All three can run optional page grouping through the user-configured endpoint.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from typing import Optional
 from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
-from karaoke_backend.jobs._llm import make_correction_progress_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import (
@@ -37,7 +35,6 @@ from karaoke_backend.workers.llm_paging import (
 from karaoke_backend.workers.word_sync_worker import (
     describe_run,
     generate_word_sync,
-    make_correction_config,
     realign_only,
 )
 
@@ -152,8 +149,7 @@ def _make_cache_write_guard(
 
     Same shape as the lease re-check in :func:`_persist_set`, and for the same
     reason — but it has to run from the executor thread ``_run_blocking`` lives
-    on, so it hops back to the loop the way ``jobs.ingest`` does for correction
-    progress.
+    on, so it hops back to the event loop to verify the claim.
 
     Returning False is not an error path the transcription can unwind: it just
     declines the write, and the orchestrator's own ``_persist_set`` claim check
@@ -177,40 +173,6 @@ def _make_cache_write_guard(
             return False
 
     return still_claimed
-
-
-def _correction_for(ctx: JobContext, payload: dict):
-    """`(pipeline_config, correction_progress_fn)` for this job's payload.
-
-    Correction is a stage INSIDE alignment — the aligners hold the corrector —
-    so both handlers can offer it, and both need the progress bridge: an LLM
-    pass over a song's regions runs for minutes with nothing else writing to
-    the job row.
-
-    Only the PLAIN-TEXT aligners hold one, though. A synced reference is
-    dispatched to the LRC-anchored aligner, which is built without a corrector,
-    so the request is honoured and corrects nothing. That is logged rather
-    than refused: the caller may well have asked for both, and the LRC
-    anchoring is the better result of the two.
-    """
-    pipeline_config = _pipeline_config(payload)
-    if not payload.get("llm_correction"):
-        return pipeline_config, None
-
-    if payload.get("synced_lyrics"):
-        logger.info(
-            "Job %s: LLM correction requested with a synced (LRC) reference — "
-            "the LRC-anchored aligner holds no corrector, so no correction "
-            "will run",
-            ctx.job_id,
-        )
-
-    return (
-        make_correction_config(pipeline_config),
-        make_correction_progress_callback(
-            ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
-        ),
-    )
 
 
 async def _maybe_page(
@@ -244,7 +206,7 @@ async def run_retranscribe(ctx: JobContext) -> Optional[str]:
     use_vad = bool(payload.get("use_vad", True))
     plain_lyrics = payload.get("plain_lyrics")
     synced_lyrics = payload.get("synced_lyrics")
-    pipeline_config, correction_progress_fn = _correction_for(ctx, payload)
+    pipeline_config = _pipeline_config(payload)
 
     await _announce(
         ctx,
@@ -265,7 +227,6 @@ async def run_retranscribe(ctx: JobContext) -> Optional[str]:
             use_vad=use_vad,
             song_id=ctx.song_id,
             pipeline_config=pipeline_config,
-            correction_progress_fn=correction_progress_fn,
             # This is the RESCUE path, and the only caller that sets either
             # flag. The ingest pass is deterministic (greedy 0.0) and
             # cache-aware; a manual re-transcribe re-arms the temperature
@@ -315,7 +276,7 @@ async def run_realign(ctx: JobContext) -> Optional[str]:
     use_vad = bool(payload.get("use_vad", True))
     plain_lyrics = payload.get("plain_lyrics")
     synced_lyrics = payload.get("synced_lyrics")
-    pipeline_config, correction_progress_fn = _correction_for(ctx, payload)
+    pipeline_config = _pipeline_config(payload)
 
     await _announce(
         ctx,
@@ -334,7 +295,6 @@ async def run_realign(ctx: JobContext) -> Optional[str]:
             whisper_model=whisper_model,
             use_vad=use_vad,
             pipeline_config=pipeline_config,
-            correction_progress_fn=correction_progress_fn,
             vocals_path=payload.get("vocals_path"),
         )
     except Exception as exc:

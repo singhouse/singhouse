@@ -727,7 +727,6 @@ async def test_handler_copies_the_library_file_and_delegates(
         "artist": "Ackerman",
         "title": "Zither Blues",
         "has_lyrics": True,
-        "llm_correction": True,
         "llm_paging": False,
         "karaoke_model": "some-model",
     })
@@ -755,7 +754,6 @@ async def test_handler_copies_the_library_file_and_delegates(
         "title": "Zither Blues",
         # The track HAS lyrics on the server, but the opt-in is off.
         "pasted_lyrics": None,
-        "llm_correction": True,
         "llm_paging": False,
         "karaoke_model": "some-model",
     }

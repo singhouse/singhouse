@@ -350,14 +350,10 @@ they re-run part of the pipeline over what a finished ingest left behind, so on
 a `processing` song they would race the ingest for the same cache and the same
 `songs.job_id`, and on a `failed` one the remedy is `/api/songs/:id/retry`.
 
-`/transcribe` and `/realign` both accept `llm_correction` and `llm_paging`
-(default false), the same two stages the upload form offers, and both forward
-`language` into the job payload — the realign handler's aligner never decodes
-audio and so ignores it, but the two routes take the same request body to the
-same payload keys rather than one of them silently dropping a field. Correction runs
-inside the aligner, and only the plain-text aligners hold a corrector — with a
-synced (LRC) reference, or none at all, the flag is accepted and nothing
-corrects.
+`/transcribe` and `/realign` accept `llm_paging` (default false) for optional
+page grouping with a user-configured endpoint. The UI shows paging controls only
+when `/api/features` reports `llm_paging: true`; see `docs/modal.md` for configuration.
+Regular lyric alignment and display paging require no LLM.
 
 #### Lyrics Lookup
 
@@ -448,10 +444,8 @@ ffmpeg `amix` in every path.
 library (`SyncPipeline`): faster-whisper on CUDA/CPU, or an optional
 fine-tuned lyrics transcriber run via subprocess in the separation venv
 (`workers/heart_transcriptor.py`; checkpoint dir override
-`KARAOKE_HEART_CKPT`). An **optional** LLM-assisted alignment correction
-pass exists: off by default, points at
-an OpenAI-compatible endpoint **you** configure (`KARAOKE_LLM_*`), and every
-failure mode falls back to the deterministic heuristic.
+`KARAOKE_HEART_CKPT`). Optional page grouping uses a user-configured
+OpenAI-compatible endpoint (`KARAOKE_LLM_*`); word alignment remains local.
 
 **Lyrics lookup** (`workers/lyrics_worker.py`): lrclib.net fetcher — exact
 match, then search fallback, best result by score. Gated at call time by
@@ -494,7 +488,7 @@ plugin is logged and skipped, never fatal.
 | `KARAOKE_DEMUCS_PYTHON` | `.venv-demucs/bin/python` | Interpreter of the local separation venv |
 | `DEMUCS_MODEL` / `KARAOKE_MODEL` / `KARAOKE_MODEL_DIR` | `mdx_extra` / roformer ckpt / — | Separation model selection |
 | `KARAOKE_HEART_CKPT` | `<cwd>/ckpt/HeartTranscriptor-oss` (not provided) | Fine-tuned transcriber checkpoint dir — supply your own to use this backend |
-| `KARAOKE_LLM_BASE_URL` / `_MODEL` / `_TIMEOUT` / `_API_KEY` / `_API_KEY_FILE` | off | Optional OpenAI-compatible endpoint for alignment correction |
+| `KARAOKE_LLM_BASE_URL` / `_MODEL` / `_TIMEOUT` / `_API_KEY` / `_API_KEY_FILE` | off | Optional OpenAI-compatible endpoint for page grouping |
 | `KARAOKE_PROVIDERS` / `KARAOKE_PROVIDERS_DIR` | unset | Plugin allowlist / extra plugin directory |
 
 ---
