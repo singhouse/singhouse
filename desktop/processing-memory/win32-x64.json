@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "runtimeLockSha256": "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
+  "evidenceReference": "https://github.com/singhouse/singhouse/pull/73 - experimental Windows estimates derived from Linux bounded-v1 measurements; native Windows inference pending",
+  "executionProfile": "bounded-v1",
+  "models": {
+    "demucs-mdx-extra": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 10737418240,
+          "vramBytes": 2147483648
+        },
+        "cpu": {
+          "ramBytes": 10737418240
+        }
+      }
+    },
+    "karaoke-roformer": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 8589934592,
+          "vramBytes": 4294967296
+        },
+        "cpu": {
+          "ramBytes": 12884901888
+        }
+      }
+    },
+    "heart-transcriptor": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 10737418240,
+          "vramBytes": 6442450944
+        },
+        "cpu": {
+          "ramBytes": 17179869184
+        }
+      }
+    }
+  }
+}
