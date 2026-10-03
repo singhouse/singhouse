@@ -711,3 +711,243 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
   assert.equal((await setup.preflight()).available, true)
   assert.equal((await setup.getStatus()).state, 'idle')
 })
+
+const CPU_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cpu' }
+const METAL_PACK = { platform: 'darwin', arch: 'arm64', accelerator: 'metal' }
+const CUDA_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cuda' }
+const MEASURED_BASIS = 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.'
+const measured = measuredPeakBytes => ({ measuredPeakBytes, evidenceReference: 'measured-fixture',
+  representativeHardware: { verified: true, description: 'Test measurement host' } })
+// Matching measured memory evidence: 10 GiB RAM and 5 GiB VRAM after headroom.
+const cudaMemory = (target = CUDA_PACK) => ({ runtimeLockSha256: 'locked', ...target, ram: measured(8 * GiB), vram: measured(4 * GiB) })
+function estimateFixture(target, hardware, { memory = target.accelerator === 'cuda' ? cudaMemory(target) : undefined } = {}) {
+  const { setup, runtime, cache } = fixture({ hardware: async () => hardware })
+  Object.assign(setup.catalog.runtime, target)
+  Object.assign(setup.catalog.qualification, target)
+  if (memory) setup.catalog.memory = memory
+  return { setup, runtime, cache }
+}
+function installEstimateFixture(target, hardware, options) {
+  const result = estimateFixture(target, hardware, options)
+  const { runtime, cache, setup } = result
+  runtime.value = { id: hash(setup.catalog.runtime), directory: '/runtime', manifest: structuredClone(setup.catalog.runtime) }
+  cache.value = { id: 'models', manifest: { models: [...LOCAL_MODEL_IDS] } }
+  const probe = runtime.probe
+  runtime.probe = async (...args) => ({ ...await probe(...args), accelerator: target.accelerator })
+  return result
+}
+const cpuHost = extra => ({ platform: 'linux', arch: 'x64', cpuCount: 16, totalMemoryBytes: 32 * GiB, ...extra })
+const appleHost = extra => ({ platform: 'darwin', arch: 'arm64', cpu: 'Apple M2', cpuCount: 10,
+  totalMemoryBytes: 16 * GiB, unifiedMemory: true, ...extra })
+const cudaHost = (name, vramGiB = 12, extra) => cpuHost({ cudaDevices: [{ name, dedicatedMemoryBytes: Math.round(vramGiB * GiB) }], ...extra })
+
+test('processing planning estimate follows the selected pack, never the display GPU', async () => {
+  const hardware = cudaHost('NVIDIA GeForce RTX 4090', 24, { gpu: 'NVIDIA GeForce RTX 4090' })
+  const plan = await estimateFixture(CPU_PACK, hardware).setup.preflight()
+  assert.deepEqual(plan.processingEstimate, { level: 2, label: 'Moderate', minutes: [9, 16], evidence: 'measured', basis: MEASURED_BASIS })
+  hardware.cpuCount = 4
+  const slow = (await estimateFixture(CPU_PACK, hardware).setup.preflight()).processingEstimate
+  assert.deepEqual(slow.minutes, [25, 45])
+  assert.match(slow.basis, /uses the CPU/)
+  assert.equal(slow.evidence, 'extrapolated')
+})
+
+const ESTIMATE_CASES = [
+  // CPU packs: logical processors, then less than 15 GiB RAM moves one tier slower.
+  [CPU_PACK, cpuHost({ cpuCount: 32 }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16 }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 15 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 12 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 11 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 8 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 7 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 1 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: 15 * GiB }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: Math.round(15.6 * GiB) }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: 15 * GiB - 1 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 12, totalMemoryBytes: 15 * GiB - 1 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 8, totalMemoryBytes: 15 * GiB - 1 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 7, totalMemoryBytes: 8 * GiB }), [25, 45]],
+  // A CPU pack on an NVIDIA host stays a CPU estimate.
+  [CPU_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24, { cpuCount: 12 }), [12, 20]],
+  // Apple Metal packs.
+  [METAL_PACK, appleHost({ cpu: 'Apple M1' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M3' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M1 Pro' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M3 Ultra' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M4' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M4 Pro' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: undefined }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max', totalMemoryBytes: 15 * GiB }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max', totalMemoryBytes: 15 * GiB - 1 }), [15, 35]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M1', totalMemoryBytes: 8 * GiB }), [15, 35]],
+  // CUDA packs classify the single CUDA device (12 GiB unless stated).
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 D', 24), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 5090 D', 32), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Ti'), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070 SUPER'), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070 Ti SUPER', 16), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060'), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 12GB'), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 2080 Ti', 11), [2, 5]],
+  [CUDA_PACK, cudaHost('Tesla T4', 15), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA T4', 15), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 5050', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1660 SUPER', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060', 12, { platform: 'win32' }), [2, 5], 'extrapolated', { platform: 'win32' }],
+  // Dedicated VRAM: 7.5 GiB up to (not including) 9.5 GiB demotes one tier; entry is the floor.
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 10), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 9.4), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 9.5), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070', 8), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070', 7.5), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4060 Ti', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4060 Ti', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), [1, 3]],
+  // Laptop and Max-Q parts demote one tier and stack with the VRAM demotion.
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 Laptop GPU', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Laptop GPU', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 2080 with Max-Q Design', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Laptop GPU with Max-Q Design', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 Laptop GPU', 12), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050 8GB Laptop GPU', 8), [5, 12]],
+]
+
+test('processing estimate tiers cover every hardware boundary', async () => {
+  for (const [pack, hardware, minutes, evidence = 'extrapolated', packOverride = {}] of ESTIMATE_CASES) {
+    const estimate = (await estimateFixture({ ...pack, ...packOverride }, hardware).setup.preflight()).processingEstimate
+    const name = `${pack.accelerator} ${hardware.cpu ?? hardware.cudaDevices?.[0]?.name ?? ''} ${hardware.cpuCount} ${hardware.totalMemoryBytes}`
+    const level = minutes[1] <= 12 ? 3 : minutes[1] <= 30 ? 2 : 1
+    assert.deepEqual(estimate.minutes, minutes, name)
+    assert.equal(estimate.level, level, name)
+    assert.equal(estimate.label, ['Slower', 'Moderate', 'Faster'][level - 1], name)
+    assert.equal(estimate.evidence, evidence, name)
+    if (evidence === 'measured') assert.equal(estimate.basis, MEASURED_BASIS, name)
+    else {
+      assert.match(estimate.basis, { cpu: /uses the CPU/, metal: /uses Apple Metal/, cuda: /uses your NVIDIA graphics card/ }[pack.accelerator], name)
+      assert.match(estimate.basis, /extrapolated from published component timings/, name)
+    }
+  }
+})
+
+test('CUDA estimates require an admitted, recognized single CUDA device with enough VRAM', async () => {
+  const unqualified = setup => { setup.catalog.qualification.passed = false }
+  for (const [pack, hardware, change = () => {}, options] of [
+    [CUDA_PACK, cudaHost('NVIDIA RTX A5000', 24)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce MX450', 8)],
+    [CUDA_PACK, cudaHost('NVIDIA A100-SXM4-40GB', 40)],
+    [CUDA_PACK, cudaHost('AMD Radeon RX 7900 XTX', 24)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1080 Ti', 11)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1060 6GB', 8)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 Mystery Edition', 24)],
+    [CUDA_PACK, cudaHost('', 12)],
+    [CUDA_PACK, cudaHost(undefined, 12)],
+    // Dedicated VRAM unknown, at most 6 GB, or below 7.5 GiB.
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090' }] })],
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: null }] })],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 Laptop GPU', 6)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050 6GB Laptop GPU', 6)],
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4070', dedicatedMemoryBytes: 7.5 * GiB - 1 }] })],
+    // Ambiguous or unsupported targets.
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB },
+      { name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [CUDA_PACK, cpuHost({ cudaDevices: [] })],
+    [CUDA_PACK, cpuHost({ gpuDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [{ ...CUDA_PACK, platform: 'darwin', arch: 'arm64' }, appleHost({ unifiedMemory: false,
+      cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [{ ...CUDA_PACK, arch: 'arm64' }, cudaHost('NVIDIA GeForce RTX 4090', 24, { arch: 'arm64' })],
+    // Missing admission: no measured memory evidence, or an unqualified catalog.
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), () => {}, { memory: null }],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), unqualified],
+  ]) {
+    const { setup } = estimateFixture(pack, hardware, options)
+    change(setup)
+    const estimate = (await setup.preflight()).processingEstimate
+    assert.equal(estimate.minutes, null, JSON.stringify(hardware.cudaDevices))
+    assert.equal(estimate.level, null)
+  }
+  // Withholding the advisory range never blocks an otherwise available plan.
+  const { setup } = estimateFixture(CUDA_PACK, cudaHost('NVIDIA RTX A5000', 24))
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.memoryQualification.status, 'meets-measured-requirements')
+  assert.equal(plan.processingEstimate.minutes, null)
+  const unmeasured = estimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
+  assert.equal((await unmeasured.setup.preflight()).available, true)
+})
+
+test('memory-blocked plans never get a speed estimate', async () => {
+  for (const hardware of [
+    cudaHost('NVIDIA GeForce RTX 4090', 24, { totalMemoryBytes: 9 * GiB }),
+    cudaHost('NVIDIA GeForce RTX 4090', 24, { cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 4 * GiB }] }),
+  ]) {
+    const plan = await estimateFixture(CUDA_PACK, hardware).setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.processingEstimate.minutes, null)
+  }
+  const cpu = estimateFixture(CPU_PACK, cpuHost({ totalMemoryBytes: 9 * GiB }),
+    { memory: { runtimeLockSha256: 'locked', ...CPU_PACK, ram: measured(8 * GiB) } })
+  const plan = await cpu.setup.preflight()
+  assert.equal(plan.available, false)
+  assert.equal(plan.processingEstimate.minutes, null)
+})
+
+test('installed runtimes matching the catalog keep their CUDA and Metal tiers', async () => {
+  const cuda = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  let plan = await cuda.setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.components.length, 0, 'the installed path answered')
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3])
+  const unqualified = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  unqualified.setup.catalog.qualification.passed = false
+  plan = await unqualified.setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.components.length, 0)
+  assert.equal(plan.processingEstimate.minutes, null)
+  const unmeasured = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
+  assert.equal((await unmeasured.setup.preflight()).processingEstimate.minutes, null)
+  const drifted = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  drifted.setup.catalog.runtime = { ...drifted.setup.catalog.runtime, id: `${drifted.setup.catalog.runtime.id}-other` }
+  plan = await drifted.setup.preflight()
+  assert.equal(plan.components.length, 0, 'the installed path answered')
+  assert.equal(plan.processingEstimate.minutes, null, 'an installed manifest that differs from the catalog gets no estimate')
+  const metal = installEstimateFixture(METAL_PACK, appleHost({ cpu: 'Apple M4 Pro', totalMemoryBytes: 24 * GiB }))
+  plan = await metal.setup.preflight()
+  assert.equal(plan.components.length, 0)
+  assert.deepEqual(plan.processingEstimate.minutes, [5, 12])
+  assert.equal(plan.processingEstimate.label, 'Faster')
+})
+
+test('unknown, mismatched, incomplete, and blocked plans never get a speed estimate', async () => {
+  const hardware = { platform: 'linux', arch: 'x64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3 }
+  for (const change of [
+    setup => { setup.catalog = null },
+    setup => { setup.catalog.qualification.passed = false },
+    setup => { setup.catalog.runtime.models = ['heart-transcriptor'] },
+    setup => { setup.catalog.runtime.models = [...LOCAL_MODEL_IDS, 'unknown-model'] },
+    setup => { setup.hardware = async () => ({ ...hardware, arch: 'arm64' }) },
+    setup => { setup.hardware = async () => ({ ...hardware, cpuCount: null }) },
+    setup => { setup.diskFree = async () => 0 },
+    setup => { setup.catalog.runtime.provenance.lockSha256 = ''; setup.catalog.qualification.runtimeLockSha256 = '' },
+  ]) {
+    const { setup } = fixture({ hardware: async () => hardware })
+    change(setup)
+    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+  }
+})
+
+test('Metal planning range requires an Apple silicon unified-memory target', async () => {
+  const hardware = { platform: 'darwin', arch: 'arm64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3, unifiedMemory: true }
+  const { setup } = fixture({ hardware: async () => hardware })
+  Object.assign(setup.catalog.runtime, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(setup.catalog.qualification, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  const plan = await setup.preflight()
+  assert.deepEqual(plan.processingEstimate.minutes, [8, 20])
+  assert.match(plan.processingEstimate.basis, /uses Apple Metal/)
+  hardware.unifiedMemory = false
+  assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+})

@@ -1247,10 +1247,33 @@ def runtime_directory(supplied: Path | None = None):
         shutil.rmtree(supplied, ignore_errors=False)
 
 
+def desktop_lyrics_lookup_endpoint(control_token):
+    """Desktop parent-only preference; renderer sessions cannot change it."""
+    from starlette.responses import JSONResponse
+
+    async def update(request):
+        headers = {"Cache-Control": "no-store"}
+        supplied = request.headers.get("x-singhouse-desktop-token", "")
+        if not control_token or not secrets.compare_digest(supplied, control_token):
+            return JSONResponse({"detail": "Forbidden"}, status_code=403, headers=headers)
+        try:
+            value = await request.json()
+            if (not isinstance(value, dict) or set(value) != {"enabled"}
+                    or type(value["enabled"]) is not bool):
+                raise ValueError("Invalid preference")
+        except (ValueError, UnicodeError):
+            return JSONResponse({"detail": "Expected a boolean enabled preference"},
+                                status_code=400, headers=headers)
+        os.environ["KARAOKE_LRCLIB"] = "1" if value["enabled"] else "0"
+        return JSONResponse({"enabled": value["enabled"]}, headers=headers)
+
+    return update
+
+
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
-        models_id: str | None = None) -> None:
+        models_id: str | None = None, lyrics_lookup: bool = False) -> None:
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1291,6 +1314,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
                                                           processing_id=processing_id, models_id=models_id))
+            if native and lyrics_lookup:
+                environment["KARAOKE_LRCLIB"] = "1"
             os.environ.clear()
             os.environ.update(environment)
             if native:
@@ -1342,6 +1367,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                         from sqlalchemy import case, func, select
                         from karaoke_backend.database import AsyncSessionLocal
                         from karaoke_backend.models.song import Job, JobStatus
+                        from karaoke_backend.workers.managed_processing import deferred_job_kinds
 
                         queued = JobStatus.QUEUED.value
                         running = JobStatus.RUNNING.value
@@ -1350,11 +1376,13 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                             func.count(case((Job.status == queued, 1))).label("queued"),
                             func.count(case((Job.status == running, 1))).label("running"),
                             func.count(case((Job.status.not_in(terminal), 1))).label("nonterminal"),
+                            func.count(case(((Job.status == queued) & Job.claimed_by.is_(None)
+                                             & Job.kind.in_(deferred_job_kinds()), 1))).label("deferred"),
                         )
                         async with AsyncSessionLocal() as db:
                             row = (await db.execute(statement)).one()
                         return {"queued": row.queued, "running": row.running,
-                                "nonterminal": row.nonterminal}
+                                "nonterminal": row.nonterminal, "deferred": row.deferred}
 
                     async def ready(request):
                         return JSONResponse({"nonce": nonce, **({"identity": identity} if identity else {})}, headers={"Cache-Control": "no-store"})
@@ -1368,6 +1396,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                             return JSONResponse({"detail": "Forbidden"}, status_code=403,
                                                 headers={"Cache-Control": "no-store"})
                         return None
+
+                    lyrics_lookup_endpoint = desktop_lyrics_lookup_endpoint(control_token)
 
                     async def quiesce(request):
                         denied = authenticate_desktop(request)
@@ -1393,12 +1423,13 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                         return JSONResponse({"schema": 1, **await mutation_barrier.state()},
                                             headers={"Cache-Control": "no-store"})
 
-                    for route in (Route("/desktop-update-state", update_state, methods=["GET"]),
+                    for route in (Route("/desktop-lyrics-lookup", lyrics_lookup_endpoint, methods=["POST"]),
+                                  Route("/desktop-update-state", update_state, methods=["GET"]),
                                   Route("/desktop-release", release, methods=["POST"]),
                                   Route("/desktop-quiesce", quiesce, methods=["POST"])):
                         app.router.routes.insert(0, route)
                     # Keep the core's provider-router insertion anchor consistent.
-                    app.state.provider_route_anchor += 4
+                    app.state.provider_route_anchor += 5
                     if demo:
                         app.state.lifespan_startup_hooks.append(seed_demo)
 
@@ -1463,6 +1494,7 @@ if __name__ == "__main__":
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
     parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
+    parser.add_argument("--lyrics-lookup", action="store_true", help="Enable optional third-party lyrics lookup")
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
@@ -1495,7 +1527,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id)
+                args.processing_id, args.models_id, args.lyrics_lookup)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

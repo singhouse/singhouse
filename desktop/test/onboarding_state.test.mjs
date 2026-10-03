@@ -136,3 +136,26 @@ test('quiesce, second activity check, restart, and resume failures never report 
   await assert.rejects(restartForSetup(resumeFailure.callbacks), /resume failed/)
   assert.deepEqual(resumeFailure.calls, ['activity'])
 })
+
+test('setup restart preserves only verified deferred queued jobs', async () => {
+  const { calls, callbacks } = restartFixture({
+    activity: async () => ({ ...idle, activeJobs: 3, deferredJobs: 3 }),
+    quiesce: async () => ({ ...locked, jobs: { nonterminal: 3, deferred: 3 } }),
+  })
+  await restartForSetup(callbacks)
+  assert.deepEqual(calls, ['restart'])
+  for (const deferred of [0, 2, 4, null, -1, 3.5, '3']) {
+    const blocked = restartFixture({ activity: async () => ({ ...idle, activeJobs: 3, deferredJobs: deferred }) })
+    await assert.rejects(restartForSetup(blocked.callbacks))
+    assert.deepEqual(blocked.calls, [])
+  }
+})
+
+test('setup restart rechecks deferral after quiescing', async () => {
+  const { calls, callbacks } = restartFixture({
+    activity: async () => ({ ...idle, activeJobs: 2, deferredJobs: 2 }),
+    quiesce: async () => ({ ...locked, jobs: { nonterminal: 2, deferred: 1 } }),
+  })
+  await assert.rejects(restartForSetup(callbacks), /library is busy/)
+  assert.deepEqual(calls, ['resume'])
+})

@@ -524,12 +524,12 @@ packages, and licenses. Preserve these with the artifact.
 
 ## Optional processing packs and offline models
 
-The packaged application's Processing menu reports playback, transcription,
-separation, and user-owned Modal readiness separately. Choose “Install processing
-runtime or model cache…” to select an explicit local JSON manifest. Runtime
-manifests authorize executable code: obtain them from a source you trust and
-review the displayed size before installation. No production download catalog,
-publication service, or signing trust root is configured by this prototype.
+Open Settings → Song processing… in the packaged application to review and
+set up local processing or user-owned Modal. The setup flow shows download sizes
+and installation notices before consent. Settings also provides library database
+backup and restore; these backups do not include audio files. Update staging,
+recovery diagnostics, and arbitrary manifest installation are not everyday menu
+actions.
 
 Processing uses a separate relocatable Python environment. CPU, CUDA, and Metal
 are separate pack variants; platform, architecture, and application package
@@ -714,14 +714,11 @@ not provide a portable directory-descriptor-relative `openat` traversal, so the
 app does not claim protection from a malicious process running as the same user
 that concurrently replaces ancestor directories or installed binaries.
 
-The first explicit Heart transcription or audio-upload action opens Heart setup.
-You can also open Processing → Set up Heart transcription. The dialog shows the
-exact size and upstream source before you choose to retrieve files or select an
-existing complete Heart model folder. Cancel keeps the operation unsubmitted.
-Progress appears in the application taskbar/dock; Processing → Cancel installation
-interrupts setup, and retry resumes verified partial transfers. Insufficient disk
-space, interrupted transfers and checksum failures preserve the prior cache.
-After installation, reopen the application and retry the original action.
+Open Settings → Song processing… to install the processing pack. The setup flow
+shows download sizes and upstream sources before consent. Installation progress
+includes a cancel action, and retry resumes verified partial transfers.
+Insufficient disk space, interrupted transfers, and checksum failures preserve
+the prior cache. Queued songs wait for the processing pack to become available.
 Prepared playback remains available while setting up models.
 
 `models.json` defines the upstream allowlist and offline cache contract.
@@ -814,8 +811,7 @@ shell. Linux graphical smoke tests can run under `xvfb-run -a`.
 
 ## Playback qualification
 
-Use the host's projector button to open the display; the Projector menu controls
-fullscreen and display placement. Opening the projector requests prevention of
+Use the host's lyrics-display controls to open and manage the display. Opening the projector requests prevention of
 display sleep. Closing the host closes its projector and backend.
 
 The output selector routes the show player's audio and reapplies the selection
@@ -871,13 +867,24 @@ bytes or establish remote weight equality by metadata alone.
 # Song processing setup
 
 The installed desktop opens a welcome flow with an option to go straight to
-the library. “Set up song processing” reopens it from the library or Processing
-menu. Download consent is separate from choosing local processing. Setup must
+the library. “Set up song processing” reopens it from the library; the menu entry
+is Settings → Song processing…. Download consent is separate from choosing local processing. Setup must
 verify a compatible processing runtime, both separation models, and Heart
 together before reporting local processing ready. A saved wizard step is never
 readiness evidence. Verified model files are reused when expanding a cache.
-Cancellation preserves resumable files. Restart is refused while processing,
-installation, playback, or a projector window is active.
+The optional lyrics step keeps LRCLIB off until explicitly enabled. It explains
+that lookups send track metadata to LRCLIB, never audio; the choice can be changed
+by reopening setup. Installation notices start collapsed with a summary, while
+component sources, terms, and exact sizes remain available before the install action.
+Back navigation returns to the welcome screen.
+
+Installation, verification, restart prompts, and completion appear as a compact
+nonmodal status panel over the library. Queued processing songs remain durable
+and unclaimed until the backend verifies the required runtime and models. This
+includes waiting across an application restart; saved wizard navigation cannot
+release jobs. Cancellation preserves resumable installation files and queued songs.
+Restart is refused while processing, installation, playback, or a projector window
+is active; queued jobs held by the readiness gate are safe to retain across restart.
 
 Release artifacts must supply a qualified runtime catalog before automatic
 local setup becomes available. Playback remains usable without it. The advanced
@@ -886,6 +893,158 @@ be selected in setup: its layout and sizes are inspected before consent, then
 its contents are verified during cancellable installation. Missing or changed
 files never trigger a silent model download. The separate processing runtime
 may still require downloading; this is shown in the installation plan.
+
+### Advisory processing speed estimate
+
+The wizard shows a deliberately broad **planning range**, not a benchmark or
+qualification result, for preparing one three-minute track with the full default
+workflow after setup and queue wait. Ranges are tiered by the selected,
+validated pack's execution device and a few observed hardware facts.
+
+What the default workflow runs (from the pinned processing pack):
+
+- Demucs `mdx_extra` (a bag of four HDemucs checkpoints) on the full mix with
+  CLI defaults (shifts 1, overlap 0.25).
+- Karaoke Mel-Band RoFormer
+  (`mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956`) via audio-separator
+  0.41.1 on the Demucs vocal stem. The shipped
+  [model configuration](https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml)
+  sets `dim_t` 801 and hop 441 (`chunk_size` 352800), which gives 8 s chunks.
+  audio-separator's default overlap value 8 is interpreted as an 8 s step for
+  RoFormer, so chunks do not overlap (roughly a quarter of the work of the
+  common UVR setting of four overlaps).
+- HeartTranscriptor (a full fine-tune of Whisper-medium, about 764M parameters)
+  via transformers: fp32 on CPU, fp16 on CUDA and MPS, greedy decoding. RMS-VAD
+  produces 1–15 s segments with one call per segment; word timing uses
+  cross-attention DTW. Transcription time scales with voiced audio, not track
+  length.
+- Each stage runs in its own process, and one job runs at a time, so each stage
+  pays its own model-load overhead.
+
+These ranges describe the pinned pack's current separation settings. Changing
+the Demucs segment or RoFormer segment/overlap settings would invalidate them.
+
+Planning ranges (minutes for one three-minute track):
+
+| Pack | Observed hardware | Range | Bar | Evidence |
+|---|---|---|---|---|
+| CPU | 16 or more logical processors | 9–16 | Moderate | Measured (one run, 16-core CPU) |
+| CPU | 12–15 logical processors | 12–20 | Moderate | Extrapolated |
+| CPU | 8–11 logical processors | 15–28 | Moderate | Extrapolated |
+| CPU | fewer than 8 logical processors | 25–45 | Slower | Extrapolated |
+| Apple Metal | M-series Pro/Max/Ultra, or generation 4 or newer | 5–12 | Faster | Extrapolated |
+| Apple Metal | base M1/M2/M3, or an unrecognized Apple chip name | 8–20 | Moderate | Extrapolated |
+| Apple Metal | any Apple chip with less than 15 GiB memory | 15–35 | Slower | Extrapolated |
+| CUDA | RTX 3080/3090 (incl. Ti), RTX 4070 (incl. Super/Ti) and above, RTX 5070 and above | 1–3 | Faster | Extrapolated |
+| CUDA | RTX 2060–2080 Ti (incl. Super), RTX 3060–3070 Ti, RTX 4060/4060 Ti, RTX 5060/5060 Ti, Tesla T4 | 2–5 | Faster | Extrapolated |
+| CUDA | GTX 16xx, RTX 2050/3050/4050/5050 | 5–12 | Faster | Extrapolated |
+
+The CUDA rows list name tiers before the video-memory rules below. Most of the
+entry-row cards ship with less than 7.5 GiB and therefore get no range, and
+most 8 GB mainstream cards display the entry range after the memory demotion.
+
+CPU packs with less than 15 GiB total RAM use the next slower CPU row (the
+slowest row stays 25–45). The low-memory cutoff is 15 GiB rather than 16 GiB
+because Linux and Windows report a nominal 16 GB machine as slightly less than
+16 GiB. The bar shows Faster when the upper end is at most 12 minutes,
+Moderate when it is at most 30, and Slower otherwise.
+
+The measured CPU row comes from a 16-physical-core processor. A computer that
+reports 16 logical processors with fewer physical cores (for example 8 cores
+with SMT) is shown the same row but may be slower.
+
+CUDA ranges appear only for a qualified CUDA catalog whose measured memory
+evidence accepts this computer, on a Linux or Windows x64 target with exactly
+one CUDA device and no unified memory. The tier comes from that device's name
+and reported dedicated memory:
+
+- Cards with 6 GB or less, or less than 7.5 GiB reported, get no range. CUDA
+  packs that apply per-stage memory admission budget at least 6 GiB of free
+  video memory for transcription (a test budget, not a measured requirement),
+  so those cards would run it on the CPU or refuse it. Unknown video memory also
+  gets no range.
+- GTX 10-series cards get no range; current CUDA PyTorch builds are unlikely to
+  support them.
+- Cards reporting at least 7.5 GiB but less than 9.5 GiB (8 GB cards), where
+  transcription fits only narrowly, and laptop or Max-Q parts are shown one tier
+  slower; both demotions stack, and the entry row is the floor. Some laptop
+  parts report desktop names and cannot be recognized as laptops.
+- Other names, including workstation, datacenter, and MX parts, non-NVIDIA
+  adapters, catalogs that have not passed qualification, and catalogs without measured
+  memory evidence get no range.
+- In CUDA packs that apply per-stage memory admission, a stage can still move
+  to the CPU when a job runs; the estimate does not reflect that. Older cards may also be much slower with
+  fp16.
+
+**Measured.**
+
+- CPU: one run on a 16-core/32-thread Zen 3 desktop CPU with 62 GiB RAM and the
+  Linux CPU pack (torch 2.10.0+cpu, with system ffmpeg) processed a 180 s track in 673 s (about
+  11.2 minutes): Demucs 160 s, RoFormer 289 s, and Heart 224 s for 11 VAD
+  segments with 127 s of voiced audio. Each stage spent roughly 5–10 s loading;
+  peak resident memory was 4.6, 2.7, and 9.9 GiB respectively. The run used a
+  separate harness that invokes the same stage workers, not the application
+  queue, with a warm file cache. The final mixdown and lyric alignment were not
+  timed. Other load was present, so this likely overstates stage time slightly.
+- CUDA: a cloud Tesla T4 run (a 261 s song) took about 260 s warm and about
+  397 s cold wall time, including per-call container start and model reloads.
+  It used the user-owned Modal processing path with a different software stack (newer
+  torch, Demucs, and audio-separator, with Demucs in-process), not the desktop
+  pack, so it is an order-of-magnitude reference only.
+- Apple and small CPUs: short-clip runs on an Apple M2 (16 GiB) Metal pack and a
+  6-vCPU virtual machine exist, but load overhead dominates them. The M2 runs
+  slowed under memory pressure, and the device actually used for inference was
+  not proven.
+
+**Inferred.**
+
+- CPU tier scaling uses published UVR community Demucs timings. On the
+  spreadsheet's Batch tab, a Ryzen 7 1700X takes about 1.5 times as long as
+  a Ryzen 7 5800X for `mdx_extra` (608 s versus 411 s). Older 2–4-core CPUs appear
+  only on its Chunks-Auto tab, at about 2–2.5 times the 5800X for `htdemucs` and
+  3–7 times for the v3 HDemucs `mdx` bag. These are cross-tab comparisons with
+  different settings, so they guide the tier spacing only. Thread scaling is
+  non-linear, and SMT or oversubscription can slow PyTorch.
+- Apple ranges come from the short M2 measurements and published MPS reports,
+  including RoFormer timings on an M4 Pro and reports that HDemucs (the
+  `mdx_extra` architecture) can run slower on MPS than on CPU.
+- CUDA ranges come from published T4 RoFormer timings, published Demucs GPU
+  timings, published Whisper-medium PyTorch GPU timings, and the T4 reference
+  above.
+- Optimized engines (faster-whisper, whisper.cpp, MLX, ONNX/TensorRT) are not
+  used as transferable timings for this pack.
+
+Sources checked 2026-10-02:
+
+- [UVR community Demucs separation-time spreadsheet](https://docs.google.com/spreadsheets/d/1R_pOURv8z9GmVkCt-x1wwApgAnplM9SHiPO_ViHWl1Q)
+  (CPU and GPU rows; uses shifts 2, so roughly double the CLI default)
+- [python-audio-separator PR #298](https://github.com/nomadkaraoke/python-audio-separator/pull/298)
+  (M4 Pro MPS and Tesla T4 timings)
+- [Demucs-GUI usage notes](https://github.com/CarlGao4/Demucs-Gui/blob/main/usage.md)
+  (HDemucs on MPS versus CPU)
+- [openai/whisper discussion #918](https://github.com/openai/whisper/discussions/918)
+  (Whisper-medium PyTorch CPU and GPU timings)
+- [Tom's Hardware Whisper GPU benchmark](https://www.tomshardware.com/news/whisper-audio-transcription-gpus-benchmarked)
+- [openai/whisper PR #382 comment](https://github.com/openai/whisper/pull/382#issuecomment-1475975663)
+  (MPS slower than CPU in one report)
+- [openai/whisper discussion #1551](https://github.com/openai/whisper/discussions/1551)
+  and [whisper.cpp issue #89](https://github.com/ggml-org/whisper.cpp/issues/89)
+  (thread-count scaling)
+- [HeartTranscriptor model card](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss)
+
+**Caveats.** Ranges are planning guidance, not qualification results or upper
+bounds. Dense vocals, retries, thermal throttling, memory pressure or swap,
+competing applications, and slow storage can push times outside them. More RAM
+and more logical processors do not guarantee faster inference, and the bar is
+never raised merely because a graphics adapter is present. The selected,
+validated pack supplies the execution device, so Windows/Linux CPU packs remain
+CPU estimates even on NVIDIA-equipped machines. Unknown accelerators, missing
+hardware observations, mismatched targets, incomplete or extended model sets,
+and blocked installation plans display no numeric range. The estimate applies
+only to the default three-model workflow from the selected validated catalog; an
+installed runtime with a different manifest from that catalog receives no
+estimate. Existing measured memory checks and runtime attestation remain
+authoritative and independent of this UI.
 
 Hardware details report observations rather than inferred processing support.
 Unknown graphics memory remains unknown, and Apple silicon unified memory is
@@ -1039,21 +1198,20 @@ certificate verification; fix the host instead.
 
 | Mode | Selected by | Installs | Model retrieval consent |
 |---|---|---|---|
-| Fresh install | `--runtime-manifest` and `--download-models` | Through the advanced manifest installer | `--download-models` |
-| Resume | Fresh install options plus `--resume`, same `--output` | Continues the interrupted attempt | `--download-models` |
 | Retained setup | `--runtime-manifest`, `--retained-profile`, `--expected-source-commit` | Nothing | Not applicable |
 | Wizard | `--wizard` and `--expected-runtime-lock-sha256` | Through the first-launch setup screens | The application's own consent screen |
 
-Fresh install, resume and wizard modes use a new profile inside the evidence
-directory. For example, on Linux:
+Wizard mode uses a new profile inside the evidence directory. Legacy manifest
+installation and resume modes are retired; use the catalog shipped in the
+candidate and the wizard. For example, on Linux:
 
 ```sh
 xvfb-run -a node desktop/test/packaged-processing-smoke.mjs \
   --executable desktop/artifacts/linux-unpacked/Singhouse \
-  --runtime-manifest /verified-pack/manifest.json \
+  --wizard \
+  --expected-runtime-lock-sha256 FULL_64_HEX_RUNTIME_LOCK \
   --audio /licensed-excerpt.wav \
-  --output /evidence/new-attempt \
-  --download-models
+  --output /evidence/new-attempt
 ```
 
 #### Candidate identity
@@ -1069,28 +1227,9 @@ architecture is authoritative; if it differs from the Node architecture running
 the harness (for example an x64 Node under translation on Apple silicon), the
 run fails before processing.
 
-#### Resume and upgrades
-
-`--resume` continues an interrupted fresh-install attempt in the same evidence
-directory. Earlier evidence is hash linked and never modified. Resume refuses
-evidence from another platform or architecture, evidence recorded in retained
-or wizard mode, and any change to the candidate tuple. Profile paths are
-compared case-insensitively on macOS and Windows and exactly on Linux.
-
-To continue with a different candidate, add
-`--upgrade-from-executable-sha256 <full original executable hash>`. The
-candidate tuple must then change, and the evidence binds the original and
-current tuples as the upgrade lineage; every later attempt must carry the same
-lineage. On Linux the stock executable hash is shared by every build, so this
-flag selects nothing there: it only confirms the original evidence, and the
-recorded tuples bind the lineage. Evidence written before candidate tuples were
-recorded resumes only on Windows, where it is compared by executable hash alone
-and marked as legacy. Once any later attempt in such a chain records a tuple,
-every other attempt and every non-upgrade resume must match that tuple. On
-Linux and macOS such evidence is refused; start a new attempt.
-
 The candidate tuple is hashed again after every relaunch and after the final
-shutdown; any change fails the run.
+shutdown; any change fails the run. Existing resume and upgrade evidence remains
+preserved, but new attempts must use wizard or retained-setup mode.
 
 #### Retained setup
 

@@ -1347,3 +1347,24 @@ async def test_ingest_plain_lookup_alignment(monkeypatch, enabled, plain, pasted
     assert lookup.await_count == int(enabled and not pasted)
     if enabled and not pasted and not expected:
         assert any("No plain lyrics found" in str(c) for c in progress.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_desktop_setup_defers_processing_without_claims_or_attempts(monkeypatch):
+    from karaoke_backend.workers import modal_offload
+    monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", "{}")
+    monkeypatch.delenv("KARAOKE_DESKTOP_PROCESSING_JSON", raising=False)
+    monkeypatch.setattr(modal_offload, "is_enabled", lambda: False)
+    for kind in (JobKind.INGEST, JobKind.PLEX_IMPORT, JobKind.RETRANSCRIBE, JobKind.REALIGN, JobKind.RESPLIT):
+        await _seed_job(kind.value, kind=kind.value)
+    await _seed_job("video", kind=JobKind.VIDEO_IMPORT.value)
+    assert (await queue.claim_next("before-restart")).id == "video"
+    assert await queue.claim_next("before-restart") is None
+    # A second worker sees exactly the same durable waiting state.
+    assert await queue.claim_next("after-restart") is None
+    for kind in (JobKind.INGEST, JobKind.PLEX_IMPORT, JobKind.RETRANSCRIBE, JobKind.REALIGN, JobKind.RESPLIT):
+        job = await _get(kind.value)
+        assert (job.status, job.attempts, job.claimed_by) == ("queued", 0, None)
+    # Configured offload releases processing without requiring a local pack.
+    monkeypatch.setattr(modal_offload, "is_enabled", lambda: True)
+    assert (await queue.claim_next("ready-worker")).attempts == 1
