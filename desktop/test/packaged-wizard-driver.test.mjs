@@ -939,3 +939,21 @@ test('a candidate without the wizard hooks fails at once, naming the reason', as
   await assert.rejects(assertWizardHooks(page({}), { timeoutMs: 20, interval: 1 }), /No setup dialog appeared/)
   await assert.rejects(assertWizardHooks(page({}), {}), /requires a timeout/)
 })
+
+
+test('hardware-test lock assertion requires explicit false status and packaged private-test channel', () => {
+  const value = catalog()
+  value.qualification.scope = 'hardware-test'
+  value.qualification.passed = false
+  const summary = summarizeCatalog(bytesOf(value))
+  assertCatalogLock(summary, LOCK, host, 'private-test')
+  assert.match(catalogLimitations(summary)[1], /unqualified hardware-test candidate/)
+  for (const channel of [undefined, 'stable', 'beta', 'core-private-test']) {
+    assert.throws(() => assertCatalogLock(summary, LOCK, host, channel), /packaged private-test release channel/)
+  }
+  for (const passed of [true, undefined, null, 0, 'false']) {
+    assert.throws(() => assertCatalogLock({ ...summary, qualification: { ...summary.qualification, passed } }, LOCK, host, 'private-test'), /passed: false/)
+  }
+  assert.throws(() => assertCatalogLock(summary, 'd'.repeat(64), host, 'private-test'), /differs from the expected lock/)
+  assert.throws(() => assertCatalogLock(summary, LOCK, { ...host, platform: 'win32' }, 'private-test'), /different platform/)
+})
