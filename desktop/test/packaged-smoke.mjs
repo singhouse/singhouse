@@ -160,7 +160,7 @@ try {
   await host.getByRole('button', { name: 'Play', exact: true }).click()
   await host.getByRole('button', { name: 'Pause', exact: true }).waitFor()
   const opened = application.waitForEvent('window')
-  await host.locator('button.popout-btn').click()
+  await host.getByRole('button', { name: 'Pop out lyrics', exact: true }).click()
   const projector = await opened
   await projector.locator('video').waitFor()
   await projector.waitForFunction(() => [...document.querySelectorAll('video')].some(video => video.readyState >= 2 && video.currentTime > 0), null, { timeout: 15000 })
