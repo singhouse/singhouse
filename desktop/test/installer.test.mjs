@@ -150,7 +150,13 @@ test('installer rejects stale native admission policy instead of overlaying it',
     assert.equal(valid.dmg.icon, valid.mac.icon)
     assert.equal(valid.win.icon, resolve(icons, 'singhouse.ico'))
     assert.equal(valid.nsis.installerIcon, valid.win.icon)
-    assert.equal(valid.nsis.uninstallerIcon, valid.win.icon)
+    assert.equal(Object.hasOwn(valid.nsis, 'uninstallerIcon'), false,
+      'NSIS must use its embedded app icon rather than install a post-receipt icon file')
+    // getResource also detects this conventional filename without a setting.
+    for (const project of [desktop, resolve(desktop, '..')]) {
+      await assert.rejects(readFile(resolve(project, valid.directories.buildResources || 'build', 'uninstallerIcon.ico')),
+        { code: 'ENOENT' })
+    }
     assert.ok(!valid.files.some(file => typeof file === 'object' && file.to === 'release.json'))
     await writeFile(resolve(native, 'processing-locks.json'), '{}\n')
     await assert.rejects(import(`${installer}?stale=${Date.now()}`), /Reassemble the native runtime after changing processing-locks.json/)

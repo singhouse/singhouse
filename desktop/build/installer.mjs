@@ -121,7 +121,8 @@ export default {
   // use the ZIP extractor and disable the differential 7z package path.
   nsis: {
     installerIcon: resolve(icons, 'singhouse.ico'),
-    uninstallerIcon: resolve(icons, 'singhouse.ico'),
+    // MUI_UNICON already inherits installerIcon. An explicit uninstallerIcon
+    // adds an unmodeled installed file after the release receipt is generated.
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
