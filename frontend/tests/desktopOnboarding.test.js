@@ -709,15 +709,37 @@ it('shows a qualitative machine rating and rough three-minute-track range with t
   globalThis.window.karaokeDesktop = bridge({
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
-      processingEstimate: { level: 2, label: 'Moderate', minutes: [20, 90], basis: 'This pack uses the CPU.' } }),
+      processingEstimate: { level: 2, label: 'Moderate', minutes: [9, 16], evidence: 'measured',
+        basis: 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' } }),
   })
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
-  expect(wrapper.find('[aria-label="Local processing estimate"]').text()).toContain('20–90 minutes to prepare a 3-minute track')
+  const estimate = wrapper.find('[aria-label="Local processing estimate"]')
+  expect(estimate.text()).toContain('9–16 minutes to prepare a 3-minute track')
+  expect(estimate.text()).toContain('Based on one measured run on a 16-core desktop processor')
+  expect(estimate.text()).toContain('Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.')
   expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
   expect(wrapper.text()).toContain('Actual processing times may vary.')
   expect(wrapper.text()).toContain('You can enable Modal later via Settings → Song processing… → My Modal account.')
+  wrapper.unmount()
+})
+
+it('shows extrapolated estimates with the same calm variability note', async () => {
+  globalThis.window.karaokeDesktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
+    preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
+      processingEstimate: { level: 3, label: 'Faster', minutes: [1, 3], evidence: 'extrapolated',
+        basis: 'This pack uses your NVIDIA graphics card; the range is extrapolated from published component timings.' } }),
+  })
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  const estimate = wrapper.find('[aria-label="Local processing estimate"]')
+  expect(estimate.text()).toContain('1–3 minutes to prepare a 3-minute track')
+  expect(estimate.text()).toContain('uses your NVIDIA graphics card')
+  expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(3)
+  expect(wrapper.text()).not.toContain('Extrapolated estimate')
+  expect(wrapper.text()).toContain('Actual processing times may vary.')
   wrapper.unmount()
 })
 

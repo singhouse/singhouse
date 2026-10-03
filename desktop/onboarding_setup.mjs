@@ -83,24 +83,106 @@ function memoryAssessment(catalog, runtime, hardware) {
 
 // Advisory planning ranges, never readiness or memory requirements. Evidence,
 // assumptions, and deliberately broad bands are documented in README.md.
-function processingEstimate(runtime, hardware = {}) {
+// Minutes for one three-minute track through the full default workflow.
+const GIB = 1024 ** 3
+// A nominal 16 GB machine reports slightly less than 16 GiB of total memory.
+const LOW_MEMORY_BYTES = 15 * GIB
+const EXTRAPOLATED = 'the range is extrapolated from published component timings.'
+const CPU_EXTRAPOLATED = `This pack uses the CPU, even if your computer has a graphics card; ${EXTRAPOLATED}`
+// Ordered fastest to slowest; less than 15 GiB RAM moves one row slower.
+const CPU_TIERS = Object.freeze([
+  { minCpus: 16, minutes: [9, 16], evidence: 'measured',
+    basis: 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' },
+  { minCpus: 12, minutes: [12, 20], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+  { minCpus: 8, minutes: [15, 28], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+  { minCpus: 1, minutes: [25, 45], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+])
+const METAL_BASIS = `This pack uses Apple Metal; ${EXTRAPOLATED}`
+const METAL_TIERS = Object.freeze({
+  performance: { minutes: [5, 12], evidence: 'extrapolated', basis: METAL_BASIS },
+  base: { minutes: [8, 20], evidence: 'extrapolated', basis: METAL_BASIS },
+  lowMemory: { minutes: [15, 35], evidence: 'extrapolated', basis: METAL_BASIS },
+})
+const CUDA_BASIS = `This pack uses your NVIDIA graphics card; ${EXTRAPOLATED}`
+// Ordered fastest to slowest; demotions move toward the last row, never past it.
+const CUDA_TIERS = Object.freeze([
+  { id: 'high', minutes: [1, 3], evidence: 'extrapolated', basis: CUDA_BASIS },
+  { id: 'mainstream', minutes: [2, 5], evidence: 'extrapolated', basis: CUDA_BASIS },
+  { id: 'entry', minutes: [5, 12], evidence: 'extrapolated', basis: CUDA_BASIS },
+])
+// Consumer model number → tier. Ti, Super, D, and memory-size variants keep the
+// tier. Unlisted names (including GTX 10-series, which current CUDA PyTorch
+// builds are unlikely to support), workstation/datacenter cards, MX, and
+// non-NVIDIA adapters stay unknown.
+const CUDA_MODELS = Object.freeze({
+  rtx: { 2050: 'entry', 3050: 'entry', 4050: 'entry', 5050: 'entry',
+    2060: 'mainstream', 2070: 'mainstream', 2080: 'mainstream', 3060: 'mainstream', 3070: 'mainstream',
+    4060: 'mainstream', 5060: 'mainstream',
+    3080: 'high', 3090: 'high', 4070: 'high', 4080: 'high', 4090: 'high', 5070: 'high', 5080: 'high', 5090: 'high' },
+  gtx: { 1630: 'entry', 1650: 'entry', 1660: 'entry' },
+})
+// Transcription needs more than 6 GiB of free VRAM; smaller or unknown cards may
+// run it on the CPU or refuse it, so they get no CUDA range.
+const CUDA_MIN_VRAM_BYTES = 7.5 * GIB
+// 8 GB cards fit transcription only narrowly; 10 GB and larger fit every stage.
+const CUDA_REDUCED_VRAM_BYTES = 9.5 * GIB
+const LEVELS = Object.freeze([[12, 3, 'Faster'], [30, 2, 'Moderate'], [Infinity, 1, 'Slower']])
+
+function cudaTier(device) {
+  if (typeof device?.name !== 'string') return null
+  const vram = device.dedicatedMemoryBytes
+  if (!Number.isSafeInteger(vram) || vram < CUDA_MIN_VRAM_BYTES) return null
+  let name = device.name.toLowerCase().replace(/\s+/g, ' ').trim().replace(/^nvidia /, '').replace(/^geforce /, '')
+  const laptop = / (?:laptop gpu|with max-q design)$/.test(name)
+  name = name.replace(/(?: laptop gpu| with max-q design)+$/, '').replace(/ \d{1,2} ?gb$/, '')
+  let id = null
+  if (/^(tesla )?t4$/.test(name)) id = 'mainstream'
+  else {
+    const match = /^(rtx|gtx) (\d{4})(?: d)?(?: ti)?(?: super)?$/.exec(name)
+    id = match ? CUDA_MODELS[match[1]][match[2]] ?? null : null
+  }
+  if (!id) return null
+  const index = CUDA_TIERS.findIndex(tier => tier.id === id)
+    + Number(vram < CUDA_REDUCED_VRAM_BYTES) + Number(laptop)
+  return CUDA_TIERS[Math.min(index, CUDA_TIERS.length - 1)]
+}
+
+function metalTier(hardware) {
+  if (hardware.totalMemoryBytes < LOW_MEMORY_BYTES) return 'lowMemory'
+  const chip = /^Apple M(\d+)(?:\s+(Pro|Max|Ultra))?\b/i.exec(typeof hardware.cpu === 'string' ? hardware.cpu.trim() : '')
+  return chip && (chip[2] || Number(chip[1]) >= 4) ? 'performance' : 'base'
+}
+
+// `cudaAdmitted` is the caller's existing admission result: a passed catalog
+// qualification and measured memory evidence that accepts this computer. It
+// only gates the advisory CUDA range; it never blocks a plan.
+function processingEstimate(runtime, hardware = {}, { cudaAdmitted = false } = {}) {
   const unknown = { level: null, label: 'Not enough information', minutes: null,
     basis: 'A matching supported processing pack and computer details are needed for an estimate.' }
   if (!runtime || !complete(runtime) || runtime.models.length !== LOCAL_MODEL_IDS.length
       || !runtime.provenance?.lockSha256
-      || !['cpu', 'metal'].includes(runtime.accelerator)
+      || !['cpu', 'metal', 'cuda'].includes(runtime.accelerator)
       || runtime.platform !== hardware.platform || runtime.arch !== hardware.arch
       || !Number.isSafeInteger(hardware.cpuCount) || hardware.cpuCount < 1
       || !Number.isSafeInteger(hardware.totalMemoryBytes) || hardware.totalMemoryBytes <= 0) return unknown
   if (runtime.accelerator === 'metal'
       && (hardware.platform !== 'darwin' || hardware.arch !== 'arm64' || hardware.unifiedMemory !== true)) return unknown
-  const limited = hardware.cpuCount < 8 || hardware.totalMemoryBytes < 16 * 1024 ** 3
-  return { level: limited ? 1 : 2, label: limited ? 'Slower' : 'Moderate',
-    minutes: limited ? [45, 180] : [20, 90],
-    basis: runtime.accelerator === 'metal'
-      ? 'This pack uses Apple Metal. The range is conservative; no measured Metal speedup is assumed.'
-      : 'This pack uses the CPU, even if your computer has a graphics card.',
+  let tier
+  if (runtime.accelerator === 'cuda') {
+    // Only one unambiguous CUDA device identifies the processing GPU.
+    if (cudaAdmitted !== true || !['linux', 'win32'].includes(hardware.platform) || hardware.arch !== 'x64'
+        || hardware.unifiedMemory === true
+        || !Array.isArray(hardware.cudaDevices) || hardware.cudaDevices.length !== 1) return unknown
+    tier = cudaTier(hardware.cudaDevices[0])
+    if (!tier) return unknown
+  } else if (runtime.accelerator === 'metal') {
+    tier = METAL_TIERS[metalTier(hardware)]
+  } else {
+    const index = CPU_TIERS.findIndex(row => hardware.cpuCount >= row.minCpus)
+    tier = CPU_TIERS[Math.min(index + Number(hardware.totalMemoryBytes < LOW_MEMORY_BYTES), CPU_TIERS.length - 1)]
   }
+  const [, level, label] = LEVELS.find(([upper]) => tier.minutes[1] <= upper)
+  return { level, label, minutes: [...tier.minutes], basis: tier.basis, evidence: tier.evidence }
 }
 
 // Catalog, policy, and qualification are release-owned inputs. Never populate
@@ -285,10 +367,12 @@ export class OnboardingSetup {
     signal?.throwIfAborted()
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
+    const estimateOptions = { cudaAdmitted: memory.memoryQualification.status === 'meets-measured-requirements'
+      && this.catalog?.qualification?.passed === true }
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
       processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
     if (installed.installed) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
-      || hash(installed.runtime.manifest) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+      || hash(installed.runtime.manifest) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
       const selected = this.selection(installed.models)
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
@@ -324,7 +408,7 @@ export class OnboardingSetup {
       if (!Number.isSafeInteger(diskFreeBytes) || diskFreeBytes < diskRequiredBytes) {
         return { ...result, reason: diskFreeBytes === null ? 'Available disk space could not be checked.' : 'Not enough free disk space for complete local setup.' }
       }
-      return { ...result, processingEstimate: processingEstimate(selected.runtime, hardware), available: true }
+      return { ...result, processingEstimate: processingEstimate(selected.runtime, hardware, estimateOptions), available: true }
     } catch (error) { signal?.throwIfAborted(); return { ...base, reason: error.message } }
   }
 

@@ -929,50 +929,155 @@ may still require downloading; this is shown in the installation plan.
 
 ### Advisory processing speed estimate
 
-The wizard offers a deliberately broad **planning heuristic**, not a benchmark
-or qualification result, for one three-minute track after setup and queue wait.
-The default workflow runs the four-checkpoint Demucs `mdx_extra` ensemble,
-`mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956`, and HeartTranscriptor
-(Whisper-derived, batch size one, including word timing). It does not assume
-newer upstream inference optimizations are in the pinned processing pack.
+The wizard shows a deliberately broad **planning range**, not a benchmark or
+qualification result, for preparing one three-minute track with the full default
+workflow after setup and queue wait. Ranges are tiered by the selected,
+validated pack's execution device and a few observed hardware facts.
 
-Research checked 2026-10-02:
+What the default workflow runs (from the pinned processing pack):
 
-- [Demucs upstream documentation](https://github.com/facebookresearch/demucs#memory-requirements-for-gpu-acceleration)
-  gives a generic CPU baseline around 1.5 times track duration. This does not
-  measure our four-checkpoint ensemble or the complete workflow.
-- [Karaoke-maker's own model comparison](https://github.com/CarlosGabrielMoralesUmasi/karaoke-maker#choosing-a-model)
-  reports 10–20 minutes for karaoke Mel-RoFormer on CPU. Its hardware and input
-  duration are unspecified, so this is an order-of-magnitude reference only.
-- [HeartTranscriptor's model card](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss)
-  identifies the Whisper-based implementation but gives no full-workflow speed
-  benchmark. Transcription, timing, loading, and retries need additional time.
-- [Audio Separator's upstream documentation](https://github.com/nomadkaraoke/python-audio-separator#-apple-silicon-macos-sonoma-with-m1-or-newer-coreml-and-mps-acceleration)
-  documents MPS execution, but does not establish a timing multiplier for our
-  pinned pack. CUDA reports and newer optimized implementations are not used
-  as Metal measurements.
+- Demucs `mdx_extra` (a bag of four HDemucs checkpoints) on the full mix with
+  CLI defaults (shifts 1, overlap 0.25).
+- Karaoke Mel-Band RoFormer
+  (`mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956`) via audio-separator
+  0.41.1 on the Demucs vocal stem. The shipped
+  [model configuration](https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml)
+  sets `dim_t` 801 and hop 441 (`chunk_size` 352800), which gives 8 s chunks.
+  audio-separator's default overlap value 8 is interpreted as an 8 s step for
+  RoFormer, so chunks do not overlap (roughly a quarter of the work of the
+  common UVR setting of four overlaps).
+- HeartTranscriptor (a full fine-tune of Whisper-medium, about 764M parameters)
+  via transformers: fp32 on CPU, fp16 on CUDA and MPS, greedy decoding. RMS-VAD
+  produces 1–15 s segments with one call per segment; word timing uses
+  cross-attention DTW. Transcription time scales with voiced audio, not track
+  length.
+- Each stage runs in its own process, and one job runs at a time, so each stage
+  pays its own model-load overhead.
 
-These references motivate a **20–90 minute** total planning band, allowing
-substantial room beyond the separation reference for the ensemble, transcription,
-loading, and timing. **45–180 minutes** is a conservative lower-resource band
-when fewer than eight logical processors or less than 16 GiB total RAM are
-observed. Those thresholds and band endpoints are product heuristics, not
-measured hardware requirements, confidence intervals, or an upper bound.
-More RAM and more logical processors do not guarantee faster inference. Model
-retries, dense vocals, thermal throttling, competing applications, memory
-pressure, and slow storage can push times outside these ranges.
+These ranges describe the pinned pack's current separation settings. Changing
+the Demucs segment or RoFormer segment/overlap settings would invalidate them.
 
-The three-position bar says Slower / Moderate / Faster. Current unbenchmarked
-CPU and Metal targets use only Slower or Moderate; Faster is not awarded merely
-because a graphics adapter is present. Metal conservatively shares the CPU
-bands until matching end-to-end measurements justify a speedup. The selected,
-validated pack supplies the execution device. Windows/Linux CPU packs therefore
-remain CPU estimates even on NVIDIA-equipped machines. Unknown accelerators,
-missing hardware observations, mismatched targets, incomplete or extended model sets, and
-blocked installation plans display no numeric range. The estimate applies only to
-the default three-model workflow from the selected validated catalog; an installed
-runtime with a different manifest from that catalog receives no estimate. Existing measured memory
-checks and runtime attestation remain authoritative and independent of this UI.
+Planning ranges (minutes for one three-minute track):
+
+| Pack | Observed hardware | Range | Bar | Evidence |
+|---|---|---|---|---|
+| CPU | 16 or more logical processors | 9–16 | Moderate | Measured (one run, 16-core CPU) |
+| CPU | 12–15 logical processors | 12–20 | Moderate | Extrapolated |
+| CPU | 8–11 logical processors | 15–28 | Moderate | Extrapolated |
+| CPU | fewer than 8 logical processors | 25–45 | Slower | Extrapolated |
+| Apple Metal | M-series Pro/Max/Ultra, or generation 4 or newer | 5–12 | Faster | Extrapolated |
+| Apple Metal | base M1/M2/M3, or an unrecognized Apple chip name | 8–20 | Moderate | Extrapolated |
+| Apple Metal | any Apple chip with less than 15 GiB memory | 15–35 | Slower | Extrapolated |
+| CUDA | RTX 3080/3090 (incl. Ti), RTX 4070 (incl. Super/Ti) and above, RTX 5070 and above | 1–3 | Faster | Extrapolated |
+| CUDA | RTX 2060–2080 Ti (incl. Super), RTX 3060–3070 Ti, RTX 4060/4060 Ti, RTX 5060/5060 Ti, Tesla T4 | 2–5 | Faster | Extrapolated |
+| CUDA | GTX 16xx, RTX 2050/3050/4050/5050 | 5–12 | Faster | Extrapolated |
+
+The CUDA rows list name tiers before the video-memory rules below. Most of the
+entry-row cards ship with less than 7.5 GiB and therefore get no range, and
+most 8 GB mainstream cards display the entry range after the memory demotion.
+
+CPU packs with less than 15 GiB total RAM use the next slower CPU row (the
+slowest row stays 25–45). The low-memory cutoff is 15 GiB rather than 16 GiB
+because Linux and Windows report a nominal 16 GB machine as slightly less than
+16 GiB. The bar shows Faster when the upper end is at most 12 minutes,
+Moderate when it is at most 30, and Slower otherwise.
+
+The measured CPU row comes from a 16-physical-core processor. A computer that
+reports 16 logical processors with fewer physical cores (for example 8 cores
+with SMT) is shown the same row but may be slower.
+
+CUDA ranges appear only for a qualified CUDA catalog whose measured memory
+evidence accepts this computer, on a Linux or Windows x64 target with exactly
+one CUDA device and no unified memory. The tier comes from that device's name
+and reported dedicated memory:
+
+- Cards with 6 GB or less, or less than 7.5 GiB reported, get no range. CUDA
+  packs that apply per-stage memory admission budget at least 6 GiB of free
+  video memory for transcription (a test budget, not a measured requirement),
+  so those cards would run it on the CPU or refuse it. Unknown video memory also
+  gets no range.
+- GTX 10-series cards get no range; current CUDA PyTorch builds are unlikely to
+  support them.
+- Cards reporting at least 7.5 GiB but less than 9.5 GiB (8 GB cards), where
+  transcription fits only narrowly, and laptop or Max-Q parts are shown one tier
+  slower; both demotions stack, and the entry row is the floor. Some laptop
+  parts report desktop names and cannot be recognized as laptops.
+- Other names, including workstation, datacenter, and MX parts, non-NVIDIA
+  adapters, catalogs that have not passed qualification, and catalogs without measured
+  memory evidence get no range.
+- In CUDA packs that apply per-stage memory admission, a stage can still move
+  to the CPU when a job runs; the estimate does not reflect that. Older cards may also be much slower with
+  fp16.
+
+**Measured.**
+
+- CPU: one run on a 16-core/32-thread Zen 3 desktop CPU with 62 GiB RAM and the
+  Linux CPU pack (torch 2.10.0+cpu, with system ffmpeg) processed a 180 s track in 673 s (about
+  11.2 minutes): Demucs 160 s, RoFormer 289 s, and Heart 224 s for 11 VAD
+  segments with 127 s of voiced audio. Each stage spent roughly 5–10 s loading;
+  peak resident memory was 4.6, 2.7, and 9.9 GiB respectively. The run used a
+  separate harness that invokes the same stage workers, not the application
+  queue, with a warm file cache. The final mixdown and lyric alignment were not
+  timed. Other load was present, so this likely overstates stage time slightly.
+- CUDA: a cloud Tesla T4 run (a 261 s song) took about 260 s warm and about
+  397 s cold wall time, including per-call container start and model reloads.
+  It used the user-owned Modal processing path with a different software stack (newer
+  torch, Demucs, and audio-separator, with Demucs in-process), not the desktop
+  pack, so it is an order-of-magnitude reference only.
+- Apple and small CPUs: short-clip runs on an Apple M2 (16 GiB) Metal pack and a
+  6-vCPU virtual machine exist, but load overhead dominates them. The M2 runs
+  slowed under memory pressure, and the device actually used for inference was
+  not proven.
+
+**Inferred.**
+
+- CPU tier scaling uses published UVR community Demucs timings. On the
+  spreadsheet's Batch tab, a Ryzen 7 1700X takes about 1.5 times as long as
+  a Ryzen 7 5800X for `mdx_extra` (608 s versus 411 s). Older 2–4-core CPUs appear
+  only on its Chunks-Auto tab, at about 2–2.5 times the 5800X for `htdemucs` and
+  3–7 times for the v3 HDemucs `mdx` bag. These are cross-tab comparisons with
+  different settings, so they guide the tier spacing only. Thread scaling is
+  non-linear, and SMT or oversubscription can slow PyTorch.
+- Apple ranges come from the short M2 measurements and published MPS reports,
+  including RoFormer timings on an M4 Pro and reports that HDemucs (the
+  `mdx_extra` architecture) can run slower on MPS than on CPU.
+- CUDA ranges come from published T4 RoFormer timings, published Demucs GPU
+  timings, published Whisper-medium PyTorch GPU timings, and the T4 reference
+  above.
+- Optimized engines (faster-whisper, whisper.cpp, MLX, ONNX/TensorRT) are not
+  used as transferable timings for this pack.
+
+Sources checked 2026-10-02:
+
+- [UVR community Demucs separation-time spreadsheet](https://docs.google.com/spreadsheets/d/1R_pOURv8z9GmVkCt-x1wwApgAnplM9SHiPO_ViHWl1Q)
+  (CPU and GPU rows; uses shifts 2, so roughly double the CLI default)
+- [python-audio-separator PR #298](https://github.com/nomadkaraoke/python-audio-separator/pull/298)
+  (M4 Pro MPS and Tesla T4 timings)
+- [Demucs-GUI usage notes](https://github.com/CarlGao4/Demucs-Gui/blob/main/usage.md)
+  (HDemucs on MPS versus CPU)
+- [openai/whisper discussion #918](https://github.com/openai/whisper/discussions/918)
+  (Whisper-medium PyTorch CPU and GPU timings)
+- [Tom's Hardware Whisper GPU benchmark](https://www.tomshardware.com/news/whisper-audio-transcription-gpus-benchmarked)
+- [openai/whisper PR #382 comment](https://github.com/openai/whisper/pull/382#issuecomment-1475975663)
+  (MPS slower than CPU in one report)
+- [openai/whisper discussion #1551](https://github.com/openai/whisper/discussions/1551)
+  and [whisper.cpp issue #89](https://github.com/ggml-org/whisper.cpp/issues/89)
+  (thread-count scaling)
+- [HeartTranscriptor model card](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss)
+
+**Caveats.** Ranges are planning guidance, not qualification results or upper
+bounds. Dense vocals, retries, thermal throttling, memory pressure or swap,
+competing applications, and slow storage can push times outside them. More RAM
+and more logical processors do not guarantee faster inference, and the bar is
+never raised merely because a graphics adapter is present. The selected,
+validated pack supplies the execution device, so Windows/Linux CPU packs remain
+CPU estimates even on NVIDIA-equipped machines. Unknown accelerators, missing
+hardware observations, mismatched targets, incomplete or extended model sets,
+and blocked installation plans display no numeric range. The estimate applies
+only to the default three-model workflow from the selected validated catalog; an
+installed runtime with a different manifest from that catalog receives no
+estimate. Existing measured memory checks and runtime attestation remain
+authoritative and independent of this UI.
 
 Hardware details report observations rather than inferred processing support.
 Unknown graphics memory remains unknown, and Apple silicon unified memory is
