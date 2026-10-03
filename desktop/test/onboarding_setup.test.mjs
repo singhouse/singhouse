@@ -914,8 +914,11 @@ test('installed runtimes matching the catalog keep their CUDA and Metal tiers', 
   const drifted = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
   drifted.setup.catalog.runtime = { ...drifted.setup.catalog.runtime, id: `${drifted.setup.catalog.runtime.id}-other` }
   plan = await drifted.setup.preflight()
-  assert.equal(plan.components.length, 0, 'the installed path answered')
-  assert.equal(plan.processingEstimate.minutes, null, 'an installed manifest that differs from the catalog gets no estimate')
+  assert.equal(plan.available, true)
+  assert.equal(plan.runtimeTransferRequired, true, 'catalog drift requires the selected runtime to replace the installed runtime')
+  assert.equal(plan.components[0].label, 'Local processing runtime')
+  assert.equal(plan.components.length, 4)
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3], 'the replacement plan estimates the selected qualified runtime')
   const metal = installEstimateFixture(METAL_PACK, appleHost({ cpu: 'Apple M4 Pro', totalMemoryBytes: 24 * GiB }))
   plan = await metal.setup.preflight()
   assert.equal(plan.components.length, 0)

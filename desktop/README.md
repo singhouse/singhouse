@@ -934,7 +934,7 @@ qualification result, for preparing one three-minute track with the full default
 workflow after setup and queue wait. Ranges are tiered by the selected,
 validated pack's execution device and a few observed hardware facts.
 
-What the default workflow runs (from the pinned processing pack):
+Historical timing assumptions for retained qualified processing profiles:
 
 - Demucs `mdx_extra` (a bag of four HDemucs checkpoints) on the full mix with
   CLI defaults (shifts 1, overlap 0.25).
@@ -954,8 +954,11 @@ What the default workflow runs (from the pinned processing pack):
 - Each stage runs in its own process, and one job runs at a time, so each stage
   pays its own model-load overhead.
 
-These ranges describe the pinned pack's current separation settings. Changing
-the Demucs segment or RoFormer segment/overlap settings would invalidate them.
+These historical ranges apply only to retained qualified profiles with those
+settings. The CUDA `bounded-v1` profile instead uses six-second Demucs segments
+and RoFormer segment size 256, as described below. Those changed CUDA profiles
+remain unqualified and display no estimate until matching qualification and
+measurement evidence is supplied; the historical ranges do not qualify them.
 
 Planning ranges (minutes for one three-minute track):
 
@@ -1074,9 +1077,10 @@ validated pack supplies the execution device, so Windows/Linux CPU packs remain
 CPU estimates even on NVIDIA-equipped machines. Unknown accelerators, missing
 hardware observations, mismatched targets, incomplete or extended model sets,
 and blocked installation plans display no numeric range. The estimate applies
-only to the default three-model workflow from the selected validated catalog; an
-installed runtime with a different manifest from that catalog receives no
-estimate. Existing measured memory checks and runtime attestation remain
+only to the default three-model workflow from the selected validated catalog.
+If the installed runtime differs from that catalog, setup plans a replacement
+and any estimate describes the selected qualified runtime. Existing measured
+memory checks and runtime attestation remain
 authoritative and independent of this UI.
 
 Hardware details report observations rather than inferred processing support.
