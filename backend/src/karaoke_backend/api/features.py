@@ -71,6 +71,7 @@ class PlexLyricsFeature(BaseModel):
 
 
 class FeaturesResponse(BaseModel):
+    llm_paging: bool = Field(default=False, description="A user-configured paging endpoint is available; remote readiness is unverified.")
     lyrics_lookup: LyricsLookupFeature
     cdg_export: bool = Field(
         description=(
@@ -172,7 +173,10 @@ async def get_features(
     at its own route — a client that ignores this response gets a 503, not a
     third-party request.
     """
+    from karaoke_backend.workers.llm_client import paging_configured
+
     return FeaturesResponse(
+        llm_paging=paging_configured(),
         lyrics_lookup=LyricsLookupFeature(
             enabled=lrclib_enabled(),
             provider=BUILTIN_LYRICS_PROVIDER,

@@ -142,7 +142,6 @@ class PlexImportTrack(BaseModel):
 
 class PlexImportRequest(BaseModel):
     tracks: list[PlexImportTrack]
-    llm_correction: bool = False
     llm_paging: bool = False
     karaoke_model: Optional[str] = None
 
@@ -437,7 +436,6 @@ async def import_tracks(
             # A hint, not a fact — it only decides whether the job bothers
             # asking about lyrics at all.
             "has_lyrics": bool(track.has_lyrics),
-            "llm_correction": bool(body.llm_correction),
             "llm_paging": bool(body.llm_paging),
             "karaoke_model": model,
         }

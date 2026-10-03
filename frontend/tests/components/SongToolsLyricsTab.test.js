@@ -61,7 +61,7 @@ function set(overrides = {}) {
 
 function flags(enabled) {
   return {
-    data: { lyrics_lookup: { enabled, provider: 'lrclib', label: 'lrclib.net' } },
+    data: { llm_paging: true, lyrics_lookup: { enabled, provider: 'lrclib', label: 'lrclib.net' } },
   }
 }
 
@@ -121,7 +121,7 @@ describe('the anchor choice', () => {
     // features store's neutral wording rather than to `lrclib` — this panel
     // must not tell a host which service it is about to ask when the server
     // did not say.
-    api.featuresGet.mockResolvedValue({ data: { lyrics_lookup: { enabled: true } } })
+    api.featuresGet.mockResolvedValue({ data: { llm_paging: true, lyrics_lookup: { enabled: true } } })
     const w = await mountTab()
     const lookup = w.vm.anchorOptions.find(o => o.value === 'lrclib')
 
@@ -193,20 +193,6 @@ describe('anchoring to the lyrics saved on the song', () => {
     expect(w.vm.anchor).toBe('none')
   })
 
-  it('warns about LLM correction whenever the active set carries synced lyrics', async () => {
-    // The server hands ANY synced reference to the LRC-anchored aligner, which
-    // is built without a corrector — a set that also carries plain text does
-    // not get one back. The old check (synced AND NOT plain) let exactly that
-    // set tick a box that does nothing, silently.
-    const w = await mountTab({
-      sets: [set({ has_synced_lyrics: true, has_plain_lyrics: true })],
-    })
-    await chooseAnchor(w, 'active')
-    const boxes = w.findAll('.card')[1].findAll('input[type="checkbox"]')
-    await boxes[boxes.length - 1].setValue(true)   // LLM correction
-
-    expect(w.vm.correctionHint).toMatch(/aligned by timestamp/)
-  })
 
   it('maps to reference_mode=active and sends no lyrics of its own', async () => {
     const w = await mountTab()
@@ -240,7 +226,7 @@ describe('pasted lyrics', () => {
     expect(body.synced_lyrics).toContain('[00:12.34]')
     expect(body.plain_lyrics).toBeUndefined()
     expect(w.text()).toContain('LRC detected')
-    expect(w.text()).toMatch(/LLM correction doesn't apply to LRC/)
+    expect(w.text()).toMatch(/timestamps will be used as anchors/)
   })
 
   it('block both actions while the box is empty', async () => {
@@ -343,24 +329,15 @@ describe('the two action cards', () => {
     }))
   })
 
-  it('sends each card’s own LLM flags, and only when ticked', async () => {
+  it('sends paging only when ticked and configured', async () => {
     const w = await mountTab()
-    // Re-fit has paging only — correction is a transcription-time stage.
+    // Paging is explicitly selected on each card.
     await w.findAll('.card')[0].find('input[type="checkbox"]').setValue(true)
     expect(w.vm.buildBody({ paging: true })).toMatchObject({ llm_paging: true })
     expect(w.vm.buildBody()).not.toHaveProperty('llm_paging')
     expect(w.vm.buildBody()).not.toHaveProperty('llm_correction')
   })
 
-  it('warns that LLM correction is a no-op against an LRC reference', async () => {
-    const w = await mountTab()
-    await chooseAnchor(w, 'paste')
-    await w.find('textarea').setValue('[00:12.34] first\n')
-    const boxes = w.findAll('.card')[1].findAll('input[type="checkbox"]')
-    await boxes[boxes.length - 1].setValue(true)   // LLM correction
-
-    expect(w.vm.correctionHint).toMatch(/aligned by timestamp/)
-  })
 
   it('blocks both actions while a job is already running for this song', async () => {
     const w = await mountTab()
@@ -375,5 +352,23 @@ describe('the two action cards', () => {
     const w = await mountTab({ song: { id: 1, status: 'failed' } })
     expect(w.vm.refitBlocked).toMatch(/ingest failed/)
     expect(w.vm.listenBlocked).toMatch(/ingest failed/)
+  })
+})
+
+
+describe('optional paging capability', () => {
+  it('hides paging controls and drops paging requests when unconfigured', async () => {
+    api.featuresGet.mockResolvedValue({ data: { llm_paging: false } })
+    const w = await mountTab()
+    expect(w.text()).not.toContain('LLM paging')
+    expect(w.text()).not.toContain('LLM correction')
+    expect(w.vm.buildBody({ paging: true })).not.toHaveProperty('llm_paging')
+  })
+
+  it('shows paging controls when configured', async () => {
+    const w = await mountTab()
+    expect(w.text()).toContain('LLM paging')
+    expect(w.text()).not.toContain('LLM correction')
+    expect(w.vm.buildBody({ paging: true }).llm_paging).toBe(true)
   })
 })

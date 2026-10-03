@@ -146,7 +146,6 @@ async def submit_separation(
     artist: Optional[str] = Form(None, description="Artist name (optional metadata)"),
     title: Optional[str] = Form(None, description="Song title (optional metadata)"),
     plain_lyrics: Optional[str] = Form(None, description="Pasted reference lyrics; anchors alignment and skips any lyrics lookup"),
-    llm_correction: bool = Form(False, description="Enable LLM lyric correction"),
     llm_paging: bool = Form(False, description="Enable LLM page structuring"),
     karaoke_model: Optional[str] = Form(
         None,
@@ -253,7 +252,6 @@ async def submit_separation(
             "artist": inferred_artist,
             "title": inferred_title,
             "pasted_lyrics": plain_lyrics,
-            "llm_correction": llm_correction,
             "llm_paging": llm_paging,
             "karaoke_model": karaoke_model or karaoke_models.DEFAULT_CHOICE,
         },

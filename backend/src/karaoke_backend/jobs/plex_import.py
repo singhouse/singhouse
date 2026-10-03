@@ -301,7 +301,6 @@ async def run_plex_import(ctx: JobContext) -> Optional[str]:
             "artist": artist,
             "title": title,
             "pasted_lyrics": pasted_lyrics,
-            "llm_correction": bool(payload.get("llm_correction")),
             "llm_paging": bool(payload.get("llm_paging")),
             "karaoke_model": payload.get("karaoke_model"),
         },

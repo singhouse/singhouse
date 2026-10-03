@@ -891,7 +891,7 @@ export async function run(options) {
       const data = Uint8Array.from(atob(bytes), value => value.charCodeAt(0)), form = new FormData()
       form.append('file', new Blob([data], { type: 'application/octet-stream' }), filename)
       form.append('artist', 'Licensed qualification audio'); form.append('title', 'Isolated processing smoke')
-      form.append('karaoke_model', 'roformer'); form.append('llm_correction', 'false'); form.append('llm_paging', 'false')
+      form.append('karaoke_model', 'roformer'); form.append('llm_paging', 'false')
       // Ingest selects Heart internally; there is no whisper_model upload field.
       const response = await fetch('/api/separate', { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
       if (response.status !== 202) throw new Error(`Audio upload returned ${response.status}`)
@@ -914,7 +914,7 @@ export async function run(options) {
     const song = await api(`/api/songs/${submitted.song_id}`)
     assert.equal(song.status, 'ready'); assert.equal(song.word_sync?.metadata?.model, 'heart')
     const words = song.word_sync.lines?.flat() || []
-    assert.equal(song.word_sync?.metadata?.pipeline_config?.correction?.enabled, false, 'External correction must remain disabled')
+    assert.equal(song.word_sync?.metadata?.pipeline_config?.correction, undefined, 'Alignment must not configure external correction')
     assert.ok(words.length > 0, 'Real Heart inference must produce word timings for the vocal excerpt')
     assert.ok(words.every(word => Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start), 'Invalid word intervals')
     assert.ok(words.every((word, index) => index === 0 || word.start >= words[index - 1].start), 'Word intervals are not ordered')

@@ -18,6 +18,7 @@ import { featuresApi } from '@/api/client'
 export const useFeaturesStore = defineStore('features', () => {
   const lyricsLookup = ref({ enabled: false, provider: 'lrclib', label: '', env: '' })
   const cdgExport = ref(false)
+  const llmPaging = ref(false)
   // Whether lyrics may be read off the operator's own media server. Its own
   // flag, not part of lyricsLookup: that one is about contacting a third-party
   // service at all, this one is about reusing text already on the operator's
@@ -31,6 +32,7 @@ export const useFeaturesStore = defineStore('features', () => {
 
   const lyricsLookupEnabled = computed(() => lyricsLookup.value.enabled === true)
   const lyricsLookupLabel = computed(() => lyricsLookup.value.label || 'a third-party service')
+  const llmPagingEnabled = computed(() => llmPaging.value === true)
   const cdgExportEnabled = computed(() => cdgExport.value === true)
   const plexLyricsEnabled = computed(() => plexLyrics.value.enabled === true)
   const plexLyricsEnv = computed(() => plexLyrics.value.env || 'KARAOKE_PLEX_LYRICS')
@@ -51,6 +53,7 @@ export const useFeaturesStore = defineStore('features', () => {
         if (mine !== generation) return          // superseded; discard
         if (res.data?.lyrics_lookup) lyricsLookup.value = res.data.lyrics_lookup
         cdgExport.value = res.data?.cdg_export === true
+        llmPaging.value = res.data?.llm_paging === true
         if (res.data?.plex_lyrics) plexLyrics.value = res.data.plex_lyrics
         loaded.value = true
       } catch (e) {
@@ -69,8 +72,8 @@ export const useFeaturesStore = defineStore('features', () => {
   }
 
   return {
-    lyricsLookup, cdgExport, plexLyrics, loaded,
-    lyricsLookupEnabled, lyricsLookupLabel, cdgExportEnabled,
+    lyricsLookup, cdgExport, plexLyrics, llmPaging, loaded,
+    lyricsLookupEnabled, lyricsLookupLabel, cdgExportEnabled, llmPagingEnabled,
     plexLyricsEnabled, plexLyricsEnv,
     load,
   }

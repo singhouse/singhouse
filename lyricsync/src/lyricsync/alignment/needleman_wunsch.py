@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Optional
+from typing import List
 
 from lyricsync._config import MatchConfig, PipelineConfig, PostProcessConfig
 from lyricsync._types import (
@@ -76,17 +76,14 @@ class NeedlemanWunschAligner:
         self,
         match_config: MatchConfig | None = None,
         post_config: PostProcessConfig | None = None,
-        corrector=None,   # lyricsync.correction.RegionCorrector | None
     ):
         self.match_config = match_config or MatchConfig()
         self.post_config = post_config or PostProcessConfig()
-        self.corrector = corrector
 
     def align(
         self,
         whisper_words: List[TimedWord],
         reference: AlignmentReference,
-        vad_segments: Optional[List[tuple[float, float]]] = None,
     ) -> SyncResult:
         if not isinstance(reference, PlainLyricsReference):
             raise TypeError("NeedlemanWunschAligner requires PlainLyricsReference")
@@ -108,11 +105,6 @@ class NeedlemanWunschAligner:
         alignment = _align_sequences(whisper_texts, ref_words, self.match_config)
 
         ref_to_timing: dict[int, dict] = {}
-        # ref idx -> "exact" | "corrected"; absent = interpolated. The
-        # distinction matters downstream: corrected words are fuzzy matches
-        # that can be outright wrong (garble cascades).
-        classes: dict[int, str] = {}
-        whisper_to_ref: dict[int, int] = {}
         num_corrected = 0
         num_matched = 0
 
@@ -124,8 +116,6 @@ class NeedlemanWunschAligner:
                 if is_different:
                     num_corrected += 1
                 num_matched += 1
-                classes[ref_idx] = "corrected" if is_different else "exact"
-                whisper_to_ref[whisper_idx] = ref_idx
                 ref_to_timing[ref_idx] = {
                     "start": w.start,
                     "end": w.end,
@@ -138,18 +128,6 @@ class NeedlemanWunschAligner:
             num_corrected,
             len(whisper_words) - num_matched,
         )
-
-        llm_stats = None
-        if self.corrector is not None:
-            ref_to_timing, llm_stats = self.corrector.correct(
-                ref_words=ref_words,
-                ref_to_timing=ref_to_timing,
-                classes=classes,
-                line_starts=ref_line_boundaries,
-                whisper_words=whisper_words,
-                whisper_to_ref=whisper_to_ref,
-                vad_segments=vad_segments,
-            )
 
         all_words = fill_unmatched_words(
             ref_words, ref_to_timing, ref_line_boundaries, self.post_config,
@@ -176,8 +154,6 @@ class NeedlemanWunschAligner:
             words_interpolated=sum(1 for w in all_words if w.interpolated),
             method="needleman-wunsch",
         )
-        if llm_stats is not None:
-            metadata.extra["llm_correction"] = llm_stats
         return SyncResult(
             segments=[{"words": flat_words}],
             lines=grouped_lines,

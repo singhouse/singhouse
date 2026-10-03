@@ -141,11 +141,7 @@
             </option>
           </select>
         </label>
-        <label class="toggle-opt">
-          <input type="checkbox" v-model="optLlmCorrection" />
-          <span>LLM correction</span>
-        </label>
-        <label class="toggle-opt">
+        <label v-if="features.llmPagingEnabled" class="toggle-opt">
           <input type="checkbox" v-model="optLlmPaging" />
           <span>LLM paging</span>
         </label>
@@ -234,6 +230,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
+import { useFeaturesStore } from '@/stores/features'
 import { useSongsStore } from '@/stores/songs'
 import { isRoutableUpload, routeUpload, validateUpload } from '@/utils/uploadRouting'
 import { prepareHeart } from '@/composables/useHeartSetup'
@@ -241,6 +238,8 @@ import Badge from '@/components/ui/Badge.vue'
 import { KARAOKE_MODELS, DEFAULT_KARAOKE_MODEL } from '@/utils/karaokeModels'
 
 const store = useSongsStore()
+const features = useFeaturesStore()
+features.load()
 
 const isDragging = ref(false)
 const validationError = ref('')
@@ -248,7 +247,6 @@ const fileInput = ref(null)
 const pendingFiles = ref([])
 
 const optKaraokeModel = ref(DEFAULT_KARAOKE_MODEL)
-const optLlmCorrection = ref(false)
 const optLlmPaging = ref(false)
 const optLyrics = ref('')
 const pasteOpen = ref(false)
@@ -391,8 +389,7 @@ async function submitPending(pending) {
     if (optKaraokeModel.value !== DEFAULT_KARAOKE_MODEL) {
       opts.karaokeModel = optKaraokeModel.value
     }
-    if (optLlmCorrection.value) opts.llmCorrection = true
-    if (optLlmPaging.value) opts.llmPaging = true
+    if (features.llmPagingEnabled && optLlmPaging.value) opts.llmPaging = true
     if (optLyrics.value.trim()) opts.plainLyrics = optLyrics.value.trim()
     store.uploadSong(pending.file, pending.artist, pending.title, opts)
     removePending(pending.id)

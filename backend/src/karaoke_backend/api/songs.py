@@ -1046,7 +1046,7 @@ async def retry_ingest(
       rows lost the race and has its enqueue rolled back with it.
 
     **How the options are recovered.** They are not on the song row — the
-    Pass-2 model, the pasted reference lyrics, the two LLM flags, the Plex
+    Pass-2 model, the pasted reference lyrics, the lyrics paging flag, the Plex
     rating key, the video's upload name all live only in the job's payload —
     so the payload of this song's most recent producing job is what is
     replayed, verbatim. That is the failed job itself in the normal case, which
@@ -1210,7 +1210,6 @@ async def retry_ingest(
                 "artist": song.artist,
                 "title": song.title,
                 "pasted_lyrics": None,
-                "llm_correction": False,
                 "llm_paging": False,
                 "karaoke_model": karaoke_models.DEFAULT_CHOICE,
             }

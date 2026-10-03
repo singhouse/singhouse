@@ -31,9 +31,8 @@ providers own their job row and some write their own intermediate strings
 "claimed and NOT terminal", so such a job keeps its heartbeat and, if its
 process dies, is still visible to the expiry sweep.
 
-Sessions are short and per-write by design (the `_persist_correction_
-progress` pattern). A long-lived session held across a 15-minute separation
-pins a connection and — worse — makes the heartbeat wait behind whatever the
+Sessions are short and per-write by design. A long-lived session held across a
+15-minute separation pins a connection and — worse — makes the heartbeat wait behind whatever the
 orchestrator is doing.
 """
 
