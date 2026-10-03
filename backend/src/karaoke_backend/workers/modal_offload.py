@@ -322,6 +322,29 @@ class ModalHeartTranscriber:
         if "error" in raw:
             raise RuntimeError(f"Modal HeartTranscriptor error: {raw['error']}")
 
+        skipped = raw.get("skipped_segments")
+        if skipped:
+            # The runner isolated these VAD segments after their decode raised;
+            # the rest of the song transcribed, so this is a warning, not a failure.
+            # Diagnostic only: a malformed entry must never fail the transcription.
+            try:
+                detail = ", ".join(
+                    "seg %s [%ss-%ss] %s" % (
+                        int(s["index"]) + 1, s.get("start"), s.get("end"), s.get("error", "")
+                    )
+                    for s in skipped
+                )
+                logger.warning(
+                    "ModalHeartTranscriber: skipped %d VAD segment(s) after decode errors: %s",
+                    len(skipped), detail,
+                )
+            except Exception:
+                logger.warning(
+                    "ModalHeartTranscriber: skipped VAD segment(s) after decode errors "
+                    "(count: %s; details unreadable)",
+                    len(skipped) if isinstance(skipped, (list, tuple)) else "unknown",
+                )
+
         segments: list = []
         for seg in raw.get("segments", []):
             words = [

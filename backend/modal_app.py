@@ -238,6 +238,122 @@ def separate_remote(
 # --------------------------------------------------------------------------- #
 # Transcription
 # --------------------------------------------------------------------------- #
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """An accelerator OOM must never be swallowed as a bad segment.
+
+    By class name (``torch.cuda.OutOfMemoryError`` / ``torch.OutOfMemoryError``)
+    or the older plain-``RuntimeError`` "out of memory" message; no torch import.
+    """
+    if any(cls.__name__ == "OutOfMemoryError" for cls in type(exc).__mro__):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _must_propagate(exc: BaseException) -> bool:
+    """Errors that are never a skippable bad segment.
+
+    Only a per-segment decode/post-processing fault (e.g. the tokenizer's
+    ``IndexError`` on a truncated multibyte character) is skippable. Any
+    ``RuntimeError`` (CUDA/MPS device asserts and ``torch.AcceleratorError``,
+    which poison every later segment; cuBLAS/cuDNN failures; allocator
+    failures) or ``MemoryError`` (incl. numpy's ``_ArrayMemoryError``), and any
+    accelerator OOM, fails the song rather than silently truncating it.
+    """
+    return isinstance(exc, (RuntimeError, MemoryError)) or _is_out_of_memory(exc)
+
+
+def _transcribe_vad_segments(pipe, audio, sr, vad_segments, generate_kwargs) -> tuple:
+    """Per-VAD-segment decode with per-segment failure isolation.
+
+    Mirrors ``transcribe_vad_segments`` in the local runner
+    (backend/src/karaoke_backend/workers/heart_transcriptor.py): a segment whose
+    decode raises is skipped and recorded (0-based ``index`` into
+    ``vad_segments``, ``start``, ``end``, ``error``) instead of failing the whole
+    song. ``RuntimeError``/``MemoryError`` and accelerator OOM propagate (see
+    ``_must_propagate``); if every attempted segment raised, or more than
+    ``max(1, attempted // 4)`` did, this raises. Returns
+    ``(words, full_text_parts, skipped)``.
+    """
+    import sys
+
+    import numpy as np
+
+    full_text_parts: list[str] = []
+    words: list[dict] = []
+    skipped: list[dict] = []
+    attempted = 0
+    first_exc = None
+
+    for seg_i, (seg_start, seg_end) in enumerate(vad_segments):
+        s_idx, e_idx = int(float(seg_start) * sr), int(float(seg_end) * sr)
+        slice_audio = audio[s_idx:e_idx].astype(np.float32)
+        if len(slice_audio) < sr * 0.1:
+            continue
+        seg_kwargs = dict(generate_kwargs)
+        seg_kwargs["max_new_tokens"] = max(
+            8, min(440, int((float(seg_end) - float(seg_start)) * 12) + 8)
+        )
+        attempted += 1
+        try:
+            seg_result = pipe(
+                {"array": slice_audio, "sampling_rate": sr},
+                return_timestamps="word",
+                generate_kwargs=seg_kwargs,
+            )
+            seg_text = seg_result.get("text", "").strip()
+            seg_words: list[dict] = []
+            for c in seg_result.get("chunks", []):
+                text = c.get("text", "").strip()
+                if not text:
+                    continue
+                ts = c.get("timestamp", (None, None))
+                start = ts[0] if ts[0] is not None else 0.0
+                end = ts[1] if ts[1] is not None else start + 0.1
+                seg_words.append({
+                    "word": text,
+                    "start": float(start) + float(seg_start),
+                    "end": float(end) + float(seg_start),
+                })
+        except Exception as exc:
+            if _must_propagate(exc):
+                raise
+            if first_exc is None:
+                first_exc = exc
+            msg = str(exc)
+            if len(msg) > 200:
+                msg = msg[:200] + "..."
+            error = f"{type(exc).__name__}: {msg}"
+            skipped.append({
+                "index": seg_i,
+                "start": float(seg_start),
+                "end": float(seg_end),
+                "error": error,
+            })
+            sys.stderr.write(
+                f"  seg {seg_i+1}/{len(vad_segments)} "
+                f"[{float(seg_start):.1f}s-{float(seg_end):.1f}s]: "
+                f"SKIPPED ({error})\n"
+            )
+            continue
+        full_text_parts.append(seg_text)
+        words.extend(seg_words)
+
+    if attempted and len(skipped) == attempted:
+        raise RuntimeError(
+            f"All {attempted} attempted VAD segments failed to decode; "
+            f"first error: {skipped[0]['error']}"
+        ) from first_exc
+    # A few hallucinated segments are tolerable; more than a quarter of the song
+    # (at least one always allowed) means the decode itself is unhealthy.
+    if len(skipped) > max(1, attempted // 4):
+        raise RuntimeError(
+            f"Too many VAD segments failed to decode: {len(skipped)} of {attempted}; "
+            f"first error: {skipped[0]['error']}"
+        ) from first_exc
+
+    return words, full_text_parts, skipped
+
+
 @app.function(image=image, gpu=GPU, timeout=1800)
 def transcribe_remote(
     audio_bytes: bytes,
@@ -255,6 +371,8 @@ def transcribe_remote(
     re-transcribe action.
 
     Returns: {"segments": [...], "language", "transcriber": "heart", "full_text"}
+    plus ``"skipped_segments": [...]`` only when a VAD segment's decode raised
+    and was skipped (see ``_transcribe_vad_segments``).
     """
     if vad_segments == []:
         return {"segments": [], "language": language, "transcriber": "heart", "full_text": ""}
@@ -303,39 +421,15 @@ def transcribe_remote(
 
     full_text_parts: list[str] = []
     words: list[dict] = []
+    skipped: list[dict] = []
 
     if vad_segments is not None:
         import librosa
-        import numpy as np
 
         audio, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-        for seg_start, seg_end in vad_segments:
-            s_idx, e_idx = int(float(seg_start) * sr), int(float(seg_end) * sr)
-            slice_audio = audio[s_idx:e_idx].astype(np.float32)
-            if len(slice_audio) < sr * 0.1:
-                continue
-            seg_kwargs = dict(generate_kwargs)
-            seg_kwargs["max_new_tokens"] = max(
-                8, min(440, int((float(seg_end) - float(seg_start)) * 12) + 8)
-            )
-            seg_result = pipe(
-                {"array": slice_audio, "sampling_rate": sr},
-                return_timestamps="word",
-                generate_kwargs=seg_kwargs,
-            )
-            full_text_parts.append(seg_result.get("text", "").strip())
-            for c in seg_result.get("chunks", []):
-                text = c.get("text", "").strip()
-                if not text:
-                    continue
-                ts = c.get("timestamp", (None, None))
-                start = ts[0] if ts[0] is not None else 0.0
-                end = ts[1] if ts[1] is not None else start + 0.1
-                words.append({
-                    "word": text,
-                    "start": float(start) + float(seg_start),
-                    "end": float(end) + float(seg_start),
-                })
+        words, full_text_parts, skipped = _transcribe_vad_segments(
+            pipe, audio, sr, vad_segments, generate_kwargs
+        )
         full_text = " ".join(p for p in full_text_parts if p)
     else:
         result = pipe(
@@ -377,12 +471,16 @@ def transcribe_remote(
     import shutil
     shutil.rmtree(work, ignore_errors=True)
 
-    return {
+    out = {
         "segments": segments,
         "language": language,
         "transcriber": "heart",
         "full_text": full_text,
     }
+    # Only when something was skipped, so a clean song's result is unchanged.
+    if skipped:
+        out["skipped_segments"] = skipped
+    return out
 
 
 @app.function(image=image, gpu=GPU)
