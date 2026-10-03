@@ -9,6 +9,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const plan = ref(null)
   const status = ref(null)
   const busy = ref(false)
+  const planning = ref(false)
   const error = ref('')
   const lyricsEnabled = ref(false)
   let navigationGeneration = 0
@@ -17,7 +18,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const currentNavigation = snapshot => snapshot.generation === navigationGeneration
     && snapshot.step === step.value && snapshot.choice === choice.value
   const localAvailable = computed(() => plan.value?.available === true)
-  const canStart = computed(() => plan.value?.available === true && !!plan.value?.planId && !busy.value)
+  const canStart = computed(() => plan.value?.available === true && !!plan.value?.planId && !busy.value && !planning.value)
 
   async function persist(skipped = false) {
     // A check is transient; reopening setup checks again from live status.
@@ -28,6 +29,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     if (busy.value) return false
     busy.value = true
     navigationGeneration += 1
+    planning.value = false
     error.value = ''
     try { await action(); return true } catch (cause) {
       error.value = cause?.message || 'Setup could not continue. Please try again.'
@@ -58,6 +60,30 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     // A failed refresh must not leave an earlier consent plan actionable.
     plan.value = null
     return bridge.preflightSetup()
+  }
+  async function planNavigation(apply, { routeIndependent = false } = {}) {
+    if (busy.value) return false
+    navigationGeneration += 1
+    const snapshot = navigation()
+    planning.value = true
+    error.value = ''
+    let applying = false
+    const currentPlan = () => snapshot.generation === navigationGeneration
+      && snapshot.step === step.value && (routeIndependent || snapshot.choice === choice.value)
+    try {
+      const next = await preflight()
+      if (!currentPlan()) return false
+      applying = true
+      await apply(next)
+      return true
+    } catch (cause) {
+      if (applying ? snapshot.generation === navigationGeneration : currentPlan()) {
+        error.value = cause?.message || 'Setup could not be checked. Please try again.'
+      }
+      return false
+    } finally {
+      if (snapshot.generation === navigationGeneration) planning.value = false
+    }
   }
   async function applyModalStatus() {
     if (choice.value !== 'modal' || !bridge.getModalStatus
@@ -119,7 +145,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     }
   }
   async function initialize() {
-    let checking = false
+    let checking = false, needsPlan = false
     const initialized = await guarded(async () => {
       const saved = await bridge.getOnboardingState()
       if (bridge.getLyricsLookup) lyricsEnabled.value = (await bridge.getLyricsLookup()).enabled === true
@@ -131,22 +157,31 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       applyStatus(live)
       // The check runs outside the busy guard so the library stays reachable.
       if (step.value === 'checking') { checking = true; return }
-      if (['choose', 'consent', 'error'].includes(step.value)) applyPlan(await preflight())
+      if (['choose', 'consent', 'error'].includes(step.value)) needsPlan = true
       await applyModalStatus()
     })
     if (checking) await verifyCheck()
+    else if (initialized && needsPlan) {
+      const choosing = step.value === 'choose'
+      const plannedChoice = choice.value
+      await planNavigation(async next => {
+        // Availability describes both routes on the choice screen. A changed
+        // choice must not be discarded or navigated by the original check.
+        if (choosing && choice.value !== plannedChoice) plan.value = next
+        else applyPlan(next)
+      }, { routeIndependent: choosing })
+    }
     return initialized
   }
   async function chooseProcessing() {
-    return guarded(async () => {
-      step.value = 'choose'
-      // An explicit request to choose a route must remain on the choice
-      // screen even when the local runtime is already usable.
-      plan.value = await preflight()
+    if (busy.value) return false
+    step.value = 'choose'
+    return planNavigation(async next => {
+      plan.value = next
       if (status.value?.state === 'running' || status.value?.state === 'restart-required') applyStatus(status.value)
       if (!localAvailable.value) choice.value = 'modal'
       await persist()
-    })
+    }, { routeIndependent: true })
   }
   async function welcome() {
     return guarded(async () => { step.value = 'welcome'; await persist() })
@@ -165,15 +200,17 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     })
   }
   async function continueChoice() {
-    return guarded(async () => {
-      if (choice.value === 'local') {
-        applyPlan(await preflight())
+    if (busy.value) return false
+    if (choice.value === 'local') {
+      return planNavigation(async next => {
+        applyPlan(next)
         if (['ready', 'restart'].includes(step.value)) { await persist(); return }
         if (!localAvailable.value) return
-      }
-      step.value = choice.value === 'modal' ? 'modal' : 'consent'
-      await persist()
-    })
+        step.value = 'consent'
+        await persist()
+      })
+    }
+    return guarded(async () => { step.value = 'modal'; await persist() })
   }
   async function start() {
     if (!canStart.value) return false
@@ -197,6 +234,6 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function restart() { return guarded(() => bridge.restartApp()) }
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
-  return { step, choice, plan, status, busy, error, localAvailable, canStart,
+  return { step, choice, plan, status, busy, planning, error, localAvailable, canStart,
     lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource }
 }

@@ -8,7 +8,7 @@ import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 const props = defineProps({ open: { type: Boolean, default: true } })
 const emit = defineEmits(['close', 'open', 'add-song', 'modal-settings', 'lyrics-saved', 'background'])
 const setup = useDesktopOnboarding()
-const { step, choice, plan, status, busy, error, localAvailable, canStart, lyricsEnabled } = setup
+const { step, choice, plan, status, busy, planning, error, localAvailable, canStart, lyricsEnabled } = setup
 const heading = ref(null)
 const dialog = ref(null)
 let poll
@@ -366,7 +366,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           <button
             class="primary"
             data-testid="onboarding-lyrics-continue"
-            :disabled="busy"
+            :disabled="busy || planning"
             @click="saveLyrics"
           >
             Save and continue →
@@ -667,6 +667,12 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           </button>
         </div>
       </template>
+      <p
+        v-if="planning"
+        role="status"
+      >
+        Checking your local processing setup… You can continue in your library while this finishes.
+      </p>
       <p
         v-if="error"
         class="alert"

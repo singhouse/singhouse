@@ -730,3 +730,137 @@ it('does not invent a range when the desktop supplies no estimate', async () => 
   expect(wrapper.text()).toContain('A time estimate is unavailable for this setup.')
   wrapper.unmount()
 })
+
+describe('responsive setup planning', () => {
+  it('shows pending feedback and an enabled library exit while reopening preferences', async () => {
+    let resolvePlan
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose', choice: 'local' }),
+      preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })),
+    })
+    window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('Checking your local processing setup')
+    expect(wrapper.find('.library').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="onboarding-continue"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('.library').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    resolvePlan({ available: true, ready: true, planId: 'late' })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('choose')
+    wrapper.unmount()
+  })
+
+  it('keeps the library reachable during a slow lyrics continuation and ignores its late result', async () => {
+    let resolvePlan
+    const desktop = bridge({ preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })) })
+    const setup = useDesktopOnboarding(desktop)
+    await setup.chooseLyrics()
+    await setup.saveLyrics()
+    const pending = setup.continueChoice()
+    expect(setup.planning.value).toBe(true)
+    expect(setup.busy.value).toBe(false)
+    expect(setup.canStart.value).toBe(false)
+    expect(await setup.skip()).toBe(true)
+    resolvePlan({ available: true, ready: true, planId: 'late' })
+    expect(await pending).toBe(false)
+    expect(setup.step.value).toBe('lyrics')
+    expect(setup.plan.value).toBe(null)
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+  })
+
+  it('does not let an older choice check replace a newer route', async () => {
+    let resolvePlan
+    const desktop = bridge({ preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })) })
+    const setup = useDesktopOnboarding(desktop)
+    const pending = setup.chooseProcessing()
+    expect(setup.busy.value).toBe(false)
+    setup.choice.value = 'modal'
+    await setup.continueChoice()
+    resolvePlan({ available: true, ready: true, planId: 'late' })
+    await pending
+    expect(setup.step.value).toBe('modal')
+    expect(setup.plan.value).toBe(null)
+    expect(setup.planning.value).toBe(false)
+  })
+})
+
+
+describe('planning result and persistence failures', () => {
+  it('retains local availability when the choice changes during the same choice screen', async () => {
+    let resolvePlan
+    const desktop = bridge({ preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })) })
+    const setup = useDesktopOnboarding(desktop)
+    const pending = setup.chooseProcessing()
+    setup.choice.value = 'modal'
+    resolvePlan({ available: true, ready: true, planId: 'available' })
+    expect(await pending).toBe(true)
+    expect(setup.localAvailable.value).toBe(true)
+    expect(setup.choice.value).toBe('modal')
+    expect(setup.step.value).toBe('choose')
+  })
+
+  it('reports failure saving the consent screen after planning navigates there', async () => {
+    const desktop = bridge({ setOnboardingState: vi.fn().mockRejectedValue(new Error('Preferences could not be saved')) })
+    const setup = useDesktopOnboarding(desktop)
+    expect(await setup.continueChoice()).toBe(false)
+    expect(setup.step.value).toBe('consent')
+    expect(setup.error.value).toBe('Preferences could not be saved')
+  })
+
+  it('ignores a persistence failure after dismissal supersedes the applied plan', async () => {
+    let rejectSave
+    const desktop = bridge({ setOnboardingState: vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { rejectSave = reject }))
+      .mockResolvedValue({}) })
+    const setup = useDesktopOnboarding(desktop)
+    const pending = setup.continueChoice()
+    await flushPromises()
+    expect(setup.step.value).toBe('consent')
+    await setup.skip()
+    rejectSave(new Error('Late save failure'))
+    await pending
+    expect(setup.error.value).toBe('')
+  })
+})
+
+
+it('retains availability without navigating when the restored choice changes during initialization', async () => {
+  let resolvePlan
+  const desktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose', choice: 'local' }),
+    preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })),
+  })
+  const setup = useDesktopOnboarding(desktop)
+  const pending = setup.initialize()
+  await flushPromises()
+  expect(setup.step.value).toBe('choose')
+  setup.choice.value = 'modal'
+  resolvePlan({ available: true, ready: true, planId: 'restored-available' })
+  await pending
+  expect(setup.localAvailable.value).toBe(true)
+  expect(setup.choice.value).toBe('modal')
+  expect(setup.step.value).toBe('choose')
+})
+
+
+it.each(['ready', 'restart', 'progress'])('retains availability when %s restores to choose and the route changes', async savedStep => {
+  let resolvePlan
+  const desktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: savedStep, choice: 'local' }),
+    getSetupStatus: vi.fn().mockResolvedValue({ state: 'idle' }),
+    preflightSetup: vi.fn(() => new Promise(resolve => { resolvePlan = resolve })),
+  })
+  const setup = useDesktopOnboarding(desktop)
+  const pending = setup.initialize()
+  await flushPromises()
+  expect(setup.step.value).toBe('choose')
+  setup.choice.value = 'modal'
+  resolvePlan({ available: true, ready: true, planId: 'effective-choice' })
+  await pending
+  expect(setup.localAvailable.value).toBe(true)
+  expect(setup.choice.value).toBe('modal')
+  expect(setup.step.value).toBe('choose')
+})
