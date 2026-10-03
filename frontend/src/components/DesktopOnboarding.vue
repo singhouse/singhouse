@@ -240,6 +240,48 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             <span class="badge neutral">Your own cloud deployment</span>
           </button>
         </div>
+        <section
+          class="speed-estimate"
+          aria-label="Local processing estimate"
+        >
+          <div class="speed-heading">
+            <strong>Estimated processing speed</strong>
+            <span>{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
+          </div>
+          <div
+            class="speed-bar"
+            role="img"
+            :aria-label="`Estimated processing speed: ${plan?.processingEstimate?.label || 'not enough information'}`"
+          >
+            <i
+              v-for="level in 3"
+              :key="level"
+              :class="{ filled: level <= (plan?.processingEstimate?.level || 0) }"
+            />
+          </div>
+          <div
+            class="speed-labels"
+            aria-hidden="true"
+          >
+            <span>Slower</span><span>Moderate</span><span>Faster</span>
+          </div>
+          <p
+            v-if="plan?.processingEstimate?.minutes"
+            class="estimate-range"
+          >
+            <strong>{{ plan.processingEstimate.minutes[0] }}–{{ plan.processingEstimate.minutes[1] }} minutes</strong> to prepare a 3-minute track
+          </p>
+          <p v-else>
+            A time estimate is unavailable for this setup.
+          </p>
+          <p>{{ plan?.processingEstimate?.basis }}</p>
+          <p class="quiet">
+            Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
+          </p>
+          <p class="quiet">
+            Actual processing times may vary.
+          </p>
+        </section>
         <div class="actions">
           <button
             class="primary"
@@ -269,7 +311,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           You can enable Modal later via Settings → Song processing… → My Modal account.
         </p>
         <details>
-          <summary>Computer details and processing estimates</summary>
+          <summary>Computer details</summary>
           <template v-if="plan?.hardware">
             <p
               v-for="[label, value] in hardwareDetails"
@@ -281,48 +323,6 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           <p v-else>
             Hardware information is not available.
           </p>
-          <section
-            class="speed-estimate"
-            aria-label="Local processing estimate"
-          >
-            <div class="speed-heading">
-              <strong>Estimated processing speed</strong>
-              <span>{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
-            </div>
-            <div
-              class="speed-bar"
-              role="img"
-              :aria-label="`Estimated processing speed: ${plan?.processingEstimate?.label || 'not enough information'}`"
-            >
-              <i
-                v-for="level in 3"
-                :key="level"
-                :class="{ filled: level <= (plan?.processingEstimate?.level || 0) }"
-              />
-            </div>
-            <div
-              class="speed-labels"
-              aria-hidden="true"
-            >
-              <span>Slower</span><span>Moderate</span><span>Faster</span>
-            </div>
-            <p
-              v-if="plan?.processingEstimate?.minutes"
-              class="estimate-range"
-            >
-              <strong>{{ plan.processingEstimate.minutes[0] }}–{{ plan.processingEstimate.minutes[1] }} minutes</strong> to prepare a 3-minute track
-            </p>
-            <p v-else>
-              A time estimate is unavailable for this setup.
-            </p>
-            <p>{{ plan?.processingEstimate?.basis }}</p>
-            <p class="quiet">
-              Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
-            </p>
-            <p class="quiet">
-              Actual processing times may vary.
-            </p>
-          </section>
           <template v-if="plan?.memoryRequirements?.evidenceAvailable">
             <p>Measured memory requirement, including headroom: {{ size(plan.memoryRequirements.ramBytes) }} RAM<span v-if="plan.memoryRequirements.dedicatedVideoMemoryBytes"> and {{ size(plan.memoryRequirements.dedicatedVideoMemoryBytes) }} dedicated graphics memory</span>.</p>
             <p>{{ plan.memoryQualification?.reason }}</p>
