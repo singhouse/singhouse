@@ -95,12 +95,13 @@ def main():
 
 
 def managed_vad_segments(audio_path, configuration):
-    """Use exactly the standalone RMS path, after admission and before loading weights."""
+    """Decode managed PCM/FLOAT WAV after admission, preserving RMS segmentation."""
     from lyricsync._config import VadConfig
-    from lyricsync.audio.io import read_wav_mono
+    import soundfile
     from lyricsync.audio.vad import rms_vad_segments
     config = VadConfig(**json.loads(configuration))
-    samples, sample_rate = read_wav_mono(audio_path)
+    samples, sample_rate = soundfile.read(audio_path, dtype="float32", always_2d=True)
+    samples = samples.mean(axis=1)
     return rms_vad_segments(samples, sample_rate, config)
 
 
