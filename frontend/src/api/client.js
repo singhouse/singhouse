@@ -134,10 +134,16 @@ export default client
 
 export const songApi = {
   /** GET /api/songs — list songs in the library (optionally search/page) */
-  list({ search, pageSize = 200, page = 1 } = {}) {
+  list({ search, artistExact, status, pageSize = 200, page = 1 } = {}) {
     const params = { page, page_size: pageSize }
     if (search) params.search = search
+    if (artistExact != null) params.artist_exact = artistExact
+    if (status) params.status = status
     return client.get('/songs', { params })
+  },
+
+  artists({ search, page = 1, pageSize = 40 } = {}) {
+    return client.get('/songs/artists', { params: { search, page, page_size: pageSize } })
   },
 
   /** GET /api/songs/:id — get single song details */

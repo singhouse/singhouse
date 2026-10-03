@@ -9,9 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 const listSongs = vi.fn()
+const listArtists = vi.fn()
 
 vi.mock('@/api/client', () => ({
-  songApi: { list: (...a) => listSongs(...a) },
+  songApi: { list: (...a) => listSongs(...a), artists: (...a) => listArtists(...a) },
 }))
 // Core with no catalog provider installed: local library search only.
 vi.mock('@/plugins/slots', () => ({ getSlot: () => null }))
@@ -28,6 +29,8 @@ let wrapper = null
 
 beforeEach(() => {
   vi.useFakeTimers()
+  listArtists.mockReset()
+  listArtists.mockResolvedValue({ data: { items: [{ artist: 'Bowie', count: 2 }], total: 41 } })
   listSongs.mockReset()
   listSongs.mockResolvedValue({ data: { songs: SONGS } })
 })
@@ -246,5 +249,87 @@ describe('results', () => {
     await search('bowie h')
     expect(sheet().textContent).not.toContain('not responding')
     expect(rows()).toHaveLength(2)
+  })
+})
+
+
+describe('artist browsing', () => {
+  async function artists() {
+    mountPicker()
+    await wrapper.find('.picker__trigger').trigger('click')
+    document.body.querySelectorAll('.sheet__modes button')[1].click()
+    await vi.advanceTimersByTimeAsync(1)
+  }
+  it('browses without a query, pages, drills down and selects a song', async () => {
+    await artists()
+    expect(listArtists).toHaveBeenCalledWith({ search: '', page: 1, pageSize: 40 })
+    expect(rows()[0].textContent).toContain('Bowie')
+    ;[...document.body.querySelectorAll('button')].find(b => b.textContent === 'Next').click()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(listArtists).toHaveBeenLastCalledWith({ search: '', page: 2, pageSize: 40 })
+    listSongs.mockResolvedValue({ data: { songs: SONGS.slice(0, 2), total: 2 } })
+    rows()[0].click()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(listSongs).toHaveBeenLastCalledWith({ artistExact: 'Bowie', search: '', status: 'ready', page: 1, pageSize: 40 })
+    expect(freehand()).toBeNull()
+    rows()[0].click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('pick')[0]).toEqual(['Bowie — Heroes', 1])
+  })
+  it('supports keyboard drill-down and returning to the artist index', async () => {
+    await artists()
+    input().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(listSongs).toHaveBeenCalledWith(expect.objectContaining({ artistExact: 'Bowie' }))
+    ;[...document.body.querySelectorAll('button')].find(b => b.textContent.includes('All artists')).click()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(rows()[0].textContent).toContain('2 songs')
+    expect(listArtists).toHaveBeenLastCalledWith({ search: '', page: 1, pageSize: 40 })
+  })
+  it('keeps keyboard focus in the dialog when a focused artist row or back button disappears', async () => {
+    await artists()
+    rows()[0].focus()
+    expect(document.activeElement).toBe(rows()[0])
+    rows()[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(document.activeElement).toBe(input())
+    const back = [...document.body.querySelectorAll('button')].find(b => b.textContent.includes('All artists'))
+    back.focus()
+    expect(document.activeElement).toBe(back)
+    // Native keyboard activation emits a click with detail zero.
+    back.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(document.activeElement).toBe(input())
+  })
+  it('does not focus the search input when pointer browsing removes a focused row', async () => {
+    await artists()
+    rows()[0].focus()
+    rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(document.activeElement).not.toBe(input())
+    const back = [...document.body.querySelectorAll('button')].find(b => b.textContent.includes('All artists'))
+    back.focus()
+    back.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
+    await vi.advanceTimersByTimeAsync(1)
+    expect(document.activeElement).not.toBe(input())
+  })
+  it('ignores artist results arriving after returning to Songs', async () => {
+    let resolve
+    listArtists.mockReturnValue(new Promise(r => { resolve = r }))
+    await artists()
+    document.body.querySelectorAll('.sheet__modes button')[0].click()
+    await wrapper.vm.$nextTick()
+    resolve({ data: { items: [{ artist: 'Stale', count: 1 }], total: 1 } })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(rows()).toHaveLength(0)
+  })
+  it('shows errors and recovers with a one-letter search', async () => {
+    listArtists.mockRejectedValueOnce(new Error('offline'))
+    await artists()
+    expect(sheet().textContent).toContain('Library browsing is not responding')
+    await search('B')
+    expect(listArtists).toHaveBeenLastCalledWith({ search: 'B', page: 1, pageSize: 40 })
+    expect(rows()).toHaveLength(1)
   })
 })
