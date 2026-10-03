@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backend import _windows_extended_path, isolated_environment, processing_environment, processing_memory_policy
+from backend import _windows_extended_path, isolated_environment, persistent_directory, processing_environment, processing_memory_policy
 
 
 class ProcessingEnvironmentTests(unittest.TestCase):
@@ -102,7 +102,7 @@ class ProcessingEnvironmentTests(unittest.TestCase):
             self.assertTrue(env["KARAOKE_PROCESSING_PYTHON"].startswith("\\\\?\\"))
 
     def test_production_cache_is_app_owned_without_ambient_username(self):
-        with patch.dict(os.environ, {"TORCHINDUCTOR_CACHE_DIR": str(self.root / "hostile-cache"),
+        with persistent_directory(self.runtime), patch.dict(os.environ, {"TORCHINDUCTOR_CACHE_DIR": str(self.root / "hostile-cache"),
                                      "USERNAME": "ambient-user"}):
             env = isolated_environment(self.runtime, "http://127.0.0.1:1234", "fixture",
                                        disposable=False)
@@ -118,8 +118,13 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["KARAOKE_PROCESSING_PYTHON"], "")
         self.assertFalse(json.loads(env["KARAOKE_DESKTOP_PROCESSING_JSON"])["capabilitiesReady"])
 
-    def test_long_inventory_hash_and_parent_containment_remain_enforced(self):
-        self.native(self.processing / self.relative).write_bytes(b"changed source")
+    def test_long_inventory_size_and_parent_containment_remain_enforced(self):
+        # Launch admission is structural; full installation/activation hashes
+        # remain covered by runtime_manager.test.mjs's same-size corruption test.
+        payload = self.native(self.processing / self.relative)
+        payload.write_bytes(b"changed source")  # same length as the fixture
+        self.assertEqual(self.admit()["KARAOKE_PROCESSING_PYTHON"], self.probe["pythonPath"])
+        payload.write_bytes(b"changed source with a different size")
         with self.assertRaisesRegex(RuntimeError, "file verification failed"):
             self.admit()
         self.runtime = self.root / "other" / "backend"

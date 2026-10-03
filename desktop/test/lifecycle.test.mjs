@@ -2,9 +2,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { projectorBlocker, stopChild, createRuntime, stopRuntime } from '../lifecycle.mjs'
 
 test('projector sleep blocker is acquired once and released once across duplicate events', () => {
@@ -134,4 +135,56 @@ time.sleep(30)
     // The old group ID was consumed; later cleanup cannot signal reused IDs.
     forceChild(backend)
   } finally { forceChild(backend) }
+})
+
+
+test('fresh desktop runtimes provision the admission cache for real inherited worker environments', async () => {
+  const { persistentRuntime } = await import('../lifecycle.mjs')
+  const temporary = createRuntime()
+  const backendLauncher = fileURLToPath(new URL('../backend.py', import.meta.url))
+  const admissionModule = fileURLToPath(new URL('../../backend/src/karaoke_backend/workers/memory_admission.py', import.meta.url))
+  const script = `
+import importlib.util, json, os, subprocess, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("desktop_launcher", sys.argv[1])
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+runtime = Path(sys.argv[2])
+worker = """
+import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('admission', sys.argv[1])
+admission = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(admission)
+with admission.serialized():
+    assert (Path(os.environ['XDG_CACHE_HOME']) / 'processing-memory.lock').is_file()
+print(os.environ['XDG_CACHE_HOME'])
+"""
+directory = launcher.runtime_directory if sys.argv[4] == "disposable" else launcher.persistent_directory
+with directory(runtime) as admitted:
+    environment = launcher.isolated_environment(admitted, "http://127.0.0.1:1234", "fixture", disposable=sys.argv[4] == "disposable")
+    if sys.argv[4] == "disposable":
+        try:
+            with launcher.runtime_directory(admitted):
+                raise AssertionError("Nonempty runtime was accepted")
+        except RuntimeError as error:
+            assert str(error) == "Runtime must be empty"
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', worker, sys.argv[3]], env=environment, capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+assert result.stdout.strip() == str(runtime / 'cache')
+`
+  try {
+    const persistent = persistentRuntime(join(temporary.root, 'persistent profile'))
+    for (const runtime of [temporary, persistent]) {
+      for (const ambient of [{ HOME: '/untrusted/home', XDG_CACHE_HOME: '/untrusted/cache' },
+        { USERPROFILE: '/untrusted/profile', LOCALAPPDATA: '/untrusted/appdata', XDG_CACHE_HOME: '/untrusted/cache' }]) {
+        mkdirSync(runtime.backend, { recursive: true, mode: 0o700 })
+        const result = spawnSync(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
+          ['-I', '-B', '-c', script, backendLauncher, runtime.backend, admissionModule, runtime === temporary ? 'disposable' : 'persistent'],
+          { env: { ...process.env, ...ambient }, encoding: 'utf8', timeout: 15000 })
+        assert.equal(result.status, 0, result.stderr || result.error?.message)
+      }
+    }
+    assert.equal(persistentRuntime(join(temporary.root, 'persistent profile')).backend, persistent.backend)
+  } finally { temporary.remove() }
 })

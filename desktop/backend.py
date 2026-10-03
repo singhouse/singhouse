@@ -743,6 +743,9 @@ def reject_plugins() -> None:
 
 
 def isolated_environment(runtime: Path, origin: str, password: str, *, disposable: bool = True) -> dict[str, str]:
+    # Runtime ownership/emptiness is checked before environment construction.
+    # Managed worker admission requires this writable cache before loading models.
+    (runtime / "cache").mkdir(mode=0o700, exist_ok=True)
     # Preserve only OS executable discovery; every application setting is new.
     env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC")
            if key in os.environ}
