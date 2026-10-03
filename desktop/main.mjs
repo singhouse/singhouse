@@ -13,16 +13,16 @@ import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { RuntimeManager, ModelCache, launchSelection, processingAttestation } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
 import { createStartupSurface } from './startup.mjs'
-import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
+import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
-import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readOnlyAppImageMount, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
+import { assertNativeInventoryDeclared, declaredApplicationDigest, observeReceiptApplication, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
 import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
 
@@ -69,9 +69,14 @@ async function installedReleaseIdentity() {
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
   if (hash(filesBytes) !== manifest.runtimeId) throw new Error('Installed native inventory identity mismatch')
   const files = JSON.parse(filesBytes)
-  for (const [name, expected] of Object.entries(files)) {
-    const path = resolve(nativeDir, ...name.split('/'))
-    if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+  // The managed-slot and signed macOS paths hash the native payload here. A
+  // receipt-described installation instead binds files.json to its receipt's
+  // declarations below, without reading the payload at launch.
+  const hashNativePayload = () => {
+    for (const [name, expected] of Object.entries(files)) {
+      const path = resolve(nativeDir, ...name.split('/'))
+      if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+    }
   }
   const provenance = JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8'))
   const assemblyBytes = readFileSync(resolve(nativeDir, 'assembly.json'))
@@ -86,17 +91,19 @@ async function installedReleaseIdentity() {
     platform: process.platform, resourcesPath: process.resourcesPath, applicationRoot,
   })
   if (portableBytes !== null) {
+    hashNativePayload()
     const portable = JSON.parse(portableBytes)
     const identity = assertReleaseIdentity(portable.identity)
     if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed managed release belongs to a different edition policy')
     managedReleaseSlot = true
     return identity
   }
-  const records = process.platform === 'darwin'
-    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
-    : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
+  const bundle = process.platform === 'darwin' ? resolve(process.resourcesPath, '../..') : applicationRoot
+  const leading = process.platform === 'darwin' ? [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory']] : []
   if (signedMarker) {
+    hashNativePayload()
+    const records = [...leading, ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)]
     if (existsSync(receiptPath)) throw new Error('Signed macOS application must keep its release receipt outside the sealed bundle')
     const observed = records.map(([path, value]) => value === 'directory' ? { path, type: 'directory' }
       : value.startsWith('symlink:') ? { path, type: 'symlink', target: value.slice('symlink:'.length) }
@@ -114,29 +121,49 @@ async function installedReleaseIdentity() {
       schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes), applicationInventoryDigest: inventoryDigest,
       ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
   }
-  if (existsSync(receiptPath)) {
-    const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
-    if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
-    const identity = validateInstalledReleaseReceipt(receipt, new Map(records), { platform: process.platform, arch: process.arch })
-    if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
-    const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
-    const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
-    const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
-      : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
-    const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
-    if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
-    const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
-      sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
-      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs), frontendDigest: digestRecords(frontend),
-      backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
-      runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
-      schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
-      applicationInventoryDigest: receipt.application.inventoryDigest,
-      ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
-    if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
-    return identity
+  if (!existsSync(receiptPath)) throw new Error('Installed first-launch application lacks its release receipt')
+  const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
+  if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
+  // Content is hashed at launch only where it can change underneath the
+  // receipt. A read-only AppImage mount (kernel evidence) carries its receipt
+  // in the same immutable image, so digests come from the receipt. A writable
+  // installation is hashed in full on its first launch (or whenever its
+  // launch inventory is missing or stale); later launches compare each file's
+  // size, modification and change times, inode and device with that
+  // inventory. Every path still walks
+  // every entry's type and symlink target against the receipt.
+  const readOnly = process.platform === 'linux' && readOnlyApplicationRoot(readOnlyAppImageMount(), applicationRoot)
+  const launchInventoryPath = resolve(runtime.root, 'launch-inventory.json')
+  // The cache is bound to the canonical root, so a different installation
+  // reached through the same path never matches it.
+  const inventoryRoot = physicalFs.realpathSync.native(applicationRoot)
+  const observed = observeReceiptApplication({ rootDirectory: applicationRoot, current: bundle, leading, physicalFs, receipt,
+    target: { platform: process.platform, arch: process.arch }, readOnly, inventoryRoot,
+    launchInventory: readOnly ? null : await readLaunchInventory(launchInventoryPath) })
+  const identity = observed.identity
+  if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
+  const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
+  const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
+  const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
+    : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
+  assertNativeInventoryDeclared(files, receipt, nativePrefix)
+  const electronAppDigest = declaredApplicationDigest(receipt, asarRelative)
+  const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
+  if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
+  const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
+    sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
+    electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest, frontendDigest: digestRecords(frontend),
+    backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
+    runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
+    schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
+    applicationInventoryDigest: receipt.application.inventoryDigest,
+    ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
+  if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
+  if (observed.launchInventory && !await writeLaunchInventory(launchInventoryPath, observed.launchInventory,
+    { lockPython: recoveryKitDurability?.pythonPath, durabilityHelper: recoveryKitDurability?.backendHelperPath })) {
+    console.warn('Could not record the application launch inventory; the next launch checks every file in full.')
   }
-  throw new Error('Installed first-launch application lacks its release receipt')
+  return identity
 }
 
 async function platformTrust({ root: applicationRoot, manifest }) {
@@ -535,17 +562,21 @@ async function start() {
     app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
+    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks: processingPolicy.lockSha256 })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
-    try {
-      activeProcessing = await processingManager.active()
-      if (activeProcessing) {
-        const probeResult = await processingManager.probe(activeProcessing)
-        processingProbe = processingAttestation(activeProcessing, probeResult)
-      }
-    } catch (error) { activeProcessing = null; processingProbe = null; processingError = error.message }
-    try { activeModels = await modelCache.active() }
-    catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
+    // Launch uses the structural pack checks and the self-test result recorded
+    // for this exact pack; payload hashes and a fresh self-test belong to
+    // installation, repair and activation. The two stores are independent, so
+    // their checks overlap; failures are reported in the same order as before.
+    const selection = launchSelection(...await Promise.allSettled([
+      (async () => {
+        const active = await processingManager.active({ launch: true })
+        if (!active) return { active }
+        return { active, probe: processingAttestation(active, await processingManager.launchProbe(active)) }
+      })(),
+      modelCache.active({ launch: true }),
+    ]))
+    ;({ activeProcessing, processingProbe, activeModels, processingError } = selection)
   }
   await startupSurface.update('Starting your library…')
   if (quitting) return

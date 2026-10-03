@@ -194,3 +194,51 @@ test('repair selection refuses modified or policy-untrusted manifests', async t 
   const untrusted = new ModelCache(cache.root, { schema: 1, allowedHosts: ['huggingface.co'], models: [] })
   assert.equal(await untrusted.selectionForRepair(), null)
 })
+
+test('launch-time model checks are structural; installation and repair still hash every file', async t => {
+  const { cache, manifest, directory, prefix, bytes } = await fixture(t)
+  const installed = await cache.installFromDirectory(manifest, directory, { prefix })
+  const damaged = join(installed.directory, manifest.files[1].path)
+  // Same-size content damage passes the launch check, which never reads
+  // payload bytes; full verification (install, repair) still rejects it.
+  const record = join(cache.root, 'verified', `${installed.id}.json`)
+  assert.deepEqual(JSON.parse(await readFile(record, 'utf8')), { schema: 1, runtimeManifestId: installed.id })
+  await writeFile(damaged, Buffer.alloc(bytes.length, 'x'))
+  assert.equal((await cache.active({ launch: true })).id, installed.id)
+  await assert.rejects(cache.active(), /verification failed/)
+  // Detected damage is not forgotten: the record is withdrawn, so later
+  // launches verify in full and reject the pack.
+  await assert.rejects(readFile(record), /ENOENT/)
+  await assert.rejects(cache.active({ launch: true }), /verification failed/)
+  await assert.rejects(new ModelCache(cache.root, cache.policy).active({ launch: true }), /verification failed/)
+  const repaired = await cache.installFromDirectory(manifest, directory, { prefix })
+  await readFile(record)
+  assert.equal(repaired.id, installed.id)
+  assert.equal((await cache.active()).id, installed.id)
+  assert.deepEqual(await readFile(damaged), bytes)
+  // Size, inventory and manifest changes fail the launch check.
+  await writeFile(damaged, 'damaged checkpoint')
+  await assert.rejects(cache.active({ launch: true }), /verification failed/)
+  await writeFile(damaged, bytes)
+  await writeFile(join(installed.directory, 'unexpected'), 'extra')
+  await assert.rejects(cache.active({ launch: true }), /inventory/)
+  await rm(join(installed.directory, 'unexpected'))
+  assert.equal((await cache.active({ launch: true })).id, installed.id)
+  // A pack with no record (installed by an earlier release, or a record that
+  // is missing, malformed or for another pack) is verified in full at launch.
+  for (const replace of [() => rm(record), () => writeFile(record, '{'),
+    () => writeFile(record, JSON.stringify({ schema: 1, runtimeManifestId: 'e'.repeat(64) })),
+    () => writeFile(record, JSON.stringify({ schema: 1, runtimeManifestId: installed.id, extra: true }))]) {
+    await writeFile(damaged, bytes)
+    await writeFile(record, JSON.stringify({ schema: 1, runtimeManifestId: installed.id }))
+    assert.equal((await cache.active({ launch: true })).id, installed.id)
+    await replace()
+    await writeFile(damaged, Buffer.alloc(bytes.length, 'x'))
+    await assert.rejects(cache.active({ launch: true }), /verification failed/)
+  }
+  // An intact pack without a record is verified in full once and recorded.
+  await writeFile(damaged, bytes)
+  await rm(record, { force: true })
+  assert.equal((await cache.active({ launch: true })).id, installed.id)
+  assert.deepEqual(JSON.parse(await readFile(record, 'utf8')), { schema: 1, runtimeManifestId: installed.id })
+})

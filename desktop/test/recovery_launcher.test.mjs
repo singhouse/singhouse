@@ -7,7 +7,8 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, readOnlyAppImageMount, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
+import { readOnlyApplicationRoot } from '../application_inventory.mjs'
 import { verifyRecoveryAnchor } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { recoveryDataDirectory, recoveryHandoff, recoveryStateRoot } from '../recovery_cli.mjs'
@@ -470,6 +471,93 @@ test('AppImage runtime evidence rejects ambient candidates and non-AppImage ance
   writeFileSync(resolve(proc, '7', 'stat'), '7 (attacker) S 0 0 0 0\n')
   writeFileSync(resolve(proc, 'self', 'mountinfo'), `25 20 0:42 / ${mount} ro - fuse.Singhouse Singhouse.AppImage ro\n`)
   assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
+})
+
+test('read-only AppImage mount evidence uses kernel mount facts and never reads the outer image', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-mount-'))
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const outer = resolve(root, 'Singhouse.AppImage'), proc = resolve(root, 'proc')
+  mkdirSync(resolve(mount, 'resources', 'app'), { recursive: true }); writeFileSync(executable, 'mounted electron')
+  // An ancestor whose outer image is absent: the full runtime check needs to
+  // read it, the mount-only check must not touch it (this holds even as root).
+  writeFileSync(outer, 'outer image'); rmSync(outer)
+  for (const directory of ['self', '17']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe')); symlinkSync(outer, resolve(proc, '17', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse) S 17 0 0 0\n')
+  writeFileSync(resolve(proc, '17', 'stat'), '17 (Singhouse.AppImage) S 1 0 0 0\n')
+  const encodedMount = mount.replaceAll(' ', '\\040')
+  const mountinfo = (options, type = 'fuse.Singhouse') => writeFileSync(resolve(proc, 'self', 'mountinfo'),
+    `25 20 0:42 / ${encodedMount} ${options},nosuid,nodev - ${type} Singhouse.AppImage ${options}\n`)
+  const check = (overrides = {}) => readOnlyAppImageMount({ platform: 'linux', executablePath: executable, procRoot: proc, ...overrides })
+  const appRoot = resolve(mount, 'resources', 'app')
+  try {
+    // (a) Read-only FUSE mount containing the application root.
+    mountinfo('ro')
+    const evidence = check()
+    assert.deepEqual(evidence, { readOnly: true, mountPath: mount, actualExecutablePath: executable })
+    assert.equal(readOnlyApplicationRoot(evidence, appRoot), true)
+    // (d) The outer image was never read: the full runtime check cannot
+    // authenticate it, yet the mount check succeeded. Without any ancestor at
+    // all the result is the same.
+    assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
+    rmSync(resolve(proc, '17'), { recursive: true })
+    writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse) S 1 0 0 0\n')
+    assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
+    assert.deepEqual(check(), evidence)
+    // Environment variables are never authority.
+    const saved = { APPIMAGE: process.env.APPIMAGE, APPDIR: process.env.APPDIR }
+    process.env.APPIMAGE = outer; process.env.APPDIR = root
+    try {
+      mountinfo('rw')
+      assert.equal(check(), null)
+    } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    }
+
+    // (b) A writable mount, a non-FUSE filesystem, or a root outside the mount.
+    mountinfo('rw'); assert.equal(check(), null); assert.equal(readOnlyApplicationRoot(check(), appRoot), false)
+    mountinfo('ro', 'ext4'); assert.equal(check(), null); assert.equal(readOnlyApplicationRoot(check(), appRoot), false)
+    mountinfo('ro')
+    assert.equal(readOnlyApplicationRoot(check(), resolve(root, 'elsewhere', 'app')), false)
+    assert.equal(readOnlyApplicationRoot(check(), `${mount}-other`), false)
+
+    // (c) Missing or contrary evidence yields null rather than throwing.
+    assert.equal(check({ platform: 'darwin' }), null)
+    assert.equal(check({ procRoot: resolve(root, 'missing-proc') }), null)
+    assert.equal(check({ executablePath: `${mount}/../.mount_Singho/Singhouse` }), null)
+    assert.equal(check({ executablePath: resolve(mount, 'missing') }), null)
+    writeFileSync(resolve(mount, 'Other'), 'other'); rmSync(resolve(proc, 'self', 'exe'))
+    symlinkSync(resolve(mount, 'Other'), resolve(proc, 'self', 'exe'))
+    assert.equal(check({ executablePath: resolve(mount, 'Other') }), null)
+    assert.equal(check(), null)
+    rmSync(resolve(proc, 'self', 'exe')); symlinkSync(executable, resolve(proc, 'self', 'exe'))
+    rmSync(resolve(proc, 'self', 'mountinfo')); assert.equal(check(), null)
+    mountinfo('ro'); assert.deepEqual(check(), evidence)
+
+    // (b) Another mount stacked on, or nested beneath, the selected mount point
+    // may expose writable files.
+    const base = `25 20 0:42 / ${encodedMount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro\n`
+    const stacked = [
+      `26 25 0:43 / ${encodedMount} rw,relatime - ext4 /dev/test rw\n`,
+      `26 25 0:43 / ${encodedMount} ro,relatime - fuse.Singhouse Singhouse.AppImage ro\n`,
+      `26 25 0:43 / ${encodedMount}/resources rw,relatime - tmpfs tmpfs rw\n`,
+      `26 25 0:43 / ${encodedMount}/resources/app ro,relatime - ext4 /dev/test ro\n`,
+      `26 25 0:43 / ${encodedMount}/..hidden rw,relatime - tmpfs tmpfs rw\n`,
+    ]
+    for (const extra of stacked) {
+      writeFileSync(resolve(proc, 'self', 'mountinfo'), base + extra)
+      assert.equal(check(), null, extra)
+      writeFileSync(resolve(proc, 'self', 'mountinfo'), extra + base)
+      assert.equal(check(), null, extra)
+    }
+    // Mounts beside or above it do not.
+    writeFileSync(resolve(proc, 'self', 'mountinfo'), `1 0 0:1 / / rw - ext4 /dev/root rw\n`
+      + `24 1 0:2 / ${root.replaceAll(' ', '\\040')} rw - tmpfs tmpfs rw\n${base}`
+      + `27 1 0:44 / ${encodedMount}-other rw - tmpfs tmpfs rw\n`)
+    assert.deepEqual(check(), evidence)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('verified installer relocation rotates one invoker without invalidating existing recovery kits', () => {
