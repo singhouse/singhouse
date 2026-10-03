@@ -313,14 +313,18 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           Look up lyrics with LRCLIB?
         </h1>
         <p class="lead">
-          LRCLIB is an independent lyrics service. When enabled, song lookups send track title, artist, album, and duration to LRCLIB. Your audio is not uploaded.
+          Karaoke track generation is much more accurate with reference lyrics. You can paste lyrics each time you add a song, or you can enable <a
+            href="https://lrclib.net"
+            target="_blank"
+            rel="noopener noreferrer"
+          >LRCLIB.net</a> lyric fetching.
         </p>
+        <p>LRCLIB is a third-party lyrics service. You are responsible for your use of this service.</p>
         <label class="lookup-option"><input
           v-model="lyricsEnabled"
           type="checkbox"
           data-testid="onboarding-lrclib"
         > Enable LRCLIB lyrics lookup</label>
-        <p>Off by default. You can continue without it and change this choice later by reopening setup. Only use lyrics you have permission to use.</p>
         <div class="actions">
           <button
             class="primary"
