@@ -56,7 +56,9 @@
       "platform": "win32",
       "arch": "x64",
       "accelerator": "cuda",
-      "functionalProbe": "rebuild-required"
+      "functionalProbe": "pending-native-hardware",
+      "inputLockSha256": "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
+      "sourceCommit": "404a4fd5b1c82a169492259acf3ec3213d3088dc"
     }
   ]
 }
