@@ -58,7 +58,7 @@ function mountShell() {
         SongList: SongListStub,
         QueuePanel: true, AudioPlayer: true, ScreenStage: true,
         UploadZone: { template: '<div class="upload-zone-stub" />' },
-        DesktopOnboarding: { name: 'DesktopOnboarding', template: '<div class="desktop-setup-stub" />', emits: ['close', 'add-song'] },
+        DesktopOnboarding: { name: 'DesktopOnboarding', props: ['open'], template: '<div class="desktop-setup-stub" />', emits: ['close', 'add-song'] },
         PlexImportModal: { template: '<div class="plex-stub" />' },
         BrandLogo: true, BrandMark: true,
         'router-link': { props: ['to'], template: '<a class="router-link-stub" :data-to="to"><slot /></a>' },
@@ -141,19 +141,19 @@ describe('HostShell chrome', () => {
     }
     mountShell()
     await flushPromises()
-    expect(wrapper.find('.desktop-setup-stub').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'DesktopOnboarding' }).props('open')).toBe(false)
     await wrapper.find('.brand-btn').trigger('click')
     const setupButton = wrapper.findAll('.ui-menu__item').find(b => b.text().includes('Set up song processing'))
     await setupButton.trigger('click')
-    expect(wrapper.find('.desktop-setup-stub').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'DesktopOnboarding' }).props('open')).toBe(true)
     expect(wrapper.find('.brand-btn').attributes('aria-expanded')).toBe('false')
     wrapper.findComponent({ name: 'DesktopOnboarding' }).vm.$emit('add-song')
     await flushPromises()
-    expect(wrapper.find('.desktop-setup-stub').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'DesktopOnboarding' }).props('open')).toBe(false)
     expect(wrapper.find('.upload-zone-stub').exists()).toBe(true)
     await wrapper.find('[aria-label="Collapse sidebar"]').trigger('click')
     await wrapper.find('[aria-label="Set up song processing"]').trigger('click')
-    expect(wrapper.find('.desktop-setup-stub').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'DesktopOnboarding' }).props('open')).toBe(true)
     wrapper.unmount()
     wrapper = null
     expect(stopListener).toHaveBeenCalledOnce()
