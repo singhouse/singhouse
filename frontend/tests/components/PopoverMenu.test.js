@@ -5,7 +5,7 @@
 // menu keyboarding, and the teleport to <body> that keeps it from being
 // clipped by the sidebar's overflow.
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
@@ -98,6 +98,59 @@ describe('PopoverMenu', () => {
     panel().querySelector('.mi-1').click()
     await nextTick()
     expect(panel()).toBeNull()
+  })
+
+  it('returns focus when activating an item removes the focused control', async () => {
+    mountMenu()
+    await wrapper.find('.trig').trigger('click')
+    expect(document.activeElement).toBe(panel().querySelector('.mi-1'))
+    panel().querySelector('.mi-1').click()
+    await nextTick()
+    expect(panel()).toBeNull()
+    expect(document.activeElement).toBe(wrapper.find('.trig').element)
+  })
+
+  it('preserves focus explicitly moved to an action destination', async () => {
+    mountMenu()
+    await wrapper.find('.trig').trigger('click')
+    const destination = wrapper.find('.outside').element
+    destination.focus()
+    wrapper.findComponent(PopoverMenu).vm.close()
+    await nextTick()
+    expect(panel()).toBeNull()
+    expect(document.activeElement).toBe(destination)
+  })
+
+  it('lets a dialog action select its destination after closing', async () => {
+    mountMenu({})
+    await wrapper.find('.trig').trigger('click')
+    const destination = wrapper.find('.outside').element
+    wrapper.findComponent(PopoverMenu).vm.close()
+    destination.focus()
+    await nextTick()
+    expect(panel()).toBeNull()
+    expect(document.activeElement).toBe(destination)
+  })
+
+  it('allows navigation actions to opt out of focus restoration', async () => {
+    mountMenu()
+    await wrapper.find('.trig').trigger('click')
+    const trigger = wrapper.find('.trig').element
+    const focusTrigger = vi.spyOn(trigger, 'focus')
+    wrapper.findComponent(PopoverMenu).vm.close({ restoreFocus: false })
+    await nextTick()
+    expect(panel()).toBeNull()
+    expect(focusTrigger).not.toHaveBeenCalled()
+  })
+
+  it('does not restore trigger focus on an outside pointer press', async () => {
+    mountMenu()
+    await wrapper.find('.trig').trigger('click')
+    const focusTrigger = vi.spyOn(wrapper.find('.trig').element, 'focus')
+    wrapper.find('.outside').element.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await nextTick()
+    expect(panel()).toBeNull()
+    expect(focusTrigger).not.toHaveBeenCalled()
   })
 
   it('is a dialog by default', async () => {

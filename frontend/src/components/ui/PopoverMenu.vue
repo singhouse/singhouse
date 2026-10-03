@@ -131,7 +131,10 @@ async function open() {
   focusFirst()
 }
 
-function close({ restoreFocus = false } = {}) {
+// Return focus before removing its current menu/dialog control. Callers may
+// move it to another surface after close(), or opt out when navigation owns
+// focus. An outside pointer press owns its destination independently.
+function close({ restoreFocus = panelEl.value?.contains(document.activeElement) ?? false } = {}) {
   if (!isOpen.value) return
   isOpen.value = false
   emit('close')
@@ -146,7 +149,7 @@ function toggle() {
 function onDocPointer(e) {
   const t = e.target
   if (anchorEl.value?.contains(t) || panelEl.value?.contains(t)) return
-  close()
+  close({ restoreFocus: false })
 }
 
 function onDocKeydown(e) {

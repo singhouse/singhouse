@@ -74,6 +74,22 @@ describe('the library ⋯ menu', () => {
     expect(wrapper.find('[role="menu"]').exists()).toBe(false)
   })
 
+  it('returns focus to the library trigger after activating Refresh from the focused menu item', async () => {
+    wrapper = mount(SongList, { global: { stubs: { Modal: true } }, attachTo: document.body })
+    await openMenu()
+    await nextTick()
+    const refresh = document.querySelector('[role="menuitem"]')
+    expect(document.activeElement).toBe(refresh)
+    listSongs.mockClear()
+    // Native buttons synthesize click for Enter/Space activation. Exercise
+    // that activation without a pointerdown changing the keyboard focus.
+    refresh.click()
+    await nextTick()
+    expect(listSongs).toHaveBeenCalledOnce()
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(wrapper.find('.lib-menu__btn').element)
+  })
+
   it('Columns… swaps to the chooser and focuses its first changeable box', async () => {
     wrapper = mount(SongList, { global: { stubs: { teleport: true } }, attachTo: document.body })
     await openMenu()
