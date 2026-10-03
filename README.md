@@ -33,22 +33,6 @@ AI models automatically separate vocals and generate timed lyrics from imported 
 10. **Host queue** — a simple, manually ordered "who sings next" list built
    from your library, plus a flat play history
 
-## How it works
-
-Generation runs in three stages:
-
-1. **Separate the audio.** Demucs separates vocals from the instrumental.
-   A second model, mel_band_roformer by default, splits the vocals into lead
-   and backing tracks, so each can be adjusted independently during playback.
-2. **Transcribe the vocals.** Heart transcribes the separated lead vocal,
-   producing words and timestamps from the recording.
-3. **Align the lyrics.** If you supply reference lyrics, lyricsync aligns them
-   to the transcription's timing. Without a reference, it uses the transcribed
-   words. Timing comes from your recording in either case.
-
-The player combines the resulting audio stems with word-level lyric
-highlighting. You can correct words and timing in the lyric editor afterward.
-
 ## Installation
 
 | Platform | Download from the release page |
@@ -58,20 +42,22 @@ highlighting. You can correct words and timing in the lyric editor afterward.
 | Linux, x64 | [AppImage or archive](https://github.com/singhouse/singhouse/releases/tag/v0.1.0) |
 
 The desktop app bundles Python and FFmpeg. See the
-[installation guide](docs/install-desktop.md) for platform requirements and setup.
+[installation guide](docs/install-desktop.md) for system requirements and installation
+instructions.
 
-## Processing setup
+## Track generation setup
 
-**Set up song processing** installs the processing runtime and models as
-separate downloads, with your permission. Available processing packs depend on
-your platform.
+At first launch, a setup wizard runs. You can either set up local processing,
+or opt to use your own [Modal](https://modal.com) account.
+**Set up song processing**, with your permission, installs a bundled processing 
+runtime and models as separate downloads.
 
-Prepared karaoke media can be imported and played without an AI processing pack.
+Existing karaoke files or videos can be imported and played without 
+an AI processing pack.
 
 ## Documentation
 
 - [Desktop installation](docs/install-desktop.md)
-- [Support and diagnostics](docs/support-diagnostics.md)
 - [Processing on your own Modal account](docs/modal.md)
 - [Importing from your Plex server](docs/plex.md)
 - [Backend development](backend/README.md)
@@ -81,15 +67,16 @@ Prepared karaoke media can be imported and played without an AI processing pack.
 
 ## Privacy
 
-Processing runs locally by default, with no telemetry in the stock configuration.
+Track generation in singhouse runs entirely locally on your machine by default.
 The project does not host, store, or transmit your audio, stems, or synced lyrics.
 Singhouse includes no music catalog, lyrics database, acquisition tools, or
 sharing between installations. Use media and lyrics you have the right to use.
 
-Optional integrations require configuration: lrclib.net lookup is **off by
-default** and sends artist and title; LLM cleanup sends lyric text to your chosen
-endpoint; GPU offload sends audio to [your own Modal deployment](docs/modal.md).
-These services use your accounts and may incur charges.
+An optional lrclib.net integration is avialable for automatic lookup of lyrics.
+Lookup is **off by default** and sends artist and title; The modal integration sends 
+audio to [your own Modal deployment](docs/modal.md) through your own provided
+account.
+
 
 ## License
 
