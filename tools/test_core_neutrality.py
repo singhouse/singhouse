@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Regression checks for narrowly permitted legal-record literals."""
+"""Regression checks for narrowly permitted public-document literals."""
 
 from pathlib import Path
 import re
@@ -11,10 +11,7 @@ import unittest
 
 GATE = Path(__file__).with_name("check_core_neutrality.sh")
 PRODUCT = re.search(r"BRAND_PATTERN=.*join_pattern '([^']+)'", GATE.read_text())[1]
-LEGAL_FILES = (
-    ".github/scripts/cla.cjs", "CLA.md", "CCLA.md", "CLA-SIGNATURES.json",
-    "CONTRIBUTING.md", "LICENSING.md",
-)
+CONTRIBUTOR_DOCS = ("CONTRIBUTING.md",)
 PUBLIC_BRAND_DOCS = (
     "docs/install-desktop.md",
     "docs/modal.md",
@@ -30,7 +27,7 @@ PRIVATE_BRAND = "retired_fixture"
 VENDOR_SAMPLE = "fixture_vendor"
 
 
-class LegalLiteralTests(unittest.TestCase):
+class PublicDocumentLiteralTests(unittest.TestCase):
     def check_gate(
         self, filename, content, *, private_brand=None, private_infra=None,
         private_vendor=None, extra_files=None,
@@ -64,14 +61,14 @@ class LegalLiteralTests(unittest.TestCase):
         self.assertEqual(code, expected, output)
         return output
 
-    def test_legal_names_allowed_with_and_without_supplement(self):
-        for filename in LEGAL_FILES:
+    def test_contributor_doc_names_allowed_with_and_without_supplement(self):
+        for filename in CONTRIBUTOR_DOCS:
             for supplement in (None, PRIVATE_BRAND):
                 with self.subTest(filename=filename, supplement=supplement):
                     self.assert_gate(filename, PRODUCT.title(), 0, private_brand=supplement)
 
-    def test_private_brand_still_rejected_in_every_legal_record(self):
-        for filename in LEGAL_FILES:
+    def test_private_brand_still_rejected_in_contributor_docs(self):
+        for filename in CONTRIBUTOR_DOCS:
             for private in (PRIVATE_BRAND, PRODUCT + "_private_fixture"):
                 with self.subTest(filename=filename, private=private):
                     output = self.assert_gate(
@@ -81,7 +78,7 @@ class LegalLiteralTests(unittest.TestCase):
                     self.assertIn("FAIL: brand literals", output)
 
     def test_ordinary_files_still_require_brand_indirection(self):
-        for filename in ("docs/contributor.md", "docs/CLA.md", "frontend/src/example.js"):
+        for filename in ("docs/contributor.md", "docs/CONTRIBUTING.md", "frontend/src/example.js"):
             with self.subTest(filename=filename):
                 self.assert_gate(filename, PRODUCT, 1)
 
@@ -153,7 +150,7 @@ class LegalLiteralTests(unittest.TestCase):
 
     def test_private_brand_starting_with_dash_is_rejected(self):
         private = "-private_fixture"
-        output = self.assert_gate("CLA.md", private, 1, private_brand=private)
+        output = self.assert_gate("CONTRIBUTING.md", private, 1, private_brand=private)
         self.assertIn("FAIL: brand literals", output)
         self.assertNotIn("invalid option", output)
 

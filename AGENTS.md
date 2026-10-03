@@ -1,8 +1,8 @@
 # Development guide
 
 Read `CONTRIBUTING.md` before changing contribution or licensing behavior.
-External contributor intake is currently inactive; public source availability
-is not an invitation to submit signatures or contributions before it opens.
+Open a discussion and obtain maintainer approval for the proposed scope before
+starting a contribution or submitting a pull request.
 Use `SECURITY.md` for security reports.
 
 ## Find the relevant code

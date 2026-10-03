@@ -513,12 +513,12 @@ BRAND_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
   | keep_private_filter \
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
-      # These legal records must name the product directly. Only the public
+      # Contributor documentation may name the product directly. Only the public
       # name is permitted: supplement alternatives remain checked, even when
       # they contain the public name as a substring.
       file_brand_pattern="$BRAND_PATTERN"
       case "$f" in
-        .github/scripts/cla.cjs|CLA.md|CCLA.md|CLA-SIGNATURES.json|CONTRIBUTING.md|LICENSING.md)
+        CONTRIBUTING.md)
           [ -n "$BRAND_PRIVATE" ] || continue
           file_brand_pattern="$BRAND_PRIVATE"
           ;;
