@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   isDesktop: true,
   managedSetup: process.argv.includes('--singhouse-managed-setup'),
   prepareHeart: () => ipcRenderer.invoke('heart:prepare'),
+  getLyricsLookup: () => ipcRenderer.invoke('setup:lyrics-lookup'),
+  setLyricsLookup: enabled => ipcRenderer.invoke('setup:lyrics-lookup-save', enabled),
   getOnboardingState: () => ipcRenderer.invoke('setup:preferences'),
   setOnboardingState: state => ipcRenderer.invoke('setup:save-preferences', state),
   preflightSetup: () => ipcRenderer.invoke('setup:preflight'),

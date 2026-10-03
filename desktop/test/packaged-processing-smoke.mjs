@@ -32,7 +32,7 @@ export function parseArguments(args) {
     if (Object.hasOwn(BOOLEAN_FLAGS, flag)) {
       assert.ok(!options[BOOLEAN_FLAGS[flag]], `Duplicate ${flag}`); options[BOOLEAN_FLAGS[flag]] = true; continue
     }
-    if (flag === '--model-folder') throw new Error('The advanced application route has no combined offline model-folder import. Use --download-models explicitly; do not transplant cache pointers.')
+    if (flag === '--model-folder') throw new Error('Offline model-folder import is unavailable in this qualification harness. Use --wizard with --expected-runtime-lock-sha256; do not transplant cache pointers.')
     if (!valued.has(flag) || options[flag] !== undefined || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Invalid argument: ${flag}`)
     options[flag] = args[++i]
   }
@@ -78,7 +78,8 @@ export function parseArguments(args) {
     assert.ok(options.resume, 'Executable upgrade requires --resume')
     assert.match(upgradeFrom, /^[a-fA-F0-9]{64}$/, 'Upgrade prior executable SHA-256 must be 64 hex characters')
   }
-  return { ...common, mode: retainedProfile ? 'retained' : 'advanced', manifest: resolve(options['--runtime-manifest']),
+  assert.ok(retainedProfile, 'Legacy manifest-install qualification is retired. Use --wizard with --expected-runtime-lock-sha256 on a fresh evidence directory.')
+  return { ...common, mode: 'retained', manifest: resolve(options['--runtime-manifest']),
     retainedProfile: retainedProfile ? resolve(retainedProfile) : undefined, expectedSourceCommit: expectedSourceCommit?.toLowerCase(),
     resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase() }
 }
@@ -614,46 +615,6 @@ export async function run(options) {
     for (const preference of preferences) assert.deepEqual(preference, { sandbox: true, isolation: true, node: false })
     assert.equal((await api('/health')).status, 'ok')
   }
-  async function install(path, kind) {
-    const installationStarted = Date.now()
-    // Replace only the native file/consent dialogs. The actual advanced menu
-    // callback owns manifest validation, transfer, probing and activation.
-    await bounded(application.evaluate(({ Menu, dialog }, { path, kind }) => {
-      const entry = Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items
-        .find(item => item.label === 'Advanced: install runtime or model manifest…')
-      if (!entry) throw new Error('Packaged advanced installation route is unavailable')
-      const original = { showOpenDialog: dialog.showOpenDialog, showMessageBox: dialog.showMessageBox, showErrorBox: dialog.showErrorBox }
-      globalThis.__processingSmoke = { done: false, error: null, restore: () => Object.assign(dialog, original) }
-      dialog.showOpenDialog = async (_host, options) => {
-        if (options.title !== 'Select a processing or upstream model manifest') throw new Error('Unexpected file dialog')
-        return { canceled: false, filePaths: [path] }
-      }
-      dialog.showMessageBox = async (_host, options) => {
-        if (options.message === 'Installation verified. Reopen the app to use it.') {
-          globalThis.__processingSmoke.done = true; return { response: 0 }
-        }
-        const expected = kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?'
-        if (options.message !== expected || options.buttons?.join('|') !== 'Cancel|Install') throw new Error('Unexpected installation consent dialog')
-        return { response: 1 }
-      }
-      dialog.showErrorBox = (title, message) => { globalThis.__processingSmoke.error = `${title}: ${message}` }
-      entry.click()
-    }, { path, kind }))
-    try {
-      while (true) {
-        remaining()
-        const state = await bounded(application.evaluate(() => ({ done: globalThis.__processingSmoke.done, error: globalThis.__processingSmoke.error })))
-        if (state.error) throw new Error(state.error)
-        if (state.done) break
-        await pause(500)
-      }
-      // Let the real operation's finally release its installation marker.
-      await pause(100)
-    } finally {
-      await bounded(application.evaluate(() => { globalThis.__processingSmoke.restore(); delete globalThis.__processingSmoke }), 5000).catch(() => {})
-    }
-    evidence.timingsMs[`${kind}Installation`] = Date.now() - installationStarted; save()
-  }
   // The ordinary first-launch path: only visible UI controls act. The harness
   // reads setup status freely, but calls preflightSetup only before consent
   // (nothing installed) and only while the wizard is idle. Ends with the
@@ -876,8 +837,7 @@ export async function run(options) {
       await wizardSetup()
     } else {
       evidence.runtimeReused = Boolean((resumed || options.retainedProfile) && reusableRuntime(initialReadiness, manifest)); save()
-      if (options.retainedProfile) assert.ok(evidence.runtimeReused, 'Retained runtime must be admitted without installation')
-      else if (!evidence.runtimeReused) await install(options.manifest, 'processing')
+      assert.ok(options.retainedProfile && evidence.runtimeReused, 'Retained runtime must be admitted without installation')
       const policyEncoded = await bounded(application.evaluate(({ app }) => {
         const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
         return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
@@ -900,10 +860,6 @@ export async function run(options) {
       writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
       evidence.modelPolicySha256 = hash(policyBytes)
       evidence.modelManifestSha256 = hash(modelManifestBytes)
-      if (!options.retainedProfile) {
-        await install(modelPath, 'models')
-        await close(); await launch()
-      }
     }
     const readiness = await api('/api/features/processing')
     evidence.readiness = readiness
@@ -987,7 +943,7 @@ export async function run(options) {
     evidence.status = 'passed'
   } catch (error) {
     evidence.status = 'failed'; evidence.error = error.message
-    if (application && !options.retainedProfile) await bounded(application.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items.find(item => item.label === 'Cancel installation')?.click()), 5000).catch(() => {})
+    if (host && !options.retainedProfile) await bounded(host.evaluate(() => window.karaokeDesktop?.cancelSetup()), 5000).catch(() => {})
     throw error
   } finally {
     try { await close() }

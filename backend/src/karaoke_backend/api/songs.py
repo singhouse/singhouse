@@ -1094,7 +1094,7 @@ async def retry_ingest(
     kind = last_job.kind if options_recovered else JobKind.INGEST.value
     if kind not in (JobKind.VIDEO_IMPORT.value, JobKind.CDG_IMPORT.value):
         from karaoke_backend.workers.managed_processing import require_heart_model
-        require_heart_model()
+        require_heart_model(allow_wait=True)
     stems_dir = INGEST_STEMS_DIR / str(song_id)
 
     if kind == JobKind.PLEX_IMPORT.value:

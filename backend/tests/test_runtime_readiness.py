@@ -305,3 +305,30 @@ async def test_managed_default_cache_does_not_admit_selected_alternate(monkeypat
     with pytest.raises(modal_worker.StemSeparationError, match="model set"):
         await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "out", "job")
     subprocess.assert_not_called()
+
+
+def test_deferred_queue_uses_verified_runtime_and_model_inventory(monkeypatch, tmp_path):
+    from karaoke_backend.workers import managed_processing, modal_offload
+    from karaoke_backend.models.song import JobKind
+    monkeypatch.setattr(modal_offload, "is_enabled", lambda: False)
+    python = tmp_path / "python"
+    python.write_bytes(b"runtime")
+    python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", json.dumps({
+        "installed": True, "modelId": "heart", "revision": "abc"}))
+    monkeypatch.setenv("KARAOKE_HEART_CKPT", str(tmp_path))
+    monkeypatch.setenv("KARAOKE_PROCESSING_PYTHON", str(python))
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cpu")
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python))
+    assert managed_processing.deferred_job_kinds() == frozenset()
+    monkeypatch.setenv("KARAOKE_DESKTOP_MODEL_SETS_JSON", _model_sets(
+        verifiedModelIds=["heart-transcriptor"]))
+    deferred = managed_processing.deferred_job_kinds()
+    assert JobKind.INGEST.value in deferred
+    assert JobKind.RESPLIT.value in deferred
+    assert JobKind.RETRANSCRIBE.value not in deferred
+    assert JobKind.REALIGN.value not in deferred
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(
+        python, pythonSha256="0" * 64))
+    assert JobKind.RETRANSCRIBE.value in managed_processing.deferred_job_kinds()
+    assert JobKind.REALIGN.value in managed_processing.deferred_job_kinds()

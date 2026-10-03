@@ -280,7 +280,7 @@
       />
     </aside>
 
-    <DesktopOnboarding v-if="onboardingOpen" @close="onboardingOpen = false" @add-song="openOnboardingImport" />
+    <DesktopOnboarding v-if="desktopSetupAvailable" :open="onboardingOpen" @background="onboardingOpen = false" @lyrics-saved="features.load({ force: true })" @open="onboardingOpen = true" @close="onboardingOpen = false" @add-song="openOnboardingImport" />
     <!-- Upload modal. Lives inside HostShell so AudioPlayer keeps playing
          while the user uploads — opening it does not unmount the player. -->
     <Modal :visible="uploadOpen" size="lg" @close="uploadOpen = false">
@@ -332,6 +332,7 @@ import UploadZone from '@/components/UploadZone.vue'
 import HistoryModal from '@/components/HistoryModal.vue'
 import PlexImportModal from '@/components/PlexImportModal.vue'
 import Modal from '@/components/ui/Modal.vue'
+import { useFeaturesStore } from '@/stores/features'
 import DesktopOnboarding from '@/components/DesktopOnboarding.vue'
 import { useHistoryStore } from '@/stores/history'
 
@@ -688,6 +689,7 @@ function onSongEnded(info) {
 
 const sidebarCollapsed = ref(false)
 const uploadOpen = ref(false)
+const features = useFeaturesStore()
 const desktopSetupAvailable = window.karaokeDesktop?.managedSetup === true
 const onboardingOpen = ref(false)
 let stopSetupListener

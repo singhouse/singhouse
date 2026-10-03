@@ -719,6 +719,9 @@ export async function chooseLocalAndContinue(page, { timeoutMs }) {
   if (await local.getAttribute('aria-pressed') !== 'true') await local.click()
   assert.equal(await local.getAttribute('aria-pressed'), 'true', 'Local processing choice was not selected')
   await control(page, 'onboarding-continue').click()
+  await waitForStep(page, 'lyrics', { timeoutMs })
+  await waitForIdle(page, { timeoutMs })
+  await control(page, 'onboarding-lyrics-continue').click()
   await waitForStep(page, 'consent', { timeoutMs })
   await waitForIdle(page, { timeoutMs })
 }
@@ -727,6 +730,8 @@ export async function readPlan(page) { return page.evaluate(() => window.karaoke
 export async function readStatus(page) { return page.evaluate(() => window.karaokeDesktop.getSetupStatus()) }
 
 export async function consentSnapshot(page, plan) {
+  const notices = control(page, 'onboarding-installation-notices')
+  if (await notices.getAttribute('open') === null) await notices.locator('summary').click()
   const text = await onboardingDialog(page).innerText()
   const formatted = await page.evaluate(values => values.map(value => Number(value).toLocaleString()), plan.components.map(component => component.bytes))
   assertConsentText(text, plan, formatted)

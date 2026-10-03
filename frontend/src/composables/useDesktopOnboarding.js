@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { computed, ref } from 'vue'
 
-const steps = new Set(['welcome', 'choose', 'consent', 'modal', 'progress', 'error', 'restart', 'ready'])
+const steps = new Set(['welcome', 'choose', 'lyrics', 'consent', 'modal', 'progress', 'error', 'restart', 'ready'])
 
 export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop) {
   const step = ref('welcome')
@@ -10,6 +10,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const status = ref(null)
   const busy = ref(false)
   const error = ref('')
+  const lyricsEnabled = ref(false)
   let navigationGeneration = 0
   let pendingCheck = null
   const navigation = () => ({ generation: navigationGeneration, step: step.value, choice: choice.value })
@@ -121,6 +122,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     let checking = false
     const initialized = await guarded(async () => {
       const saved = await bridge.getOnboardingState()
+      if (bridge.getLyricsLookup) lyricsEnabled.value = (await bridge.getLyricsLookup()).enabled === true
       if (steps.has(saved?.step)) step.value = saved.step
       choice.value = saved?.choice === 'modal' ? 'modal' : 'local'
       const live = await bridge.getSetupStatus()
@@ -144,6 +146,22 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       if (status.value?.state === 'running' || status.value?.state === 'restart-required') applyStatus(status.value)
       if (!localAvailable.value) choice.value = 'modal'
       await persist()
+    })
+  }
+  async function welcome() {
+    return guarded(async () => { step.value = 'welcome'; await persist() })
+  }
+  async function chooseLyrics() {
+    return guarded(async () => {
+      if (bridge.getLyricsLookup) lyricsEnabled.value = (await bridge.getLyricsLookup()).enabled === true
+      step.value = 'lyrics'
+      await persist()
+    })
+  }
+  async function saveLyrics() {
+    return guarded(async () => {
+      if (!bridge.setLyricsLookup) throw new Error('Lyrics lookup settings are unavailable. Update the desktop application and try again.')
+      lyricsEnabled.value = (await bridge.setLyricsLookup(lyricsEnabled.value)).enabled === true
     })
   }
   async function continueChoice() {
@@ -180,5 +198,5 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
   return { step, choice, plan, status, busy, error, localAvailable, canStart,
-    initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource }
+    lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource }
 }

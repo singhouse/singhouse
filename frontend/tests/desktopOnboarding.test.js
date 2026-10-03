@@ -10,6 +10,8 @@ function bridge(overrides = {}) {
   return {
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'welcome', choice: 'local' }),
     setOnboardingState: vi.fn().mockResolvedValue({}),
+    getLyricsLookup: vi.fn().mockResolvedValue({ enabled: false }),
+    setLyricsLookup: vi.fn(async enabled => ({ enabled })),
     getSetupStatus: vi.fn().mockResolvedValue({ state: 'idle' }),
     preflightSetup: vi.fn().mockResolvedValue({ planId: 'plan-1', available: true, components: [{ label: 'Processing model', bytes: 1024, sources: ['https://example.test/model'], terms: 'MIT' }] }),
     startSetup: vi.fn().mockResolvedValue({ state: 'running', phase: 'download' }),
@@ -279,6 +281,8 @@ describe('desktop setup screens', () => {
     expect(cards[1].attributes('aria-pressed')).toBe('true')
     await wrapper.find('.primary').trigger('click')
     await flushPromises()
+    await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
+    await flushPromises()
     expect(wrapper.text()).toContain('Save and check your connection')
     expect(desktop.startSetup).not.toHaveBeenCalled()
     await wrapper.find('.library').trigger('click')
@@ -286,7 +290,7 @@ describe('desktop setup screens', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
     wrapper.unmount()
   })
-  it('shows per-file byte progress and uses a modal dialog', async () => {
+  it('shows per-file byte progress in a nonmodal panel', async () => {
     const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', progress: { file: 'model.bin', received: 250, total: 1000 } }) })
     globalThis.window.karaokeDesktop = desktop
     const wrapper = mount(DesktopOnboarding)
@@ -323,6 +327,8 @@ describe('desktop setup screens', () => {
     await wrapper.find('.primary').trigger('click')
     await flushPromises()
     await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('https://example.test/model')
     expect(wrapper.text()).toContain('Terms: MIT')
@@ -578,6 +584,8 @@ describe('desktop setup test hooks and sizes', () => {
     expect(hook('onboarding-choice-local').exists()).toBe(true)
     await hook('onboarding-continue').trigger('click')
     await flushPromises()
+    await hook('onboarding-lyrics-continue').trigger('click')
+    await flushPromises()
     expect(hook('onboarding-consent-components').text()).toContain('Processing model')
     await hook('onboarding-install').trigger('click')
     await flushPromises()
@@ -607,4 +615,104 @@ describe('desktop setup test hooks and sizes', () => {
     expect(rows[2]).not.toContain('installed')
     wrapper.unmount()
   })
+})
+
+describe('optional lookup and background setup', () => {
+  it('keeps lookup off until explicit save, preserves errors, and returns to welcome', async () => {
+    const desktop = bridge()
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('[data-testid=onboarding-get-started]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '← Back to welcome').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('data-step')).toBe('welcome')
+    await wrapper.find('[data-testid=onboarding-get-started]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid=onboarding-continue]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid=onboarding-lrclib]').element.checked).toBe(false)
+    expect(desktop.setLyricsLookup).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('LRCLIB is a third-party lyrics service.')
+    await wrapper.find('[data-testid=onboarding-lrclib]').setValue(true)
+    desktop.setLyricsLookup.mockRejectedValueOnce(new Error('Could not save preference'))
+    await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('data-step')).toBe('lyrics')
+    expect(wrapper.text()).toContain('Could not save preference')
+    await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
+    await flushPromises()
+    expect(desktop.setLyricsLookup).toHaveBeenLastCalledWith(true)
+    expect(wrapper.emitted('lyrics-saved')).toHaveLength(1)
+    expect(wrapper.find('[data-testid=onboarding-installation-notices]').attributes('open')).toBeUndefined()
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+  it('retains progress while the library is open, then allows dismissing ready and reopening preferences', async () => {
+    vi.useFakeTimers()
+    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running' }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding, { props: { open: false } })
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('open')).toBeDefined()
+    expect(wrapper.find('dialog').attributes('aria-modal')).toBe('false')
+    expect(wrapper.find('dialog').classes()).toContain('compact')
+    desktop.getSetupStatus.mockResolvedValue({ state: 'ready' })
+    await vi.advanceTimersByTimeAsync(1500)
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('data-step')).toBe('ready')
+    await wrapper.find('.library').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('open')).toBeUndefined()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    expect(wrapper.find('dialog').attributes('data-step')).toBe('choose')
+    expect(wrapper.find('dialog').attributes('aria-modal')).toBe('true')
+    wrapper.unmount()
+  })
+})
+
+
+it('refreshes lookup preferences even when the following installation preflight fails', async () => {
+  const desktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'lyrics' }),
+    preflightSetup: vi.fn().mockRejectedValue(new Error('Disk unavailable')),
+  })
+  globalThis.window.karaokeDesktop = desktop
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  await wrapper.find('[data-testid=onboarding-lrclib]').setValue(true)
+  await wrapper.find('[data-testid=onboarding-lyrics-continue]').trigger('click')
+  await flushPromises()
+  expect(desktop.setLyricsLookup).toHaveBeenCalledWith(true)
+  expect(wrapper.emitted('lyrics-saved')).toHaveLength(1)
+  expect(wrapper.text()).toContain('Disk unavailable')
+  wrapper.unmount()
+})
+
+it('shows a qualitative machine rating and rough three-minute-track range with the real settings path', async () => {
+  globalThis.window.karaokeDesktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
+    preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
+      processingEstimate: { level: 2, label: 'Moderate', minutes: [20, 90], basis: 'This pack uses the CPU.' } }),
+  })
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  expect(wrapper.find('[aria-label="Local processing estimate"]').text()).toContain('20–90 minutes to prepare a 3-minute track')
+  expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
+  expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
+  expect(wrapper.text()).toContain('Actual processing times may vary.')
+  expect(wrapper.text()).toContain('You can enable Modal later via Settings → Song processing… → My Modal account.')
+  wrapper.unmount()
+})
+
+it('does not invent a range when the desktop supplies no estimate', async () => {
+  globalThis.window.karaokeDesktop = bridge({ getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }) })
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(0)
+  expect(wrapper.find('.estimate-range').exists()).toBe(false)
+  expect(wrapper.text()).toContain('A time estimate is unavailable for this setup.')
+  wrapper.unmount()
 })

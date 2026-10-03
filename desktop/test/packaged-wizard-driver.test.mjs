@@ -483,7 +483,7 @@ test('controls are judged only after the wizard is idle (aria-busy=false)', asyn
   // The choice screen renders while its preflight runs: busy, local disabled.
   let polls = 0
   const { state, page } = fakeWizard({ busy: true, onPoll: s => { if (++polls >= 3) s.busy = false },
-    onClick: (id, s) => { if (id === 'onboarding-continue') s.step = 'consent' } })
+    onClick: (id, s) => { if (id === 'onboarding-continue') s.step = 'lyrics'; if (id === 'onboarding-lyrics-continue') s.step = 'consent' } })
   await chooseLocalAndContinue(page, { timeoutMs: 2000 })
   assert.ok(polls >= 3)
   assert.ok(state.calls.includes('isDisabled:onboarding-choice-local:false'))
@@ -499,7 +499,7 @@ test('controls are judged only after the wizard is idle (aria-busy=false)', asyn
   assert.deepEqual(consent.state.calls, ['isEnabled:onboarding-install:false', 'click:onboarding-install:false'])
 
   const retry = fakeWizard({ busy: true, step: 'error', heading: 'Setup cancelled.',
-    onClick: (id, s) => { if (id === 'onboarding-retry') s.step = 'choose'; if (id === 'onboarding-continue') s.step = 'consent' } })
+    onClick: (id, s) => { if (id === 'onboarding-retry') s.step = 'choose'; if (id === 'onboarding-continue') s.step = 'lyrics'; if (id === 'onboarding-lyrics-continue') s.step = 'consent' } })
   setTimeout(() => { retry.state.busy = false }, 30)
   await retryFromUi(retry.page, { timeoutMs: 2000 })
   assert.equal(retry.state.calls[0], 'click:onboarding-retry:false')
