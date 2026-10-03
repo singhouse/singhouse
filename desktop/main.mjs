@@ -18,6 +18,7 @@ import { authorizedHeartCaller } from './heart_setup.mjs'
 import { LyricsLookupPreference } from './lyrics_lookup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { relaunchForSetup } from './setup_relaunch.mjs'
 import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
@@ -708,7 +709,7 @@ async function start() {
   })
   setupHandler('setup:restart', () => operationGate.run('setup restart', () => restartForSetup({
     activity: boundaryState, quiesce: quiesceBackend, resume: resumeBackend,
-    restart: () => { app.relaunch(); app.quit() },
+    restart: () => relaunchForSetup(app),
   })))
   ipcMain.handle('heart:prepare', async event => {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Heart setup is only available in the host window')
