@@ -13,6 +13,10 @@ from karaoke_backend.workers.llm_paging import page_word_sync, PAGING_STATUS_KEY
     ('file:///tmp/model', 'local', '600', False),
     ('https://example.test/v1', 'local', '600', True),
     ('http://localhost:8080/v1', 'local', '600', True),
+    ('http://localhost:65535/v1', 'local', '600', True),
+    ('http://localhost:abc/v1', 'local', '600', False),
+    ('http://localhost:-1/v1', 'local', '600', False),
+    ('https://example.test:65536/v1', 'local', '600', False),
     ('https://example.test/v1', '', '600', False),
     ('https://example.test/v1', 'local', 'nan', False),
     ('https://example.test/v1', 'local', '0', False),
@@ -42,8 +46,9 @@ def test_key_environment_precedence(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_paging_never_calls_endpoint(monkeypatch):
-    monkeypatch.delenv('KARAOKE_LLM_BASE_URL', raising=False)
+@pytest.mark.parametrize('url', ['', 'http://localhost:abc/v1', 'https://example.test:65536/v1'])
+async def test_unconfigured_paging_never_calls_endpoint(monkeypatch, url):
+    monkeypatch.setenv('KARAOKE_LLM_BASE_URL', url)
     word_data = {'lines': [[{'text': 'example', 'start': 1, 'end': 2}]]}
     with patch('karaoke_backend.workers.llm_paging.OpenAIChatClient') as client:
         result = await page_word_sync(word_data, 'example')

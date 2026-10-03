@@ -92,6 +92,9 @@ def paging_configured() -> bool:
 
     try:
         url = urlsplit(os.environ.get("KARAOKE_LLM_BASE_URL", "").strip())
+        # Accessing hostname alone does not validate an explicit port. The
+        # port property rejects nonnumeric values and values outside 0..65535.
+        _ = url.port
         timeout = float(os.environ.get("KARAOKE_LLM_TIMEOUT", "600"))
         return (url.scheme in {"http", "https"} and bool(url.hostname)
                 and bool(os.environ.get("KARAOKE_LLM_MODEL", "local").strip())
