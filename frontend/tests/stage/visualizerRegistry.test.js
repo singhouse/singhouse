@@ -22,7 +22,7 @@ import { describe, expect, it } from 'vitest'
 import { getVisualizer, listVisualizers } from '@/stage/visualizers/index.js'
 
 // The publishable defaults, in host-picker order. Private entries sort after.
-const PUBLIC_IDS = ['aurora', 'particles', 'waveform']
+const PUBLIC_IDS = ['aurora', 'particles', 'waveform', 'tidal', 'ember']
 
 // Independent of the registry's own glob ON PURPOSE: if this test reused that
 // result it would agree with the registry by construction and could never
