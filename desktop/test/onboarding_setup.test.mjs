@@ -711,3 +711,25 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
   assert.equal((await setup.preflight()).available, true)
   assert.equal((await setup.getStatus()).state, 'idle')
 })
+
+test('hardware-test requires private channel and false status, and cannot skip functional verification', async () => {
+  for (const releaseChannel of ['private-test', 'stable', undefined]) {
+    const candidate = fixture({ releaseChannel })
+    candidate.setup.catalog.qualification.scope = 'hardware-test'
+    candidate.setup.catalog.qualification.passed = false
+    const plan = await candidate.setup.preflight()
+    assert.equal(plan.available, releaseChannel === 'private-test')
+    if (plan.available) {
+      assert.equal(plan.qualificationScope, 'hardware-test')
+      candidate.runtime.probe = async () => { throw new Error('CUDA device unavailable') }
+      assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+      assert.equal((await candidate.setup.preflight()).ready, false)
+    } else {
+      assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+      assert.deepEqual(candidate.calls, [])
+    }
+  }
+  const misleading = fixture({ releaseChannel: 'private-test' })
+  misleading.setup.catalog.qualification.scope = 'hardware-test'
+  assert.equal((await misleading.setup.preflight()).available, false)
+})

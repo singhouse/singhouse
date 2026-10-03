@@ -14,6 +14,7 @@ import { isIP } from 'node:net'
 import { join } from 'node:path'
 // The store's own naming rule, so these paths cannot drift from it.
 import { runtimeDirectoryName } from '../runtime_manager.mjs'
+import { qualificationScopeError, qualificationStatusMatches } from '../setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 export const RUNTIME_COMPONENT_LABEL = 'Local processing runtime'
@@ -131,15 +132,21 @@ export function catalogLimitations(summary) {
   }
   const scope = summary.qualification.scope
   if (scope === undefined) limitations.push('The packaged catalog declares no qualification scope; it is not marked as full qualification')
+  else if (scope === 'hardware-test') limitations.push('The packaged runtime is an unqualified hardware-test candidate; real-song processing and release qualification have not passed')
   else if (scope !== 'full') limitations.push(`The packaged catalog qualification scope is ${JSON.stringify(scope)}, not full`)
   return limitations
 }
 
-export function assertCatalogLock(summary, expectedLock, host) {
+export function assertCatalogLock(summary, expectedLock, host, releaseChannel) {
   assert.match(expectedLock, /^[a-f0-9]{64}$/u, 'Expected runtime lock must be 64 lowercase hex characters')
   assert.equal(summary.runtimeLockSha256, expectedLock, 'Packaged catalog runtime lock differs from the expected lock')
   assert.equal(summary.qualification.runtimeLockSha256, expectedLock, 'Packaged catalog qualification is bound to a different lock')
-  assert.equal(summary.qualification.passed, true, 'Packaged catalog qualification is not marked passed')
+  if (summary.qualification.scope === 'hardware-test') {
+    assert.equal(qualificationScopeError('hardware-test', releaseChannel), null, 'Hardware-test catalog requires the packaged private-test release channel')
+    assert.equal(qualificationStatusMatches(summary.qualification), true, 'Hardware-test catalog must explicitly record passed: false')
+  } else {
+    assert.equal(summary.qualification.passed, true, 'Packaged catalog qualification is not marked passed')
+  }
   for (const key of ['platform', 'arch', 'accelerator']) {
     assert.equal(summary.qualification[key], summary.target[key], `Packaged catalog qualification ${key} differs from its runtime`)
   }
