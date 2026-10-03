@@ -98,6 +98,13 @@ def configured_pass2_device() -> str | None:
     return declared
 
 
+def _managed_processing_timeout(device: str | None, legacy: int) -> int:
+    # Device is attested by the caller. A CUDA child may choose CPU after its
+    # memory check, so the parent cannot decide its deadline from GPU speed.
+    guarded = device is not None and (device == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
+    return 3600 if guarded else legacy
+
+
 def _find_demucs_output(out_dir: Path, model_name: str, audio_stem: str) -> Optional[Path]:
     """Find the demucs output directory (it nests under model_name/audio_stem/)."""
     candidate = out_dir / model_name / audio_stem
@@ -299,7 +306,7 @@ async def run_pass2(
         karaoke_cmd.extend(["--device", pass2_device])
     logger.info("Running karaoke separation (%s): %s", pass2_model, " ".join(karaoke_cmd))
 
-    await _await_subprocess(karaoke_cmd, timeout=600)
+    await _await_subprocess(karaoke_cmd, timeout=_managed_processing_timeout(pass2_device, 600))
     await progress("processing", 70, "Lead/backing split complete")
 
     lead: Optional[Path] = None
@@ -412,21 +419,23 @@ async def separate_stems(
 
     demucs_entrypoint = ([str(DEMUCS_PYTHON), "-I", "-B", "-m", "karaoke_backend.workers.managed_demucs"]
                         if managed else [str(DEMUCS_PYTHON), "-m", "demucs.separate"])
+    demucs_device = configured_accelerator()
+    demucs_timeout = _managed_processing_timeout(demucs_device if managed else None, 900)
     demucs_cmd = [
         *demucs_entrypoint,
         "-n", model,
-        "--device", configured_accelerator(),
+        "--device", demucs_device,
         "--float32",
         "-o", str(demucs_out),
         str(audio_path),
     ]
     logger.info("Running demucs: %s", " ".join(demucs_cmd))
-    await _progress("processing", 10, "Demucs running on GPU...")
+    await _progress("processing", 10, "Separating vocals and accompaniment...")
 
     try:
-        await _await_subprocess(demucs_cmd, timeout=900)
+        await _await_subprocess(demucs_cmd, timeout=demucs_timeout)
     except asyncio.TimeoutError:
-        raise StemSeparationError("Demucs timed out after 15 minutes")
+        raise StemSeparationError(f"Demucs timed out after {demucs_timeout // 60} minutes")
 
     await _progress("processing", 45, "Pass 1 complete")
 
