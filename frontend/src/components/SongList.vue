@@ -3,50 +3,88 @@
   <div class="song-list">
     <!-- Header / Filter bar -->
     <div class="song-list__header">
-      <h2 class="song-list__title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M9 18V5l12-2v13"/>
-          <circle cx="6" cy="18" r="3"/>
-          <circle cx="18" cy="16" r="3"/>
-        </svg>
-        Library
-        <Badge v-if="store.songs.length" variant="synced">{{ store.songs.length }}</Badge>
+      <!-- The sidebar's one header row. The shell fills `lead` (brand mark /
+           status), `actions` (its own menus) and `trail` (collapse); the
+           title, count and the library ⋯ menu are the list's own. -->
+      <div class="song-list__bar">
+        <slot name="lead" />
+        <h2 class="song-list__title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+          </svg>
+          <span class="song-list__title-text">Library</span>
+          <Badge v-if="store.songs.length" variant="synced" class="song-list__count">{{ store.songs.length }}</Badge>
+        </h2>
+        <span class="song-list__spacer" />
+        <slot name="actions" />
 
-        <div class="col-menu" ref="colMenuEl">
-          <button
-            class="col-menu__btn"
-            :class="{ 'col-menu__btn--open': columnMenuOpen }"
-            title="Choose columns"
-            aria-label="Choose columns"
-            :aria-expanded="columnMenuOpen"
-            @click="columnMenuOpen = !columnMenuOpen"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="4" width="18" height="16" rx="1"/>
-              <path d="M9 4v16M15 4v16"/>
-            </svg>
-          </button>
-
-          <div v-if="columnMenuOpen" class="col-menu__pop" role="menu">
-            <p class="col-menu__heading">Columns</p>
-            <label
-              v-for="col in COLUMNS"
-              :key="col.key"
-              class="col-menu__item"
-              :class="{ 'col-menu__item--locked': col.locked }"
-            >
-              <input
-                type="checkbox"
-                :checked="isVisible(col.key)"
-                :disabled="col.locked"
-                @change="toggleColumn(col.key)"
-              />
-              <span>{{ col.label }}</span>
-              <span v-if="col.locked" class="col-menu__lock">always</span>
-            </label>
-          </div>
-        </div>
-      </h2>
+        <!-- Library ⋯ menu. "Columns…" swaps the panel to the column chooser
+             in place rather than stacking a second popover on the first. -->
+        <PopoverMenu
+          :role="menuView === 'columns' ? 'dialog' : 'menu'"
+          align="end"
+          :label="menuView === 'columns' ? 'Columns' : 'Library actions'"
+          @close="menuView = 'menu'"
+        >
+          <template #trigger="{ toggle, attrs, open }">
+            <button
+              type="button"
+              class="lib-menu__btn"
+              :class="{ 'lib-menu__btn--open': open }"
+              title="Library actions"
+              aria-label="Library actions"
+              v-bind="attrs"
+              @click="toggle"
+            >⋯</button>
+          </template>
+          <template #default="{ close }">
+            <div v-if="menuView === 'columns'" ref="colPopEl" class="col-menu__pop">
+              <p class="col-menu__heading">Columns</p>
+              <label
+                v-for="col in COLUMNS"
+                :key="col.key"
+                class="col-menu__item"
+                :class="{ 'col-menu__item--locked': col.locked }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="isVisible(col.key)"
+                  :disabled="col.locked"
+                  @change="toggleColumn(col.key)"
+                />
+                <span>{{ col.label }}</span>
+                <span v-if="col.locked" class="col-menu__lock">always</span>
+              </label>
+            </div>
+            <template v-else>
+              <button type="button" role="menuitem" class="ui-menu__item" @click="close(); store.fetchSongs()">
+                <span class="ui-menu__icon" aria-hidden="true">↺</span>Refresh library
+              </button>
+              <button type="button" role="menuitem" class="ui-menu__item lib-menu__columns" @click="showColumns">
+                <span class="ui-menu__icon" aria-hidden="true">▥</span>Columns…
+              </button>
+              <template v-if="extraItems.length">
+                <hr class="ui-menu__sep" />
+                <button
+                  v-for="item in extraItems"
+                  :key="item.id"
+                  type="button"
+                  role="menuitem"
+                  class="ui-menu__item"
+                  :title="item.title || undefined"
+                  @click="close(); openItem(item)"
+                >
+                  <span class="ui-menu__icon" aria-hidden="true">{{ item.icon || '' }}</span>{{ item.label }}
+                </button>
+              </template>
+            </template>
+          </template>
+        </PopoverMenu>
+        <slot name="trail" />
+      </div>
+      <slot name="notice" />
 
       <div class="search-row">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -295,21 +333,55 @@
 
     <!-- Single-song CD+G / MP3+G export dialog -->
     <SongExportModal :song="exportTarget" @close="exportTarget = null" />
+
+    <!-- A 'library-menu' item's surface. Mounted only while open, so an
+         item's component fetches nothing until the host asks for it. -->
+    <Modal
+      :visible="!!activeItem"
+      :size="activeItem?.size || 'lg'"
+      @close="activeItem = null"
+    >
+      <div v-if="activeItem" class="lib-item-modal">
+        <h2 v-if="activeItem.title" class="lib-item-modal__title">{{ activeItem.title }}</h2>
+        <component :is="activeItem.component" />
+      </div>
+    </Modal>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useSongsStore, JOB_KIND_LABELS } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
 import { parseServerTs, formatServerDate } from '@/utils/serverTime'
 import Badge from '@/components/ui/Badge.vue'
 import Modal from '@/components/ui/Modal.vue'
+import PopoverMenu from '@/components/ui/PopoverMenu.vue'
 import SongExportModal from '@/components/SongExportModal.vue'
 import { getSlot } from '@/plugins/slots'
 
 const libraryPanel = getSlot('library-panel')
+
+// Extra entries for the library ⋯ menu. An installed package may register an
+// ARRAY under 'library-menu', each item:
+//
+//   id         string      — stable key
+//   label      string      — menu text
+//   icon       string?     — a glyph shown before the label
+//   title      string?     — tooltip, and the heading of the modal it opens
+//   size       string?     — Modal size ('sm' | 'md' | 'lg'; default 'lg')
+//   component  Component   — mounted inside a core Modal when picked
+//   visible    () => bool? — evaluated at render time; omitted = always shown.
+//                            Called during render, so it may read stores.
+//
+// Core registers none, so the menu is just Refresh + Columns in a stock build.
+const libraryMenu = getSlot('library-menu')
+const extraItems = computed(() =>
+  (Array.isArray(libraryMenu) ? libraryMenu : []).filter(i => !i.visible || i.visible()),
+)
+const activeItem = ref(null)
+function openItem(item) { activeItem.value = item }
 
 const store = useSongsStore()
 const songTools = useSongToolsStore()
@@ -395,25 +467,19 @@ const gridStyle = computed(() => ({
   gridTemplateColumns: ['14px', ...visibleColumns.value.map(c => c.width), '112px'].join(' '),
 }))
 
-// ─── Column menu ────────────────────────────────────────────────────────────
-const columnMenuOpen = ref(false)
-const colMenuEl = ref(null)
-
-function onDocClick(e) {
-  if (!columnMenuOpen.value) return
-  if (colMenuEl.value && !colMenuEl.value.contains(e.target)) columnMenuOpen.value = false
-}
-function onDocKeydown(e) {
-  if (e.key === 'Escape') columnMenuOpen.value = false
+// ─── Library menu ──────────────────────────────────────────────────────────
+// 'menu' | 'columns' — which face the ⋯ popover shows; reset on close.
+const menuView = ref('menu')
+const colPopEl = ref(null)
+// The face swap happens inside an open popover, so its own open-time focus
+// does not run again: hand focus to the first checkbox the host can change.
+async function showColumns() {
+  menuView.value = 'columns'
+  await nextTick()
+  colPopEl.value?.querySelector('input[type="checkbox"]:not(:disabled)')?.focus()
 }
 onMounted(() => {
-  document.addEventListener('click', onDocClick)
-  document.addEventListener('keydown', onDocKeydown)
   features.load()   // cached after the first call; gates the export action
-})
-onUnmounted(() => {
-  document.removeEventListener('click', onDocClick)
-  document.removeEventListener('keydown', onDocKeydown)
 })
 
 // ─── Sorting ────────────────────────────────────────────────────────────────
@@ -570,28 +636,46 @@ function onDragStart(ev, song) {
 <style scoped>
 .song-list { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 .song-list__header { flex-shrink: 0; padding: 0 0 0.5rem; }
+.song-list__bar {
+  display: flex; align-items: center; gap: 0.4rem;
+  margin-bottom: 0.5rem; min-height: 36px;
+}
 .song-list__title {
-  display: flex; align-items: center; gap: 0.5rem;
+  display: flex; align-items: center; gap: 0.45rem; min-width: 0;
+  flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis;
   font-size: 0.8rem; font-weight: 600; color: rgba(255,255,255,0.5);
-  text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;
+  text-transform: uppercase; letter-spacing: 0.08em; margin: 0;
+  white-space: nowrap;
+}
+/* At the 300px minimum sidebar the row is over-full: the title text is what
+   gives way (ellipsis); the icon, count and every button keep their size. */
+.song-list__title svg,
+.song-list__count { flex: none; }
+.song-list__title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.song-list__spacer { flex: 1; min-width: 0; }
+
+/* ── Library ⋯ menu ─────────────────────────────────────────────────────── */
+.lib-menu__btn {
+  flex: none;
+  width: 30px; height: 30px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent;
+  color: var(--text-secondary); font-size: 1.1rem; line-height: 1;
+  cursor: pointer; transition: all 0.15s;
+}
+.lib-menu__btn:hover { background: var(--bg-glass-hover); color: white; }
+.lib-menu__btn--open { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
+.lib-menu__btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+
+/* Core Modal's own `title` prop switches it into confirm mode (Cancel /
+   Confirm buttons), so an item's heading is rendered here instead. */
+.lib-item-modal__title {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem; font-weight: 700; color: white; letter-spacing: -0.01em;
 }
 
-/* ── Column chooser ─────────────────────────────────────────────────────── */
-.col-menu { position: relative; margin-left: auto; }
-.col-menu__btn {
-  width: 24px; height: 24px; border-radius: var(--radius-sm);
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg-glass); border: 1px solid var(--border-subtle);
-  color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
-}
-.col-menu__btn:hover { background: var(--bg-glass-active); color: white; }
-.col-menu__btn--open { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
-.col-menu__pop {
-  position: absolute; right: 0; top: calc(100% + 0.3rem); z-index: 30;
-  min-width: 150px; padding: 0.4rem;
-  background: #14161c; border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 0.5rem; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-}
+/* Column chooser — the ⋯ popover's second face. */
+.col-menu__pop { min-width: 150px; }
 .col-menu__heading {
   font-size: 0.65rem; letter-spacing: 0.08em; text-transform: uppercase;
   color: rgba(255,255,255,0.35); padding: 0.15rem 0.35rem 0.3rem;
