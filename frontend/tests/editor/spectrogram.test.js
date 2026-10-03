@@ -55,27 +55,28 @@ describe('computeSpectrogram', () => {
 
   it('normalizes to 0..1 with the peak at 1', () => {
     const spec = computeSpectrogram(sine(440, 1), SR, { t0: 0, t1: 1 })
-    let max = 0
+    let min = Infinity
+    let max = -Infinity
     for (const v of spec.data) {
-      expect(v).toBeGreaterThanOrEqual(0)
-      expect(v).toBeLessThanOrEqual(1)
-      if (v > max) max = v
+      // Math.min/max propagate NaN; the bound assertions also reject infinities.
+      min = Math.min(min, v)
+      max = Math.max(max, v)
     }
+    expect(min).toBeGreaterThanOrEqual(0)
+    expect(max).toBeLessThanOrEqual(1)
     expect(max).toBeCloseTo(1, 5)
   })
 
   it('survives total silence without NaN', () => {
     const spec = computeSpectrogram(new Float32Array(SR), SR, { t0: 0, t1: 1 })
-    for (const v of spec.data) {
-      expect(Number.isFinite(v)).toBe(true)
-    }
+    expect(spec.data.every(Number.isFinite)).toBe(true)
   })
 
   it('zero-pads windows outside the sample range', () => {
     // Window extends well past the 0.5s of audio — must not throw or NaN.
     const spec = computeSpectrogram(sine(440, 0.5), SR, { t0: -1, t1: 4 })
     expect(spec.frames).toBeGreaterThan(0)
-    for (const v of spec.data) expect(Number.isFinite(v)).toBe(true)
+    expect(spec.data.every(Number.isFinite)).toBe(true)
   })
 
   it('caps frame count near maxFrames', () => {
