@@ -4,6 +4,9 @@
 export async function prepareHeart(model = 'heart') {
   if (model !== 'heart' || !globalThis.window?.karaokeDesktop?.isDesktop) return
   const desktop = window.karaokeDesktop
+  // Managed desktop actions enter the durable queue. The worker waits for
+  // verified runtime readiness, including any required application restart.
+  if (desktop.managedSetup === true) return
   if (typeof desktop.prepareHeart !== 'function') {
     throw new Error('Heart model setup is unavailable in this desktop version.')
   }

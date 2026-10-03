@@ -42,8 +42,8 @@ def heart_model_status() -> dict[str, Any] | None:
         return missing
 
 
-def require_transcription_model(model: str = "heart") -> None:
-    """Refuse unavailable managed models before queueing or external lookups."""
+def require_transcription_model(model: str = "heart", *, allow_wait: bool = False) -> None:
+    """Validate model admission; durable callers may wait for desktop setup."""
     from karaoke_backend.workers import modal_offload
     if modal_offload.is_enabled():
         return
@@ -56,6 +56,10 @@ def require_transcription_model(model: str = "heart") -> None:
             })
         return
     status = heart_model_status()
+    if allow_wait and status is not None:
+        # Admission to the durable queue is safe; claiming still requires the
+        # verified runtime and model inventory, never this permission alone.
+        return
     if status is not None and not status["installed"]:
         from fastapi import HTTPException
         raise HTTPException(409, detail={
@@ -74,9 +78,9 @@ def require_transcription_model(model: str = "heart") -> None:
             }) from None
 
 
-def require_heart_model(model: str = "heart") -> None:
+def require_heart_model(model: str = "heart", *, allow_wait: bool = False) -> None:
     """Compatibility name for existing admission callers."""
-    require_transcription_model(model)
+    require_transcription_model(model, allow_wait=allow_wait)
 
 
 def validated_attestation() -> dict[str, Any] | None:
@@ -195,3 +199,37 @@ def accelerator_device(*, capability: str | None = None) -> str | None:
     return {"cpu": "cpu", "metal": "mps", "mps": "mps", "cuda": "cuda"}[
         value["accelerator"]
     ]
+
+
+def deferred_job_kinds() -> frozenset[str]:
+    """Kinds that must stay durably queued until desktop setup is ready.
+
+    This uses the same evidence as execution. Installing files or saving a
+    setup preference cannot release jobs; a new verified desktop boot can.
+    Other deployments and configured Modal workers retain their normal policy.
+    """
+    from karaoke_backend.models.song import JobKind
+    from karaoke_backend.workers import modal_offload
+
+    status = heart_model_status()
+    if status is None or modal_offload.is_enabled():
+        return frozenset()
+    missing = set()
+    for capability in ("transcription", "separation"):
+        try:
+            ready = accelerator_device(capability=capability) is not None
+        except InvalidAttestation:
+            ready = False
+        if capability == "transcription":
+            ready = ready and status["installed"]
+        if not ready:
+            missing.add(capability)
+    requirements = {
+        JobKind.INGEST.value: {"transcription", "separation"},
+        JobKind.PLEX_IMPORT.value: {"transcription", "separation"},
+        JobKind.RETRANSCRIBE.value: {"transcription"},
+        # Realignment constructs the same attested transcription pipeline.
+        JobKind.REALIGN.value: {"transcription"},
+        JobKind.RESPLIT.value: {"separation"},
+    }
+    return frozenset(kind for kind, required in requirements.items() if required & missing)

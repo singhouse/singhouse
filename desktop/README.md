@@ -876,8 +876,19 @@ menu. Download consent is separate from choosing local processing. Setup must
 verify a compatible processing runtime, both separation models, and Heart
 together before reporting local processing ready. A saved wizard step is never
 readiness evidence. Verified model files are reused when expanding a cache.
-Cancellation preserves resumable files. Restart is refused while processing,
-installation, playback, or a projector window is active.
+The optional lyrics step keeps LRCLIB off until explicitly enabled. It explains
+that lookups send track metadata to LRCLIB, never audio; the choice can be changed
+by reopening setup. Installation notices start collapsed with a summary, while
+component sources, terms, and exact sizes remain available before the install action.
+Back navigation returns to the welcome screen.
+
+Installation, verification, restart prompts, and completion appear as a compact
+nonmodal status panel over the library. Queued processing songs remain durable
+and unclaimed until the backend verifies the required runtime and models. This
+includes waiting across an application restart; saved wizard navigation cannot
+release jobs. Cancellation preserves resumable installation files and queued songs.
+Restart is refused while processing, installation, playback, or a projector window
+is active; queued jobs held by the readiness gate are safe to retain across restart.
 
 Release artifacts must supply a qualified runtime catalog before automatic
 local setup becomes available. Playback remains usable without it. The advanced

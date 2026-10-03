@@ -15,6 +15,7 @@ import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sa
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
+import { LyricsLookupPreference } from './lyrics_lookup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
 import { createStartupSurface } from './startup.mjs'
@@ -201,6 +202,7 @@ async function launchBackend() {
   let privateModal = null
   if (packaged) {
     args.push('--desktop-config-stdin')
+    if ((await onboardingState.read())?.lyricsLookup?.enabled === true) args.push('--lyrics-lookup')
     const preferences = onboardingPreferences((await onboardingState.read())?.preferences)
     if (preferences.choice === 'modal') {
       try { privateModal = await modalCredentials.readForBackend() } catch { /* Playback still starts when a keyring is unavailable. */ }
@@ -296,6 +298,7 @@ async function boundaryState() {
   try { state = await releaseState() } catch { state = null }
   return { projectorOpen: Boolean(projector), audible: host?.webContents.isCurrentlyAudible() === true,
     activeJobs: state?.jobs?.nonterminal ?? null,
+    deferredJobs: state?.jobs?.deferred ?? 0,
     installing: Boolean(onboardingSetup?.operation) || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation }),
     backendReady: Boolean(host) && backend?.exitCode === null && backend?.signalCode === null }
 }
@@ -623,6 +626,12 @@ async function start() {
     if (!onboardingSetup) throw new Error('Managed setup is available in the installed desktop application.')
   }
   const setupHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeSetup(event); return action(...args) })
+  const lyricsLookup = packaged ? new LyricsLookupPreference({ state: onboardingState,
+    apply: enabled => fetchJSON('/desktop-lyrics-lookup', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Singhouse-Desktop-Token': controlToken, Origin: launch.origin },
+      body: JSON.stringify({ enabled }) }) }) : null
+  setupHandler('setup:lyrics-lookup', () => lyricsLookup.get())
+  setupHandler('setup:lyrics-lookup-save', enabled => lyricsLookup.set(enabled))
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
   setupHandler('setup:preflight', () => onboardingSetup.preflight())

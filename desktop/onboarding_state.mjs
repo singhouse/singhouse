@@ -3,7 +3,7 @@ import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-const steps = new Set(['welcome', 'choose', 'consent', 'progress', 'modal', 'error', 'restart', 'ready'])
+const steps = new Set(['welcome', 'choose', 'lyrics', 'consent', 'progress', 'modal', 'error', 'restart', 'ready'])
 export function onboardingPreferences(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) value = {}
   return { step: steps.has(value.step) ? value.step : 'welcome',
@@ -40,16 +40,22 @@ export class OnboardingState {
   }
 }
 
+// Only durable queued jobs held by the readiness gate may survive a setup restart.
+function onlyDeferred(total, deferred = 0) {
+  return Number.isSafeInteger(total) && total >= 0
+    && Number.isSafeInteger(deferred) && deferred >= 0 && total === deferred
+}
+
 export async function restartForSetup({ activity, quiesce, resume, restart }) {
   const check = async () => {
     const state = await activity()
     if (state.projectorOpen || state.audible || state.installing || !state.backendReady
-      || state.activeJobs !== 0) throw new Error('Finish processing and playback, close the projector, and wait for installation before restarting.')
+      || !onlyDeferred(state.activeJobs, state.deferredJobs)) throw new Error('Finish processing and playback, close the projector, and wait for installation before restarting.')
   }
   await check()
   try {
     const locked = await quiesce()
-    if (locked.quiesced !== true || locked.activeMutations !== 0 || locked.jobs?.nonterminal !== 0) {
+    if (locked.quiesced !== true || locked.activeMutations !== 0 || !onlyDeferred(locked.jobs?.nonterminal, locked.jobs?.deferred)) {
       throw new Error('The library is busy. Finish the current operation before restarting.')
     }
     await check()

@@ -684,7 +684,7 @@ async def transcribe(
     if body.whisper_model not in ALL_MODELS:
         raise HTTPException(400, f"Invalid model. Must be one of: {sorted(ALL_MODELS)}")
 
-    require_heart_model(body.whisper_model)
+    require_heart_model(body.whisper_model, allow_wait=True)
     song = await get_song_or_404(db, song_id, user.id)
     require_ready(song)
     vocals_path = _vocals_path_for(song)

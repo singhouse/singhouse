@@ -5,14 +5,38 @@ import DesktopModalSetup from './DesktopModalSetup.vue'
 import { BRAND_NAME } from '../brand'
 import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 
-const emit = defineEmits(['close', 'add-song', 'modal-settings'])
+const props = defineProps({ open: { type: Boolean, default: true } })
+const emit = defineEmits(['close', 'open', 'add-song', 'modal-settings', 'lyrics-saved', 'background'])
 const setup = useDesktopOnboarding()
-const { step, choice, plan, status, busy, error, localAvailable, canStart } = setup
+const { step, choice, plan, status, busy, error, localAvailable, canStart, lyricsEnabled } = setup
 const heading = ref(null)
 const dialog = ref(null)
 let poll
 let unmounted = false
-const stage = computed(() => step.value === 'welcome' ? 0 : step.value === 'ready' ? 2 : 1)
+const compact = computed(() => ['progress', 'checking', 'restart', 'ready', 'error'].includes(step.value))
+const dismissed = ref(false)
+const stage = computed(() => step.value === 'welcome' ? 0 : step.value === 'lyrics' ? 2 : ['consent', 'modal'].includes(step.value) ? 3 : 1)
+async function display() {
+  await nextTick()
+  const element = dialog.value
+  if (!element) return
+  const focused = document.activeElement
+  element.close()
+  if ((props.open || (compact.value && !dismissed.value))) {
+    if (compact.value) {
+      element.show()
+      if (focused?.isConnected && !element.contains(focused)) focused.focus({ preventScroll: true })
+    }
+    else element.showModal()
+  }
+}
+watch([step, () => props.open], display)
+watch(step, () => { if (compact.value) emit('background') })
+watch(() => props.open, async value => {
+  if (!value) return
+  dismissed.value = false
+  if (['ready', 'error'].includes(step.value)) await setup.chooseProcessing()
+})
 const progress = computed(() => {
   const value = status.value?.progress
   return value?.total > 0 && Number.isFinite(value.received) ? Math.max(0, Math.min(100, value.received / value.total * 100)) : undefined
@@ -61,17 +85,32 @@ function humanLabel(key) {
   const names = { totalMemoryBytes: 'Memory (bytes)', availableMemoryBytes: 'Available memory (bytes)', freeMemoryBytes: 'Free memory (bytes)', platform: 'Operating system', arch: 'Processor architecture', cpus: 'Processors', cpu: 'Processor', cpuCount: 'Processor cores', gpu: 'Graphics processor', ramBytes: 'Memory (bytes)' }
   return names[key] || key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, value => value.toUpperCase())
 }
-async function leave(event = 'close') {
-  if (await (step.value === 'ready' ? setup.complete() : setup.skip())) emit(event)
+async function saveLyrics() {
+  if (await setup.saveLyrics()) {
+    emit('lyrics-saved')
+    await setup.continueChoice()
+  }
 }
-watch(step, async () => { await nextTick(); heading.value?.focus() })
+async function reviewSetup() {
+  emit('open')
+  await setup.chooseProcessing()
+}
+async function leave(event = 'close') {
+  if (await (step.value === 'ready' ? setup.complete() : setup.skip())) {
+    dismissed.value = !['progress', 'checking', 'restart'].includes(step.value)
+    emit(event)
+    await display()
+  }
+}
+watch(step, async () => { await nextTick(); if (!compact.value && props.open) heading.value?.focus() })
 onMounted(async () => {
-  dialog.value?.showModal()
   await setup.initialize()
+  if (!props.open && step.value === 'ready') dismissed.value = true
+  await display()
   // Leaving during the check can unmount the wizard before it settles.
   if (unmounted) return
-  poll = setInterval(() => { if (step.value === 'progress' && !busy.value) setup.refresh() }, 1500)
-  heading.value?.focus()
+  poll = setInterval(() => { if (['progress', 'restart'].includes(step.value) && !busy.value) setup.refresh() }, 1500)
+  if (!compact.value && props.open) heading.value?.focus()
 })
 onUnmounted(() => { unmounted = true; clearInterval(poll) })
 </script>
@@ -80,18 +119,22 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
   <dialog
     ref="dialog"
     class="onboarding"
-    aria-modal="true"
+    :class="{ compact }"
+    :aria-modal="!compact"
     :aria-label="`${BRAND_NAME} setup`"
     data-testid="onboarding-dialog"
     :data-step="step"
     :aria-busy="busy"
     @cancel.prevent="leave()"
   >
-    <header class="setup-header">
+    <header
+      v-if="!compact"
+      class="setup-header"
+    >
       <span class="brand">{{ BRAND_NAME }}</span>
       <nav aria-label="Setup progress">
         <span
-          v-for="(label, index) in ['Welcome', 'Processing', 'Ready']"
+          v-for="(label, index) in ['Welcome', 'Processing', 'Lyrics', 'Review']"
           :key="label"
           :aria-current="stage === index ? 'step' : undefined"
           :class="{ active: stage === index }"
@@ -202,7 +245,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             class="primary"
             data-testid="onboarding-continue"
             :disabled="busy || (choice === 'local' && !localAvailable)"
-            @click="setup.continueChoice"
+            @click="setup.chooseLyrics"
           >
             Continue →
           </button>
@@ -215,6 +258,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             Check local setup again
           </button>
         </div>
+        <button
+          class="text-button"
+          :disabled="busy"
+          @click="setup.welcome"
+        >
+          ← Back to welcome
+        </button>
         <details>
           <summary>Computer details and processing estimates</summary>
           <template v-if="plan?.hardware">
@@ -250,6 +300,44 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             No measured memory recommendation is available for this release target.
           </p>
         </details>
+      </template>
+
+      <template v-else-if="step === 'lyrics'">
+        <p class="eyebrow">
+          Lyrics lookup · optional
+        </p>
+        <h1
+          ref="heading"
+          tabindex="-1"
+        >
+          Look up lyrics with LRCLIB?
+        </h1>
+        <p class="lead">
+          LRCLIB is an independent lyrics service. When enabled, song lookups send track title, artist, album, and duration to LRCLIB. Your audio is not uploaded.
+        </p>
+        <label class="lookup-option"><input
+          v-model="lyricsEnabled"
+          type="checkbox"
+          data-testid="onboarding-lrclib"
+        > Enable LRCLIB lyrics lookup</label>
+        <p>Off by default. You can continue without it and change this choice later by reopening setup. Only use lyrics you have permission to use.</p>
+        <div class="actions">
+          <button
+            class="primary"
+            data-testid="onboarding-lyrics-continue"
+            :disabled="busy"
+            @click="saveLyrics"
+          >
+            Save and continue →
+          </button>
+          <button
+            class="text-button"
+            :disabled="busy"
+            @click="setup.chooseProcessing"
+          >
+            ← Back
+          </button>
+        </div>
       </template>
 
       <template v-else-if="step === 'consent'">
@@ -305,8 +393,9 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         >
           {{ plan?.reason || 'Setup is unavailable on this computer.' }}
         </p>
-        <details open>
-          <summary>Components, sources, and terms</summary>
+        <p>Includes local processing tools, vocal separation models, and lyric transcription models. Installation uses the transfer and disk space shown above. Review individual sources and license terms below.</p>
+        <details data-testid="onboarding-installation-notices">
+          <summary>Components, sources, and terms ({{ plan?.components?.length || 0 }} components)</summary>
           <ul
             v-if="plan?.components?.length"
             class="components"
@@ -316,7 +405,9 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
               v-for="file in plan.components"
               :key="file.label"
             >
-              <strong>{{ file.label }}</strong> · {{ size(file.bytes) }} ({{ Number.isFinite(file.bytes) ? `${file.bytes.toLocaleString()} bytes` : 'exact size unavailable' }})<template v-if="unpacked(file)"> to retrieve, {{ size(file.installedBytes) }} installed</template><p>Source: {{ describe(file.sources) || 'Not provided' }}</p><p>Terms: {{ describe(file.terms) || 'Not provided' }}</p>
+              <strong>{{ file.label }}</strong> · {{ size(file.bytes) }} ({{ Number.isFinite(file.bytes) ? `${file.bytes.toLocaleString()} bytes` : 'exact size unavailable' }})<template v-if="unpacked(file)">
+                to retrieve, {{ size(file.installedBytes) }} installed
+              </template><p>Source: {{ describe(file.sources) || 'Not provided' }}</p><p>Terms: {{ describe(file.terms) || 'Not provided' }}</p>
             </li>
           </ul>
           <p v-else>
@@ -340,7 +431,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           </button><button
             class="text-button"
             :disabled="busy"
-            @click="setup.chooseProcessing"
+            @click="setup.chooseLyrics"
           >
             ← Back
           </button>
@@ -360,7 +451,10 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         <p class="lead">
           Modal processing uses cloud resources in your own account. Audio needed for processing leaves this computer for your deployment.
         </p>
-        <DesktopModalSetup @ready="step = 'ready'" @restart="setup.restart" />
+        <DesktopModalSetup
+          @ready="step = 'ready'"
+          @restart="setup.restart"
+        />
         <div class="actions">
           <button
             class="text-button"
@@ -401,10 +495,10 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           ref="heading"
           tabindex="-1"
         >
-          We’ll take it from here.
+          Installing processing tools
         </h1>
         <p class="lead">
-          You can use your library while setup continues.
+          Use your library while setup continues. Queued songs wait until processing tools are ready.
         </p>
         <div
           class="panel"
@@ -418,7 +512,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             v-if="progress !== undefined"
             class="quiet"
           >
-            <template v-if="status?.progress?.phase === 'retrieve'">Retrieving the processing tools archive<template v-if="status.progress.part && status.progress.parts">, part {{ status.progress.part }} of {{ status.progress.parts }}</template></template><template v-else-if="status?.progress?.phase === 'extract'">Unpacking and checking processing tools</template><template v-else>{{ status?.progress?.file }}</template> · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of {{ status?.progress?.phase === 'retrieve' ? 'this part' : status?.progress?.phase === 'extract' ? 'the processing tools' : 'this file' }})
+            <template v-if="status?.progress?.phase === 'retrieve'">
+              Retrieving the processing tools archive{{ status.progress.part && status.progress.parts ? `, part ${status.progress.part} of ${status.progress.parts}` : '' }}
+            </template><template v-else-if="status?.progress?.phase === 'extract'">
+              Unpacking and checking processing tools
+            </template><template v-else>
+              {{ status?.progress?.file }}
+            </template> · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of {{ status?.progress?.phase === 'retrieve' ? 'this part' : status?.progress?.phase === 'extract' ? 'the processing tools' : 'this file' }})
           </p>
         </div>
         <details data-testid="onboarding-setup-controls">
@@ -452,7 +552,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             class="primary"
             data-testid="onboarding-retry"
             :disabled="busy"
-            @click="setup.chooseProcessing"
+            @click="reviewSetup"
           >
             Review setup and retry
           </button>
@@ -492,7 +592,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           ref="heading"
           tabindex="-1"
         >
-          Let’s add your first song.
+          Song processing is ready.
         </h1>
         <p class="lead">
           {{ choice === 'modal' ? 'Your Modal connection is ready.' : 'Local song processing is ready.' }} Add audio from your library, then review and edit its lyrics before your show.
@@ -511,6 +611,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           >
             Add a song →
           </button>
+          <button
+            class="text-button"
+            :disabled="busy"
+            @click="reviewSetup"
+          >
+            Change setup preferences
+          </button>
         </div>
       </template>
       <p
@@ -526,7 +633,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         :disabled="busy"
         @click="leave()"
       >
-        {{ ['ready', 'progress', 'checking'].includes(step) ? 'Open my library →' : 'Skip setup and open my library' }}
+        {{ compact ? (['progress', 'checking', 'restart'].includes(step) ? 'Continue in library →' : 'Dismiss') : 'Skip setup and open my library' }}
       </button>
     </main>
   </dialog>
@@ -534,4 +641,5 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
 
 <style scoped>
 .onboarding{position:fixed;inset:0;margin:0;width:100vw;height:100dvh;max-width:none;max-height:none;border:0;overflow-y:auto;z-index:1000;box-sizing:border-box;background:#0e1118;color:#f7eee2;padding:30px 40px 60px;font-family:inherit;color-scheme:dark}.setup-header{max-width:1020px;margin:auto;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:22px;font-weight:750;letter-spacing:-.7px}nav{display:flex;gap:20px;color:#8992a4;font-size:12px}nav>span{display:flex;align-items:center;gap:7px}nav b{display:grid;place-items:center;width:23px;height:23px;border:1px solid #465063;border-radius:50%}nav .active{color:#f7e7c8}nav .active b{border-color:#e23e57;background:#e23e5722}.focused{max-width:620px;margin:60px auto 0}h1{font-size:42px;line-height:1.12;letter-spacing:-1.4px;font-weight:650;margin:16px 0 22px}h1:focus{outline:none}h2{font-size:19px;margin:0 0 8px}p{color:#a9afbd;line-height:1.7;font-size:14px}.lead{font-size:16px;margin-bottom:28px}.eyebrow{color:#e98694;font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}.quiet{font-size:12px;color:#9ba4b4}.actions{display:flex;flex-direction:column;align-items:flex-start;gap:7px;margin-top:28px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.65}button:focus-visible,summary:focus-visible{outline:3px solid #f2cf7a;outline-offset:4px}.primary{background:#e23e57;border:1px solid #e23e57;border-radius:7px;color:white;font-weight:600;padding:15px 23px;font-size:14px;min-width:210px}.text-button{border:0;background:none;color:#bbc3d2;padding:10px 0;font-size:12px;text-align:left}.library{margin-top:12px}.wave{height:140px;display:flex;align-items:center;gap:9px;margin:20px 0 30px}.wave i{width:10px;border-radius:8px;background:linear-gradient(#eb6c80,#e23e57)}.choices{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:28px 0}.choice{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#191e29;color:#eee8df;border:1px solid #3b4353;border-radius:12px;padding:22px;gap:16px}.choice.chosen{border-color:#e23e57;box-shadow:0 0 0 1px #e23e57;background:#e23e570b}.choice strong{font-size:18px}.choice>span:not(.badge):not(.choice-symbol){color:#b4bbc9;font-size:13px;line-height:1.65}.choice small{color:#a4adbd;font-size:12px;line-height:1.7}.choice-symbol{font-size:25px}.badge{font-size:10px;color:#bcddc0;background:#294034;padding:5px 8px;border-radius:4px;margin-top:auto}.badge.neutral{background:#282f3d;color:#b8c0ce}details{margin-top:20px;font-size:12px;color:#b8c0d0}summary{cursor:pointer}details p{font-size:12px;overflow-wrap:anywhere}details li{margin:12px 0;line-height:1.7}.facts{display:flex;gap:32px;border-block:1px solid #323947;padding:25px 0;margin:20px 0}.facts dt{color:#9ba4b4;font-size:12px;margin-bottom:9px}.facts dd{margin:0;font-size:20px}.panel{padding:24px;background:#191e29;border:1px solid #323947;border-radius:12px}.panel p:last-child{margin-bottom:0}.alert{border-left:3px solid #e8bc6f;padding:12px 16px;background:#e8bc6f0b;color:#e9d3ad}.ready-mark{display:grid;place-items:center;border:1px solid #53664e;border-radius:50%;width:76px;height:76px;color:#d9e6b1;font-size:30px;margin:32px 0}progress{width:100%;accent-color:#e23e57;margin-top:16px}.components{padding-left:20px}@media(max-width:600px){.onboarding{padding:24px 18px 40px}.focused{margin-top:38px}h1{font-size:34px}.lead{font-size:14px}nav{gap:8px}nav>span>span{display:none}.choices{grid-template-columns:1fr}.facts{flex-wrap:wrap;gap:20px}.wave{gap:6px}.wave i{width:8px}}
+.compact{inset:auto 20px 20px auto;width:min(390px,calc(100vw - 40px));height:auto;max-height:45vh;padding:18px 22px;border:1px solid #3b4353;border-radius:12px;box-shadow:0 8px 30px #0006;z-index:100}.compact .focused{margin:0}.compact h1{font-size:20px;letter-spacing:-.3px;margin:6px 0 10px}.compact .eyebrow,.compact .ready-mark{display:none}.compact .lead,.compact p{font-size:12px;line-height:1.5;margin:8px 0}.compact .panel{padding:12px}.compact h2{font-size:13px}.compact .actions{margin-top:12px}.compact .primary{padding:10px 14px;min-width:0}.compact details{margin-top:8px}.compact .library{margin-top:4px}.lookup-option{display:flex;align-items:center;gap:10px}
 </style>
