@@ -29,6 +29,15 @@
           aria-modal="true"
           aria-label="Search for a song"
         >
+          <div class="sheet__modes" role="group" aria-label="Browse by">
+            <button v-for="option in ['Songs', 'Artists']" :key="option" type="button"
+              :aria-pressed="browseMode === option" :disabled="singerImporting"
+              @click="setBrowseMode(option)">{{ option }}</button>
+          </div>
+          <div v-if="selectedArtist !== null" class="sheet__modes sheet__artist-heading">
+            <button type="button" @click="browseArtist(null, $event)">← All artists</button>
+            <strong>{{ selectedArtist || 'Unknown artist' }}</strong>
+          </div>
           <div class="sheet__bar">
             <input
               ref="inputRef"
@@ -38,7 +47,8 @@
               @blur="activeIndex = -1"
               class="sheet__input"
               type="search"
-              :placeholder="placeholder"
+              :placeholder="browseMode === 'Artists' ? (selectedArtist === null ? 'Search artists' : 'Search this artist’s songs') : placeholder"
+              :aria-label="browseMode === 'Artists' ? (selectedArtist === null ? 'Search artists' : 'Search this artist’s songs') : placeholder"
               :disabled="singerImporting"
               maxlength="200"
               autocomplete="off"
@@ -71,9 +81,9 @@
               :role="rowAction(r) ? 'option' : null"
               :aria-selected="rowAction(r) ? idx === activeIndex : null"
               :tabindex="isRowClickable(r) ? 0 : null"
-              @click="onRowClick(r)"
-              @keydown.enter="onRowClick(r)"
-              @keydown.space.prevent="onRowClick(r)"
+              @click="onRowClick(r, $event)"
+              @keydown.enter="onRowClick(r, $event)"
+              @keydown.space.prevent="onRowClick(r, $event)"
             >
               <span
                 class="sheet__badge"
@@ -91,7 +101,7 @@
                     v-else-if="r.source === 'catalog' && imports[importKey(r)]?.status"
                     class="sheet__status"
                   >{{ imports[importKey(r)].status }}</span>
-                  <template v-else>{{ r.artist }}</template>
+                  <template v-else>{{ r.source === 'artist' ? `${r.count} songs` : r.artist }}</template>
                 </div>
               </div>
               <button
@@ -120,6 +130,11 @@
             <li v-else-if="!results.length" role="presentation" class="sheet__note">{{ emptyNote }}</li>
           </ul>
 
+          <div v-if="browseMode === 'Artists' && total > pageSize" class="sheet__modes" aria-label="Pagination">
+            <button type="button" :disabled="page === 1 || searching" @click="changePage(-1)">Previous</button>
+            <span>Page {{ page }} of {{ Math.ceil(total / pageSize) }}</span>
+            <button type="button" :disabled="page * pageSize >= total || searching" @click="changePage(1)">Next</button>
+          </div>
           <div v-if="showFreehand" class="sheet__foot">
             <button type="button" class="sheet__freehand" @click="submitFreehand">
               ＋ Add “{{ query.trim() }}” as a new request
@@ -158,6 +173,11 @@ const emit = defineEmits(['pick'])
 
 const inputRef = ref(null)
 const query = ref('')
+const browseMode = ref('Songs')
+const selectedArtist = ref(null)
+const page = ref(1)
+const total = ref(0)
+const pageSize = 40
 const searching = ref(false)
 const results = ref([])     // normalized rows
 const searchError = ref(null)
@@ -176,11 +196,11 @@ const exactMatch = computed(() => {
 })
 
 const showFreehand = computed(() =>
-  !!query.value.trim() && !exactMatch.value && !singerImporting.value
+  browseMode.value === 'Songs' && !!query.value.trim() && !exactMatch.value && !singerImporting.value
 )
 
 const emptyNote = computed(() =>
-  query.value.trim().length < 2
+  browseMode.value === 'Artists' ? 'No matching artists or songs in this library.' : query.value.trim().length < 2
     ? 'Type at least two letters to search.'
     : 'Nothing here matches — add it as a request below.'
 )
@@ -245,13 +265,14 @@ function teardownSheet() {
 
 onBeforeUnmount(() => {
   clearTimeout(timer)
+  ++queryToken
   teardownSheet()
 })
 
 // ─── Search ─────────────────────────────────────────────────────────────────
 
 function isRowClickable(r) {
-  if (r.source === 'local') return true
+  if (r.source === 'local' || r.source === 'artist') return true
   if (r.source === 'catalog' && props.mode === 'singer') {
     return !imports[importKey(r)]?.importing
   }
@@ -324,7 +345,63 @@ function onEnter() {
 // highlight stays, which is correct: Enter acts on what is visibly lit.)
 watch(results, () => { activeIndex.value = -1 })
 
+function setBrowseMode(mode) {
+  if (browseMode.value === mode) return
+  browseMode.value = mode
+  selectedArtist.value = null
+  query.value = ''
+  onInput()
+}
+
+async function browseArtist(artist, event) {
+  // A keyboard-activated row/back button disappears on drill-down. Keep
+  // focus in the dialog, but do not summon a phone keyboard after a tap.
+  const active = document.activeElement
+  const restoreFocus = event && (event.type === 'keydown' || event.detail === 0)
+    && active !== inputRef.value && event.currentTarget?.contains(active)
+  selectedArtist.value = artist
+  query.value = ''
+  onInput()
+  if (restoreFocus) {
+    await nextTick()
+    if (sheetOpen.value) inputRef.value?.focus()
+  }
+}
+
+function changePage(delta) {
+  page.value += delta
+  loadBrowse()
+}
+
+async function loadBrowse() {
+  clearTimeout(timer)
+  const token = ++queryToken
+  results.value = []
+  searchError.value = null
+  searching.value = true
+  try {
+    const artist = selectedArtist.value
+    const response = artist === null
+      ? await songApi.artists({ search: query.value.trim(), page: page.value, pageSize })
+      : await songApi.list({ artistExact: artist, search: query.value.trim(), status: 'ready', page: page.value, pageSize })
+    if (token !== queryToken) return
+    total.value = response.data.total
+    results.value = artist === null
+      ? response.data.items.map(row => ({ ...row, source: 'artist', key: `artist-${row.artist}`, title: row.artist || 'Unknown artist' }))
+      : response.data.songs.map(row => ({ ...row, source: 'local', key: `local-${row.id}` }))
+  } catch {
+    if (token === queryToken) searchError.value = 'Library browsing is not responding. Try searching again.'
+  } finally {
+    if (token === queryToken) searching.value = false
+  }
+}
+
 function onInput() {
+  if (browseMode.value === 'Artists') {
+    page.value = 1
+    loadBrowse()
+    return
+  }
   clearTimeout(timer)
   const q = query.value.trim()
   searchError.value = null
@@ -410,6 +487,9 @@ function reset() {
   clearTimeout(timer)
   ++queryToken
   query.value = ''
+  browseMode.value = 'Songs'
+  selectedArtist.value = null
+  total.value = 0
   results.value = []
   searching.value = false
   searchError.value = null
@@ -421,9 +501,11 @@ function pickLocal(r) {
   reset()
 }
 
-function onRowClick(r) {
+function onRowClick(r, event) {
   if (!isRowClickable(r)) return
-  if (r.source === 'local') {
+  if (r.source === 'artist') {
+    browseArtist(r.artist, event)
+  } else if (r.source === 'local') {
     pickLocal(r)
   } else if (r.source === 'catalog' && props.mode === 'singer') {
     pickCatalogSinger(r)
@@ -481,7 +563,7 @@ async function importFromCatalog(r) {
 
 function submitFreehand() {
   const text = query.value.trim()
-  if (!text) return
+  if (browseMode.value !== 'Songs' || !text) return
   emit('pick', text, null)
   reset()
 }
@@ -489,6 +571,12 @@ function submitFreehand() {
 
 <style scoped>
 .picker { position: relative; }
+.sheet__modes { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem; color: white; flex-shrink: 0; }
+.sheet__modes button { min-height: 44px; padding: 0.5rem 0.8rem; border: 1px solid #555; border-radius: 0.5rem; background: transparent; color: white; cursor: pointer; }
+.sheet__modes button[aria-pressed="true"] { background: #932b43; }
+.sheet__modes button:disabled { opacity: 0.5; cursor: default; }
+.sheet__artist-heading button { flex-shrink: 0; }
+.sheet__artist-heading strong { min-width: 0; overflow-wrap: anywhere; }
 
 /* ─── Trigger ─── */
 .picker__trigger {
