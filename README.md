@@ -54,7 +54,7 @@ The lyric editor lets you correct the text and timing afterward.
 
 Prepared karaoke media can be imported and played without an AI processing pack.
 The player includes a queue, vocal and instrumental levels, key shift, and a
-projector window on the host machine. There is no guest-phone interface.
+projector window on the host machine.
 
 ## Documentation
 
