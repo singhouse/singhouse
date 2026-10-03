@@ -33,6 +33,22 @@ AI models automatically separate vocals and generate timed lyrics from imported 
 10. **Host queue** — a simple, manually ordered "who sings next" list built
    from your library, plus a flat play history
 
+## How it works
+
+Generation runs in three stages:
+
+1. **Separate the audio.** Demucs separates vocals from the instrumental.
+   A second model, mel_band_roformer by default, splits the vocals into lead
+   and backing tracks, so each can be adjusted independently during playback.
+2. **Transcribe the vocals.** Heart transcribes the separated lead vocal,
+   producing words and timestamps from the recording.
+3. **Align the lyrics.** If you supply reference lyrics, lyricsync aligns them
+   to the transcription's timing. Without a reference, it uses the transcribed
+   words. Timing comes from your recording in either case.
+
+The player combines the resulting audio stems with word-level lyric
+highlighting. You can correct words and timing in the lyric editor afterward.
+
 ## Installation
 
 | Platform | Download from the release page |
@@ -44,17 +60,13 @@ AI models automatically separate vocals and generate timed lyrics from imported 
 The desktop app bundles Python and FFmpeg. See the
 [installation guide](docs/install-desktop.md) for platform requirements and setup.
 
-## Processing
+## Processing setup
 
 **Set up song processing** installs the processing runtime and models as
 separate downloads, with your permission. Available processing packs depend on
-your platform. Import an audio file and optionally supply reference lyrics;
-Singhouse separates the vocals and generates synchronized lyrics automatically.
-The lyric editor lets you correct the text and timing afterward.
+your platform.
 
 Prepared karaoke media can be imported and played without an AI processing pack.
-The player includes a queue, vocal and instrumental levels, key shift, and a
-projector window on the host machine.
 
 ## Documentation
 
