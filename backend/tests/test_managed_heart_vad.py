@@ -60,15 +60,17 @@ def test_vad_executes_after_admission_before_model_loading(monkeypatch, tmp_path
     assert events == ["admit", "vad", "inference", "release"]
 
 
-def test_child_uses_identical_rms_segmentation(tmp_path):
+@pytest.mark.parametrize("sample_width", [2, 4])
+def test_child_uses_identical_rms_segmentation(tmp_path, sample_width):
     rate = 16000
-    samples = np.zeros(rate * 8, dtype=np.int16)
+    dtype = np.int16 if sample_width == 2 else np.int32
+    samples = np.zeros(rate * 8, dtype=dtype)
     samples[rate:rate * 3] = (10000 * np.sin(np.arange(rate * 2) * .1)).astype(np.int16)
     samples[rate * 5:rate * 7] = samples[rate:rate * 3]
     audio = tmp_path / "fixture.wav"
     with wave.open(str(audio), "wb") as wav:
         wav.setnchannels(1)
-        wav.setsampwidth(2)
+        wav.setsampwidth(sample_width)
         wav.setframerate(rate)
         wav.writeframes(samples.tobytes())
     config = VadConfig()
@@ -95,3 +97,46 @@ def test_old_cpu_metal_pack_does_not_import_new_guard(monkeypatch, tmp_path, acc
     monkeypatch.setattr(sys, "argv", ["heart", "audio.wav", "--device", device, "--model-path", str(tmp_path)])
     worker.main()
     assert inference.call_args.args[0].device == device
+
+
+def test_managed_vad_supports_float_stereo_wav(tmp_path):
+    import soundfile
+    rate = 16000
+    signal = np.zeros(rate * 8, dtype=np.float32)
+    signal[rate:rate * 3] = .3 * np.sin(np.arange(rate * 2) * .1)
+    signal[rate * 5:rate * 7] = signal[rate:rate * 3]
+    stereo = np.stack([signal, signal * .5], axis=1)
+    audio = tmp_path / "managed-vocals.wav"
+    soundfile.write(audio, stereo, rate, subtype="FLOAT")
+    assert soundfile.info(audio).subtype == "FLOAT"
+    config = VadConfig()
+    expected = rms_vad_segments(stereo.mean(axis=1), rate, config)
+    assert expected
+    assert worker.managed_vad_segments(str(audio), json.dumps(asdict(config))) == expected
+
+
+def test_managed_float_decoder_is_never_called_before_admission(monkeypatch, tmp_path):
+    import soundfile
+    active = False
+    @contextmanager
+    def admit(*args):
+        nonlocal active
+        active = True
+        try:
+            yield "cpu"
+        finally:
+            active = False
+    calls = []
+    def decode(*args, **kwargs):
+        assert active
+        assert kwargs == {"dtype": "float32", "always_2d": True}
+        calls.append(args[0])
+        return np.zeros((32000, 2), dtype=np.float32), 16000
+    monkeypatch.setattr(memory_admission, "admit", admit)
+    monkeypatch.setattr(soundfile, "read", decode)
+    monkeypatch.setattr(worker, "run_inference", Mock())
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cuda")
+    monkeypatch.setattr(sys, "argv", ["heart", "audio.wav", "--device", "cuda", "--model-path", str(tmp_path), "--managed-vad-config", "{}"])
+    worker.main()
+    assert calls == ["audio.wav"]
+    assert not active
