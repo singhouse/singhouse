@@ -28,7 +28,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /path: desktop\/artifacts\/\r?\n\s+include-hidden-files: true/)
   assert.doesNotMatch(workflow, /AZURE_CLIENT_SECRET/)
   assert.match(workflow, /import \{ WINDOWS_SIGNING \}/)
-  assert.match(workflow, /import \{ BRAND_NAME \}/)
+  assert.match(workflow, /import \{ BRAND_INSTALLED_NAME \}/)
   assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_ACCOUNT'/)
   assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_PROFILE'/)
   assert.match(workflow, /Add-WorkflowEnvironment 'SIGNING_SUBJECT'/)

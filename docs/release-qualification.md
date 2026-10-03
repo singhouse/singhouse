@@ -17,7 +17,7 @@ system. Record the exact OS build, CPU, RAM, GPU and driver, display topology,
 audio device, filesystem, desktop/session type, kernel, and available disk.
 
 For each target, begin from a machine or user profile with no developer cache,
-system Python dependency, existing Singhouse data, runtime packs, or models.
+system Python dependency, existing singhouse data, runtime packs, or models.
 Retain the original downloaded installer so its operating-system warning and
 checksum can be tested. Cover install, first launch, second-instance refusal,
 normal restart, offline restart, upgrade, interrupted upgrade, recovery,

@@ -1,6 +1,6 @@
-# Install Singhouse Core
+# Install singhouse Core
 
-Singhouse is a desktop application for a karaoke library you already have. The
+singhouse is a desktop application for a karaoke library you already have. The
 installer includes the app, its private local backend, Python, and FFmpeg. You
 do not need Docker or a system Python installation. AI model files are separate
 downloads that require your consent; prepared media playback does not require
@@ -46,7 +46,7 @@ candidate. They must not promise an override that was not tested.
 2. Run the per-user installer.
 3. Record any SmartScreen or organization-policy message. Proceed only when
    Windows offers an acceptable per-application action.
-4. Launch Singhouse from the installed shortcut.
+4. Launch singhouse from the installed shortcut.
 
 Windows ARM is not supported by this release.
 
@@ -81,7 +81,7 @@ outer-image verification passed for that candidate.
 
 The library, uploads, stems, models, settings, and recovery state live in the
 per-user application-data directory, separate from installed application
-files. Back up the complete directory while Singhouse is closed before an
+files. Back up the complete directory while singhouse is closed before an
 upgrade or operating-system migration.
 
 The normal uninstaller is intended to retain user data. Confirm the behavior

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "upstream-model-policy",
-  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. No model weights are shipped or mirrored by Singhouse.",
+  "description": "Only model IDs and exact immutable file inventories defined in this application policy may be installed. No model weights are shipped or mirrored by singhouse.",
   "allowedHosts": [
     "huggingface.co",
     "download.pytorch.org",

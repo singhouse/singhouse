@@ -12,7 +12,7 @@ const bytes = manifest => manifest.files.reduce((sum, file) => sum + file.size, 
 const complete = manifest => ['transcription', 'separation'].every(id => manifest.capabilities?.includes(id))
   && LOCAL_MODEL_IDS.every(id => manifest.models?.includes(id)
     && manifest.modelCapabilities?.[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
-const REOPEN_MESSAGE = 'Setup is verified. Reopen Singhouse to use local processing.'
+const REOPEN_MESSAGE = 'Setup is verified. Reopen singhouse to use local processing.'
 const initial = () => ({ state: 'idle', phase: 'preflight', message: 'Choose local processing or playback.', retryable: false, restartRequired: false })
 
 // These checks compare observations with measured release evidence. They do not

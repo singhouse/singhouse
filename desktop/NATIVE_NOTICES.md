@@ -31,7 +31,7 @@ them are not trusted by this release.
   identifies its posy ancestry and distlib influence. Exact upstream license
   texts, package metadata and README are copied under `native/notices/uv-*`;
   their source URLs and hashes are pinned in `desktop/locks/native.json` and
-  retained in native provenance. Singhouse changes the interpreter-path and
+  retained in native provenance. singhouse changes the interpreter-path and
   script resources and normalizes PE/ZIP timestamps; executable code sections
   and Python callable bodies remain unchanged. The transformation and output
   hashes are recorded in `installationNormalization.consoleLaunchers`.

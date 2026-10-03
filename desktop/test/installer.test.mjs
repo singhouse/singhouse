@@ -121,7 +121,7 @@ test('installer rejects stale native admission policy instead of overlaying it',
   try {
     const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
     assert.equal(pkg.author, 'Bones Consulting LLC')
-    assert.equal(pkg.description, 'Singhouse is a self-hosted karaoke suite for your own music library.')
+    assert.equal(pkg.description, 'singhouse is a self-hosted karaoke suite for your own music library.')
     assert.equal(pkg.desktopName, 'org.karaoke.desktop.desktop')
     await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: pkg.version }))
     await writeFile(resolve(native, 'files.json'), '{}\n')
@@ -194,6 +194,9 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     const { default: config, stageProcessingCatalog, withStagedCatalog } = await import(`${installer}?catalog=${Date.now()}`)
     // Neither a stray legacy catalog nor the per-target sources are in the static file list.
     assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))
+    // The installed name is fixed: packaging, signing and recovery match these files by exact name.
+    assert.equal(config.productName, 'Singhouse')
+    assert.equal(config.executableName, 'Singhouse')
 
     const playback = await stageProcessingCatalog({ mode: 'playback-only', catalogBytes: null, catalogSha256: null })
     assert.deepEqual(playback.files, [])

@@ -7,7 +7,7 @@ module.
 """
 from karaoke_backend import __version__
 
-PRODUCT_NAME = "Singhouse"
+PRODUCT_NAME = "singhouse"
 PRODUCT_SLUG = "singhouse"
 # Source repository, carried as the User-Agent comment so the operators of the
 # services we call have a way to reach the project. Not a link shown in any UI.

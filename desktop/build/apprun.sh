@@ -8,7 +8,7 @@ app_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd -P)
 for argument do
   case "$argument" in
     --no-sandbox|--no-sandbox=*|--disable-sandbox|--disable-sandbox=*|--disable-*-sandbox|--disable-*-sandbox=*|--single-process|--single-process=*|--in-process-gpu|--in-process-gpu=*)
-      echo "Singhouse requires Electron sandboxing; sandbox bypass arguments are not supported." >&2
+      echo "singhouse requires Electron sandboxing; sandbox bypass arguments are not supported." >&2
       exit 1
       ;;
   esac

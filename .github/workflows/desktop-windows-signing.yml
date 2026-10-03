@@ -43,7 +43,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $configuration = node --input-type=module -e "import { WINDOWS_SIGNING } from './desktop/windows_signing.mjs'; import { BRAND_NAME } from './frontend/src/brand.js'; console.log(JSON.stringify({ ...WINDOWS_SIGNING, productName: BRAND_NAME }))" | ConvertFrom-Json
+          $configuration = node --input-type=module -e "import { WINDOWS_SIGNING } from './desktop/windows_signing.mjs'; import { BRAND_INSTALLED_NAME } from './frontend/src/brand.js'; console.log(JSON.stringify({ ...WINDOWS_SIGNING, productName: BRAND_INSTALLED_NAME }))" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $configuration.account -or -not $configuration.certificateProfile -or
               -not $configuration.subject -or -not $configuration.productName) { throw 'Product signing configuration is incomplete.' }
           $values = @($configuration.account, $configuration.certificateProfile, $configuration.subject, $configuration.productName)

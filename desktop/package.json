@@ -1,7 +1,7 @@
 {
   "name": "karaoke-desktop",
   "version": "0.1.0",
-  "description": "Singhouse is a self-hosted karaoke suite for your own music library.",
+  "description": "singhouse is a self-hosted karaoke suite for your own music library.",
   "author": "Bones Consulting LLC",
   "desktopName": "org.karaoke.desktop.desktop",
   "private": true,

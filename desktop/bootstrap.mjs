@@ -381,40 +381,40 @@ export async function verifyRecoveryAnchor(anchorPath, { platform = process.plat
   helperPath = fileURLToPath(import.meta.url), verifiedAppImage = null, platformTrust = defaultAnchorPlatformTrust } = {}) {
   const anchor = readRecoveryAnchor(anchorPath)
   if (anchor.platform !== platform || anchor.arch !== arch) {
-    throw new Error('Recovery trust anchor path or target changed; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor path or target changed; reinstall singhouse before attempting recovery')
   }
   const selectedAnchor = resolve(anchorPath), canonicalAnchor = await realpath(anchorPath), stateRoot = dirname(dirname(canonicalAnchor))
   if (anchorPath !== selectedAnchor || selectedAnchor !== canonicalAnchor || anchor.anchorPath !== canonicalAnchor ||
       canonicalAnchor !== join(stateRoot, 'recovery-tool', 'anchor.json') || anchor.stateRoot !== stateRoot) {
-    throw new Error('Recovery trust anchor state root changed; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor state root changed; reinstall singhouse before attempting recovery')
   }
   const paths = { executablePath, bootstrapPath, pythonPath, helperPath }
   let currentLayout
   try { currentLayout = exactComponentLayout(platform, paths, verifiedAppImage) } catch {
-    throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
   }
   if (canonicalJson(currentLayout) !== canonicalJson(anchor.componentLayout)) {
-    throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
   }
   if (platform === 'linux') {
     let outer
     try { outer = stableFirstInstallerExecutable({ platform, executablePath: verifiedAppImage?.actualExecutablePath, verifiedAppImage }) } catch {
-      throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+      throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
     }
-    if (outer !== anchor.executablePath || executablePath !== outer) throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+    if (outer !== anchor.executablePath || executablePath !== outer) throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
     let actualBytes
     try { actualBytes = await readFile(verifiedAppImage.actualExecutablePath) } catch {
-      throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+      throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
     }
-    if (sha256(actualBytes) !== anchor.digests.actualExecutablePath) throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+    if (sha256(actualBytes) !== anchor.digests.actualExecutablePath) throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
     for (const name of ['bootstrapPath', 'pythonPath', 'helperPath']) {
       const logical = anchor.componentLayout[name]
       if (paths[name] !== join(verifiedAppImage.mountPath, ...logical.split('/'))) {
-        throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+        throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
       }
     }
   } else if (!Object.keys(paths).every(name => paths[name] === anchor.componentLayout[name])) {
-    throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+    throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
   }
   for (const [name, path] of Object.entries(paths)) {
     let canonical, info
@@ -422,19 +422,19 @@ export async function verifyRecoveryAnchor(anchorPath, { platform = process.plat
       canonical = await realpath(path)
       info = await lstat(anchor.platform === 'linux' && name !== 'executablePath' ? canonical : path)
     } catch {
-      throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+      throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
     }
     const mountedComponent = anchor.platform === 'linux' && name !== 'executablePath'
     const mountedRelative = mountedComponent ? relative(verifiedAppImage.mountPath, canonical) : null
     if (path !== resolve(path) || !info.isFile() ||
         (mountedComponent ? !mountedRelative || mountedRelative.startsWith('..') || isAbsolute(mountedRelative) : canonical !== path || info.isSymbolicLink())) {
-      throw new Error('Recovery trust anchor component layout changed; reinstall Singhouse before attempting recovery')
+      throw new Error('Recovery trust anchor component layout changed; reinstall singhouse before attempting recovery')
     }
     let bytes
-    try { bytes = await readFile(path) } catch { throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery') }
-    if (sha256(bytes) !== anchor.digests?.[name]) throw new Error('Recovery trust anchor is missing or corrupt; reinstall Singhouse before attempting recovery')
+    try { bytes = await readFile(path) } catch { throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery') }
+    if (sha256(bytes) !== anchor.digests?.[name]) throw new Error('Recovery trust anchor is missing or corrupt; reinstall singhouse before attempting recovery')
   }
-  if (!await platformTrust(anchor, { verifiedAppImage })) throw new Error('Recovery trust anchor platform signature is invalid; reinstall Singhouse before attempting recovery')
+  if (!await platformTrust(anchor, { verifiedAppImage })) throw new Error('Recovery trust anchor platform signature is invalid; reinstall singhouse before attempting recovery')
   return anchor
 }
 

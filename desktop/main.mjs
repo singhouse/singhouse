@@ -33,10 +33,11 @@ const root = resolve(desktopDir, '..')
 const packaged = app.isPackaged
 const nativeDir = resolve(process.resourcesPath, 'native')
 const releasePolicyPath = packaged ? resolve(process.resourcesPath, 'release.json') : resolve(desktopDir, 'release.json')
-let brand = app.getName()
+let brand = 'singhouse'
 if (!packaged) {
-  brand = (await import(pathToFileURL(resolve(root, 'frontend/src/brand.js')).href)).BRAND_NAME
-  app.setName(brand)
+  const names = await import(pathToFileURL(resolve(root, 'frontend/src/brand.js')).href)
+  brand = names.BRAND_NAME
+  app.setName(names.BRAND_INSTALLED_NAME)
 }
 const ownsInstance = !packaged || app.requestSingleInstanceLock()
 const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userData')) : createRuntime()) : null
@@ -314,7 +315,7 @@ function runProcessingOperation(kind, action) {
 
 async function stageUpdate() {
   const choice = await dialog.showOpenDialog(host, { title: 'Select authenticated update metadata', properties: ['openFile'],
-    filters: [{ name: 'Singhouse update metadata', extensions: ['json'] }] })
+    filters: [{ name: `${brand} update metadata`, extensions: ['json'] }] })
   if (choice.canceled || !choice.filePaths.length) return
   const metadataPath = choice.filePaths[0], metadata = JSON.parse(readFileSync(metadataPath, 'utf8'))
   const signed = await updates.updates.validate(metadata)
@@ -459,7 +460,7 @@ async function installProcessing() {
 }
 
 async function start() {
-  startupSurface = createStartupSurface({ BrowserWindow, brand: 'Singhouse', onClose: () => app.quit() })
+  startupSurface = createStartupSurface({ BrowserWindow, brand: 'singhouse', onClose: () => app.quit() })
   await startupSurface.ready
   if (quitting) return
   await startupSurface.update('Verifying application files…')
@@ -528,9 +529,10 @@ async function start() {
     if (startupHandoff?.state === 'release-mismatch') throw new Error('This launcher does not match the authenticated update handoff')
     const selected = await updates.updates.active({ handoff: startupHandoff?.journal })
     if (selected && selected.releaseId !== productRelease.releaseId) throw new Error('Managed application selection is not authenticated for this launcher')
-    brand = (await import(pathToFileURL(resolve(nativeDir, 'brand.mjs')).href)).BRAND_NAME
-    if (typeof brand !== 'string' || !brand) throw new Error('Installed product name is invalid')
-    app.setName(brand)
+    const names = await import(pathToFileURL(resolve(nativeDir, 'brand.mjs')).href)
+    brand = names.BRAND_NAME
+    if (typeof brand !== 'string' || !brand || typeof names.BRAND_INSTALLED_NAME !== 'string' || !names.BRAND_INSTALLED_NAME) throw new Error('Installed product name is invalid')
+    app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
     processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
@@ -575,7 +577,7 @@ async function start() {
     }
   }
   if (!ready) throw new Error('Private backend did not become ready')
-  await startupSurface.update('Opening Singhouse…')
+  await startupSurface.update(`Opening ${brand}…`)
   await fetchJSON('/api/auth/gate', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: launch.origin }, body: JSON.stringify({ password: launch.password }) })
   launch.password = ''
   const me = await fetchJSON('/api/auth/me')

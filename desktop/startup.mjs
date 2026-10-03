@@ -27,7 +27,7 @@ main { width: min(82vw, 360px); }
 }
 
 /** A separate, network-disabled window; no backend or renderer bridge needed. */
-export function createStartupSurface({ BrowserWindow, brand = 'Singhouse', onClose = () => {} }) {
+export function createStartupSurface({ BrowserWindow, brand = 'singhouse', onClose = () => {} }) {
   const window = new BrowserWindow({
     title: brand, width: 480, height: 380, show: true,
     backgroundColor: '#141821', resizable: false, maximizable: false,

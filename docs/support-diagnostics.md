@@ -1,6 +1,6 @@
 # Support diagnostics
 
-Start by recording the Singhouse version, artifact filename and SHA-256, exact
+Start by recording the singhouse version, artifact filename and SHA-256, exact
 operating-system version, CPU architecture, and whether the problem occurred
 before or after an upgrade. For display or audio problems, include the desktop
 session, connected displays, output device, and the action that triggered the
@@ -40,8 +40,8 @@ For a release candidate, also preserve:
 - the recovery-point identifier shown by the application after an interrupted
   update.
 
-Singhouse does not write a separate persistent application log in this
-candidate. To capture one reproduction, close Singhouse and start the installed
+singhouse does not write a separate persistent application log in this
+candidate. To capture one reproduction, close singhouse and start the installed
 executable from a terminal with output redirected to a new file:
 
 ```sh
@@ -59,7 +59,7 @@ directory:
 & "$env:LOCALAPPDATA\Programs\Singhouse\Singhouse.exe" *> .\singhouse-reproduction.log
 ```
 
-Reproduce the problem once, close Singhouse, then review the captured file
+Reproduce the problem once, close singhouse, then review the captured file
 before sharing it. These commands do not change operating-system security
 settings.
 
