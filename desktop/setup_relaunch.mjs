@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { readOnlyAppImageMount, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
 
 
@@ -84,9 +85,100 @@ export function setupRelaunchOptions({ platform = process.platform, executablePa
   return { execPath, args: [...args] }
 }
 
-export function relaunchForSetup(app, options) {
-  // All selection/verification must succeed before quitting, so the caller's
-  // restartForSetup catch can resume the backend on a rejected relaunch.
-  app.relaunch(setupRelaunchOptions(options))
-  app.quit()
+// No code or executable is loaded from the disappearing AppImage mount after
+// shutdown. Positional arguments preserve the authenticated path and argv.
+const handoffScript = `set -eu
+set -f
+parent=$1
+expected=$2
+shift 2
+printf 'READY\\n' >&3
+exec 3>&-
+IFS= read -r armed
+[ "$armed" = ARM ] || exit 70
+# Any extra input cancels. Only the owning parent's descriptor closing arms EOF.
+if IFS= read -r cancelled; then exit 70; fi
+tries=0
+while [ -r "/proc/$parent/stat" ]; do
+  IFS= read -r record 2>/dev/null < "/proc/$parent/stat" || break
+  rest=\${record##*) }
+  index=0
+  current=
+  state=
+  for field in $rest; do
+    index=$((index + 1))
+    if [ "$index" -eq 1 ]; then state=$field; fi
+    if [ "$index" -eq 20 ]; then current=$field; break; fi
+  done
+  [ "$current" = "$expected" ] || break
+  # A zombie has exited; waiting for its launcher to reap it can hang forever.
+  case "$state" in Z|X) break ;; esac
+  tries=$((tries + 1))
+  [ "$tries" -lt 1200 ] || exit 71
+  /bin/sleep 0.1
+done
+exec "$@"
+`
+
+export async function prepareAppImageHandoff({ execPath, args }, { signal, readinessTimeout = 5000, shutdownTimeout = 120000 } = {}) {
+  signal?.throwIfAborted()
+  const stat = readFileSync('/proc/self/stat', 'utf8')
+  const startTime = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]
+  if (!/^\d+$/.test(startTime || '')) throw new Error('Restart process identity is unavailable')
+  const helper = spawn('/bin/sh', ['-c', handoffScript, 'singhouse-restart', String(process.pid), startTime, execPath, ...args],
+    { detached: true, cwd: '/', stdio: ['pipe', 'inherit', 'inherit', 'pipe'] })
+  let exited = false, failure, rejectReady, readinessTimer, shutdownTimer
+  const cancel = () => {
+    failure ??= signal?.reason || new Error('Application restart handoff cancelled')
+    if (!exited) helper.kill('SIGKILL')
+    rejectReady?.(failure)
+  }
+  signal?.addEventListener('abort', cancel, { once: true })
+  const cleanup = () => {
+    clearTimeout(readinessTimer); clearTimeout(shutdownTimer)
+    signal?.removeEventListener('abort', cancel)
+  }
+  helper.once('exit', () => { exited = true; cleanup(); rejectReady?.(new Error('Application restart helper stopped before readiness')) })
+  helper.on('error', error => { failure = error; cleanup(); rejectReady?.(error) })
+  helper.stdin.on('error', error => { failure = error; cancel() })
+  try {
+    await new Promise((resolve, reject) => {
+      rejectReady = reject
+      let received = ''
+      readinessTimer = setTimeout(() => { failure = new Error('Application restart helper readiness timed out'); cancel() }, readinessTimeout)
+      helper.stdio[3].on('data', chunk => {
+        received += chunk.toString()
+        if (received.length > 6 || !'READY\n'.startsWith(received)) {
+          failure = new Error('Invalid application restart helper acknowledgement'); cancel(); return
+        }
+        if (received === 'READY\n') resolve()
+      })
+      if (signal?.aborted) cancel()
+    })
+    clearTimeout(readinessTimer)
+    if (failure || exited) throw failure || new Error('Application restart helper stopped')
+    await new Promise((resolve, reject) => helper.stdin.write('ARM\n', error => error ? reject(error) : resolve()))
+    if (failure || signal?.aborted) throw failure || signal.reason
+    rejectReady = null
+    // If normal shutdown stalls while this process lives, cancel the handoff.
+    // After process exit the helper's own bounded identity wait takes over.
+    shutdownTimer = setTimeout(cancel, shutdownTimeout)
+    shutdownTimer.unref()
+    helper.unref()
+    helper.stdin.unref()
+    helper.stdio[3].unref()
+    return { cancel }
+  } catch (error) { cancel(); cleanup(); throw error }
+}
+
+export async function relaunchForSetup(app, options = {}) {
+  const selected = setupRelaunchOptions(options)
+  const platform = options.platform ?? process.platform
+  if (platform === 'linux' && selected.execPath !== (options.executablePath ?? process.execPath)) {
+    const handoff = await prepareAppImageHandoff(selected)
+    try { app.quit() } catch (error) { handoff.cancel(); throw error }
+  } else {
+    if (app.relaunch(selected) === false) throw new Error('The application could not schedule a restart. Please try again.')
+    app.quit()
+  }
 }

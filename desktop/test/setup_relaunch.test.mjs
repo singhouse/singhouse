@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import { createHash } from 'node:crypto'
-import { setupRelaunchOptions, relaunchForSetup, verifiedSetupAppImageRuntime } from '../setup_relaunch.mjs'
+import { setupRelaunchOptions, relaunchForSetup, verifiedSetupAppImageRuntime, prepareAppImageHandoff } from '../setup_relaunch.mjs'
 import { restartForSetup } from '../onboarding_state.mjs'
 
 test('AppImage setup relaunch validates outer image bytes and preserves every argument', () => {
@@ -48,12 +50,13 @@ test('failed AppImage authentication resumes backend and never schedules relaunc
   assert.deepEqual(calls, ['resume'])
 })
 
-test('relaunch is scheduled before quit and scheduling errors leave the application open', () => {
+test('relaunch is scheduled before quit and scheduling errors leave the application open', async () => {
   const calls = []
   const options = { platform: 'win32', executablePath: '/application', args: ['--profile=isolated'] }
-  relaunchForSetup({ relaunch: value => calls.push(value), quit: () => calls.push('quit') }, options)
+  await relaunchForSetup({ relaunch: value => calls.push(value), quit: () => calls.push('quit') }, options)
   assert.deepEqual(calls, [{ execPath: '/application', args: ['--profile=isolated'] }, 'quit'])
-  assert.throws(() => relaunchForSetup({ relaunch: () => { throw new Error('schedule failed') }, quit: () => assert.fail() }, options), /schedule failed/)
+  await assert.rejects(relaunchForSetup({ relaunch: () => { throw new Error('schedule failed') }, quit: () => assert.fail() }, options), /schedule failed/)
+  await assert.rejects(relaunchForSetup({ relaunch: () => false, quit: () => assert.fail() }, options), /could not schedule/)
 })
 
 
@@ -113,3 +116,113 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
     assert.throws(check, /no authenticated runtime keeper/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+
+test('real handoff waits for parent exit and preserves argument boundaries', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'actual-handoff-'))
+  let parent
+  try {
+    const output = join(root, 'arguments.json')
+    const args = ['space value', '$(not a command)', 'quote"value', '--user-data-dir=profile with spaces']
+    const target = `require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))`
+    const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
+      await prepareAppImageHandoff({ execPath: process.execPath, args: ${JSON.stringify(['-e', target, output, ...args])} });
+      process.send('ready');
+      process.on('message', () => process.exit(0));`
+    parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    await once(parent, 'message')
+    assert.equal(existsSync(output), false, 'new application must not race the old singleton')
+    const exited = once(parent, 'exit')
+    parent.send('exit')
+    await exited
+    for (let tick = 0; tick < 100 && !existsSync(output); tick++) await new Promise(resolve => setTimeout(resolve, 20))
+    assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')), args)
+  } finally {
+    if (parent?.exitCode === null) parent.kill('SIGKILL')
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('handoff abort and shutdown deadline cancel the helper without launching', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cancel-handoff-'))
+  try {
+    const output = join(root, 'must-not-exist')
+    const selected = { execPath: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(output)}, 'bad')`] }
+    const already = new AbortController(); already.abort()
+    await assert.rejects(prepareAppImageHandoff(selected, { signal: already.signal }), { name: 'AbortError' })
+    const pending = new AbortController()
+    const preparing = prepareAppImageHandoff(selected, { signal: pending.signal })
+    pending.abort()
+    await assert.rejects(preparing, { name: 'AbortError' })
+    const armed = new AbortController()
+    await prepareAppImageHandoff(selected, { signal: armed.signal })
+    armed.abort()
+    await prepareAppImageHandoff(selected, { shutdownTimeout: 20 })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(existsSync(output), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('handoff starts after an unreaped owner has become a zombie', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'zombie-handoff-'))
+  let parent
+  try {
+    const output = join(root, 'launched')
+    const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
+      await prepareAppImageHandoff({ execPath: process.execPath, args: ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(output)}, 'ready')`)}] });
+      process.exit(0);`
+    parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: 'ignore' })
+    const exited = once(parent, 'exit')
+    // Blocking this launcher's event loop deliberately prevents libuv from
+    // reaping the owner. A separate Node observer checks /proc without waitpid.
+    const observer = `
+      const fs = require('node:fs');
+      const deadline = Date.now() + 5000;
+      let zombie = false;
+      while (Date.now() < deadline) {
+        const record = fs.readFileSync('/proc/' + process.argv[1] + '/stat', 'utf8');
+        zombie = record.slice(record.lastIndexOf(') ') + 2).split(' ')[0] === 'Z';
+        if (zombie && fs.existsSync(process.argv[2])) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+      if (!zombie) throw new Error('owner was not deliberately held unreaped');
+      if (!fs.existsSync(process.argv[2])) throw new Error('handoff waited for reaping rather than exit');
+    `
+    const result = spawnSync(process.execPath, ['-e', observer, String(parent.pid), output], { encoding: 'utf8', timeout: 8000 })
+    assert.equal(result.status, 0, result.stderr || result.error?.message)
+    await exited
+  } finally {
+    if (parent?.exitCode === null) parent.kill('SIGKILL')
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const mode of ['abort', 'deadline']) {
+  test(`armed handoff ${mode} cannot launch after its owning process exits`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cancelled-owner-'))
+    let parent
+    try {
+      const output = join(root, 'must-not-launch')
+      const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
+        const controller = new AbortController();
+        await prepareAppImageHandoff({ execPath: process.execPath, args: ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(output)}, 'bad')`)}] },
+          { signal: controller.signal, shutdownTimeout: ${mode === 'deadline' ? 20 : 5000} });
+        process.send('armed');
+        process.on('message', async () => {
+          ${mode === 'abort' ? 'controller.abort();' : 'await new Promise(resolve => setTimeout(resolve, 100));'}
+          process.exit(0);
+        });`
+      parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+      await once(parent, 'message')
+      const exited = once(parent, 'exit')
+      parent.send('exit')
+      await exited
+      await new Promise(resolve => setTimeout(resolve, 300))
+      assert.equal(existsSync(output), false)
+    } finally {
+      if (parent?.exitCode === null) parent.kill('SIGKILL')
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
