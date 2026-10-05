@@ -58,6 +58,7 @@ from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs._llm import make_correction_progress_callback
+from karaoke_backend.jobs._progress import make_message_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import Job, JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import page_word_sync
@@ -68,7 +69,12 @@ from karaoke_backend.workers.lyrics_worker import (
     fetch_lyrics,
     lrclib_enabled,
 )
-from karaoke_backend.workers.modal_worker import StemSeparationError, separate_stems
+from karaoke_backend.workers.modal_worker import (
+    StemSeparationError,
+    ProcessingRefusedError,
+    separate_stems,
+    separation_timeout,
+)
 from karaoke_backend.workers.word_sync_worker import (
     DEFAULT_MODEL,
     describe_run,
@@ -145,6 +151,9 @@ async def _run_with_retry(coro_factory, *, job_id: str, timeout_s: int) -> None:
             return
         except asyncio.TimeoutError:
             raise StemSeparationError(f"Stem separation timed out after {timeout_s}s")
+        except ProcessingRefusedError:
+            # Processing was refused up front; a second attempt cannot change that.
+            raise
         except StemSeparationError as e:
             last_err = e
             if attempt == 0:
@@ -248,7 +257,9 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
                     karaoke_model=karaoke_model,
                 ),
                 job_id=ctx.job_id,
-                timeout_s=900,
+                # Follows the inner stage deadlines: a guarded worker may choose
+                # its slower measured CPU route after its own memory check.
+                timeout_s=separation_timeout(),
             )
             # Only now — separation returned, so every mix ran to completion.
             write_separation_marker(stems_dir)
@@ -357,6 +368,9 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
             song_id=song_id,
             pipeline_config=pipeline_config,
             correction_progress_fn=correction_progress_fn,
+            device_notice_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
         )
         if word_data is None:
             raise IngestError("Transcription returned no result")
@@ -433,6 +447,8 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
         # and deleting it here would be the same bug as the blanket `finally`,
         # aimed at somebody else's work.
         raise
+    except ProcessingRefusedError as exc:
+        raise JobFailure(str(exc), str(exc)) from exc
     except StemSeparationError as exc:
         raise JobFailure("Stem separation failed", str(exc)) from exc
     except IngestError as exc:

@@ -61,9 +61,42 @@ async def test_demucs_deadline_and_timeout_message(monkeypatch, tmp_path, device
     monkeypatch.setattr(modal_worker, "require_selected_models", lambda *_: None)
     monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", "managed")
     monkeypatch.setenv("KARAOKE_PROCESSING_MEMORY_JSON", policy)
+    prepared = AsyncMock(side_effect=lambda path, _work: path)
+    monkeypatch.setattr(modal_worker, "_prepare_guarded_input", prepared)
     launch = AsyncMock(side_effect=asyncio.TimeoutError)
     monkeypatch.setattr(modal_worker, "_await_subprocess", launch)
     with pytest.raises(modal_worker.StemSeparationError, match=f"after {expected // 60} minutes"):
         await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "stems", "job")
     assert launch.call_args.kwargs["timeout"] == expected
     launch.assert_awaited_once()
+    assert prepared.await_count == (1 if expected == 3600 else 0)
+
+
+GUARDED_TOTAL = (modal_worker.INPUT_PREPARATION_TIMEOUT + 2 * modal_worker.MANAGED_STAGE_TIMEOUT
+                 + modal_worker.MIXING_TIMEOUT)
+
+
+@pytest.mark.parametrize("managed,device,policy,modal,expected", [
+    ("managed", "cuda", "", False, GUARDED_TOTAL),
+    ("managed", "cpu", "measured-policy", False, GUARDED_TOTAL),
+    ("managed", "cpu", "", False, 900), ("managed", "mps", "", False, 900),
+    ("", "cuda", "", False, 900), ("managed", "cuda", "", True, 900),
+])
+def test_whole_separation_deadline_covers_every_guarded_stage(monkeypatch, managed, device, policy, modal, expected):
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", managed)
+    monkeypatch.setenv("KARAOKE_PROCESSING_MEMORY_JSON", policy)
+    monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: modal)
+    monkeypatch.setattr(modal_worker, "configured_accelerator", lambda: device)
+    assert modal_worker.separation_timeout() == expected
+    if expected != 900:
+        # Demucs and Roformer may each use their whole CPU-fallback deadline.
+        assert expected > 2 * modal_worker._managed_processing_timeout(device, 900)
+
+
+def test_invalid_attestation_keeps_legacy_whole_deadline(monkeypatch):
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", "managed")
+    monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: False)
+    def invalid():
+        raise modal_worker.StemSeparationError("bad attestation")
+    monkeypatch.setattr(modal_worker, "configured_accelerator", invalid)
+    assert modal_worker.separation_timeout() == 900

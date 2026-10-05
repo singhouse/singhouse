@@ -87,19 +87,98 @@ def main():
         from karaoke_backend.workers.memory_admission import admit
     if args.managed_vad_config is not None and (not guarded or args.vad_segments):
         raise ValueError("Managed VAD requires a managed worker and cannot combine with external segments")
-    with (admit("heart-transcriptor", args.device, [args.audio_path]) if guarded else nullcontext(args.device)) as selected:
+    admission = nullcontext(args.device)
+    if guarded:
+        admission = admit("heart-transcriptor", args.device, [args.audio_path],
+                          unmeasured_cuda=unmeasured_gpu_path(args))
+    with admission as selected:
         args.device = selected
         args.managed_vad_segments = (managed_vad_segments(args.audio_path, args.managed_vad_config)
                                      if args.managed_vad_config is not None else None)
         run_inference(args, ckpt_dir)
 
 
+def unmeasured_gpu_path(args):
+    """Name a requested mode outside the measured GPU profile, or None.
+
+    The GPU budget was measured with managed VAD at the default ``VadConfig``
+    (the qualification profiler passes ``--managed-vad-config {}``) and greedy
+    decoding, so every decoded slice is at most ``max_segment_duration`` long.
+    Anything else uses the CPU budget instead.
+    """
+    if args.managed_vad_config is not None:
+        from lyricsync._config import VadConfig
+        if vad_config_from_json(args.managed_vad_config) != VadConfig():
+            return "transcription with a non-default voice activity configuration"
+    elif not args.vad_segments:
+        return "whole-file transcription without voice activity detection"
+    else:
+        problem = segment_problem(args.vad_segments, args.audio_path)
+        if problem is not None:
+            return f"transcription of supplied segments with {problem}"
+    if args.temperature_fallback:
+        return "transcription with temperature fallback"
+    return None
+
+
+def segment_problem(segments_path, audio_path):
+    """Why supplied VAD segments fall outside the measured profile, or None.
+
+    Segments must be finite, ordered and non-overlapping, inside the audio,
+    and no longer than the measured maximum segment length.
+    """
+    import math
+    from lyricsync._config import VadConfig
+    longest = VadConfig().max_segment_duration
+    try:
+        import soundfile
+        with open(segments_path) as handle:
+            segments = json.load(handle)
+        duration = soundfile.info(audio_path).duration
+    except Exception:  # noqa: BLE001 - unreadable input is simply unmeasured
+        return "unreadable segments or audio"
+    if not isinstance(segments, list):
+        return "a malformed segment list"
+    previous_end = 0.0
+    # Allow one 16 kHz sample of rounding at the end of the audio.
+    tolerance = 1 / 16000
+    for segment in segments:
+        if (not isinstance(segment, (list, tuple)) or len(segment) != 2
+                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in segment)):
+            return "a malformed segment"
+        start, end = (float(value) for value in segment)
+        if not (math.isfinite(start) and math.isfinite(end)):
+            return "a non-finite boundary"
+        if start < previous_end or end <= start:
+            return "overlapping or unordered segments"
+        if end > duration + tolerance:
+            return "a segment past the end of the audio"
+        if end - start > longest + 1e-9:
+            return f"a segment longer than the measured {longest:g} seconds"
+        previous_end = end
+    return None
+
+
+def vad_config_from_json(configuration):
+    """Build the installed VadConfig, ignoring fields this version lacks.
+
+    The worker script and the processing runtime can differ by a release in
+    development; unknown keys keep that skew from failing the job.
+    """
+    from dataclasses import fields
+    from lyricsync._config import VadConfig
+    values = json.loads(configuration)
+    if not isinstance(values, dict):
+        raise ValueError("Managed VAD configuration must be a JSON object")
+    known = {field.name for field in fields(VadConfig)}
+    return VadConfig(**{key: value for key, value in values.items() if key in known})
+
+
 def managed_vad_segments(audio_path, configuration):
     """Decode managed PCM/FLOAT WAV after admission, preserving RMS segmentation."""
-    from lyricsync._config import VadConfig
     import soundfile
     from lyricsync.audio.vad import rms_vad_segments
-    config = VadConfig(**json.loads(configuration))
+    config = vad_config_from_json(configuration)
     samples, sample_rate = soundfile.read(audio_path, dtype="float32", always_2d=True)
     samples = samples.mean(axis=1)
     return rms_vad_segments(samples, sample_rate, config)

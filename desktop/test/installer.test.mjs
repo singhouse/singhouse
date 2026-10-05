@@ -180,6 +180,42 @@ test('installer rejects stale native admission policy instead of overlaying it',
   }
 })
 
+test('installer requires the native memory policy to match the target platform source exactly', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'installer-memory-'))
+  const previous = process.env.KARAOKE_NATIVE_PAYLOAD
+  process.env.KARAOKE_NATIVE_PAYLOAD = native
+  const stale = /Reassemble the native runtime after changing processing-memory.json/
+  const memory = resolve(native, 'processing-memory.json')
+  try {
+    const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
+    const target = platform => writeFile(resolve(native, 'manifest.json'),
+      JSON.stringify({ appVersion: pkg.version, platform, arch: 'x64' }))
+    await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
+    await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
+    for (const policy of ['models.json', 'processing-locks.json']) {
+      await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
+    }
+    const source = await readFile(resolve(desktop, 'processing-memory', 'linux-x64.json'))
+
+    await target('linux')
+    await assert.rejects(import(`${installer}?memory-missing=${Date.now()}`), stale)
+    await writeFile(memory, Buffer.concat([source, Buffer.from('\n')]))
+    await assert.rejects(import(`${installer}?memory-changed=${Date.now()}`), stale)
+    await writeFile(memory, source)
+    await import(`${installer}?memory-match=${Date.now()}`)
+
+    // A target without a measured policy may not carry one.
+    await target('win32')
+    await assert.rejects(import(`${installer}?memory-unexpected=${Date.now()}`), stale)
+    await rm(memory)
+    await import(`${installer}?memory-absent=${Date.now()}`)
+  } finally {
+    if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
+    else process.env.KARAOKE_NATIVE_PAYLOAD = previous
+    await rm(native, { recursive: true, force: true })
+  }
+})
+
 test('only a processing-ready build maps its validated catalog onto the packaged name', async () => {
   const native = await mkdtemp(resolve(tmpdir(), 'installer-catalog-'))
   const previous = process.env.KARAOKE_NATIVE_PAYLOAD

@@ -26,6 +26,7 @@ from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs._llm import make_correction_progress_callback
+from karaoke_backend.jobs._progress import make_message_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import (
@@ -279,6 +280,9 @@ async def run_retranscribe(ctx: JobContext) -> Optional[str]:
             # used to always hit the cache, so it needs the same claim re-check
             # the DB write below has.
             cache_write_guard=_make_cache_write_guard(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
+            device_notice_fn=make_message_callback(
                 ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
             ),
         )
