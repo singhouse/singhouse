@@ -954,11 +954,12 @@ Historical timing assumptions for retained qualified processing profiles:
 - Each stage runs in its own process, and one job runs at a time, so each stage
   pays its own model-load overhead.
 
-These historical ranges apply only to retained qualified profiles with those
-settings. The CUDA `bounded-v1` profile instead uses six-second Demucs segments
-and RoFormer segment size 256, as described below. Those changed CUDA profiles
-remain unqualified and display no estimate until matching qualification and
-measurement evidence is supplied; the historical ranges do not qualify them.
+The CUDA `bounded-v1` profile uses six-second Demucs segments and RoFormer
+segment size 256, as described below. Its estimates reuse the broad CUDA ranges
+as extrapolations; they are not measurements of that execution profile. Allowed
+experimental catalogs also show estimates without changing their qualification
+status. The wizard labels the range “Estimated processing time*” with the note
+“*Actual processing time varies by hardware and song.”
 
 Planning ranges (minutes for one three-minute track):
 
@@ -989,8 +990,8 @@ The measured CPU row comes from a 16-physical-core processor. A computer that
 reports 16 logical processors with fewer physical cores (for example 8 cores
 with SMT) is shown the same row but may be slower.
 
-CUDA ranges appear only for a qualified CUDA catalog whose measured memory
-evidence accepts this computer, on a Linux or Windows x64 target with exactly
+CUDA ranges appear for a validated CUDA catalog allowed on the release channel,
+including experimental hardware-test catalogs, on a Linux or Windows x64 target with exactly
 one CUDA device and no unified memory. The tier comes from that device's name
 and reported dedicated memory:
 
@@ -1006,8 +1007,9 @@ and reported dedicated memory:
   slower; both demotions stack, and the entry row is the floor. Some laptop
   parts report desktop names and cannot be recognized as laptops.
 - Other names, including workstation, datacenter, and MX parts, non-NVIDIA
-  adapters, catalogs that have not passed qualification, and catalogs without measured
-  memory evidence get no range.
+  adapters, and catalogs not allowed on the release channel get no range.
+  Missing measured memory evidence does not suppress advisory timing; existing
+  setup memory checks and per-stage processing admission remain independent.
 - In CUDA packs that apply per-stage memory admission, a stage can still move
   to the CPU when a job runs; the estimate does not reflect that. Older cards may also be much slower with
   fp16.
@@ -1079,7 +1081,7 @@ hardware observations, mismatched targets, incomplete or extended model sets,
 and blocked installation plans display no numeric range. The estimate applies
 only to the default three-model workflow from the selected validated catalog.
 If the installed runtime differs from that catalog, setup plans a replacement
-and any estimate describes the selected qualified runtime. Existing measured
+and any estimate describes the selected runtime. Existing measured
 memory checks and runtime attestation remain
 authoritative and independent of this UI.
 

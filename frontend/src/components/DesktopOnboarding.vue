@@ -245,7 +245,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           aria-label="Local processing estimate"
         >
           <div class="speed-heading">
-            <strong>Estimated processing speed</strong>
+            <strong>Estimated processing time*</strong>
             <span>{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
           </div>
           <div
@@ -276,10 +276,10 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           </p>
           <p>{{ plan?.processingEstimate?.basis }}</p>
           <p class="quiet">
-            Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
+            Estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
           </p>
           <p class="quiet">
-            Actual processing times may vary.
+            *Actual processing time varies by hardware and song.
           </p>
         </section>
         <div class="actions">

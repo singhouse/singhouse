@@ -705,7 +705,7 @@ it('refreshes lookup preferences even when the following installation preflight 
   wrapper.unmount()
 })
 
-it('shows a qualitative machine rating and rough three-minute-track range with the real settings path', async () => {
+it('shows a qualitative machine rating and estimated three-minute-track range with the real settings path', async () => {
   globalThis.window.karaokeDesktop = bridge({
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
@@ -715,12 +715,14 @@ it('shows a qualitative machine rating and rough three-minute-track range with t
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
   const estimate = wrapper.find('[aria-label="Local processing estimate"]')
+  expect(estimate.text()).toContain('Estimated processing time*')
+  expect(estimate.text()).not.toMatch(/rough/i)
   expect(estimate.text()).toContain('9–16 minutes to prepare a 3-minute track')
   expect(estimate.text()).toContain('Based on one measured run on a 16-core desktop processor')
-  expect(estimate.text()).toContain('Rough estimate for vocal separation and timed lyrics. Excludes installation and time in queue.')
+  expect(estimate.text()).toContain('Estimate for vocal separation and timed lyrics. Excludes installation and time in queue.')
   expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
-  expect(wrapper.text()).toContain('Actual processing times may vary.')
+  expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
   expect(wrapper.text()).toContain('You can enable Modal later via Settings → Song processing… → My Modal account.')
   wrapper.unmount()
 })
@@ -739,7 +741,7 @@ it('shows extrapolated estimates with the same calm variability note', async () 
   expect(estimate.text()).toContain('uses your NVIDIA graphics card')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(3)
   expect(wrapper.text()).not.toContain('Extrapolated estimate')
-  expect(wrapper.text()).toContain('Actual processing times may vary.')
+  expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
   wrapper.unmount()
 })
 

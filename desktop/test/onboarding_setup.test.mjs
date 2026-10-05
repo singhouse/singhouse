@@ -861,8 +861,7 @@ test('CUDA estimates require an admitted, recognized single CUDA device with eno
     [{ ...CUDA_PACK, platform: 'darwin', arch: 'arm64' }, appleHost({ unifiedMemory: false,
       cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
     [{ ...CUDA_PACK, arch: 'arm64' }, cudaHost('NVIDIA GeForce RTX 4090', 24, { arch: 'arm64' })],
-    // Missing admission: no measured memory evidence, or an unqualified catalog.
-    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), () => {}, { memory: null }],
+    // Invalid qualification status for the selected release scope.
     [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), unqualified],
   ]) {
     const { setup } = estimateFixture(pack, hardware, options)
@@ -879,6 +878,27 @@ test('CUDA estimates require an admitted, recognized single CUDA device with eno
   assert.equal(plan.processingEstimate.minutes, null)
   const unmeasured = estimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
   assert.equal((await unmeasured.setup.preflight()).available, true)
+})
+
+test('shipped experimental CUDA catalogs provide advisory estimates without changing qualification', async () => {
+  for (const platform of ['linux', 'win32']) {
+    const catalog = JSON.parse(await readFile(new URL(`../processing-catalogs/${platform}-x64.json`, import.meta.url), 'utf8'))
+    const { setup } = fixture({ catalog, releaseChannel: 'private-test',
+      hardware: async () => cudaHost('NVIDIA GeForce RTX 3090', 24, { platform }), diskFree: async () => 100 * GiB })
+    const plan = await setup.preflight()
+    assert.equal(plan.available, true, platform)
+    assert.deepEqual(plan.processingEstimate.minutes, [1, 3], platform)
+    assert.equal(plan.processingEstimate.evidence, 'extrapolated')
+    assert.equal(plan.qualificationScope, 'hardware-test')
+    assert.equal(plan.memoryQualification.status, 'unknown')
+    assert.equal(catalog.qualification.passed, false)
+    // Release-channel restrictions and the setup disk gate remain authoritative.
+    setup.releaseChannel = 'stable'
+    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+    setup.releaseChannel = 'private-test'
+    setup.diskFree = async () => 0
+    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+  }
 })
 
 test('memory-blocked plans never get a speed estimate', async () => {
@@ -909,8 +929,15 @@ test('installed runtimes matching the catalog keep their CUDA and Metal tiers', 
   assert.equal(plan.available, true)
   assert.equal(plan.components.length, 0)
   assert.equal(plan.processingEstimate.minutes, null)
+  const experimental = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3090', 24), { memory: null })
+  experimental.setup.releaseChannel = 'private-test'
+  Object.assign(experimental.setup.catalog.qualification, { passed: false, scope: 'hardware-test' })
+  plan = await experimental.setup.preflight()
+  assert.equal(plan.components.length, 0)
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3])
+  assert.equal(plan.qualificationScope, 'hardware-test')
   const unmeasured = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
-  assert.equal((await unmeasured.setup.preflight()).processingEstimate.minutes, null)
+  assert.deepEqual((await unmeasured.setup.preflight()).processingEstimate.minutes, [1, 3])
   const drifted = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
   drifted.setup.catalog.runtime = { ...drifted.setup.catalog.runtime, id: `${drifted.setup.catalog.runtime.id}-other` }
   plan = await drifted.setup.preflight()

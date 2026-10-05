@@ -153,10 +153,10 @@ function metalTier(hardware) {
   return chip && (chip[2] || Number(chip[1]) >= 4) ? 'performance' : 'base'
 }
 
-// `cudaAdmitted` is the caller's existing admission result: a passed catalog
-// qualification and measured memory evidence that accepts this computer. It
-// only gates the advisory CUDA range; it never blocks a plan.
-function processingEstimate(runtime, hardware = {}, { cudaAdmitted = false } = {}) {
+// Advisory timing is independent of hardware qualification and measured memory
+// evidence. The caller still validates catalog scope and applies existing memory
+// admission; estimates never enable installation or processing.
+function processingEstimate(runtime, hardware = {}, { cudaEstimateAllowed = false } = {}) {
   const unknown = { level: null, label: 'Not enough information', minutes: null,
     basis: 'A matching supported processing pack and computer details are needed for an estimate.' }
   if (!runtime || !complete(runtime) || runtime.models.length !== LOCAL_MODEL_IDS.length
@@ -170,7 +170,7 @@ function processingEstimate(runtime, hardware = {}, { cudaAdmitted = false } = {
   let tier
   if (runtime.accelerator === 'cuda') {
     // Only one unambiguous CUDA device identifies the processing GPU.
-    if (cudaAdmitted !== true || !['linux', 'win32'].includes(hardware.platform) || hardware.arch !== 'x64'
+    if (cudaEstimateAllowed !== true || !['linux', 'win32'].includes(hardware.platform) || hardware.arch !== 'x64'
         || hardware.unifiedMemory === true
         || !Array.isArray(hardware.cudaDevices) || hardware.cudaDevices.length !== 1) return unknown
     tier = cudaTier(hardware.cudaDevices[0])
@@ -367,8 +367,8 @@ export class OnboardingSetup {
     signal?.throwIfAborted()
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
-    const estimateOptions = { cudaAdmitted: memory.memoryQualification.status === 'meets-measured-requirements'
-      && this.catalog?.qualification?.passed === true }
+    const estimateOptions = { cudaEstimateAllowed: qualificationStatusMatches(this.catalog?.qualification)
+      && !qualificationScopeError(this.catalog?.qualification?.scope, this.releaseChannel) }
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
       processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
     if (installed.installed) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
