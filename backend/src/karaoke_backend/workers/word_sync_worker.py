@@ -111,9 +111,24 @@ def _plugin_transcriber(whisper_model: str, *, use_vad: bool):
     return None
 
 
+def _device_line_handler(device_notice_fn: Optional[Callable[[str], None]]):
+    """Translate a managed worker's device line into user-facing job text."""
+    if device_notice_fn is None:
+        return None
+    from karaoke_backend.workers.memory_admission import describe_device_selection, parse_device_line
+
+    def handle(line: str) -> None:
+        record = parse_device_line(line)
+        if record is not None:
+            device_notice_fn(describe_device_selection(record, "Transcribing vocals"))
+
+    return handle
+
+
 def _make_transcriber(
     whisper_model: str, *, use_vad: bool, allow_temperature_fallback: bool = False,
     cancel_event: threading.Event | None = None,
+    device_notice_fn: Optional[Callable[[str], None]] = None,
 ):
     """Build the transcriber for ``whisper_model``.
 
@@ -143,13 +158,21 @@ def _make_transcriber(
                 "fail (set KARAOKE_DEMUCS_PYTHON or create .venv-demucs)",
                 DEMUCS_PYTHON,
             )
+        accelerator = _attested_accelerator(whisper_model)
+        guarded = accelerator is not None and (accelerator == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
         return HeartTranscriber(
             python_path=DEMUCS_PYTHON,
             script_path=HEART_SCRIPT,
             use_vad=use_vad,
             allow_temperature_fallback=allow_temperature_fallback,
             cancel_event=cancel_event,
-            accelerator=_attested_accelerator(whisper_model),
+            accelerator=accelerator,
+            managed_vad=guarded,
+            # The child may select CPU after its fresh memory check. Allow that
+            # slower route without changing bounded cancellation or retrying.
+            timeout=3600 if guarded else 600,
+            **({"on_stderr_line": _device_line_handler(device_notice_fn)}
+               if guarded and device_notice_fn is not None else {}),
         )
     accelerator = _attested_accelerator(whisper_model)
     if accelerator == "mps":
@@ -219,6 +242,7 @@ def _make_pipeline(
     correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
     cancel_event: threading.Event | None = None,
+    device_notice_fn: Optional[Callable[[str], None]] = None,
 ) -> SyncPipeline:
     """Build a configured SyncPipeline.
 
@@ -231,6 +255,7 @@ def _make_pipeline(
         use_vad=use_vad,
         allow_temperature_fallback=allow_temperature_fallback,
         cancel_event=cancel_event,
+        **({"device_notice_fn": device_notice_fn} if device_notice_fn is not None else {}),
     )
     cfg = _with_env_correction(config or PipelineConfig())
     return SyncPipeline(
@@ -350,6 +375,7 @@ def _run_blocking(
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
     cancel_event: threading.Event | None = None,
+    device_notice_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Cache-aware transcribe-then-align (synchronous core).
 
@@ -387,6 +413,7 @@ def _run_blocking(
         correction_progress_fn=correction_progress_fn,
         allow_temperature_fallback=allow_temperature_fallback,
         cancel_event=cancel_event,
+        **({"device_notice_fn": device_notice_fn} if device_notice_fn is not None else {}),
     )
 
     if cached is not None:
@@ -466,6 +493,7 @@ async def generate_word_sync(
     allow_temperature_fallback: bool = False,
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
+    device_notice_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Full pipeline: transcribe (cached) → align → word-level sync.
 
@@ -490,6 +518,9 @@ async def generate_word_sync(
     action sets them — ``allow_temperature_fallback`` re-arms the
     0.0/0.1/0.2/0.4 rescue ladder, ``force_transcribe`` makes the run actually
     re-transcribe instead of replaying the ingest-populated cache.
+
+    ``device_notice_fn`` receives user-facing text, on the executor thread,
+    when a guarded local worker reports which device it selected.
     """
     valid_models = available_models()
     if whisper_model not in valid_models:
@@ -520,6 +551,7 @@ async def generate_word_sync(
             force_transcribe=force_transcribe,
             cache_write_guard=cache_write_guard,
             cancel_event=cancel_event,
+            device_notice_fn=device_notice_fn,
         ),
     )
     try:

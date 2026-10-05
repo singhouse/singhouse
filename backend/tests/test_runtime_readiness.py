@@ -305,3 +305,49 @@ async def test_managed_default_cache_does_not_admit_selected_alternate(monkeypat
     with pytest.raises(modal_worker.StemSeparationError, match="model set"):
         await modal_worker.separate_stems(tmp_path / "input.wav", tmp_path / "out", "job")
     subprocess.assert_not_called()
+
+
+def _cuda_policy(models):
+    envelope = {"maxDurationSeconds": 600, "maxSampleRate": 48000, "maxChannels": 2,
+                "devices": {"cuda": {"ramBytes": 1, "vramBytes": 1}}}
+    return json.dumps({"schema": 1, "executionProfile": "bounded-v1", "evidenceReference": "synthetic-test-only",
+                       "models": {model: envelope for model in models}})
+
+
+@pytest.mark.parametrize("policy,separation,transcription", [
+    (_cuda_policy(["demucs-mdx-extra", "karaoke-roformer", "heart-transcriptor"]), True, True),
+    ("", False, False),
+    (_cuda_policy(["heart-transcriptor"]), False, True),
+    # Separation preparation needs every workflow model's envelope.
+    (_cuda_policy(["demucs-mdx-extra", "karaoke-roformer"]), False, False),
+    ('{"schema": 1, "executionProfile": "stale"}', False, False),
+])
+def test_cuda_runtime_without_measured_policy_is_not_ready(monkeypatch, tmp_path, policy, separation, transcription):
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.write_bytes(b"")
+    python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_PROCESSING_PYTHON", str(python))
+    monkeypatch.setenv("KARAOKE_PROCESSING_ACCELERATOR", "cuda")
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python, accelerator="cuda"))
+    monkeypatch.setenv("KARAOKE_PROCESSING_MEMORY_JSON", policy)
+    monkeypatch.setattr(features.modal_offload, "readiness", lambda: {"configured": False})
+    result = features._processing_readiness()
+    assert result["separation"]["ready"] is separation
+    assert result["transcription"]["ready"] is transcription
+    assert result["runtime"]["memoryPolicy"] is (separation and transcription)
+    for name, ready in (("separation", separation), ("transcription", transcription)):
+        if not ready:
+            assert "no measured memory policy" in result[name]["reason"]
+
+
+def test_non_cuda_runtime_readiness_does_not_require_policy(monkeypatch, tmp_path):
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir()
+    python.write_bytes(b"")
+    python.chmod(0o700)
+    monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", _attestation(python, accelerator="metal"))
+    monkeypatch.delenv("KARAOKE_PROCESSING_MEMORY_JSON", raising=False)
+    result = features._processing_readiness()
+    assert result["separation"]["ready"] is True
+    assert "memoryPolicy" not in result["runtime"]

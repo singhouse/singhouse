@@ -21,6 +21,24 @@ finally:
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_memory_policy_selects_only_native_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "processing-memory"
+            source.mkdir()
+            for target in ("linux-x64", "win32-x64"):
+                (source / f"{target}.json").write_text(target)
+            with patch.object(assemble, "DESKTOP", root):
+                for target in ("linux-x64", "win32-x64", "darwin-arm64"):
+                    output = root / target
+                    output.mkdir()
+                    assemble.copy_processing_memory_policy(target, output)
+                    path = output / "processing-memory.json"
+                    if target == "darwin-arm64":
+                        self.assertFalse(path.exists())
+                    else:
+                        self.assertEqual(path.read_text(), target)
+
     def test_generic_assembly_descriptor_binds_opaque_payload_and_pairing(self):
         files = {"backend.py": "a" * 64, "static/index.html": "b" * 64}
         core = assemble.assembly_descriptor(files)

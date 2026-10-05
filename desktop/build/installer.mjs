@@ -34,6 +34,14 @@ for (const policy of ['models.json', 'processing-locks.json']) {
     throw new Error(`Reassemble the native runtime after changing ${policy}`)
   }
 }
+// Optional memory evidence is native-inventory owned, beside backend.py.
+const memoryName = 'processing-memory.json'
+const memorySource = resolve(desktop, 'processing-memory', `${manifest.platform}-${manifest.arch}.json`)
+if (existsSync(resolve(native, memoryName)) !== existsSync(memorySource)
+    || existsSync(resolve(native, memoryName))
+      && !readFileSync(resolve(native, memoryName)).equals(readFileSync(memorySource))) {
+  throw new Error('Reassemble the native runtime after changing processing-memory.json')
+}
 // The processing catalog is never part of the static file list: a stray
 // desktop/processing-catalog.json or the per-target desktop/processing-catalogs/
 // sources are not packed. For a processing-ready build only, the gate's exact
