@@ -142,9 +142,10 @@ test('receipt launch modes: read-only and cached launches read no bytes; stale o
     const inventory = hashed.launchInventory
     assert.equal(inventory.applicationRoot, root)
     assert.equal(inventory.inventoryDigest, receipt.application.inventoryDigest)
-    const backendInfo = fs.lstatSync(join(root, 'resources/native/backend.py'))
+    // Exact stats, as decimal strings (inode and device numbers may exceed 2^53).
+    const backendInfo = fs.lstatSync(join(root, 'resources/native/backend.py'), { bigint: true })
     assert.deepEqual(inventory.files['resources/native/backend.py'],
-      [7, backendInfo.mtimeMs, backendInfo.ctimeMs, backendInfo.ino, backendInfo.dev])
+      [7n, backendInfo.mtimeNs, backendInfo.ctimeNs, backendInfo.ino, backendInfo.dev].map(String))
     assert.ok(Object.hasOwn(inventory.files, 'resources/release-receipt.json'))
 
     // Later launches compare sizes and times only.
@@ -164,9 +165,11 @@ test('receipt launch modes: read-only and cached launches read no bytes; stale o
       { ...inventory, schema: 2 }, { ...inventory, extra: true }, { ...inventory, files: [] },
       { ...inventory, files: Object.fromEntries(Object.entries(files).filter(([path]) => path !== firstFile)) },
       { ...inventory, files: { ...files, 'resources/native/gone.py': [1, 1] } },
-      ...[0, 1, 2, 3, 4].map(changed => ({ ...inventory, files: { ...files, [firstFile]: files[firstFile].map((value, index) => index === changed ? value + 1 : value) } })),
+      ...[0, 1, 2, 3, 4].map(changed => ({ ...inventory, files: { ...files, [firstFile]: files[firstFile].map((value, index) => index === changed ? String(BigInt(value) + 1n) : value) } })),
       { ...inventory, files: { ...files, [firstFile]: files[firstFile].slice(0, 2) } },
-      { ...inventory, files: { ...files, [firstFile]: [...files[firstFile], 0] } }]) {
+      { ...inventory, files: { ...files, [firstFile]: [...files[firstFile], '0'] } },
+      // Facts recorded as (rounded) numbers never match the exact values.
+      { ...inventory, files: { ...files, [firstFile]: files[firstFile].map(Number) } }]) {
       const view = countingFs()
       const result = observe(view.fs, { launchInventory })
       assert.equal(result.mode, 'hashed')
@@ -204,7 +207,7 @@ test('receipt launch modes: read-only and cached launches read no bytes; stale o
     await new Promise(resolveWait => setTimeout(resolveWait, 20))
     await writeFile(path, 'PRINT()')
     fs.utimesSync(path, 1000000000, 1000000000)
-    assert.equal(fs.lstatSync(path).mtimeMs, recorded.files['resources/native/backend.py'][1])
+    assert.equal(String(fs.lstatSync(path, { bigint: true }).mtimeNs), recorded.files['resources/native/backend.py'][1])
     view = countingFs()
     assert.throws(() => observe(view.fs, { launchInventory: recorded }), /changed: resources\/native\/backend.py/)
     assert.ok(view.reads > 0)

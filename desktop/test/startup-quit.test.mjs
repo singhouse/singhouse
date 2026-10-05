@@ -68,6 +68,8 @@ async function exercise(phase, intentionalQuit, failure = 'renderer') {
     quitting: false, shutdownComplete: false, updateOperation: null,
     installation: null, heartSetup: null, onboardingSetup: null,
     modalCheckController: null, processingOperation: null, projector: null,
+    packRecheck: null, processingManager: null, modelCache: null, activeProcessing: null, activeModels: null,
+    AbortController, recheckPacks: async () => { calls.push('pack-recheck') },
     startupHandoff: { state: 'awaiting-presentation' },
     updates: { completeStartup(value) {
       calls.push('complete-startup')
@@ -109,8 +111,9 @@ async function exercise(phase, intentionalQuit, failure = 'renderer') {
 
 for (const phase of ['ready', 'load', 'frame']) {
   test(`intentional quit during pending ${phase} completes cleanup without startup error UI`, async () => {
-    const { errors } = await exercise(phase, true)
+    const { errors, calls } = await exercise(phase, true)
     assert.deepEqual(errors, [])
+    assert.equal(calls.includes('pack-recheck'), false, 'No background pack check before presentation')
   })
 }
 test('a genuine presentation failure still shows the startup error and cleans up', async () => {
@@ -125,6 +128,114 @@ for (const phase of ['ready', 'load', 'frame']) {
   })
 }
 test('renderer crash after presentation retains normal shutdown', async () => {
-  const { errors } = await exercise('presented', false)
+  const { errors, calls } = await exercise('presented', false)
   assert.deepEqual(errors, [])
+  // The background pack check starts only once the window is presented.
+  assert.ok(calls.indexOf('pack-recheck') > calls.indexOf('splash-close'))
+})
+
+test('a damage notice is recorded at once, waits for every operation and covers only packs still damaged', async () => {
+  const begin = source.indexOf('// Packs the background check found damaged')
+  const end = source.indexOf("app.on('before-quit'", begin)
+  assert.ok(begin > 0 && end > begin)
+  const dialogs = [], sent = [], logged = []
+  const context = vm.createContext({
+    quitting: false, processingError: null, processingOperation: null, updateOperation: null, installation: null, heartSetup: null,
+    operationGate: { active: null }, setupChecks: 0, DAMAGE_NOTICE_POLL_MS: 1, setTimeout, String, Boolean,
+    console: { error: message => logged.push(message) },
+    host: { webContents: { send: channel => sent.push(channel) } },
+    dialog: { showMessageBox: async (_, options) => { dialogs.push(options.message); return { response: 1 } } },
+  })
+  vm.runInContext(source.slice(begin, end), context)
+  const settled = () => vm.runInContext('damageNotice', context) ?? Promise.resolve()
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20))
+  // A store whose packs are damaged until marked repaired (or replaced).
+  const store = () => { const repaired = new Set(); return { repaired, damageOutstanding: async id => !repaired.has(id) } }
+  const runtime = store(), models = store()
+  const report = (label, packStore, id) => context.reportDamagedPack({ label, store: packStore, id, error: new Error('hash mismatch') })
+  const busy = kind => { context.processingOperation = Promise.resolve(); context.operationGate.active = { kind } }
+  const idle = () => { context.processingOperation = null; context.updateOperation = null; context.operationGate.active = null }
+  const RUNTIME = 'The installed song processing runtime failed verification'
+
+  // A backup: the failures are recorded and logged at once; one dialog
+  // covering both packs follows when it finishes.
+  context.updateOperation = Promise.resolve(); context.operationGate.active = { kind: 'release operation' }
+  report('song processing runtime', runtime, 'r1')
+  report('separation and Heart model files', models, 'm1')
+  report('song processing runtime', runtime, 'r1')
+  assert.equal(context.processingError.split('\n').length, 2)
+  assert.match(context.processingError, /song processing runtime failed verification/)
+  assert.match(context.processingError, /separation and Heart model files failed verification/)
+  assert.equal(logged.length, 3)
+  await tick()
+  assert.deepEqual(dialogs, [])
+  idle()
+  await settled()
+  assert.deepEqual(dialogs, ['The installed song processing runtime and separation and Heart model files failed verification'])
+  assert.deepEqual(sent, ['setup:open'])
+
+  // A model installation cannot repair the runtime: its notice is shown once
+  // the installation ends.
+  dialogs.length = 0
+  busy('processing or model installation')
+  report('song processing runtime', runtime, 'r1')
+  await tick()
+  models.repaired.add('m1')
+  idle()
+  await settled()
+  assert.deepEqual(dialogs, [RUNTIME])
+
+  // Setup consent whose preflight is cancelled or rejected repairs nothing:
+  // the notice is shown afterwards.
+  dialogs.length = 0
+  busy('song processing setup')
+  report('song processing runtime', runtime, 'r1')
+  await tick()
+  assert.deepEqual(dialogs, [])
+  idle()
+  await settled()
+  assert.deepEqual(dialogs, [RUNTIME])
+
+  // A pack repaired (or replaced by another) meanwhile is dropped; its failure
+  // stays recorded.
+  dialogs.length = 0
+  context.processingError = null
+  busy('song processing setup')
+  report('song processing runtime', runtime, 'r1')
+  runtime.repaired.add('r1')
+  idle()
+  await settled(); await tick()
+  assert.deepEqual(dialogs, [])
+  assert.match(context.processingError, /song processing runtime failed verification/)
+
+  // A mixed queue shows only the packs still damaged.
+  busy('processing or model installation')
+  report('song processing runtime', runtime, 'r2')
+  report('separation and Heart model files', models, 'm2')
+  models.repaired.add('m2')
+  idle()
+  await settled()
+  assert.deepEqual(dialogs, [RUNTIME])
+
+  // A standalone setup check (preflight verification, the model folder
+  // choice) delays the dialog until it ends.
+  dialogs.length = 0
+  context.setupChecks = 1
+  report('song processing runtime', runtime, 'r2')
+  await tick()
+  assert.deepEqual(dialogs, [])
+  context.setupChecks = 0
+  await settled()
+  assert.deepEqual(dialogs, [RUNTIME])
+
+  // A failure queued while the queue is being checked joins the same dialog.
+  dialogs.length = 0
+  const slow = { damageOutstanding: async () => {
+    await tick()
+    report('separation and Heart model files', models, 'm3')
+    return true
+  } }
+  report('song processing runtime', slow, 'r3')
+  await settled(); await tick()
+  assert.deepEqual(dialogs, ['The installed song processing runtime and separation and Heart model files failed verification'])
 })

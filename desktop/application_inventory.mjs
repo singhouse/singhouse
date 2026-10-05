@@ -28,11 +28,11 @@ export function declaredFileDigests(receipt) {
 // Without `fileDigest` every regular file is content-hashed (the signed macOS
 // bundle path); with it, each digest comes from
 // `fileDigest(relativePath, path, lstatInfo)` and file bytes are read only if
-// that function reads them.
+// that function reads them. Entries are observed with exact (bigint) stats.
 export function physicalApplicationRecords(rootDirectory, physicalFs, current = rootDirectory, fileDigest) {
   const records = []
   for (const name of physicalFs.readdirSync(current).sort()) {
-    const path = resolve(current, name), info = physicalFs.lstatSync(path)
+    const path = resolve(current, name), info = physicalFs.lstatSync(path, { bigint: true })
     const relativePath = relative(rootDirectory, path).split(sep).join('/')
     if (info.isSymbolicLink()) {
       const raw = physicalFs.readlinkSync(path), target = relative(rootDirectory, resolve(dirname(path), raw)).split(sep).join('/')
@@ -69,11 +69,13 @@ export function validLaunchInventory(value, receipt, applicationRoot) {
 
 const staleInventory = Symbol('launch inventory is stale')
 
-// The recorded identity of one file. On POSIX systems utimes cannot set
+// The recorded identity of one file, from exact (bigint) stats written as
+// decimal strings: nanosecond times, and inode and device numbers that may
+// exceed 2^53 (NTFS file IDs, for example). On POSIX systems utimes cannot set
 // ctime, so a content change that restores the modification time still
 // differs. A Windows file owner can set it; that stays within the writable
 // installation's same-user trust boundary.
-const fileFacts = info => [info.size, info.mtimeMs, info.ctimeMs, info.ino, info.dev]
+const fileFacts = info => [info.size, info.mtimeNs, info.ctimeNs, info.ino, info.dev].map(String)
 
 // Hashes a regular file through one descriptor, confirming it is the entry the
 // walk observed, and returns its digest with that descriptor's facts. The open
@@ -82,7 +84,7 @@ function hashedFile(path, info, physicalFs) {
   const { O_RDONLY, O_NOFOLLOW = 0, O_NONBLOCK = 0 } = physicalFs.constants
   const descriptor = physicalFs.openSync(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
   try {
-    const opened = physicalFs.fstatSync(descriptor)
+    const opened = physicalFs.fstatSync(descriptor, { bigint: true })
     if (!opened.isFile() || opened.ino !== info.ino || opened.dev !== info.dev) throw new Error('Installed application file changed while it was checked')
     return { digest: hash(physicalFs.readFileSync(descriptor)), facts: fileFacts(opened) }
   } finally { physicalFs.closeSync(descriptor) }

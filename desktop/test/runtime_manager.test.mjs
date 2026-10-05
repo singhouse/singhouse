@@ -5,11 +5,11 @@ import fsPromises, { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, ren
 import { syncBuiltinESMExports } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, toNamespacedPath } from 'node:path'
+import { basename, dirname, join, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import zlib, { crc32, deflateRawSync, gzipSync } from 'node:zlib'
-import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, launchSelection, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
+import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, directorySyncUnsupported, launchSelection, recheckPacks, structuralTree, RECHECK_INTERVAL_MS, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
 const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
@@ -577,8 +577,13 @@ test('launch-time verification is structural: size, inventory, links and manifes
   // Full verification, and so every install and activation path, still does.
   await assert.rejects(manager.verify(installed.id), /verification failed/)
   assert.ok(reads > 0)
-  await assert.rejects(manager.install(manifest), /verification failed/)
-  await writeFile(python, 'fixture python')
+  // Reinstalling the same pack repairs it in place, keeping the damaged tree
+  // in quarantine.
+  assert.equal((await manager.install(manifest)).id, installed.id)
+  assert.equal(await readFile(python, 'utf8'), 'fixture python')
+  const quarantined = await readdir(join(root, 'processing', 'quarantine'))
+  assert.equal(quarantined.length, 1)
+  assert.equal(await readFile(join(root, 'processing', 'quarantine', quarantined[0], 'pack', manifest.python), 'utf8'), 'x'.repeat(manifest.files[0].size))
   assert.equal((await manager.verify(installed.id)).id, installed.id)
   const damages = [
     [() => writeFile(python, 'fixture python, longer'), /verification failed/],
@@ -728,13 +733,13 @@ test('a failed fresh self-test withdraws the recorded success; cancellation keep
   await assert.rejects(readFile(recorded), /ENOENT/)
   // A timeout is a failure too.
   await rm(fail)
-  await manager.probe(installed)
+  await manager.probe(await manager.verify(installed.id))
   await writeFile(slow, '')
   await assert.rejects(manager.probe(installed, { timeout: 50 }), /timed out/)
   await assert.rejects(readFile(recorded), /ENOENT/)
   // Cancellation says nothing about the pack.
   await rm(slow)
-  await manager.probe(installed)
+  await manager.probe(await manager.verify(installed.id))
   await writeFile(slow, '')
   const controller = new AbortController()
   const cancelled = manager.probe(installed, { signal: controller.signal })
@@ -786,10 +791,11 @@ test('launch takes the structural path only for a pack whose full verification i
   assert.equal((await launch()).runtimeManifestId, newer.id)
   assert.equal(await count(), probes)
 
-  // A reinstall attempt detects it: the full verification fails and the
-  // record is withdrawn, so the next launch verifies in full, rejects the
-  // pack and falls back to the earlier pointer, as an intact launch would.
-  await assert.rejects(manager.install(second), /verification failed/)
+  // A full verification (a background re-check, onboarding or reinstall)
+  // detects it and withdraws the record, so the next launch verifies in full,
+  // rejects the pack and falls back to the earlier pointer, as an intact
+  // launch would.
+  await assert.rejects(manager.verify(newer.id), /verification failed/)
   await assert.rejects(readFile(newerRecord), /ENOENT/)
   assert.equal((await launch()).runtimeManifestId, installed.id)
   assert.equal(await count(), probes, 'The earlier pack is admitted from its own record')
@@ -827,6 +833,421 @@ test('a FIFO in place of a recorded self-test result is rejected without waiting
   assert.equal((await launch()).probePassed, true)
   assert.ok(Date.now() - started < 10000)
   assert.equal(await count(), 2, 'The FIFO was not used as a record; the probe ran')
+})
+
+// True when a mode 0500 directory refuses new entries for this user (not
+// root, and a filesystem that enforces permission bits).
+async function directoryModesEnforced(directory) {
+  await chmod(directory, 0o500)
+  try {
+    await writeFile(join(directory, '.mode-check'), '')
+    await rm(join(directory, '.mode-check'))
+    return false
+  } catch { return true } finally { await chmod(directory, 0o700) }
+}
+
+test('withdrawing a record fails closed when the record cannot be deleted', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const { root, manager, installed, count, recorded, launch } = await controllablePack(t)
+  const records = dirname(recorded), notice = join(installed.directory, 'NOTICE.fixture')
+  if (!await directoryModesEnforced(records)) { t.skip('directory permissions are not enforced on this filesystem'); return }
+  const probes = await count()
+  try {
+    // Same-size damage passes the structural launch check while the record stands.
+    await writeFile(notice, 'xxx notice')
+    assert.equal((await launch()).runtimeManifestId, installed.id)
+    // The record cannot be deleted or renamed: it is invalidated in place.
+    await chmod(records, 0o500)
+    await assert.rejects(manager.verify(installed.id), /verification failed/)
+    assert.equal(await readFile(recorded, 'utf8'), '')
+    await assert.rejects(launch(), /verification failed/)
+    await assert.rejects(new RuntimeManager(join(root, 'processing'), identity).active({ launch: true }), /verification failed/)
+    assert.equal(await count(), probes, 'The damaged pack never ran')
+
+    // Restore the pack and its record.
+    await chmod(records, 0o700)
+    await writeFile(notice, 'MIT notice')
+    await manager.probe(await manager.verify(installed.id))
+    const record = await readFile(recorded, 'utf8')
+    await writeFile(notice, 'xxx notice')
+
+    // Neither removable nor writable: the failure is reported with the
+    // verification error, and this process never trusts the record again.
+    await chmod(recorded, 0o400)
+    await chmod(records, 0o500)
+    await assert.rejects(manager.verify(installed.id), /verification failed[\s\S]*could not be removed/)
+    assert.equal(await readFile(recorded, 'utf8'), record, 'The record is still on disk')
+    const restarted = new RuntimeManager(join(root, 'processing'), identity)
+    assert.equal(await restarted.recordedProbe(installed), null)
+    await assert.rejects(restarted.active({ launch: true }), /verification failed/)
+    await assert.rejects(launch(), /verification failed/)
+    assert.equal(await count(), probes + 1, 'Only the restoring self-test ran')
+
+    // A later full verification and self-test record the pack again.
+    await chmod(records, 0o700)
+    await chmod(recorded, 0o600)
+    await writeFile(notice, 'MIT notice')
+    assert.equal((await launch()).runtimeManifestId, installed.id)
+    assert.equal(await count(), probes + 2)
+    assert.equal((await launch()).runtimeManifestId, installed.id)
+    assert.equal(await count(), probes + 2, 'The new record is trusted again')
+  } finally {
+    await chmod(records, 0o700).catch(() => {})
+    await chmod(recorded, 0o600).catch(() => {})
+  }
+})
+
+test('a self-test success never re-arms a record withdrawn while it ran; concurrent writes stay whole', { skip: process.platform === 'win32' }, async t => {
+  const { manager, installed, recorded } = await controllablePack(t)
+  await readFile(recorded)
+  // A failed check withdraws the record while a slower self-test is running.
+  const runProbe = manager.runProbe
+  manager.runProbe = async function (...args) {
+    const result = await runProbe.apply(this, args)
+    await this.forgetVerified(installed.id)
+    return result
+  }
+  assert.equal((await manager.probe(installed)).hardwareAvailable, true)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  delete manager.runProbe
+
+  // After a withdrawal only a new full verification can record the pack again.
+  await manager.probe(installed)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  // A write whose check began before a withdrawal is discarded.
+  await manager.probe(await manager.verify(installed.id))
+  const record = JSON.parse(await readFile(recorded, 'utf8'))
+  const generation = manager.recordGeneration(installed.id)
+  await manager.forgetVerified(installed.id)
+  await manager.saveProbe(installed, record.result, await readFile(new URL('../processing_probe.py', import.meta.url), 'utf8'), generation)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+
+  // Concurrent writers use separate pending files and leave one whole record.
+  const verified = await manager.verify(installed.id)
+  await Promise.all(Array.from({ length: 4 }, () => manager.probe(verified)))
+  assert.deepEqual(JSON.parse(await readFile(recorded, 'utf8')), record)
+  assert.deepEqual(await readdir(dirname(recorded)), [basename(recorded)])
+})
+
+test('a withdrawal between a full verification and its self-test is never undone by that self-test', { skip: process.platform === 'win32' }, async t => {
+  const { root, manager, installed, count, recorded, launch } = await controllablePack(t)
+  // Onboarding's pattern: full verification (active()), then the self-test.
+  // A background re-check withdraws the record in between.
+  let verified = await manager.active()
+  await manager.forgetVerified(installed.id)
+  assert.equal((await manager.probe(verified)).hardwareAvailable, true)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  // So the next launch verifies in full and probes again.
+  const probes = await count()
+  const restarted = new RuntimeManager(join(root, 'processing'), identity)
+  const active = await restarted.active({ launch: true })
+  assert.equal(restarted.fullyVerifiedAtLaunch.has(installed.id), true)
+  await restarted.launchProbe(active)
+  assert.equal(await count(), probes + 1)
+  await readFile(recorded)
+
+  // Without a withdrawal, the same pattern records the result.
+  await rm(recorded)
+  verified = await manager.active()
+  await manager.probe(verified)
+  await readFile(recorded)
+
+  // A pack object from a structural check alone never records a result.
+  await rm(recorded)
+  const structural = await manager.verify(installed.id, { quick: true })
+  assert.equal((await manager.probe(structural)).hardwareAvailable, true)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+
+  // Install's own full verification carries through to its self-test.
+  await manager.probe(await manager.verify(installed.id))
+  await readFile(recorded)
+  assert.equal((await launch()).runtimeManifestId, installed.id)
+})
+
+test('a withdrawal counts only once its directory is flushed; an unsupported flush is skipped', { skip: process.platform === 'win32' }, async t => {
+  const { root, manager, installed, recorded } = await controllablePack(t)
+  const records = dirname(recorded)
+  const restarted = () => new RuntimeManager(join(root, 'processing'), identity)
+  const flush = manager.directorySync
+  await manager.probe(await manager.verify(installed.id))
+  const record = await readFile(recorded)
+
+  // The removal happened but could not be made durable: the error surfaces
+  // and this process keeps ignoring the record, even if it reappears.
+  manager.directorySync = async path => {
+    if (path === records) throw Object.assign(new Error('flush failed'), { code: 'EIO' })
+    return flush(path)
+  }
+  await assert.rejects(manager.forgetVerified(installed.id), error => /could not be confirmed on disk \(EIO\)/.test(error.message) && error.cause.code === 'EIO')
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  await writeFile(recorded, record)
+  assert.equal(await manager.recordedProbe(installed), null)
+  assert.equal(await restarted().recordedProbe(installed), null)
+
+  // Where directories cannot be flushed, the removal alone completes it.
+  manager.directorySync = async () => false
+  await manager.forgetVerified(installed.id)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  manager.directorySync = flush
+  await manager.probe(await manager.verify(installed.id))
+  assert.notEqual(await manager.recordedProbe(installed), null)
+})
+
+test('only a platform without directory flushing skips it; on POSIX a permission error is a failure', () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    for (const code of ['EINVAL', 'ENOTSUP']) assert.equal(directorySyncUnsupported({ code }, platform), true, `${platform} ${code}`)
+    assert.equal(directorySyncUnsupported({ code: 'EIO' }, platform), false)
+  }
+  for (const code of ['EACCES', 'EPERM', 'EISDIR']) {
+    assert.equal(directorySyncUnsupported({ code }, 'linux'), false, code)
+    assert.equal(directorySyncUnsupported({ code }, 'darwin'), false, code)
+    assert.equal(directorySyncUnsupported({ code }, 'win32'), true, code)
+  }
+})
+
+test('a directory that allows a record removal but refuses its flush keeps the withdrawal guard', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const { manager, installed, recorded } = await controllablePack(t)
+  const records = dirname(recorded)
+  if (!await directoryModesEnforced(records)) { t.skip('directory permissions are not enforced on this filesystem'); return }
+  await manager.probe(await manager.verify(installed.id))
+  const record = await readFile(recorded)
+  // Write and search permission allow the removal; without read permission
+  // the directory cannot be opened to flush it.
+  await chmod(records, 0o300)
+  try {
+    await assert.rejects(manager.forgetVerified(installed.id), /could not be confirmed on disk \(EACCES\)/)
+  } finally { await chmod(records, 0o700) }
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  await writeFile(recorded, record)
+  assert.equal(await manager.recordedProbe(installed), null)
+})
+
+test('a failure to withdraw a record of uncertain commit is raised; an ordinary failed write is not', { skip: process.platform === 'win32' }, async t => {
+  const { manager, installed, recorded } = await controllablePack(t)
+  const records = dirname(recorded), flush = manager.directorySync
+  const verified = await manager.verify(installed.id)
+  manager.durableReplace = async (source, destination) => { await rename(source, destination); throw new Error('directory flush failed') }
+  manager.directorySync = async path => {
+    if (path === records) throw Object.assign(new Error('flush failed'), { code: 'EIO' })
+    return flush(path)
+  }
+  await assert.rejects(manager.probe(verified), /could not be confirmed on disk \(EIO\)/)
+  assert.equal(await manager.recordedProbe(installed), null)
+
+  // A write that fails before committing leaves nothing to withdraw.
+  manager.directorySync = flush
+  manager.durableReplace = async () => { throw new Error('commit failed') }
+  assert.equal((await manager.probe(await manager.verify(installed.id))).hardwareAvailable, true)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+})
+
+test('damage stays outstanding until the pack is fully verified again or no longer selected', { skip: process.platform === 'win32' }, async t => {
+  const { root, manager, installed } = await controllablePack(t)
+  assert.equal(await manager.damageOutstanding(installed.id), false)
+  // The failed check withdrew the record.
+  await manager.forgetVerified(installed.id)
+  assert.equal(await manager.damageOutstanding(installed.id), true)
+  assert.equal(await new RuntimeManager(join(root, 'processing'), identity).damageOutstanding(installed.id), true)
+  // A repair's full verification writes it again.
+  await manager.probe(await manager.verify(installed.id))
+  assert.equal(await manager.damageOutstanding(installed.id), false)
+  // A newer pointer the session never selected: a store that has not
+  // selected a pack goes by the newest pointer.
+  await manager.forgetVerified(installed.id)
+  const [newest] = await manager.readPointers()
+  const replacement = { schema: 2, sequence: newest.sequence + 1, id: 'f'.repeat(64) }
+  replacement.checksum = sha(JSON.stringify(replacement))
+  await writeFile(join(root, 'processing', `active.${1 - newest.slot}.json`), JSON.stringify(replacement))
+  const fresh = new RuntimeManager(join(root, 'processing'), identity)
+  assert.equal(await fresh.damageOutstanding(installed.id), false)
+  // That newer pack cannot be verified, so active() falls back to the older
+  // pointer: damage found in the pack actually selected stays outstanding.
+  assert.equal((await fresh.active()).id, installed.id)
+  assert.equal(await fresh.damageOutstanding(installed.id), true)
+  assert.equal(await fresh.damageOutstanding(replacement.id), false)
+  // A pack activated by install() is the selection from then on.
+  fresh.selectedId = replacement.id
+  assert.equal(await fresh.damageOutstanding(installed.id), false)
+})
+
+test('a record commit that renames and then fails is reconciled with withdrawals and invalidated', { skip: process.platform === 'win32' }, async t => {
+  const { root, manager, installed, recorded } = await controllablePack(t)
+  const records = dirname(recorded)
+  const restarted = () => new RuntimeManager(join(root, 'processing'), identity)
+  const flushFails = async (source, destination) => { await rename(source, destination); throw new Error('directory flush failed') }
+
+  // A concurrent withdrawal completes (and clears its in-process guard)
+  // before the rename lands; the failed flush must not leave the record trusted.
+  let verified = await manager.verify(installed.id)
+  manager.durableReplace = async (source, destination) => {
+    await manager.forgetVerified(installed.id)
+    return flushFails(source, destination)
+  }
+  await manager.probe(verified)
+  assert.equal(await restarted().recordedProbe(installed), null)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+
+  // Even with no withdrawal, a commit of uncertain durability is invalidated.
+  verified = await manager.verify(installed.id)
+  manager.durableReplace = flushFails
+  await manager.probe(verified)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  assert.equal(await restarted().recordedProbe(installed), null)
+
+  // A commit that fails before renaming leaves the earlier record as it was.
+  delete manager.durableReplace
+  await manager.probe(await manager.verify(installed.id))
+  const record = await readFile(recorded, 'utf8')
+  manager.durableReplace = async () => { throw new Error('commit failed') }
+  await manager.probe(await manager.verify(installed.id))
+  assert.equal(await readFile(recorded, 'utf8'), record)
+  assert.notEqual(await restarted().recordedProbe(installed), null)
+  assert.deepEqual(await readdir(records), [basename(recorded)])
+})
+
+test('a fresh launch self-test waits for the other store; a recorded result does not', { skip: process.platform === 'win32' }, async t => {
+  const { root, installed, count, recorded } = await controllablePack(t)
+  const restarted = () => new RuntimeManager(join(root, 'processing'), identity)
+  let waited = 0
+  const never = () => { waited++; return new Promise(() => {}) }
+  let manager = restarted()
+  let active = await manager.active({ launch: true })
+  assert.equal(manager.fullyVerifiedAtLaunch.has(installed.id), false)
+  assert.equal((await manager.launchProbe(active, { before: never })).hardwareAvailable, true)
+  assert.equal(waited, 0)
+  assert.equal(await count(), 1)
+
+  await rm(recorded)
+  manager = restarted()
+  active = await manager.active({ launch: true })
+  assert.equal(manager.fullyVerifiedAtLaunch.has(installed.id), true)
+  let release
+  const settled = new Promise(resolveSettled => { release = resolveSettled })
+  const probing = manager.launchProbe(active, { before: () => settled })
+  await new Promise(resolveWait => setTimeout(resolveWait, 200))
+  assert.equal(await count(), 1, 'No self-test runs before the other store settles')
+  release()
+  assert.equal((await probing).hardwareAvailable, true)
+  assert.equal(await count(), 2)
+})
+
+test('the background re-check finds same-size damage, withdraws the record and skips packs verified in full at launch', { skip: process.platform === 'win32' }, async t => {
+  const { root, manager, installed, count, recorded, launch } = await controllablePack(t)
+  const notice = join(installed.directory, 'NOTICE.fixture')
+  const restarted = new RuntimeManager(join(root, 'processing'), identity)
+  const active = await restarted.active({ launch: true })
+  await writeFile(notice, 'xxx notice')
+  const failures = []
+  const onFailure = failure => { failures.push(failure) }
+  // Installation verified it in full just now; a week later it is due again.
+  const later = Date.now() + RECHECK_INTERVAL_MS + 1000
+  await recheckPacks([{ store: restarted, active, label: 'processing' }, { store: restarted, active: null, label: 'absent' }], { onFailure, now: later })
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].label, 'processing')
+  assert.equal(failures[0].id, installed.id)
+  assert.match(failures[0].error.message, /verification failed/)
+  await assert.rejects(readFile(recorded), /ENOENT/)
+  await assert.rejects(launch(), /verification failed/)
+
+  // Cancellation reports nothing and withdraws nothing.
+  await writeFile(notice, 'MIT notice')
+  await manager.probe(await manager.verify(installed.id))
+  await writeFile(notice, 'xxx notice')
+  const cancelled = new AbortController()
+  const checking = restarted.recheck(installed.id, { signal: cancelled.signal })
+  cancelled.abort()
+  await assert.rejects(checking)
+  cancelled.abort()
+  await recheckPacks([{ store: restarted, active, label: 'processing' }], { signal: cancelled.signal, onFailure, now: later })
+  assert.equal(failures.length, 1)
+  await readFile(recorded)
+
+  // A pack this launch verified in full is not hashed again.
+  const probes = await count()
+  await writeFile(notice, 'MIT notice')
+  await rm(recorded)
+  const full = new RuntimeManager(join(root, 'processing'), identity)
+  const fullActive = await full.active({ launch: true })
+  assert.equal(full.fullyVerifiedAtLaunch.has(installed.id), true)
+  let rechecks = 0
+  full.recheck = async () => { rechecks++ }
+  await recheckPacks([{ store: full, active: fullActive, label: 'processing' }], { onFailure, now: later })
+  assert.equal(rechecks, 0)
+  assert.equal(await count(), probes)
+})
+
+test('the background re-check runs only when the last full verification is stale, missing, unreadable or in the future', { skip: process.platform === 'win32' }, async t => {
+  const { root, installed } = await controllablePack(t)
+  const stamp = join(root, 'processing', 'verified-at', `${installed.id}.json`)
+  const installedAt = JSON.parse(await readFile(stamp, 'utf8'))
+  assert.deepEqual(Object.keys(installedAt).sort(), ['runtimeManifestId', 'schema', 'verifiedAt'])
+  assert.equal(installedAt.runtimeManifestId, installed.id)
+  assert.ok(Math.abs(Date.now() - installedAt.verifiedAt) < 60000, 'Installation records its full verification')
+
+  const manager = new RuntimeManager(join(root, 'processing'), identity)
+  const active = await manager.active({ launch: true })
+  assert.equal(manager.fullyVerifiedAtLaunch.has(installed.id), false)
+  let rechecks = 0
+  const recheck = manager.recheck
+  manager.recheck = async function (...args) { rechecks++; return recheck.apply(this, args) }
+  const run = now => recheckPacks([{ store: manager, active, label: 'processing' }],
+    { now, onFailure: ({ error }) => { throw error } })
+  const day = 24 * 60 * 60 * 1000, now = Date.now()
+  const write = verifiedAt => writeFile(stamp, JSON.stringify({ schema: 1, runtimeManifestId: installed.id, verifiedAt }))
+
+  // Fresh: no re-check, up to just under the interval.
+  await write(now - RECHECK_INTERVAL_MS + day)
+  await run(now)
+  assert.equal(rechecks, 0)
+  // Stale, missing, unreadable, malformed, for another pack, or in the future
+  // (clock skew): each is re-checked, and the success refreshes the time.
+  const stale = [
+    () => write(now - RECHECK_INTERVAL_MS - 1),
+    () => write(now - RECHECK_INTERVAL_MS),
+    () => rm(stamp),
+    () => writeFile(stamp, '{'),
+    () => writeFile(stamp, JSON.stringify({ schema: 1, runtimeManifestId: installed.id, verifiedAt: 'yesterday' })),
+    () => writeFile(stamp, JSON.stringify({ schema: 1, runtimeManifestId: 'e'.repeat(64), verifiedAt: now })),
+    () => writeFile(stamp, JSON.stringify({ schema: 1, runtimeManifestId: installed.id, verifiedAt: now, extra: true })),
+    () => write(now + day),
+  ]
+  for (const [index, makeStale] of stale.entries()) {
+    await makeStale()
+    const before = Date.now()
+    await run(now)
+    assert.equal(rechecks, index + 1, `case ${index} is re-checked`)
+    const refreshed = JSON.parse(await readFile(stamp, 'utf8'))
+    assert.equal(refreshed.runtimeManifestId, installed.id)
+    assert.ok(refreshed.verifiedAt >= before && refreshed.verifiedAt <= Date.now(), `case ${index} refreshes the time`)
+    await write(now)
+    await run(now)
+    assert.equal(rechecks, index + 1, `case ${index} is fresh afterwards`)
+  }
+
+  // A full launch verification counts as fresh as well.
+  await rm(join(root, 'processing', 'probe-results', `${installed.id}.json`))
+  await write(now - 2 * RECHECK_INTERVAL_MS)
+  const full = new RuntimeManager(join(root, 'processing'), identity)
+  await full.active({ launch: true })
+  assert.equal(full.fullyVerifiedAtLaunch.has(installed.id), true)
+  assert.equal(await full.recheckDue(installed.id), false)
+})
+
+test('the structural walk yields to the event loop within one large directory', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'structural-walk-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  for (let index = 0; index < 40; index++) await writeFile(join(directory, `file-${index}`), 'x'.repeat(index))
+  // Every clock reading advances 5 ms, so the 8 ms budget runs out every
+  // couple of entries.
+  let now = 0
+  t.mock.method(performance, 'now', () => (now += 5))
+  let turns = 0, running = true
+  const tick = () => { if (running) { turns++; setImmediate(tick) } }
+  setImmediate(tick)
+  const sizes = await structuralTree(directory)
+  running = false
+  assert.equal(sizes.size, 40)
+  assert.equal(sizes.get('file-39'), 39)
+  assert.ok(turns >= 10, `expected the walk to yield within the directory (yielded ${turns} times)`)
 })
 
 test('launch selection keeps the processing-then-models error order and clears only a failed processing selection', () => {

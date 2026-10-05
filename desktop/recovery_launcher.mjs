@@ -3,7 +3,7 @@
 // has no Electron dependency, so a broken target application cannot prevent a
 // rollback.
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmodSync, closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -94,7 +94,7 @@ function appImageMount(mountInfo, executablePath) {
     const mountPath = procMountValue(before[4]), options = before[5].split(','), filesystem = after[0]
     const rel = relative(mountPath, executablePath)
     if ((rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) && /^fuse(?:\.|$)/.test(filesystem) && options.includes('ro')) {
-      matches.push({ mountPath, filesystem })
+      matches.push({ mountPath, filesystem, device: before[2] })
     }
   }
   matches.sort((left, right) => right.mountPath.length - left.mountPath.length)
@@ -181,7 +181,12 @@ function appImageMountEvidence(executablePath, procRoot) {
 // expose writable files, so it also yields null, as does any missing or
 // contrary evidence. A read-only FUSE view of a writable directory (a bindfs
 // or rclone mount the same user created) is indistinguishable here.
-export function readOnlyAppImageMount({ platform = process.platform, executablePath = process.execPath, procRoot = '/proc' } = {}) {
+//
+// The files actually reached must also belong to that mount: the device of
+// the mount point and of `applicationRoot` (when given) must equal the
+// selected entry's major:minor. This also rejects a mount stacked later on an
+// ancestor, which hides the FUSE mount without appearing beneath it.
+export function readOnlyAppImageMount({ platform = process.platform, executablePath = process.execPath, procRoot = '/proc', applicationRoot } = {}) {
   if (platform !== 'linux') return null
   try {
     const { mount, actualExecutablePath, mountInfo } = appImageMountEvidence(executablePath, procRoot)
@@ -190,8 +195,27 @@ export function readOnlyAppImageMount({ platform = process.platform, executableP
       return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
     })
     if (covering.length !== 1) return null
+    const device = linuxDeviceNumbers(mount.device)
+    if (!device) return null
+    for (const path of [mount.mountPath, actualExecutablePath, ...(applicationRoot === undefined ? [] : [applicationRoot])]) {
+      if (!sameLinuxDevice(statSync(path, { bigint: true }).dev, device)) return null
+    }
     return { readOnly: true, mountPath: mount.mountPath, actualExecutablePath }
   } catch { return null }
+}
+
+// A mountinfo "major:minor" field.
+function linuxDeviceNumbers(value) {
+  const match = /^(\d+):(\d+)$/.exec(value || '')
+  return match ? { major: BigInt(match[1]), minor: BigInt(match[2]) } : null
+}
+
+// Compares a stat device number with major:minor using the Linux (glibc
+// gnu_dev_major/gnu_dev_minor) encoding.
+function sameLinuxDevice(dev, { major, minor }) {
+  const devMajor = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n)
+  const devMinor = (dev & 0xffn) | ((dev >> 12n) & 0xffffff00n)
+  return devMajor === major && devMinor === minor
 }
 
 // Bind the running Electron executable to the immutable outer AppImage using

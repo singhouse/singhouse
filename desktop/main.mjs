@@ -13,7 +13,7 @@ import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, launchSelection, processingAttestation } from './runtime_manager.mjs'
+import { RuntimeManager, ModelCache, launchSelection, processingAttestation, recheckPacks } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
@@ -47,6 +47,7 @@ let processingManager, modelCache, activeProcessing, activeModels, processingErr
 let processingProbe
 let installation
 let processingOperation
+let packRecheck
 let heartSetup
 let onboardingSetup, onboardingState, startupSurface, modalCredentials, modalCheck, modalCheckController
 let modalLoadedFingerprint = null
@@ -59,6 +60,13 @@ app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.resto
 let backend, host, projector, quitting = false, shutdownComplete = false, handingOff = false
 let recoveryKitDurability = null, recoveryAnchor = null
 const operationGate = new OperationGate()
+const DAMAGE_NOTICE_POLL_MS = 500
+// Setup checks (preflight verification, the model folder choice) in progress.
+let setupChecks = 0
+const setupCheck = action => async (...args) => {
+  setupChecks++
+  try { return await action(...args) } finally { setupChecks-- }
+}
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
 
@@ -132,7 +140,7 @@ async function installedReleaseIdentity() {
   // size, modification and change times, inode and device with that
   // inventory. Every path still walks
   // every entry's type and symlink target against the receipt.
-  const readOnly = process.platform === 'linux' && readOnlyApplicationRoot(readOnlyAppImageMount(), applicationRoot)
+  const readOnly = process.platform === 'linux' && readOnlyApplicationRoot(readOnlyAppImageMount({ applicationRoot }), applicationRoot)
   const launchInventoryPath = resolve(runtime.root, 'launch-inventory.json')
   // The cache is bound to the canonical root, so a different installation
   // reached through the same path never matches it.
@@ -478,6 +486,7 @@ async function installProcessing() {
       message: manifest.kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?',
       detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Runtime packs contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
     if (consent.response !== 1 || quitting) return
+    packRecheck?.abort()
     installation = new AbortController()
     await manager.install(manifest, { signal: installation.signal })
     if (!quitting) await dialog.showMessageBox(host, { message: 'Installation verified. Reopen the app to use it.' })
@@ -568,13 +577,19 @@ async function start() {
     // for this exact pack; payload hashes and a fresh self-test belong to
     // installation, repair and activation. The two stores are independent, so
     // their checks overlap; failures are reported in the same order as before.
+    // A fresh self-test (only after a full processing verification) starts once
+    // the model check has settled: its cold imports would otherwise compete
+    // with a full model verification for the disk and could exceed the
+    // self-test time limit on slow storage.
+    const models = modelCache.active({ launch: true })
+    const modelsSettled = () => models.then(() => {}, () => {})
     const selection = launchSelection(...await Promise.allSettled([
       (async () => {
         const active = await processingManager.active({ launch: true })
         if (!active) return { active }
-        return { active, probe: processingAttestation(active, await processingManager.launchProbe(active)) }
+        return { active, probe: processingAttestation(active, await processingManager.launchProbe(active, { before: modelsSettled })) }
       })(),
-      modelCache.active({ launch: true }),
+      models,
     ]))
     ;({ activeProcessing, processingProbe, activeModels, processingError } = selection)
   }
@@ -656,8 +671,8 @@ async function start() {
   const setupHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeSetup(event); return action(...args) })
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
-  setupHandler('setup:preflight', () => onboardingSetup.preflight())
-  setupHandler('setup:model-source', async mode => {
+  setupHandler('setup:preflight', setupCheck(() => onboardingSetup.preflight()))
+  setupHandler('setup:model-source', setupCheck(async mode => {
     if (!['offline', 'upstream'].includes(mode)) throw new Error('Unknown model source')
     if (processingOperation || operationGate.active) throw new Error('Wait for the current installation to finish or cancel it.')
     if (mode === 'upstream') onboardingSetup.setOfflineModelsDirectory(null)
@@ -668,7 +683,7 @@ async function start() {
       if (!selected.canceled && selected.filePaths.length === 1) onboardingSetup.setOfflineModelsDirectory(selected.filePaths[0])
     }
     return onboardingSetup.preflight()
-  })
+  }))
   setupHandler('setup:status', () => onboardingSetup.getStatus())
   setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
   setupHandler('setup:modal-status', async () => {
@@ -714,6 +729,7 @@ async function start() {
   })
   setupHandler('setup:start', async request => {
     if (processingOperation || operationGate.active) throw new Error('Another installation or release operation is running.')
+    packRecheck?.abort()
     let accept, reject
     const accepted = new Promise((resolve, fail) => { accept = resolve; reject = fail })
     processingOperation = operationGate.run('song processing setup', async () => {
@@ -778,6 +794,76 @@ async function start() {
       } })
   else { await host.loadURL(launch.origin); host.show() }
   startupSurface.close()
+  if (packaged) recheckInstalledPacks()
+}
+
+// Launch admits packs from structural checks, which cannot see a same-size
+// change. Once the window is shown, packs admitted that way whose last full
+// verification is older than RECHECK_INTERVAL_MS (or unknown) are verified in
+// full again in the background, one file at a time. A failure has withdrawn
+// the pack's record, so the next launch verifies it in full; this session is
+// told now and offered setup, which repairs it.
+function recheckInstalledPacks() {
+  packRecheck = new AbortController()
+  void recheckPacks([
+    { store: processingManager, active: activeProcessing, label: 'song processing runtime' },
+    { store: modelCache, active: activeModels, label: 'separation and Heart model files' },
+  ], { signal: packRecheck.signal, onFailure: reportDamagedPack }).catch(error => {
+    console.error(`Could not complete the background check of installed processing files: ${error.message}`)
+  })
+}
+
+// Packs the background check found damaged, awaiting one notice, by label.
+const damagedPacks = new Map()
+let damageNotice = null
+
+// The failure is recorded at once; the dialog is shown by showDamageNotice().
+function reportDamagedPack({ label, store, id, error }) {
+  console.error(`Background verification of the installed ${label} failed: ${error.message}`)
+  if (quitting) return
+  const notice = `The installed ${label} failed verification. Repair it with Set up song processing, then reopen the app.`
+  if (!String(processingError || '').split('\n').includes(notice)) processingError = [processingError, notice].filter(Boolean).join('\n')
+  damagedPacks.set(label, { label, store, id })
+  damageNotice ??= Promise.resolve().then(showDamageNotice)
+    .catch(failure => console.error(`Could not show the damaged processing files notice: ${failure.message}`))
+    .finally(() => { damageNotice = null })
+}
+
+const damageNoticeBlocked = () => Boolean(processingOperation || updateOperation || installation || heartSetup?.operation
+  || operationGate.active || setupChecks > 0)
+
+// The dialog waits until no operation of any kind is running (a backup, an
+// update, recovery information, Heart model setup, or a processing
+// installation or setup, including its selection and consent). It then covers,
+// in one dialog, every queued pack that is still damaged: still the pack its
+// store would select, and not fully verified since (see damageOutstanding()).
+// A pack repaired or replaced meanwhile is dropped; its failure stays recorded
+// in the processing status.
+async function showDamageNotice() {
+  while (damagedPacks.size) {
+    if (quitting || !host) return
+    if (damageNoticeBlocked()) {
+      await new Promise(resolve => setTimeout(resolve, DAMAGE_NOTICE_POLL_MS))
+      continue
+    }
+    // Check every queued pack, including any queued while checking, so all
+    // of them are presented in one dialog.
+    const checked = new Map()
+    for (let fresh; (fresh = [...damagedPacks.values()].filter(pack => !checked.has(pack))).length;) {
+      for (const pack of fresh) checked.set(pack, await pack.store.damageOutstanding(pack.id).catch(() => true))
+    }
+    // An operation that started while the packs were checked delays the dialog again.
+    if (damageNoticeBlocked()) continue
+    const current = [...checked.keys()].filter(pack => damagedPacks.get(pack.label) === pack)
+    for (const pack of current) damagedPacks.delete(pack.label)
+    const outstanding = current.filter(pack => checked.get(pack))
+    if (!outstanding.length || quitting || !host) continue
+    const labels = outstanding.map(pack => pack.label).join(' and ')
+    const choice = await dialog.showMessageBox(host, { type: 'warning', buttons: ['Later', 'Set up song processing…'], defaultId: 1, cancelId: 0,
+      message: `The installed ${labels} failed verification`,
+      detail: 'Some of its files no longer match what was installed. Song processing may fail until it is repaired. Set up song processing to repair it, then reopen the app.' })
+    if (choice.response === 1 && !quitting) host?.webContents.send('setup:open')
+  }
 }
 
 app.on('before-quit', event => {
@@ -790,6 +876,7 @@ app.on('before-quit', event => {
     return
   }
   quitting = true
+  packRecheck?.abort()
   installation?.abort()
   heartSetup?.cancel()
   onboardingSetup?.cancel()

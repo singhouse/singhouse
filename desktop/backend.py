@@ -36,6 +36,40 @@ BACKEND_PARENT_WATCHDOG_SECONDS = 15
 RECOVERY_OWNER_LOCK_WAIT_SECONDS = 45
 
 
+def _is_link_entry(entry: os.DirEntry, *, windows: bool = os.name == "nt") -> bool:
+    """A directory entry that is a symbolic link, a junction, or (on Windows)
+    any other reparse point. A junction is not a symbolic link to
+    ``DirEntry.is_symlink()`` and is a directory to ``is_dir(follow_symlinks=False)``,
+    so it is checked separately."""
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _is_link_path(path: Path, *, windows: bool = os.name == "nt") -> bool:
+    """The same check as ``_is_link_entry`` for a named path: a symbolic
+    link, a junction, or (on Windows) any other reparse point. A missing path
+    is not a link; opening it fails later."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        try:
+            attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        except OSError:
+            return False
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
 def _safe_regular_file(path: Path, *, required: bool = True) -> Path | None:
     """Validate the path as named, before resolving it.
 
@@ -870,8 +904,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                 or directory.name not in (identifier, identifier[:16])):
             raise RuntimeError("Invalid managed processing path")
         for ancestor in (expected_parent.parent, expected_parent, directory):
-            if ancestor.is_symlink():
-                raise RuntimeError("Managed processing directories must not be symbolic links")
+            if _is_link_path(ancestor):
+                raise RuntimeError("Managed processing directories must not be symbolic links or junctions")
         # Non-blocking, so a FIFO placed here is rejected instead of waiting.
         descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                              | getattr(os, "O_NONBLOCK", 0))
@@ -923,7 +957,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             records.append((name, record["size"]))
         # A structural check in one walk: entry types come from the listing
         # (links are never followed, special files never opened, so nothing
-        # can block), no level may hold a link, and each listed path must be
+        # can block), no level may hold a link, junction or other reparse
+        # point, and each listed path must be
         # a regular file of its recorded size, read from one lstat. Payload
         # bytes are hashed when the desktop installs or activates a pack,
         # never at each backend start.
@@ -934,8 +969,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             with os.scandir(current) as entries:
                 for entry in entries:
                     relative_name = prefix + entry.name
-                    if entry.is_symlink():
-                        raise RuntimeError("Managed processing files must not be symbolic links")
+                    if _is_link_entry(entry):
+                        raise RuntimeError("Managed processing files must not be symbolic links or junctions")
                     if entry.is_dir(follow_symlinks=False):
                         pending.append((entry.path, relative_name + "/"))
                     elif entry.is_file(follow_symlinks=False):
