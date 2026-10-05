@@ -451,11 +451,44 @@ class IsolationTests(unittest.TestCase):
                 self.assertFalse(json.loads(rejected["KARAOKE_DESKTOP_PROCESSING_JSON"])["capabilitiesReady"])
             with self.assertRaisesRegex(RuntimeError, "not trusted"):
                 backend.processing_environment(root / "backend", identity, pack, None, probe, trusted_locks=[], processing_id=pack.name)
+            # Application trust policy: a private-test-only lock is accepted only
+            # by an exactly private-test channel, and rejected by default.
+            scoped = {"schema": 1, "lockSha256": ["b" * 64, lock_hash], "privateTestLockSha256": [lock_hash]}
+            with patch.object(backend, "_processing_lock_policy", return_value=scoped):
+                selected = backend.processing_environment(root / "backend", identity, pack, None, probe,
+                                                          processing_id=pack.name, release_channel="private-test")
+                self.assertEqual(selected["KARAOKE_PROCESSING_PYTHON"], str(pack / "python/bin/python3"))
+                for channel in (None, "stable", "beta", "Private-test", "private-test "):
+                    with self.assertRaisesRegex(RuntimeError, "not trusted"):
+                        backend.processing_environment(root / "backend", identity, pack, None, probe,
+                                                       processing_id=pack.name, release_channel=channel)
+            with patch.object(backend, "_processing_lock_policy", return_value={"schema": 1, "lockSha256": [lock_hash]}):
+                selected = backend.processing_environment(root / "backend", identity, pack, None, probe,
+                                                          processing_id=pack.name, release_channel="stable")
+                self.assertEqual(selected["KARAOKE_PROCESSING_PYTHON"], str(pack / "python/bin/python3"))
             changed = json.loads(json.dumps(manifest))
             changed["probe"]["modules"] = ["faster_whisper"]
             changed_pack = write_pack(changed)
             with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
                 backend.processing_environment(root / "backend", identity, changed_pack, None, probe, trusted_locks=[lock_hash], processing_id=changed_pack.name)
+
+    def test_private_test_locks_are_trusted_only_by_private_test_channel(self):
+        shared, candidate = "a" * 64, "b" * 64
+        policy = {"schema": 1, "lockSha256": [shared, candidate], "privateTestLockSha256": [candidate]}
+        self.assertEqual(backend.channel_trusted_locks(policy, "private-test"), [shared, candidate])
+        for channel in (None, "", "stable", "core-private-test", "Private-test"):
+            self.assertEqual(backend.channel_trusted_locks(policy, channel), [shared])
+        self.assertEqual(backend.channel_trusted_locks({"schema": 1, "lockSha256": [shared]}, None), [shared])
+        for invalid in (None, [], {}, {"schema": 2, "lockSha256": []}, {"schema": 1, "lockSha256": shared},
+                        {"schema": 1, "lockSha256": [shared], "privateTestLockSha256": candidate},
+                        {"schema": 1, "lockSha256": [shared], "privateTestLockSha256": [candidate]}):
+            with self.assertRaisesRegex(RuntimeError, "Invalid application processing trust policy"):
+                backend.channel_trusted_locks(invalid, "private-test")
+        # The shipped policy keeps every hardware-test lock out of non-private-test trust.
+        shipped = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
+        for lock in shipped.get("privateTestLockSha256", []):
+            self.assertIn(lock, backend.channel_trusted_locks(shipped, "private-test"))
+            self.assertNotIn(lock, backend.channel_trusted_locks(shipped, "stable"))
 
     def test_processing_path_case_collisions_follow_target(self):
         with tempfile.TemporaryDirectory() as temporary:

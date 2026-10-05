@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase,
   applicationEnvironment, shutdownStrategy, validateResumedApplication, candidateIdentity, executableIdentityLimitation, harnessIdentity, HARNESS_FILES,
-  extraCaCertificate, copyExtraCaCertificate, readPackServerLog, playwrightVersion, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
+  extraCaCertificate, copyExtraCaCertificate, readPackServerLog, playwrightVersion, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, packagedReleasePolicy, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
@@ -594,4 +594,17 @@ test('retained candidate identity reads macOS bundle resources', t => {
   writeFileSync(join(contents, 'Resources', 'release-receipt.json'), JSON.stringify({ identity: { sourceCommit: expected, nativeRuntimeId: runtimeId } }))
   assert.equal(validateRetainedCandidate(executable, expected, 'darwin').applicationArchiveSha256, hash('bundle archive'))
   assert.throws(() => validateRetainedCandidate(join(root, 'Singhouse'), expected, 'darwin'), /MacOS/)
+})
+
+test('the packaged release channel is cross-checked against the receipt, with a clear message when the receipt is absent', t => {
+  const resources = mkdtempSync(join(tmpdir(), 'release-policy-'))
+  t.after(() => rmSync(resources, { recursive: true, force: true }))
+  const policyBytes = readFileSync(new URL('../release.json', import.meta.url))
+  const policy = JSON.parse(policyBytes)
+  writeFileSync(join(resources, 'release.json'), policyBytes)
+  assert.throws(() => packagedReleasePolicy(resources), /no resources\/release-receipt\.json \(signed macOS builds keep it outside the sealed bundle\)/)
+  writeFileSync(join(resources, 'release-receipt.json'), JSON.stringify({ identity: { policyId: 'f'.repeat(64) } }))
+  assert.throws(() => packagedReleasePolicy(resources), /differs from its receipt identity/)
+  writeFileSync(join(resources, 'release-receipt.json'), JSON.stringify({ identity: { policyId: policy.policyId } }))
+  assert.deepEqual(packagedReleasePolicy(resources), { channel: policy.channel, policyId: policy.policyId, sha256: hash(policyBytes) })
 })

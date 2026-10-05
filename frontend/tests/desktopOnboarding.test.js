@@ -268,7 +268,7 @@ describe('desktop setup screens', () => {
   it('warns before consenting to an unqualified hardware test without starting setup', async () => {
     const desktop = bridge({
       getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
-      preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'hardware-test', qualificationScope: 'hardware-test',
+      preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'hardware-test', qualificationScope: 'hardware-test', accelerator: 'cuda',
         components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
     })
     globalThis.window.karaokeDesktop = desktop
@@ -276,6 +276,54 @@ describe('desktop setup screens', () => {
     await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('has not passed a real-song test or release qualification')
     expect(wrapper.text()).toContain('before enabling it')
+    expect(wrapper.find('[role="alert"]').text()).toContain('Requires an NVIDIA GPU and a current driver.')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+  it('states the NVIDIA requirement only for CUDA hardware-test plans', async () => {
+    for (const accelerator of ['cpu', 'metal', undefined]) {
+      const desktop = bridge({
+        getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+        preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'hardware-test', qualificationScope: 'hardware-test', accelerator,
+          components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
+      })
+      globalThis.window.karaokeDesktop = desktop
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      const alert = wrapper.find('[role="alert"]')
+      expect(alert.text()).toContain('has not passed a real-song test or release qualification')
+      expect(alert.text()).not.toContain('NVIDIA')
+      wrapper.unmount()
+    }
+  })
+  it('labels an available hardware-test pack Experimental instead of Recommended', async () => {
+    for (const [qualificationScope, label, absent] of [['hardware-test', 'Experimental', 'Recommended'], ['full', 'Recommended', 'Experimental']]) {
+      const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: qualificationScope, qualificationScope,
+        components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }) })
+      globalThis.window.karaokeDesktop = desktop
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      await wrapper.find('.primary').trigger('click')
+      await flushPromises()
+      const badge = wrapper.find('[data-testid="onboarding-choice-local"] .badge')
+      expect(badge.text()).toBe(label)
+      expect(badge.classes('experimental')).toBe(qualificationScope === 'hardware-test')
+      expect(wrapper.find('[data-testid="onboarding-choice-local"]').text()).not.toContain(absent)
+      wrapper.unmount()
+    }
+  })
+  it('explains that a hardware-test pack needs an NVIDIA GPU when none is detected', async () => {
+    const reason = 'Local processing in this build requires an NVIDIA GPU with a current driver, and none was detected on this computer.'
+    const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: false, qualificationScope: 'hardware-test', reason, components: [] }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    const local = wrapper.find('[data-testid="onboarding-choice-local"]')
+    expect(local.attributes('disabled')).toBeDefined()
+    expect(local.text()).toContain(reason)
+    expect(local.find('.badge').text()).toBe('Currently unavailable')
     expect(desktop.startSetup).not.toHaveBeenCalled()
     wrapper.unmount()
   })

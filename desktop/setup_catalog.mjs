@@ -65,6 +65,20 @@ export function qualificationScopeError(scope, releaseChannel) {
   return null
 }
 
+// The runtime locks this build trusts, from the application's
+// processing-locks.json. `privateTestLockSha256` names entries of `lockSha256`
+// (hardware-test candidates) that only `private-test` channel builds trust, so
+// a build on any other channel never activates a runtime installed from one,
+// even one already on disk from an earlier test build.
+export function channelTrustedLocks(policy, releaseChannel) {
+  if (policy?.schema !== 1 || !Array.isArray(policy.lockSha256)) throw new Error('Invalid application processing lock policy')
+  const privateOnly = policy.privateTestLockSha256 ?? []
+  if (!Array.isArray(privateOnly) || privateOnly.some(lock => !policy.lockSha256.includes(lock))) {
+    throw new Error('Invalid application processing lock policy: private-test locks must also be listed in lockSha256')
+  }
+  return releaseChannel === PRIVATE_TEST_CHANNEL ? [...policy.lockSha256] : policy.lockSha256.filter(lock => !privateOnly.includes(lock))
+}
+
 // An experimental candidate explicitly records that qualification has not passed.
 // This changes catalog eligibility only; installation still requires the fixed
 // functional probe on the user's device before the runtime can become active.

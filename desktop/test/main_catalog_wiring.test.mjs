@@ -27,7 +27,19 @@ test('main.mjs validates the shipped catalog with the packaged release channel',
   // releasePolicy is the packaged policy, assigned exactly once at startup.
   assert.equal((source.match(/\breleasePolicy = /g) ?? []).length, 1)
   assert.match(source, /releasePolicy = assertReleasePolicy\(JSON\.parse\(readFileSync\(releasePolicyPath, 'utf8'\)\)\)/)
-  assert.match(source, /^import \{ validateShippedCatalog \} from '\.\/setup_catalog\.mjs'$/m)
+  assert.match(source, /^import \{ channelTrustedLocks, validateShippedCatalog \} from '\.\/setup_catalog\.mjs'$/m)
+})
+
+test('main.mjs scopes runtime lock trust to the packaged release channel before any runtime activates', () => {
+  const trust = source.indexOf("const trustedLocks = channelTrustedLocks(JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8')), releasePolicy.channel)")
+  assert.ok(trust > source.indexOf('releasePolicy = assertReleasePolicy('), 'trust derives from the already validated release policy')
+  const construct = source.indexOf('processingManager = new RuntimeManager(', trust)
+  assert.ok(construct > trust)
+  assert.match(source.slice(construct, source.indexOf('\n', construct)), /, trustedLocks \}\)$/)
+  assert.ok(source.indexOf('activeProcessing = await processingManager.active()') > construct)
+  // No other runtime manager or unscoped lock list exists.
+  assert.equal((source.match(/new RuntimeManager\(/g) ?? []).length, 1)
+  assert.doesNotMatch(source, /processingPolicy\.lockSha256|trustedLocks: [a-zA-Z.]*lockSha256/)
 })
 
 test('main.mjs never uses the unrestricted catalog validator or private-test local sources', () => {

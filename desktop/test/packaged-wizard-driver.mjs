@@ -233,8 +233,21 @@ export function assertWizardPlan(plan, summary, expectedLock) {
 // runtime) must also name that installed size right after the exact
 // retrieval size, in the renderer's size format.
 export const formatSize = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(bytes / 1024 ** 2)} MiB`
-export function assertConsentText(text, plan, formatted) {
+// The warning a hardware-test catalog's consent screen must show, and the
+// device requirement it states exactly when the plan's runtime is CUDA.
+export const HARDWARE_TEST_WARNING = 'Experimental hardware test: local processing in this build has not passed a real-song test or release qualification.'
+export const NVIDIA_REQUIREMENT = 'Requires an NVIDIA GPU and a current driver.'
+// `catalog` is the packaged catalog summary. A hardware-test catalog must reach
+// consent with that scope on the plan and its warning visible on the screen.
+export function assertConsentText(text, plan, formatted, catalog) {
   const normalized = normalizeText(text)
+  if (catalog?.qualification?.scope === 'hardware-test') {
+    assert.equal(plan.qualificationScope, 'hardware-test', 'Setup plan does not carry the catalog\'s hardware-test scope')
+    assert.ok(normalized.includes(HARDWARE_TEST_WARNING), 'Consent screen omits the hardware-test warning')
+    assert.equal(plan.accelerator, catalog.target?.accelerator, 'Setup plan accelerator differs from the catalog runtime')
+    if (plan.accelerator === 'cuda') assert.ok(normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen omits the NVIDIA GPU requirement')
+    else assert.ok(!normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen states an NVIDIA GPU requirement for a non-CUDA runtime')
+  }
   for (const [index, component] of plan.components.entries()) {
     assert.ok(normalized.includes(component.label), `Consent screen omits ${component.label}`)
     assert.ok(normalized.includes(`(${formatted[index]} bytes)`), `Consent screen omits the exact size of ${component.label}`)
@@ -733,10 +746,11 @@ export async function chooseLocalAndContinue(page, { timeoutMs }) {
 export async function readPlan(page) { return page.evaluate(() => window.karaokeDesktop.preflightSetup()) }
 export async function readStatus(page) { return page.evaluate(() => window.karaokeDesktop.getSetupStatus()) }
 
-export async function consentSnapshot(page, plan) {
+export async function consentSnapshot(page, plan, catalog) {
+  assert.ok(catalog?.qualification, 'Consent snapshot requires the packaged catalog summary')
   const text = await onboardingDialog(page).innerText()
   const formatted = await page.evaluate(values => values.map(value => Number(value).toLocaleString()), plan.components.map(component => component.bytes))
-  assertConsentText(text, plan, formatted)
+  assertConsentText(text, plan, formatted, catalog)
   return { text: normalizeText(text), sha256: sha256(Buffer.from(normalizeText(text))) }
 }
 

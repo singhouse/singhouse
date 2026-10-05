@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
 import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
 import { RuntimeManager } from '../runtime_manager.mjs'
+import { channelTrustedLocks } from '../setup_catalog.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 function fixture(overrides = {}) {
@@ -376,7 +377,8 @@ test('CUDA memory stays unknown for missing, generic-only, or ambiguous CUDA dev
     const plan = await setup.preflight()
     assert.equal(plan.available, false)
     assert.equal(plan.memoryQualification.status, 'unknown')
-    assert.match(plan.reason, /unambiguous CUDA device/)
+    // No NVIDIA device at all is reported as such before any memory reason.
+    assert.match(plan.reason, cudaDevices?.length ? /unambiguous CUDA device/ : /requires an NVIDIA GPU/)
     assert.equal((await start(setup, plan.planId)).state, 'error')
   }
   assert.deepEqual(calls, [])
@@ -732,4 +734,73 @@ test('hardware-test requires private channel and false status, and cannot skip f
   const misleading = fixture({ releaseChannel: 'private-test' })
   misleading.setup.catalog.qualification.scope = 'hardware-test'
   assert.equal((await misleading.setup.preflight()).available, false)
+})
+
+test('a CUDA pack is unavailable without an NVIDIA device and retrieves nothing', async () => {
+  for (const cudaDevices of [[], undefined]) {
+    const candidate = fixture({ releaseChannel: 'private-test' })
+    Object.assign(candidate.setup.catalog.qualification, { scope: 'hardware-test', passed: false, accelerator: 'cuda' })
+    candidate.setup.catalog.runtime.accelerator = 'cuda'
+    candidate.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB, gpuDevices: [{ name: 'Other GPU', dedicatedMemoryBytes: 16 * GiB }], cudaDevices })
+    const plan = await candidate.setup.preflight()
+    assert.equal(plan.available, false)
+    assert.match(plan.reason, /requires an NVIDIA GPU with a current driver/)
+    assert.deepEqual(plan.components, [])
+    assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+    assert.deepEqual(candidate.calls, [])
+  }
+  const nvidia = fixture({ releaseChannel: 'private-test' })
+  Object.assign(nvidia.setup.catalog.qualification, { scope: 'hardware-test', passed: false, accelerator: 'cuda' })
+  nvidia.setup.catalog.runtime.accelerator = 'cuda'
+  nvidia.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', cudaDevices: [{ name: 'NVIDIA GPU', dedicatedMemoryBytes: 8 * GiB }] })
+  const offered = await nvidia.setup.preflight()
+  assert.equal(offered.available, true, offered.reason)
+  assert.equal(offered.qualificationScope, 'hardware-test')
+  assert.equal(offered.accelerator, 'cuda')
+  // CPU packs never require an NVIDIA device.
+  const cpu = fixture()
+  cpu.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', cudaDevices: [] })
+  const cpuPlan = await cpu.setup.preflight()
+  assert.equal(cpuPlan.available, true)
+  assert.equal(cpuPlan.accelerator, 'cpu')
+})
+
+test('a runtime installed from a private-test-only lock is not activated by a build on another channel', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'onboarding-channel-trust-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { manifest, parts, urls } = archiveRuntime(archiveEntries)
+  const lock = manifest.provenance.lockSha256
+  const policy = { schema: 1, lockSha256: ['b'.repeat(64), lock], privateTestLockSha256: [lock] }
+  const options = channel => ({ lockPython: process.platform === 'win32' ? 'python.exe' : 'python3',
+    durabilityHelper: fileURLToPath(new URL('../backend.py', import.meta.url)), trustedLocks: channelTrustedLocks(policy, channel) })
+  const probe = async () => ({ schema: 2, accelerator: 'cpu', hardwareAvailable: true, pythonVersion: '3.12.14', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0',
+    capabilities: manifest.capabilities, components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1'])),
+    capabilitiesReady: true, verifiedCapabilities: manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } })
+  const tester = new RuntimeManager(join(root, 'processing'), archiveIdentity, { ...options('private-test'),
+    fetchImpl: async url => new Response(parts[urls.indexOf(String(url))]), diskFree: async () => 1e12 })
+  tester.probe = probe
+  const installedByTester = fixture({ runtime: tester, releaseChannel: 'private-test' })
+  installedByTester.setup.catalog.runtime = manifest
+  Object.assign(installedByTester.setup.catalog.qualification, { scope: 'hardware-test', passed: false, runtimeLockSha256: lock })
+  const plan = await installedByTester.setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  assert.equal((await start(installedByTester.setup, plan.planId)).state, 'restart-required')
+  const installedId = (await tester.active()).id
+
+  // A later stable build at the same application version, over the same state.
+  for (const channel of ['stable', undefined]) {
+    const later = new RuntimeManager(join(root, 'processing'), archiveIdentity, options(channel))
+    later.probe = probe
+    assert.throws(() => later.validate(manifest), /not trusted/)
+    await assert.rejects(later.active())
+    const stable = fixture({ runtime: later, releaseChannel: channel, loaded: { runtimeId: installedId, modelsId: installedByTester.cache.value.id } })
+    stable.cache.value = installedByTester.cache.value
+    const status = await stable.setup.installed()
+    assert.equal(status.installed, false)
+    assert.equal(status.ready, false)
+  }
+  // The private-test build still trusts it.
+  const again = new RuntimeManager(join(root, 'processing'), archiveIdentity, options('private-test'))
+  assert.equal((await again.active()).id, installedId)
 })

@@ -96,6 +96,21 @@ export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs'
   'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs',
   // The driver takes the runtime store's directory naming from the store itself.
   'runtime_manager.mjs', 'processing_probe.py', 'setup_catalog.mjs', 'release.mjs'])
+// The packaged release policy, cross-checked against the build's release
+// receipt. A consistency check only, not receipt verification: policyId hashes
+// the complete release policy, so equality ties the packaged channel to the
+// policy this build's receipt names rather than to a loose channel string.
+export function packagedReleasePolicy(resources) {
+  const policyBytes = readFileSync(join(resources, 'release.json'))
+  const policy = assertReleasePolicy(JSON.parse(policyBytes))
+  const receiptPath = join(resources, 'release-receipt.json')
+  // Signed macOS builds keep the receipt outside the sealed bundle.
+  assert.ok(existsSync(receiptPath), 'This candidate has no resources/release-receipt.json (signed macOS builds keep it outside the sealed bundle), '
+    + 'so its packaged release channel cannot be cross-checked for a hardware-test catalog; use a build that includes the receipt')
+  const receipt = JSON.parse(readFileSync(receiptPath))
+  assert.equal(policy.policyId, receipt?.identity?.policyId, 'Packaged release policy differs from its receipt identity')
+  return { channel: policy.channel, policyId: policy.policyId, sha256: hash(policyBytes) }
+}
 export function playwrightVersion() {
   try { return createRequire(import.meta.url)('playwright/package.json').version } catch { return null }
 }
@@ -674,15 +689,8 @@ export async function run(options) {
     evidence.limitations.push(...catalogLimitations(summary)); save()
     let releaseChannel
     if (summary.qualification.scope === 'hardware-test') {
-      const { resources } = packagedLayout(options.executable)
-      const policyBytes = readFileSync(join(resources, 'release.json'))
-      const policy = assertReleasePolicy(JSON.parse(policyBytes))
-      const receipt = JSON.parse(readFileSync(join(resources, 'release-receipt.json')))
-      // policyId hashes the complete release policy and is bound into the
-      // recorded receipt identity; a loose channel string is not evidence.
-      assert.equal(policy.policyId, receipt.identity.policyId, 'Packaged release policy differs from its receipt identity')
-      releaseChannel = policy.channel
-      wizard.releasePolicy = { channel: releaseChannel, policyId: policy.policyId, sha256: hash(policyBytes) }
+      wizard.releasePolicy = packagedReleasePolicy(packagedLayout(options.executable).resources)
+      releaseChannel = wizard.releasePolicy.channel
     }
     assertCatalogLock(summary, expectedLock, evidence.application, releaseChannel)
     manifest = JSON.parse(catalogBytes.toString('utf8')).runtime
@@ -702,7 +710,7 @@ export async function run(options) {
     wizard.statusBeforeConsent = await bounded(readStatus(host), 20000)
     wizard.plan = assertWizardPlan(plan, summary, expectedLock)
     wizard.plan.identity = assertPlanIdentity(plan, { catalogRuntime: manifest, policy })
-    wizard.consent = await bounded(consentSnapshot(host, plan), 20000)
+    wizard.consent = await bounded(consentSnapshot(host, plan, summary), 20000)
     save()
 
     const setupStarted = Date.now(), tracker = createStatusTracker({ runtimeBytes: summary.runtimeBytes, start: setupStarted })
