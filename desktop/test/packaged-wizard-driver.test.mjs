@@ -13,7 +13,7 @@ import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalize
   assertWizardPlan, assertConsentText, createStatusTracker, shouldInterrupt, classifyRetry, partialRuntimeBytes, installedRuntimeIdentity,
   installedModelsIdentity, assertPostRestart, stagedArchivePartBytes, resolveRetryTarget, UNPROVEN_RESUME, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
   parsePackServerLog, runtimeFileUrlPath, runtimeFileForUrlPath, judgePostRestart, observePostRestart, waitForIdle, acceptConsent,
-  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, cancelFromUi, clickRestart } from './packaged-wizard-driver.mjs'
+  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, cancelFromUi, clickRestart, HARDWARE_TEST_WARNING, NVIDIA_REQUIREMENT } from './packaged-wizard-driver.mjs'
 
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const LOCK = 'a'.repeat(64)
@@ -938,4 +938,47 @@ test('a candidate without the wizard hooks fails at once, naming the reason', as
   await assert.rejects(assertWizardHooks(page({ hooked: true }), { timeoutMs: 100, interval: 1 }), /predates the wizard test hooks.*no data-step/)
   await assert.rejects(assertWizardHooks(page({}), { timeoutMs: 20, interval: 1 }), /No setup dialog appeared/)
   await assert.rejects(assertWizardHooks(page({}), {}), /requires a timeout/)
+})
+
+
+test('hardware-test lock assertion requires explicit false status and packaged private-test channel', () => {
+  const value = catalog()
+  value.qualification.scope = 'hardware-test'
+  value.qualification.passed = false
+  const summary = summarizeCatalog(bytesOf(value))
+  assertCatalogLock(summary, LOCK, host, 'private-test')
+  assert.match(catalogLimitations(summary)[1], /unqualified hardware-test candidate/)
+  for (const channel of [undefined, 'stable', 'beta', 'core-private-test']) {
+    assert.throws(() => assertCatalogLock(summary, LOCK, host, channel), /packaged private-test release channel/)
+  }
+  for (const passed of [true, undefined, null, 0, 'false']) {
+    assert.throws(() => assertCatalogLock({ ...summary, qualification: { ...summary.qualification, passed } }, LOCK, host, 'private-test'), /passed: false/)
+  }
+  assert.throws(() => assertCatalogLock(summary, 'd'.repeat(64), host, 'private-test'), /differs from the expected lock/)
+  assert.throws(() => assertCatalogLock(summary, LOCK, { ...host, platform: 'win32' }, 'private-test'), /different platform/)
+})
+
+test('a hardware-test catalog requires its scope on the plan and its warning on the consent screen', () => {
+  const value = catalog()
+  Object.assign(value.qualification, { scope: 'hardware-test', passed: false })
+  const summary = summarizeCatalog(bytesOf(value))
+  const offered = { ...plan(), qualificationScope: 'hardware-test', accelerator: 'cpu' }, formatted = offered.components.map(component => component.bytes.toLocaleString('en-US'))
+  const sizes = offered.components.map(component => `${component.label}\n (${component.bytes.toLocaleString('en-US')} bytes)`).join('\n') + '\nInstall tools and models'
+  const text = `${HARDWARE_TEST_WARNING} Processing may fail.\n${sizes}`
+  assertConsentText(text, offered, formatted, summary)
+  assert.throws(() => assertConsentText(sizes, offered, formatted, summary), /omits the hardware-test warning/)
+  assert.throws(() => assertConsentText(text, { ...offered, qualificationScope: null }, formatted, summary), /hardware-test scope/)
+  assert.throws(() => assertConsentText(text, { ...offered, accelerator: 'cuda' }, formatted, summary), /accelerator differs/)
+  // The NVIDIA requirement appears exactly when the plan's runtime is CUDA.
+  const withNvidia = `${HARDWARE_TEST_WARNING} ${NVIDIA_REQUIREMENT} Processing may fail.\n${sizes}`
+  for (const accelerator of ['cpu', 'metal']) {
+    const other = { ...summary, target: { ...summary.target, accelerator } }
+    assertConsentText(text, { ...offered, accelerator }, formatted, other)
+    assert.throws(() => assertConsentText(withNvidia, { ...offered, accelerator }, formatted, other), /non-CUDA runtime/)
+  }
+  const cuda = { ...summary, target: { ...summary.target, accelerator: 'cuda' } }
+  assertConsentText(withNvidia, { ...offered, accelerator: 'cuda' }, formatted, cuda)
+  assert.throws(() => assertConsentText(text, { ...offered, accelerator: 'cuda' }, formatted, cuda), /NVIDIA GPU requirement/)
+  // Other scopes are unaffected by the warning check.
+  assertConsentText(sizes, plan(), formatted, summarizeCatalog(bytesOf(catalog())))
 })

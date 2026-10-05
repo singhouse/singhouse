@@ -360,3 +360,24 @@ test('processing-ready accepts only the generator\'s exact canonical bytes', asy
     assert.deepEqual(result, { mode: 'processing-ready', catalogSha256: sha(generated), runtimeLockSha256: f.catalog.runtime.provenance.lockSha256, qualificationScope: scope })
   }
 })
+
+test('hardware-test packaging is private-only and records unqualified scope without upgrading evidence', () => {
+  const f = fixture()
+  f.catalog.qualification.scope = 'hardware-test'
+  f.catalog.qualification.passed = false
+  const args = { mode: 'processing-ready', catalogBytes: bytes(f.catalog), identity: f.identity,
+    locks: f.locks, modelPolicy: f.modelPolicy }
+  assert.equal(assertProcessingCatalog({ ...args, releaseChannel: 'private-test' }).qualificationScope, 'hardware-test')
+  for (const releaseChannel of [undefined, 'stable', 'beta']) {
+    assert.throws(() => assertProcessingCatalog({ ...args, releaseChannel }), /accepted only by "private-test"/)
+  }
+  // Packaging applies the application's channel-scoped lock trust.
+  const lock = f.catalog.runtime.provenance.lockSha256
+  const scoped = { ...args, locks: { ...f.locks, privateTestLockSha256: [lock] } }
+  assert.equal(assertProcessingCatalog({ ...scoped, releaseChannel: 'private-test' }).runtimeLockSha256, lock)
+  assert.throws(() => assertProcessingCatalog({ ...scoped, releaseChannel: 'stable' }), /not trusted/)
+  assert.throws(() => assertProcessingCatalog({ ...args, locks: { ...f.locks, privateTestLockSha256: ['c'.repeat(64)] }, releaseChannel: 'private-test' }),
+    /private-test locks must also be listed/)
+  f.catalog.qualification.passed = true
+  assert.throws(() => assertProcessingCatalog({ ...args, catalogBytes: bytes(f.catalog), releaseChannel: 'private-test' }), /qualification evidence/)
+})

@@ -121,8 +121,8 @@ sees that. Only the exact flags are accepted; forms such as
   applies at start for the exact target being built. The target is read from
   the native assembly's manifest (`linux-x64`, `linux-arm64`, `darwin-arm64`, or
   `win32-x64`). The catalog is checked against the channel of the release
-  policy being packaged, so a `private-smoke` catalog cannot be packaged into a
-  build whose channel is not `private-test`. The file must also be byte for
+  policy being packaged, so a `private-smoke` or `hardware-test` catalog cannot
+  be packaged into a build whose channel is not `private-test`. The file must also be byte for
   byte the generator's output for the catalog it validates to (two-space
   indented JSON with a trailing newline, keys in generator order): duplicate
   keys, unknown fields, reordered keys, or hand reformatting are refused with
@@ -634,6 +634,12 @@ rejects missing notice files. File hashes establish correspondence
 with a selected manifest; they do not establish publisher identity.
 Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+Locks also listed in its `privateTestLockSha256` (hardware-test candidates) are
+trusted only by `private-test` channel builds: a build on any other channel
+neither installs nor activates such a runtime, including one left on disk by an
+earlier test build of the same application version. The backend's own lock
+check applies the same rule to the channel the application passes it, and
+rejects these locks when no channel is supplied.
 
 For archive-form packs, installation retrieves each part into
 `processing/staging/<name>.archive/`, outside the pack tree. It resumes partial
@@ -990,7 +996,29 @@ from the renderer or saved preferences. Its schema is:
 - `qualification`: `passed`, `scope`, `runtimeLockSha256`, `platform`, `arch`,
   `evidenceReference`, and `accelerator`, matching that exact runtime. Populate
   only from actual evidence. `scope` is required and states what `passed`
-  covers:
+  covers (`passed: true` for `full` and `private-smoke`):
+  - `hardware-test`: an experimental candidate awaiting real-song testing;
+    `passed` must be exactly `false`. Accepted only on the `private-test`
+    channel. The evidence reference identifies its build/inventory evidence,
+    never a claimed inference result. Setup displays an explicit experimental
+    warning before consent. Hash trust, download consent, and the mandatory
+    on-device functional probe before runtime activation remain required.
+    This scope is suitable for sending a CUDA candidate to a hardware tester;
+    it does not establish memory suitability or release qualification.
+    CUDA candidates still require a successful CUDA functional probe before
+    activation. CPU fallback within that pack is available only after this
+    initial CUDA check succeeds; machines without a working CUDA device need
+    a CPU pack. This catalog does not automatically select between packs.
+    For a CUDA catalog, setup is unavailable before any download when no
+    NVIDIA device is detected, and the wizard labels an available
+    hardware-test choice "Experimental" rather than "Recommended". Its runtime
+    lock must also be listed in `privateTestLockSha256` (see above).
+    The committed `win32-x64.json` is currently such a Windows CUDA
+    hardware-test catalog. It replaces the earlier Windows CPU `private-smoke`
+    catalog: because there is one catalog per target, a processing-ready
+    Windows build from this source offers only the CUDA test pack, and Windows
+    computers without an NVIDIA GPU cannot set up local processing with it.
+    See `desktop/qualification/windows-cuda-test.md`.
   - `full`: the complete release qualification passed for this runtime and
     target. Accepted by builds on any release channel.
   - `private-smoke`: only a single-song real-processing smoke test passed. This
@@ -1016,8 +1044,8 @@ replaces an existing file). Commit the file exactly as written: packaging
 accepts only the generator's canonical bytes. Inputs are explicit;
 the tool never manufactures qualification. `--release release.json` names the
 release policy whose channel the catalog is checked against (default
-`desktop/release.json`); the tool refuses to write a `private-smoke` catalog
-for any channel other than `private-test`. Packaging re-checks the catalog
+`desktop/release.json`); the tool refuses to write a `private-smoke` or
+`hardware-test` catalog for any channel other than `private-test`. Packaging re-checks the catalog
 against the release policy actually packaged. `--memory memory.json` adds measured
 memory evidence. Production catalogs reject local runtime URLs. The explicit
 `--private-test-local-sources` option is only for validating private test inputs;

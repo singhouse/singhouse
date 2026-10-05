@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { checkedFile, processingAttestation } from './runtime_manager.mjs'
-import { QUALIFICATION_SCOPES, qualificationScopeError, validateSetupMemory } from './setup_catalog.mjs'
+import { QUALIFICATION_SCOPES, qualificationScopeError, qualificationStatusMatches, validateSetupMemory } from './setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -12,6 +12,9 @@ const bytes = manifest => manifest.files.reduce((sum, file) => sum + file.size, 
 const complete = manifest => ['transcription', 'separation'].every(id => manifest.capabilities?.includes(id))
   && LOCAL_MODEL_IDS.every(id => manifest.models?.includes(id)
     && manifest.modelCapabilities?.[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
+const NVIDIA_REQUIRED = 'Local processing in this build requires an NVIDIA GPU with a current driver, and none was detected on this computer. You can still play your existing karaoke files.'
+// The accelerator of the runtime a plan installs or uses, for wizard wording only.
+const planAccelerator = runtime => ['cpu', 'cuda', 'metal'].includes(runtime?.accelerator) ? runtime.accelerator : null
 const REOPEN_MESSAGE = 'Setup is verified. Reopen singhouse to use local processing.'
 const initial = () => ({ state: 'idle', phase: 'preflight', message: 'Choose local processing or playback.', retryable: false, restartRequired: false })
 
@@ -95,7 +98,7 @@ export class OnboardingSetup {
   }
 
   // releaseChannel is the validated release policy's channel; it decides
-  // whether private-smoke qualification evidence is acceptable.
+  // whether private-smoke or hardware-test qualification is acceptable.
   constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
     loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
     Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
@@ -167,7 +170,7 @@ export class OnboardingSetup {
     if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
-    if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
+    if (!complete(runtime) || runtime.probe.schema !== 2 || !qualificationStatusMatches(q)
         || q.runtimeLockSha256 !== runtime.provenance.lockSha256 || qualificationScopeError(q.scope, this.releaseChannel)
         || ['platform', 'arch', 'accelerator'].some(key => q[key] !== runtime[key])) {
       throw new Error('Local song processing is not available in this version yet. Its processing tools still need to pass the required checks.')
@@ -259,10 +262,15 @@ export class OnboardingSetup {
     const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+      qualificationScope: this.qualificationScope(), accelerator: planAccelerator(installed.installed ? installed.runtime.manifest : this.catalog?.runtime), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
     if (installed.installed) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
       const selected = this.selection(installed.models)
+      // A CUDA pack activates only after its CUDA device check passes, so never
+      // offer its multi-GB download to a computer with no NVIDIA driver inventory.
+      if (selected.runtime.accelerator === 'cuda' && !(Array.isArray(hardware.cudaDevices) && hardware.cudaDevices.length)) {
+        return { ...base, reason: NVIDIA_REQUIRED }
+      }
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
       const runtimeNeeded = installed.runtime?.id !== hash(selected.runtime)
       const modelsNeeded = installed.models?.id !== hash(selected.models)

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
-import { validateShippedCatalog } from './setup_catalog.mjs'
+import { channelTrustedLocks, validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
 import { checkModalConnection } from './modal_connection.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -196,6 +196,8 @@ async function launchBackend() {
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
   // Directory names may be shortened; the backend checks each manifest against the full identity.
   if (activeProcessing) args.push('--processing', activeProcessing.directory, '--processing-id', activeProcessing.id)
+  // The backend scopes its independent lock trust to this validated channel.
+  if (packaged && releasePolicy) args.push('--release-channel', releasePolicy.channel)
   if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
   if (activeModels) args.push('--models', activeModels.directory, '--models-id', activeModels.id)
   let privateModal = null
@@ -533,9 +535,10 @@ async function start() {
     brand = names.BRAND_NAME
     if (typeof brand !== 'string' || !brand || typeof names.BRAND_INSTALLED_NAME !== 'string' || !names.BRAND_INSTALLED_NAME) throw new Error('Installed product name is invalid')
     app.setName(names.BRAND_INSTALLED_NAME)
-    const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
-    if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
+    // Trust is channel-scoped: a build that is not private-test never
+    // activates an installed hardware-test runtime, at startup or in setup.
+    const trustedLocks = channelTrustedLocks(JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8')), releasePolicy.channel)
+    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
     try {
       activeProcessing = await processingManager.active()

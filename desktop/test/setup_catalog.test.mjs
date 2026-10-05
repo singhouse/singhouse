@@ -4,8 +4,9 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { createSetupCatalog, validateSetupCatalog, qualificationScopeError, SETUP_MODEL_IDS } from '../setup_catalog.mjs'
+import { channelTrustedLocks, createSetupCatalog, validateSetupCatalog, qualificationScopeError, SETUP_MODEL_IDS } from '../setup_catalog.mjs'
 import { derivePolicyId } from '../release.mjs'
 import { prepareSetupCatalog } from '../build/setup_catalog.mjs'
 const sha = value => createHash('sha256').update(value).digest('hex')
@@ -177,4 +178,49 @@ test('archive-form runtimes source-check every part URL with the per-file rule',
   const mixed = archived('https://example.org/releases/runtime.pack.gz.002')
   mixed.input.runtime.files[0].url = 'https://example.org/python'
   assert.throws(() => createSetupCatalog(mixed.input, mixed.options), /mixes/)
+})
+
+test('hardware-test is explicitly unqualified, private-test only, and retains lock and target validation', () => {
+  const { input, options } = fixture()
+  input.qualification.scope = 'hardware-test'
+  input.qualification.passed = false
+  const privateOptions = { ...options, releaseChannel: 'private-test' }
+  assert.deepEqual(createSetupCatalog(input, privateOptions).qualification, input.qualification)
+  for (const releaseChannel of [undefined, 'stable', 'beta', 'core-private-test']) {
+    assert.throws(() => createSetupCatalog(input, { ...options, releaseChannel }), /accepted only by "private-test"/)
+  }
+  for (const passed of [true, undefined, null, 0, 'false']) {
+    const invalid = structuredClone(input); invalid.qualification.passed = passed
+    assert.throws(() => createSetupCatalog(invalid, privateOptions), /qualification evidence/)
+  }
+  assert.throws(() => createSetupCatalog(input, { ...privateOptions, trustedLocks: [] }), /not trusted/)
+  for (const mutate of [q => { q.runtimeLockSha256 = 'b'.repeat(64) }, q => { q.platform = 'win32' }, q => { delete q.evidenceReference }]) {
+    const invalid = structuredClone(input); mutate(invalid.qualification)
+    assert.throws(() => createSetupCatalog(invalid, privateOptions), /qualification evidence/)
+  }
+})
+
+test('private-test-only runtime locks are trusted only by private-test channel builds', () => {
+  const [shared, candidate] = ['a'.repeat(64), 'b'.repeat(64)]
+  const policy = { schema: 1, lockSha256: [shared, candidate], privateTestLockSha256: [candidate] }
+  assert.deepEqual(channelTrustedLocks(policy, 'private-test'), [shared, candidate])
+  for (const channel of [undefined, 'stable', 'beta', 'core-private-test', 'Private-test']) {
+    assert.deepEqual(channelTrustedLocks(policy, channel), [shared])
+  }
+  assert.deepEqual(channelTrustedLocks({ schema: 1, lockSha256: [shared] }, 'stable'), [shared])
+  for (const invalid of [null, {}, { schema: 2, lockSha256: [] }, { schema: 1, lockSha256: [shared], privateTestLockSha256: candidate },
+    { schema: 1, lockSha256: [shared], privateTestLockSha256: [candidate] }]) {
+    assert.throws(() => channelTrustedLocks(invalid, 'private-test'), /Invalid application processing lock policy/)
+  }
+})
+
+test('every committed hardware-test catalog lock is trusted only by private-test builds', () => {
+  const policy = JSON.parse(readFileSync(new URL('../processing-locks.json', import.meta.url), 'utf8'))
+  const directory = new URL('../processing-catalogs/', import.meta.url)
+  for (const name of readdirSync(directory).filter(file => file.endsWith('.json'))) {
+    const { qualification } = JSON.parse(readFileSync(new URL(name, directory), 'utf8'))
+    if (qualification?.scope !== 'hardware-test') continue
+    assert.ok(policy.privateTestLockSha256?.includes(qualification.runtimeLockSha256), `${name} lock must be private-test only`)
+    assert.equal(channelTrustedLocks(policy, 'stable').includes(qualification.runtimeLockSha256), false)
+  }
 })
