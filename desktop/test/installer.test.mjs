@@ -188,8 +188,8 @@ test('installer requires the native memory policy to match the target platform s
   const memory = resolve(native, 'processing-memory.json')
   try {
     const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
-    const target = platform => writeFile(resolve(native, 'manifest.json'),
-      JSON.stringify({ appVersion: pkg.version, platform, arch: 'x64' }))
+    const target = (platform, arch = 'x64') => writeFile(resolve(native, 'manifest.json'),
+      JSON.stringify({ appVersion: pkg.version, platform, arch }))
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
     for (const policy of ['models.json', 'processing-locks.json']) {
@@ -205,7 +205,7 @@ test('installer requires the native memory policy to match the target platform s
     await import(`${installer}?memory-match=${Date.now()}`)
 
     // A target without a measured policy may not carry one.
-    await target('win32')
+    await target('darwin', 'arm64')
     await assert.rejects(import(`${installer}?memory-unexpected=${Date.now()}`), stale)
     await rm(memory)
     await import(`${installer}?memory-absent=${Date.now()}`)
