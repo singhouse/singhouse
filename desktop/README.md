@@ -909,20 +909,58 @@ runtime. The initial CUDA functional probe must still pass before activation.
 Workers check fresh available RAM, the selected CUDA device's free VRAM, and
 audio metadata before loading checkpoints. Missing evidence, unknown memory,
 out-of-envelope audio, or insufficient memory for both routes refuses the job.
-Guarded workers serialize processing and never restart failed inference on a
-different device. The bounded profile uses six-second Demucs segments,
-Roformer segment size 256 with batch size one and CUDA autocast, and HEART's
-30-second chunks with batch size one. Managed HEART VAD runs inside admission.
-These checks cannot reserve memory against other applications or establish
-support for hardware that has not been tested.
+Guarded workers serialize processing, wait a bounded time for another local
+worker to finish, and never restart failed inference on a different device.
+Before Pass 1, a guarded runtime decodes the upload with the bundled ffmpeg to
+a temporary 44.1 kHz stereo float WAV, so every accepted upload format is
+inspected and admitted under the same envelope; the copy is removed after
+Pass 1. Tracks longer than the shortest measured `maxDurationSeconds` are
+refused with a message that states the limit, which applies on the GPU and the
+CPU alike. The decode is bounded by output size rather than by timestamp and
+copies no metadata, so neither timestamp gaps nor large tags can let a file
+pass the check with audio cut off. Without a valid measured policy for every
+workflow model, preparation is refused before decoding. Each guarded worker reports the device it selected and why; the job
+message names CPU fallback (for example, too little free GPU memory, a CUDA
+driver error, or an unsupported GPU) and that it is slower. HEART was measured
+on the GPU only with managed VAD at its default configuration (segments of at
+most 15 seconds) and greedy decoding. Whole-file decoding, temperature-fallback
+decoding, a non-default VAD configuration, and supplied segments that are not
+finite, ordered, inside the audio, and at most 15 seconds long use the CPU
+route. A CUDA runtime without a valid policy for its models reports
+local processing as not ready.
+
+The bounded profile applies only to guarded runtimes: six-second Demucs
+segments, Roformer segment size 256 with batch size one and CUDA autocast, and
+HEART's 30-second chunks with batch size one. Unguarded CPU and Metal runtimes
+keep upstream Demucs and audio-separator settings. Managed HEART VAD runs
+inside admission. The quality effect of the shorter separation segments has not
+been measured. These checks cannot reserve memory against other applications
+or establish support for hardware that has not been tested.
+
+The Linux CUDA runtime pins PyTorch 2.10 built for CUDA 12.8, compiled for
+compute capabilities `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_90`, `sm_100`,
+and `sm_120`. GPUs below compute capability 7.0 (Pascal, including the
+GeForce GTX 10 series, and older) are not supported; workers name the GPU's
+capability and use the CPU route instead. A runtime that reports no compiled
+GPU architectures is treated as unusable for CUDA in the same way, and the
+activation probe refuses both cases with the reason. The CUDA 12.8 libraries need an
+NVIDIA driver from the R525 series or newer through CUDA minor-version
+compatibility, and R570 or newer for Blackwell (RTX 50 series) GPUs. The
+current memory policy rests on measurements from a single 24 GB GPU host.
+Cards with 8 GB or less are untested; on 6 GB cards HEART cannot meet its GPU
+budget and runs on the CPU only when enough RAM is available.
 
 `desktop/qualification/profile_processing.py --help` describes the explicit
 Linux measurement harness. It verifies runtime files, records model/input
 identities, monitors only the owned worker group, and stops the experiment if
 the chosen host RAM reserve is threatened. Its candidate budgets are experiment
 inputs, and its sampled peaks are raw lower bounds, not release qualification
-or automatically generated memory minima. Keep audio and transcription logs
-local; publish only sanitized technical evidence.
+or automatically generated memory minima. For CUDA and CPU runs alike it
+records the worker group's sampled peak RSS, the highest per-process kernel
+RSS high-water mark, and the minimum host available RAM, so a CUDA route's
+`ramBytes` can be derived from its own run. Profile Demucs with the prepared
+44.1 kHz stereo WAV that guarded runtimes pass to Pass 1. Keep audio and
+transcription logs local; publish only sanitized technical evidence.
 
 Desktop Modal setup saves credentials with operating-system encryption and
 performs a bounded, explicit metadata check using the pinned client. No audio

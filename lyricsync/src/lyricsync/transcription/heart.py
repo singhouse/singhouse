@@ -6,21 +6,27 @@ import importlib.resources
 import json
 import logging
 import os
+import queue
 import subprocess
 import tempfile
 import threading
 import time
 import signal
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from lyricsync._config import VadConfig
 from lyricsync._types import TimedWord, TranscriptionResult, TranscriptionSegment
 
 logger = logging.getLogger(__name__)
 
-def _terminate_tree_and_reap(proc, original_error: BaseException) -> None:
-    """Best-effort bounded tree cleanup, then re-raise the original failure."""
+def _terminate_tree_and_reap(proc, original_error: BaseException, *, wait_only: bool = False) -> None:
+    """Best-effort bounded tree cleanup, then re-raise the original failure.
+
+    ``wait_only`` reaps without reading the pipes, for callers whose reader
+    threads already own them.
+    """
+    reap = proc.wait if wait_only else proc.communicate
     try:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGKILL)
@@ -31,11 +37,11 @@ def _terminate_tree_and_reap(proc, original_error: BaseException) -> None:
         try: proc.kill()
         except OSError: pass
     try:
-        proc.communicate(timeout=5)
+        reap(timeout=5)
     except subprocess.TimeoutExpired:
         try: proc.kill()
         except OSError: pass
-        try: proc.communicate(timeout=5)
+        try: reap(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             logger.error("HeartTranscriptor child did not reap after forced termination")
     except OSError:
@@ -68,6 +74,7 @@ class HeartTranscriber:
         cancel_event: threading.Event | None = None,
         accelerator: str | None = None,
         managed_vad: bool = False,
+        on_stderr_line: Callable[[str], None] | None = None,
     ):
         self.python_path = Path(python_path)
         self.timeout = timeout
@@ -79,6 +86,9 @@ class HeartTranscriber:
         self.cancel_event = cancel_event
         self.accelerator = accelerator
         self.managed_vad = managed_vad
+        # Receives each child stderr line once, while the child runs. A reader
+        # thread consumes stderr, so delivery does not depend on the platform.
+        self.on_stderr_line = on_stderr_line
 
         if script_path is not None:
             self.script_path = Path(script_path)
@@ -89,6 +99,68 @@ class HeartTranscriber:
                 self.script_path = Path(str(ref))
             except Exception:
                 self.script_path = Path(__file__).parent / "_heart_script.py"
+
+    def _deliver(self, line: str) -> None:
+        if not line:
+            return
+        try:
+            self.on_stderr_line(line)
+        except Exception as exc:  # noqa: BLE001 - notification must not fail transcription
+            logger.warning("HeartTranscriber stderr callback failed: %s", exc)
+
+    def _stream(self, proc, cmd, deadline):
+        """Wait for ``proc`` while reader threads drain both pipes.
+
+        stdout is collected whole by its own thread, so a large result cannot
+        fill the pipe while stderr is read line by line (universal newlines,
+        so progress-bar carriage returns end lines too). Lines are delivered
+        on this thread; cancellation and the deadline still apply.
+        """
+        lines: queue.Queue[str] = queue.Queue()
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+
+        def read_stdout():
+            stdout_parts.append(proc.stdout.read())
+
+        def read_stderr():
+            for line in iter(proc.stderr.readline, ""):
+                stderr_parts.append(line)
+                lines.put(line.rstrip("\r\n"))
+
+        readers = [threading.Thread(target=read_stdout, daemon=True),
+                   threading.Thread(target=read_stderr, daemon=True)]
+        for reader in readers:
+            reader.start()
+
+        def drain():
+            while True:
+                try:
+                    self._deliver(lines.get_nowait())
+                except queue.Empty:
+                    return
+
+        def stop(error):
+            try:
+                _terminate_tree_and_reap(proc, error, wait_only=True)
+            finally:
+                for reader in readers:
+                    reader.join(timeout=1)
+                drain()
+
+        while proc.poll() is None or any(reader.is_alive() for reader in readers):
+            try:
+                self._deliver(lines.get(timeout=0.1))
+            except queue.Empty:
+                pass
+            drain()
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                stop(RuntimeError("HeartTranscriptor cancelled"))
+            if time.monotonic() >= deadline:
+                stop(subprocess.TimeoutExpired(cmd, self.timeout))
+        drain()
+        proc.wait()
+        return "".join(stdout_parts), "".join(stderr_parts)
 
     def transcribe(
         self,
@@ -136,15 +208,18 @@ class HeartTranscriber:
                        {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
             proc_handle = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
             deadline = time.monotonic() + self.timeout
-            while True:
-                try:
-                    stdout, stderr = proc_handle.communicate(timeout=0.1)
-                    break
-                except subprocess.TimeoutExpired:
-                    if self.cancel_event is not None and self.cancel_event.is_set():
-                        _terminate_tree_and_reap(proc_handle, RuntimeError("HeartTranscriptor cancelled"))
-                    if time.monotonic() >= deadline:
-                        _terminate_tree_and_reap(proc_handle, subprocess.TimeoutExpired(cmd, self.timeout))
+            if self.on_stderr_line is not None:
+                stdout, stderr = self._stream(proc_handle, cmd, deadline)
+            else:
+                while True:
+                    try:
+                        stdout, stderr = proc_handle.communicate(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if self.cancel_event is not None and self.cancel_event.is_set():
+                            _terminate_tree_and_reap(proc_handle, RuntimeError("HeartTranscriptor cancelled"))
+                        if time.monotonic() >= deadline:
+                            _terminate_tree_and_reap(proc_handle, subprocess.TimeoutExpired(cmd, self.timeout))
             proc = subprocess.CompletedProcess(cmd, proc_handle.returncode, stdout, stderr)
         finally:
             if vad_tmp:

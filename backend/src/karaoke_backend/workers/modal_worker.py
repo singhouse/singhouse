@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -79,6 +81,21 @@ KARAOKE_MODEL_DIR = os.getenv(
 class StemSeparationError(Exception):
     """Raised when stem separation fails."""
 
+
+class ProcessingRefusedError(StemSeparationError):
+    """Processing was refused before it started; the message is user-facing.
+
+    Retrying cannot change the outcome, so callers do not retry it.
+    """
+
+
+class UnsupportedAudioError(ProcessingRefusedError):
+    """The input cannot be processed by this runtime; the message is user-facing."""
+
+
+MISSING_POLICY_MESSAGE = ("Local processing was refused because the installed processing runtime has no "
+                          "measured memory policy for this release. Reinstall the processing runtime, then retry.")
+
 def configured_accelerator() -> str:
     """Use a verified desktop device, preserving the legacy CUDA default."""
     try:
@@ -98,11 +115,170 @@ def configured_pass2_device() -> str | None:
     return declared
 
 
+# A guarded worker may choose its measured CPU route after its own memory
+# check, so the parent cannot set its deadline from GPU speed.
+MANAGED_STAGE_TIMEOUT = 3600
+LEGACY_SEPARATION_TIMEOUT = 900
+# Guarded input preparation: one ffmpeg decode to the measured WAV format.
+INPUT_PREPARATION_TIMEOUT = 300
+# Final mixing: two vocal-stem probes and conversions, then both mixes.
+MIXING_TIMEOUT = 2 * (30 + 300) + 120 + 120
+# Measured envelope models used by one managed separation and transcription.
+WORKFLOW_MODELS = ("demucs-mdx-extra", "karaoke-roformer", "heart-transcriptor")
+
+
+def _guarded_device(device: str | None) -> bool:
+    """Whether an attested managed device runs under measured admission."""
+    return device is not None and (device == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
+
+
 def _managed_processing_timeout(device: str | None, legacy: int) -> int:
-    # Device is attested by the caller. A CUDA child may choose CPU after its
-    # memory check, so the parent cannot decide its deadline from GPU speed.
-    guarded = device is not None and (device == "cuda" or bool(os.getenv("KARAOKE_PROCESSING_MEMORY_JSON")))
-    return 3600 if guarded else legacy
+    # Device is attested by the caller.
+    return MANAGED_STAGE_TIMEOUT if _guarded_device(device) else legacy
+
+
+def separation_timeout() -> int:
+    """Whole-call deadline for :func:`separate_stems`.
+
+    Legacy, Modal, and unguarded managed runtimes keep their historical
+    deadline. A guarded runtime gets the sum of its inner stage deadlines so
+    an admitted CPU fallback is never cut short by the outer wrapper.
+    """
+    if modal_offload.is_enabled() or not os.getenv("KARAOKE_DESKTOP_PROCESSING_JSON", "").strip():
+        return LEGACY_SEPARATION_TIMEOUT
+    try:
+        device = configured_accelerator()
+    except StemSeparationError:
+        return LEGACY_SEPARATION_TIMEOUT
+    if not _guarded_device(device):
+        return LEGACY_SEPARATION_TIMEOUT
+    return INPUT_PREPARATION_TIMEOUT + 2 * MANAGED_STAGE_TIMEOUT + MIXING_TIMEOUT
+
+
+def workflow_duration_limit() -> int | None:
+    """Shortest measured duration envelope across the managed workflow models.
+
+    None unless every workflow model has a valid measured policy.
+    """
+    from karaoke_backend.workers.memory_admission import MemoryAdmissionError, policy_for
+    try:
+        return min(policy_for(model)["maxDurationSeconds"] for model in WORKFLOW_MODELS)
+    except MemoryAdmissionError:
+        return None
+
+
+def _format_duration(seconds: int) -> str:
+    minutes, rest = divmod(int(seconds), 60)
+    if rest:
+        return f"{minutes}:{rest:02d}"
+    return f"{minutes} minute" + ("" if minutes == 1 else "s")
+
+
+def _wav_layout(path: Path) -> tuple[float, int]:
+    """Duration and data-chunk offset of a RIFF/WAVE file."""
+    with path.open("rb") as stream:
+        header = stream.read(12)
+        if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+            raise ValueError("not a WAV file")
+        rate = block = None
+        while True:
+            chunk = stream.read(8)
+            if len(chunk) < 8:
+                raise ValueError("WAV data chunk is missing")
+            name, size = chunk[:4], int.from_bytes(chunk[4:], "little")
+            if name == b"fmt ":
+                fmt = stream.read(size)
+                rate = int.from_bytes(fmt[4:8], "little")
+                block = int.from_bytes(fmt[12:14], "little")
+                if size % 2:
+                    stream.read(1)
+            elif name == b"data":
+                if not rate or not block:
+                    raise ValueError("WAV format chunk is missing")
+                return size / block / rate, stream.tell()
+            else:
+                stream.seek(size + size % 2, os.SEEK_CUR)
+
+
+PREPARED_SAMPLE_RATE = 44100
+PREPARED_CHANNELS = 2
+PREPARED_SAMPLE_BYTES = 4  # pcm_f32le
+WAV_HEADER_ALLOWANCE = 4096
+
+
+def _prepared_size_limit(limit_seconds: float) -> int:
+    """Output bytes holding one second more than ``limit_seconds`` of audio."""
+    frames = math.ceil((limit_seconds + 1) * PREPARED_SAMPLE_RATE)
+    return frames * PREPARED_CHANNELS * PREPARED_SAMPLE_BYTES + WAV_HEADER_ALLOWANCE
+
+
+async def _prepare_guarded_input(audio_path: Path, work_dir: Path) -> Path:
+    """Decode the upload to the measured 44.1 kHz stereo float WAV format.
+
+    Guarded admission inspects audio with libsndfile, which cannot open AAC or
+    ALAC and whose envelope excludes high sample rates and surround layouts.
+    Decoding with the application's ffmpeg admits every format the upload
+    route accepts. Tracks longer than the measured duration are refused with
+    a device-independent message.
+
+    The decode is bounded by output size (``-fs``), not by timestamp (``-t``).
+    Samples are written back to back, as Demucs's own ffmpeg decode did before
+    preparation existed, so a source with a forward timestamp gap would lose
+    every sample after the gap under a timestamp limit and still pass the
+    duration check. A byte limit stops only once more than the limit's worth
+    of samples was decoded, which the duration check then refuses.
+
+    Metadata and chapters are not copied, so the bounded bytes hold audio:
+    a large tag would otherwise fill the allowance and end the decode early.
+    The data offset is checked as well. Without a valid measured policy for
+    every workflow model there is no bound, so preparation is refused.
+    """
+    limit = workflow_duration_limit()
+    if limit is None:
+        raise ProcessingRefusedError(MISSING_POLICY_MESSAGE)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    target = work_dir / f"{audio_path.stem}.wav"
+    command = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(audio_path),
+               "-map", "0:a:0", "-map_metadata", "-1", "-map_chapters", "-1", "-vn", "-sn", "-dn",
+               "-ac", str(PREPARED_CHANNELS), "-ar", str(PREPARED_SAMPLE_RATE), "-c:a", "pcm_f32le",
+               "-bitexact", "-fs", str(_prepared_size_limit(limit)), str(target)]
+    try:
+        await _await_subprocess(command, timeout=INPUT_PREPARATION_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise StemSeparationError(
+            f"Preparing the audio timed out after {INPUT_PREPARATION_TIMEOUT // 60} minutes") from None
+    except StemSeparationError as exc:
+        raise UnsupportedAudioError(
+            "The uploaded audio could not be decoded. Check that the file plays, then re-upload it."
+        ) from exc
+    try:
+        duration, data_offset = _wav_layout(target)
+        if data_offset > WAV_HEADER_ALLOWANCE:
+            raise ValueError("WAV header exceeds the bounded allowance")
+    except (OSError, ValueError) as exc:
+        raise UnsupportedAudioError(
+            "The uploaded audio could not be decoded. Check that the file plays, then re-upload it."
+        ) from exc
+    if duration <= 0:
+        raise UnsupportedAudioError("The uploaded audio contains no sound to process.")
+    if duration > limit:
+        raise UnsupportedAudioError(
+            f"This track is longer than {_format_duration(limit)}. Local processing supports tracks up to "
+            f"{_format_duration(limit)} long, on the GPU and the CPU alike, so it was not processed."
+        )
+    return target
+
+
+def _device_notice(progress: "ProgressCallback", pct: int, activity: str):
+    """Publish a guarded worker's device-selection line as job progress text."""
+    from karaoke_backend.workers.memory_admission import describe_device_selection, parse_device_line
+
+    async def handle(line: str) -> None:
+        record = parse_device_line(line)
+        if record is not None:
+            await progress("processing", pct, describe_device_selection(record, activity))
+
+    return handle
 
 
 def _find_demucs_output(out_dir: Path, model_name: str, audio_stem: str) -> Optional[Path]:
@@ -119,7 +295,38 @@ def _find_demucs_output(out_dir: Path, model_name: str, audio_stem: str) -> Opti
     return None
 
 
-async def _run_subprocess(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
+async def _communicate(process, on_stderr_line):
+    """``communicate()``, optionally passing each stderr line to a callback.
+
+    Reads in bounded chunks rather than by line: progress bars write long
+    carriage-return runs that would overflow a line reader's limit.
+    """
+    if on_stderr_line is None:
+        return await process.communicate()
+    stdout_task = asyncio.ensure_future(process.stdout.read())
+    chunks: list[bytes] = []
+    pending = b""
+    try:
+        while chunk := await process.stderr.read(65536):
+            chunks.append(chunk)
+            pending += chunk
+            *lines, pending = re.split(rb"\r\n|\r|\n", pending)
+            if len(pending) > 65536:
+                pending = b""  # an over-long fragment is never a notice line
+            for line in lines:
+                if line:
+                    await on_stderr_line(line.decode(errors="replace"))
+        if pending:
+            await on_stderr_line(pending.decode(errors="replace"))
+        stdout = await stdout_task
+    finally:
+        if not stdout_task.done():
+            stdout_task.cancel()
+    await process.wait()
+    return stdout, b"".join(chunks)
+
+
+async def _run_subprocess(cmd: list[str], timeout: int = 900, on_stderr_line=None) -> subprocess.CompletedProcess:
     """Run one job-owned child and reap it before returning or unwinding.
 
     ``subprocess.run`` in an executor outlives cancellation of the awaiting
@@ -139,8 +346,10 @@ async def _run_subprocess(cmd: list[str], timeout: int = 900) -> subprocess.Comp
         **spawn_options,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+        stdout, stderr = await asyncio.wait_for(_communicate(process, on_stderr_line), timeout)
+    except BaseException:
+        # Timeout, cancellation, or a failed progress callback: never leave
+        # the job-owned child running.
         try:
             if process.returncode is None and os.name == "posix":
                 try:
@@ -184,9 +393,14 @@ async def _run_subprocess(cmd: list[str], timeout: int = 900) -> subprocess.Comp
     return result
 
 
-async def _await_subprocess(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
-    """Compatibility seam for tests and third-party patches of the old helper."""
-    result = _run_subprocess(cmd, timeout=timeout)
+async def _await_subprocess(cmd: list[str], timeout: int, **options) -> subprocess.CompletedProcess:
+    """Compatibility seam for tests and third-party patches of the old helper.
+
+    Options (``on_stderr_line``) are forwarded only to a runner that accepts
+    them; a replacement with the historical signature still runs the command
+    and simply does not receive progress notices.
+    """
+    result = _run_subprocess(cmd, timeout=timeout, **_accepted_options(_run_subprocess, options))
     if inspect.isawaitable(result):
         result = await result
     return result
@@ -230,11 +444,11 @@ def _plugin_separator():
     return None
 
 
-def _accepts_karaoke_model(fn) -> bool:
-    """True when ``fn`` can be called with a ``karaoke_model=`` keyword.
+def _accepts_keyword(fn, name: str) -> bool:
+    """True when ``fn`` can be called with a ``name=`` keyword.
 
     A signature we cannot read (C callable, exotic wrapper) answers False —
-    dropping the per-song pick beats a TypeError that fails the whole job.
+    dropping an optional extra beats a TypeError that fails the whole job.
     """
     try:
         sig = inspect.signature(fn)
@@ -243,12 +457,21 @@ def _accepts_karaoke_model(fn) -> bool:
     for param in sig.parameters.values():
         if param.kind is inspect.Parameter.VAR_KEYWORD:
             return True
-        if param.name == "karaoke_model" and param.kind in (
+        if param.name == name and param.kind in (
             inspect.Parameter.KEYWORD_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         ):
             return True
     return False
+
+
+def _accepts_karaoke_model(fn) -> bool:
+    """True when ``fn`` can be called with a ``karaoke_model=`` keyword."""
+    return _accepts_keyword(fn, "karaoke_model")
+
+
+def _accepted_options(fn, options: dict) -> dict:
+    return {name: value for name, value in options.items() if _accepts_keyword(fn, name)}
 
 
 async def run_pass2(
@@ -306,7 +529,10 @@ async def run_pass2(
         karaoke_cmd.extend(["--device", pass2_device])
     logger.info("Running karaoke separation (%s): %s", pass2_model, " ".join(karaoke_cmd))
 
-    await _await_subprocess(karaoke_cmd, timeout=_managed_processing_timeout(pass2_device, 600))
+    notices = ({"on_stderr_line": _device_notice(progress, 50, "Splitting lead and backing vocals")}
+               if _guarded_device(pass2_device) else {})
+    await _await_subprocess(karaoke_cmd, timeout=_managed_processing_timeout(pass2_device, 600),
+                            **_accepted_options(_await_subprocess, notices))
     await progress("processing", 70, "Lead/backing split complete")
 
     lead: Optional[Path] = None
@@ -420,27 +646,40 @@ async def separate_stems(
     demucs_entrypoint = ([str(DEMUCS_PYTHON), "-I", "-B", "-m", "karaoke_backend.workers.managed_demucs"]
                         if managed else [str(DEMUCS_PYTHON), "-m", "demucs.separate"])
     demucs_device = configured_accelerator()
+    guarded = managed and _guarded_device(demucs_device)
     demucs_timeout = _managed_processing_timeout(demucs_device if managed else None, 900)
-    demucs_cmd = [
-        *demucs_entrypoint,
-        "-n", model,
-        "--device", demucs_device,
-        "--float32",
-        "-o", str(demucs_out),
-        str(audio_path),
-    ]
-    logger.info("Running demucs: %s", " ".join(demucs_cmd))
-    await _progress("processing", 10, "Separating vocals and accompaniment...")
-
+    prepared_dir = stems_dir / "_input"
     try:
-        await _await_subprocess(demucs_cmd, timeout=demucs_timeout)
-    except asyncio.TimeoutError:
-        raise StemSeparationError(f"Demucs timed out after {demucs_timeout // 60} minutes")
+        demucs_input = audio_path
+        if guarded:
+            await _progress("processing", 7, "Preparing audio...")
+            demucs_input = await _prepare_guarded_input(audio_path, prepared_dir)
+        demucs_cmd = [
+            *demucs_entrypoint,
+            "-n", model,
+            "--device", demucs_device,
+            "--float32",
+            "-o", str(demucs_out),
+            str(demucs_input),
+        ]
+        logger.info("Running demucs: %s", " ".join(demucs_cmd))
+        await _progress("processing", 10, "Separating vocals and accompaniment...")
+        notices = ({"on_stderr_line": _device_notice(_progress, 10, "Separating vocals and accompaniment")}
+                   if guarded else {})
+        try:
+            await _await_subprocess(demucs_cmd, timeout=demucs_timeout,
+                                    **_accepted_options(_await_subprocess, notices))
+        except asyncio.TimeoutError:
+            raise StemSeparationError(f"Demucs timed out after {demucs_timeout // 60} minutes")
+    finally:
+        # The prepared copy is needed only by Pass 1.
+        if guarded:
+            shutil.rmtree(prepared_dir, ignore_errors=True)
 
     await _progress("processing", 45, "Pass 1 complete")
 
     # Find demucs output
-    audio_stem = audio_path.stem
+    audio_stem = demucs_input.stem
     demucs_dir = _find_demucs_output(demucs_out, model, audio_stem)
     if not demucs_dir:
         raise StemSeparationError(f"Demucs output not found in {demucs_out / model}")

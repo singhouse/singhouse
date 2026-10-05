@@ -114,6 +114,20 @@ def _processing_readiness() -> dict[str, Any]:
         local_python and manifest.get("capabilitiesReady") is True
         and "transcription" in capabilities and model_set_ready("transcription", manifest)
     )
+    # A CUDA runtime admits work only under a measured memory policy bound to
+    # it; without one every local job would be refused, so it is not ready.
+    memory_policy = None
+    if local_python and manifest.get("accelerator") == "cuda":
+        from karaoke_backend.workers.memory_admission import policy_covers
+        from karaoke_backend.workers.modal_worker import workflow_duration_limit
+        memory_policy = {
+            # Separation input preparation needs the envelope of every
+            # workflow model, transcription included; use the same test.
+            "separation": workflow_duration_limit() is not None,
+            "transcription": policy_covers(("heart-transcriptor",)),
+        }
+        local_separation = local_separation and memory_policy["separation"]
+        local_transcription = local_transcription and memory_policy["transcription"]
     modal_detail = modal_offload.readiness()
     # Source configuration alone is not readiness. Packaged bootstrap may supply
     # a qualified release contract + consent + checked metadata before workers
@@ -123,6 +137,9 @@ def _processing_readiness() -> dict[str, Any]:
     if local_python:
         runtime = {"id": manifest["runtimeManifestId"], "accelerator": manifest["accelerator"],
                    "capabilities": sorted(capabilities) if manifest.get("capabilitiesReady") is True else []}
+        if memory_policy is not None:
+            runtime["memoryPolicy"] = all(memory_policy.values())
+    missing_policy = "the CUDA runtime has no measured memory policy for this release"
 
     def fact(ready: bool, unavailable: str) -> dict[str, Any]:
         return {"ready": True} if ready else {"ready": False, "reason": unavailable}
@@ -135,11 +152,13 @@ def _processing_readiness() -> dict[str, Any]:
         ),
         "transcription": fact(
             local_transcription or modal_ready,
-            "no verified local transcription models or ready user-owned Modal",
+            missing_policy if memory_policy and not memory_policy["transcription"]
+            else "no verified local transcription models or ready user-owned Modal",
         ),
         "separation": fact(
             local_separation or modal_ready,
-            "no verified local separation models or ready user-owned Modal",
+            missing_policy if memory_policy and not memory_policy["separation"]
+            else "no verified local separation models or ready user-owned Modal",
         ),
         "modal": {**fact(
             modal_ready,
