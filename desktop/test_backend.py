@@ -6,6 +6,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path, PureWindowsPath
 import ctypes
 import errno
@@ -390,7 +391,7 @@ class IsolationTests(unittest.TestCase):
             wrong_policy["models"][0]["files"][0]["size"] = 6
             with self.assertRaisesRegex(RuntimeError, "immutable application policy"):
                 backend.processing_environment(root / "backend", identity, pack, model_pack, probe, wrong_policy, processing_id=pack.name, models_id=model_pack.name)
-            (pack / "python/bin/python3").write_bytes(b"changed")
+            (pack / "python/bin/python3").write_bytes(b"changed size")
             with self.assertRaisesRegex(RuntimeError, "verification"):
                 backend.processing_environment(root / "backend", identity, pack, None, processing_id=pack.name)
 
@@ -457,6 +458,156 @@ class IsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "differs from its input lock"):
                 backend.processing_environment(root / "backend", identity, changed_pack, None, probe, trusted_locks=[lock_hash], processing_id=changed_pack.name)
 
+    def test_backend_start_checks_pack_structure_without_reading_payload_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            manifest = {"schema": 1, "kind": "processing", **identity,
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["whisper"], "capabilities": ["transcription"],
+                        "probe": {"schema": 1, "type": "python-imports-v1", "modules": ["faster_whisper"]},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True},
+                                  {"path": "lib/data.txt", "size": 4,
+                                   "sha256": hashlib.sha256(b"data").hexdigest(), "executable": False}]}
+            raw = json.dumps(manifest, separators=(",", ":")).encode()
+            pack = root / "processing/packs" / hashlib.sha256(raw).hexdigest()[:16]
+            identifier = hashlib.sha256(raw).hexdigest()
+
+            def build():
+                if pack.exists():
+                    shutil.rmtree(pack)
+                (pack / "python/bin").mkdir(parents=True)
+                (pack / "lib").mkdir()
+                (pack / "manifest.json").write_bytes(raw)
+                (pack / "python/bin/python3").write_bytes(b"fixture")
+                (pack / "lib/data.txt").write_bytes(b"data")
+
+            def select():
+                return backend.processing_environment(root / "backend", identity, pack, None, processing_id=identifier)
+
+            build()
+            # Payload bytes are never hashed at backend start: same-size content
+            # passes here (installation and activation hash every file).
+            (pack / "lib/data.txt").write_bytes(b"DATA")
+            with patch.object(backend.hashlib, "file_digest", side_effect=AssertionError("payload bytes were hashed")):
+                select()
+            for damage, message in (
+                    (lambda: (pack / "lib/data.txt").write_bytes(b"longer"), "verification failed"),
+                    (lambda: (pack / "lib/data.txt").unlink(), "No such file|verification|inventory"),
+                    (lambda: (pack / "lib/extra.txt").write_bytes(b"data"), "inventory"),
+                    (lambda: ((pack / "lib/data.txt").unlink(), (pack / "lib/data.txt").symlink_to(pack / "python/bin/python3")), "symbolic links"),
+                    (lambda: ((pack / "lib/data.txt").unlink(), (pack / "lib/data.txt").mkdir()), "verification failed"),
+                    *([(lambda: ((pack / "lib/data.txt").unlink(), os.mkfifo(pack / "lib/data.txt")), "verification failed"),
+                       (lambda: os.mkfifo(pack / "lib/unlisted.pipe"), "inventory"),
+                       (lambda: (pack / "manifest.json").unlink() or os.mkfifo(pack / "manifest.json"), "regular file")]
+                      if hasattr(os, "mkfifo") else []),
+                    (lambda: (shutil.move(pack / "lib", root / "moved-lib"), (pack / "lib").symlink_to(root / "moved-lib")), "symbolic links"),
+                    (lambda: ((pack / "python/bin/extra").mkdir(), (pack / "python/bin/extra/link").symlink_to(pack / "lib/data.txt")), "symbolic links"),
+                    (lambda: (pack / "manifest.json").write_bytes(raw.replace(b'"size":4', b'"size":5')), "manifest was modified")):
+                build()
+                shutil.rmtree(root / "moved-lib", ignore_errors=True)
+                damage()
+                with self.assertRaisesRegex((RuntimeError, OSError), message):
+                    select()
+
+    def test_backend_start_rejects_junctions_and_reparse_points(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = {"appVersion": "1", "backendVersion": "1", "lyricsyncVersion": "1", "platform": "linux", "arch": "x64"}
+            manifest = {"schema": 1, "kind": "processing", **identity,
+                        "accelerator": "cpu", "python": "python/bin/python3",
+                        "models": ["whisper"], "capabilities": ["transcription"],
+                        "probe": {"schema": 1, "type": "python-imports-v1", "modules": ["faster_whisper"]},
+                        "files": [{"path": "python/bin/python3", "size": 7,
+                                   "sha256": hashlib.sha256(b"fixture").hexdigest(), "executable": True},
+                                  {"path": "lib/data.txt", "size": 4,
+                                   "sha256": hashlib.sha256(b"data").hexdigest(), "executable": False}]}
+            raw = json.dumps(manifest, separators=(",", ":")).encode()
+            identifier = hashlib.sha256(raw).hexdigest()
+            pack = root / "processing/packs" / identifier[:16]
+            (pack / "python/bin").mkdir(parents=True)
+            (pack / "lib").mkdir()
+            (pack / "manifest.json").write_bytes(raw)
+            (pack / "python/bin/python3").write_bytes(b"fixture")
+            (pack / "lib/data.txt").write_bytes(b"data")
+
+            def select():
+                return backend.processing_environment(root / "backend", identity, pack, None, processing_id=identifier)
+
+            select()
+
+            class Entry:
+                """A listing entry reported as a junction or reparse point."""
+                def __init__(self, entry, junction, attributes):
+                    self._entry, self._junction, self._attributes = entry, junction, attributes
+                    self.name, self.path = entry.name, entry.path
+
+                def __getattr__(self, name):
+                    return getattr(self._entry, name)
+
+                def is_junction(self):
+                    return self._junction
+
+                def stat(self, *, follow_symlinks=True):
+                    info = self._entry.stat(follow_symlinks=follow_symlinks)
+                    return types.SimpleNamespace(st_mode=info.st_mode, st_size=info.st_size,
+                                                 st_file_attributes=self._attributes)
+
+            native_scandir = os.scandir
+
+            def scandir_marking(name, junction, attributes=0):
+                class Listing:
+                    def __init__(self, path):
+                        self._listing = native_scandir(path)
+
+                    def __enter__(self):
+                        return (Entry(entry, junction, attributes) if entry.name == name else entry
+                                for entry in self._listing.__enter__())
+
+                    def __exit__(self, *details):
+                        return self._listing.__exit__(*details)
+                return Listing
+
+            # A junction is a directory to is_dir(follow_symlinks=False) and not
+            # a symbolic link, yet it must never be descended.
+            with patch.object(backend.os, "scandir", scandir_marking("lib", True)):
+                with self.assertRaisesRegex(RuntimeError, "symbolic links or junctions"):
+                    select()
+            with patch.object(backend.os, "scandir", scandir_marking("data.txt", True)):
+                with self.assertRaisesRegex(RuntimeError, "symbolic links or junctions"):
+                    select()
+
+            # Without is_junction (Python before 3.12), Windows reparse-point
+            # attributes are checked instead.
+            entry = types.SimpleNamespace(is_symlink=lambda: False,
+                                          stat=lambda follow_symlinks: types.SimpleNamespace(
+                                              st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT))
+            self.assertTrue(backend._is_link_entry(entry, windows=True))
+            self.assertFalse(backend._is_link_entry(entry, windows=False))
+            entry.stat = lambda follow_symlinks: types.SimpleNamespace(st_file_attributes=stat.FILE_ATTRIBUTE_DIRECTORY)
+            self.assertFalse(backend._is_link_entry(entry, windows=True))
+            entry.is_junction = lambda: True
+            self.assertTrue(backend._is_link_entry(entry, windows=False))
+            select()
+
+            # The pack directory and its store ancestors get the same check.
+            for ancestor in (pack.parent.parent, pack.parent, pack):
+                with patch.object(type(pack), "is_junction", lambda self, marked=ancestor: self == marked, create=True):
+                    with self.assertRaisesRegex(RuntimeError, "directories must not be symbolic links or junctions"):
+                        select()
+            select()
+            native_lstat = os.lstat
+
+            def reparse_lstat(path, *args, **kwargs):
+                info = native_lstat(path, *args, **kwargs)
+                return types.SimpleNamespace(st_mode=info.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+            with patch.object(backend.os, "lstat", reparse_lstat):
+                self.assertTrue(backend._is_link_path(pack, windows=True))
+                self.assertFalse(backend._is_link_path(pack, windows=False))
+            self.assertFalse(backend._is_link_path(pack / "missing", windows=True))
+
     def test_processing_path_case_collisions_follow_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -517,7 +668,7 @@ class IsolationTests(unittest.TestCase):
             for models_id in (None, pack.name[:16], "0" * 64):
                 with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
                     backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy, models_id=models_id)
-            (pack / directory / "model.safetensors").write_bytes(b"corrupt")
+            (pack / directory / "model.safetensors").write_bytes(b"corrupted")
             with self.assertRaisesRegex(RuntimeError, "verification failed"):
                 backend.processing_environment(root / "backend", {}, None, pack, model_policy=policy, models_id=pack.name)
 

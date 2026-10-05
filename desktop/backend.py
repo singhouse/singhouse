@@ -36,6 +36,40 @@ BACKEND_PARENT_WATCHDOG_SECONDS = 15
 RECOVERY_OWNER_LOCK_WAIT_SECONDS = 45
 
 
+def _is_link_entry(entry: os.DirEntry, *, windows: bool = os.name == "nt") -> bool:
+    """A directory entry that is a symbolic link, a junction, or (on Windows)
+    any other reparse point. A junction is not a symbolic link to
+    ``DirEntry.is_symlink()`` and is a directory to ``is_dir(follow_symlinks=False)``,
+    so it is checked separately."""
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _is_link_path(path: Path, *, windows: bool = os.name == "nt") -> bool:
+    """The same check as ``_is_link_entry`` for a named path: a symbolic
+    link, a junction, or (on Windows) any other reparse point. A missing path
+    is not a link; opening it fails later."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        try:
+            attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        except OSError:
+            return False
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
 def _safe_regular_file(path: Path, *, required: bool = True) -> Path | None:
     """Validate the path as named, before resolving it.
 
@@ -870,9 +904,11 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                 or directory.name not in (identifier, identifier[:16])):
             raise RuntimeError("Invalid managed processing path")
         for ancestor in (expected_parent.parent, expected_parent, directory):
-            if ancestor.is_symlink():
-                raise RuntimeError("Managed processing directories must not be symbolic links")
-        descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            if _is_link_path(ancestor):
+                raise RuntimeError("Managed processing directories must not be symbolic links or junctions")
+        # Non-blocking, so a FIFO placed here is rejected instead of waiting.
+        descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise RuntimeError("Managed processing manifest must be a regular file")
@@ -884,38 +920,72 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             raise RuntimeError("Invalid managed processing manifest")
         allowed = {"manifest.json"}
         path_keys = {"manifest.json"}
+        records = []
         case_sensitive = kind == "processing" and manifest.get("platform") == "linux"
+        # Packs repeat the same directory names across thousands of paths, so
+        # each distinct component is checked once. A path made only of such
+        # components has no empty, "." or ".." part, no separator other than
+        # "/", and no drive, so it is relative and already in POSIX form.
+        safe_part_pattern = re.compile(r"[A-Za-z0-9._+() -]+")
+        reserved_pattern = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.I)
+        safe_parts: set[str] = set()
+
+        def safe_path(path: object) -> bool:
+            if not isinstance(path, str):
+                return False
+            parts = path.split("/")
+            if safe_parts.issuperset(parts):
+                return True
+            for part in parts:
+                if part not in safe_parts:
+                    if (safe_part_pattern.fullmatch(part) is None or part.strip() != part
+                            or part in {".", ".."} or part.endswith(".")
+                            or reserved_pattern.match(part) is not None):
+                        return False
+                    safe_parts.add(part)
+            return True
+
         for record in manifest["files"]:
-            if (not isinstance(record.get("path"), str)
-                    or any(not re.fullmatch(r"[A-Za-z0-9._+() -]+", part) or part.strip() != part
-                           or part in {".", ".."} or part.endswith(".")
-                           or re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)
-                           for part in record["path"].split("/"))):
+            if not safe_path(record.get("path")):
                 raise RuntimeError("Invalid managed processing file path")
-            relative = Path(record["path"])
-            if relative.is_absolute() or any(part in {"..", "."} for part in relative.parts):
-                raise RuntimeError("Invalid managed processing file path")
-            path = directory / relative
-            name = relative.as_posix()
+            name = record["path"]
             path_key = name if case_sensitive else name.casefold()
             if path_key in path_keys:
                 raise RuntimeError("Duplicate managed processing file path")
             path_keys.add(path_key)
             allowed.add(name)
-            if any(parent.is_symlink() for parent in (path, *path.parents) if parent != directory.parent):
-                raise RuntimeError("Managed processing files must not be symbolic links")
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_size != record["size"] or hashlib.file_digest(stream, "sha256").hexdigest() != record["sha256"]:
-                    raise RuntimeError("Managed processing file verification failed")
-        actual = set()
-        for path in directory.rglob("*"):
-            if path.is_symlink() or not (path.is_dir() or path.is_file()):
-                raise RuntimeError("Unexpected managed processing file type")
-            if path.is_file():
-                actual.add(path.relative_to(directory).as_posix())
-        if actual != allowed:
+            records.append((name, record["size"]))
+        # A structural check in one walk: entry types come from the listing
+        # (links are never followed, special files never opened, so nothing
+        # can block), no level may hold a link, junction or other reparse
+        # point, and each listed path must be
+        # a regular file of its recorded size, read from one lstat. Payload
+        # bytes are hashed when the desktop installs or activates a pack,
+        # never at each backend start.
+        sizes, special = {}, False
+        pending = [(str(directory), "")]
+        while pending:
+            current, prefix = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    relative_name = prefix + entry.name
+                    if _is_link_entry(entry):
+                        raise RuntimeError("Managed processing files must not be symbolic links or junctions")
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append((entry.path, relative_name + "/"))
+                    elif entry.is_file(follow_symlinks=False):
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            raise RuntimeError("Managed processing files must not be symbolic links")
+                        if stat.S_ISREG(info.st_mode):
+                            sizes[relative_name] = info.st_size
+                        else:
+                            special = True
+                    else:
+                        special = True
+        if any(sizes.get(name) != size for name, size in records):
+            raise RuntimeError("Managed processing file verification failed")
+        if special or set(sizes) != allowed:
             raise RuntimeError("Managed processing file inventory does not match its manifest")
         if not isinstance(manifest.get("models"), list) or len(set(manifest["models"])) != len(manifest["models"]):
             raise RuntimeError("Invalid or duplicate managed model IDs")

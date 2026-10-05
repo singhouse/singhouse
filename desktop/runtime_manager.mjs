@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Manifests are administrator-selected inputs, not a remotely trusted catalog.
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { constants } from 'node:fs'
+import { constants, lstatSync, opendirSync } from 'node:fs'
 import { mkdir, mkdtemp, open, readFile, rename, rm, lstat, statfs, readdir, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, isAbsolute, toNamespacedPath } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,10 +50,21 @@ const modelTransferHosts = new Set(['huggingface.co', 'cdn-lfs.huggingface.co',
   'transfer.xethub.hf.co', 'transfer.xethub-eu.hf.co', 'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co',
   'github.com', 'raw.githubusercontent.com', 'release-assets.githubusercontent.com',
   'dl.fbaipublicfiles.com', 'download.pytorch.org'])
+const safePart = part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part
+  && !['.', '..'].includes(part) && !part.endsWith('.')
+  && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
+// Pack manifests repeat the same directory names across thousands of paths;
+// each distinct component is checked once (the result depends on it alone).
+const safeParts = new Map()
 const safePath = value => typeof value === 'string' && value.length < 512
-  && value.split('/').every(part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part
-    && !['.', '..'].includes(part) && !part.endsWith('.')
-    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
+  && value.split('/').every(part => {
+    let safe = safeParts.get(part)
+    if (safe === undefined) {
+      safe = safePart(part)
+      if (safeParts.size < 65536) safeParts.set(part, safe)
+    }
+    return safe
+  })
 
 // This is a fixed application-owned protocol, never a command from a manifest.
 const PROBE = `import importlib, importlib.metadata, json, platform, sys
@@ -212,6 +223,7 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
       : key === 'files' ? value.files.map(({ url, ...record }) => record) : value[key]
     if (JSON.stringify(manifestValue) !== JSON.stringify(inputLock[key])) throw new Error('Processing manifest differs from its input lock')
   }
+  const filePaths = new Set(value.files.map(file => file?.path))
   if (inputLock.schema !== 1 || inputLock.kind !== 'processing-input'
       || !Array.isArray(inputLock.packages) || !inputLock.packages.length || inputLock.packages.some(packageRecord => {
         let source
@@ -220,7 +232,7 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
           || typeof packageRecord.license !== 'string' || !packageRecord.license.trim()
           || source.protocol !== 'https:' || source.username || source.password || source.hash
           || !hashPattern.test(packageRecord.sha256 || '') || !Array.isArray(packageRecord.notices)
-          || !packageRecord.notices.length || packageRecord.notices.some(path => !safePath(path) || !value.files.some(file => file.path === path))
+          || !packageRecord.notices.length || packageRecord.notices.some(path => !safePath(path) || !filePaths.has(path))
       })) throw new Error('Processing package provenance or notices are malformed')
   if (value.accelerator === 'metal' && value.platform !== 'darwin'
       || value.accelerator === 'cuda' && value.platform === 'darwin') throw new Error('Invalid accelerator target')
@@ -243,8 +255,13 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
   return value
 }
 
+// Opens `path` itself (never through a link) and confirms the descriptor is
+// the regular file the name refers to. A read-only open is also non-blocking,
+// so a FIFO or device placed at the path is rejected at once instead of
+// waiting for a writer; non-blocking has no effect on regular-file reads.
 export async function checkedFile(path, flags) {
-  const file = await open(path, flags | (constants.O_NOFOLLOW || 0), 0o600)
+  const readOnly = (flags & (constants.O_ACCMODE ?? 3)) === constants.O_RDONLY
+  const file = await open(path, flags | (constants.O_NOFOLLOW || 0) | (readOnly ? constants.O_NONBLOCK || 0 : 0), 0o600)
   try {
     const info = await file.stat()
     const named = await lstat(path)
@@ -368,13 +385,95 @@ async function archiveRemaining(directory, parts) {
   return remaining
 }
 
-async function matches(path, record) {
+async function matches(path, record, signal) {
   let file
   try {
     file = await checkedFile(path, constants.O_RDONLY)
-    return (await file.stat()).size === record.size && await fileHash(file) === record.sha256
+    return (await file.stat()).size === record.size && await fileHash(file, signal) === record.sha256
   } catch (error) { if (error.code === 'ENOENT') return false; throw error }
   finally { await file?.close() }
+}
+
+// The launch-time structural walk: one pass over the pack that rejects any
+// link or special entry at every level (a linked or special directory is
+// never descended) and returns each regular file's size by relative path.
+// Directory entry types come from the listing; each file is lstat-ed once for
+// its size. It holds no file descriptors and never reads payload bytes (see
+// verify()). Synchronous metadata calls measured fastest for packs of tens of
+// thousands of files; directories are read incrementally and the walk yields
+// to the event loop every few milliseconds, within a directory as well as
+// between directories, so even one very large directory never stalls the
+// process.
+export async function structuralTree(directory) {
+  const sizes = new Map(), pending = [[directory, '']]
+  let since = performance.now()
+  while (pending.length) {
+    const [path, prefix] = pending.pop()
+    const listing = opendirSync(path)
+    try {
+      for (let entry; (entry = listing.readSync()) !== null;) {
+        const child = join(path, entry.name)
+        if (entry.isDirectory()) pending.push([child, `${prefix}${entry.name}/`])
+        else {
+          const info = entry.isFile() ? lstatSync(child) : null
+          if (!info?.isFile()) throw new Error('Runtime contains a symbolic link or unsupported file')
+          sizes.set(prefix + entry.name, info.size)
+        }
+        if (performance.now() - since > 8) {
+          await new Promise(resolveTurn => setImmediate(resolveTurn))
+          since = performance.now()
+        }
+      }
+    } finally { listing.closeSync() }
+  }
+  return sizes
+}
+
+// Verification records (a processing self-test result or a model cache
+// verification mark) let launch take the structural path. Withdrawal must
+// fail closed: a record path this process withdrew but could neither remove
+// nor invalidate on disk is never trusted again by this process.
+const withdrawnRecords = new Set()
+// Each withdrawal advances its record's generation. A record write carries the
+// generation observed before the check that justified it, and is discarded if
+// a withdrawal happened since, so a slower success never re-arms a record that
+// a later failure withdrew.
+const recordGenerations = new Map()
+const recordGeneration = path => recordGenerations.get(path) ?? 0
+// Record writes in progress, by destination. While any is outstanding a
+// withdrawal stays in force in this process, so a write that commits after a
+// withdrawal is never trusted before it has reconciled.
+const recordWriters = new Map()
+const releaseWithdrawn = path => { if (!recordWriters.has(path)) withdrawnRecords.delete(path) }
+// The proof that a pack object came from a full verification: its record
+// path and the record generation observed before that verification began. A
+// self-test records its result only under such a proof, so a withdrawal after
+// the full verification always requires another one.
+const fullVerifications = new WeakMap()
+// How long a pack's last full verification counts as fresh for the
+// background re-check after launch (see recheckPacks()).
+export const RECHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+const pause = milliseconds => new Promise(resolvePause => setTimeout(resolvePause, milliseconds))
+
+// A verification failure that could not also withdraw its record: both are
+// reported, and the original error's classification is kept.
+function withdrawalFailure(error, withdrawal) {
+  return Object.assign(new Error(`${error.message}\n${withdrawal.message}`, { cause: error }),
+    { withdrawal, ...(error.code ? { code: error.code } : {}), ...(error.collision ? { collision: true } : {}) })
+}
+
+// Manifest objects verify() has bound to their full identity, so launch-time
+// record checks need not serialize a large manifest again.
+const verifiedManifests = new WeakMap()
+const manifestMatches = (manifest, id) => verifiedManifests.get(manifest) === id || digest(JSON.stringify(manifest)) === id
+
+// The application-owned probe source a result was produced by. A persisted
+// result is reused only for the same source, so a changed probe runs again.
+async function probeSource(manifest) {
+  // This fixed source belongs to the integrity-checked application package.
+  // Electron's ASAR entries have virtual identities that differ from the
+  // extracted descriptors used by open(); read through its archive-aware API.
+  return manifest.probe.schema === 2 ? readFile(new URL('./processing_probe.py', import.meta.url), 'utf8') : PROBE
 }
 
 async function inventory(directory, prefix = '') {
@@ -388,6 +487,16 @@ async function inventory(directory, prefix = '') {
   return files
 }
 
+// Whether a failure to flush a directory means the platform cannot flush
+// directories at all, so the step is skipped. POSIX requires directory fsync:
+// only a file system without it (EINVAL, ENOTSUP) is skipped there, and a
+// permission error is a real failure. Windows gives no directory handle to
+// fsync from Node (the native durability helper covers its commits).
+export function directorySyncUnsupported(error, platform = process.platform) {
+  const unsupported = platform === 'win32' ? ['EINVAL', 'ENOTSUP', 'EISDIR', 'EPERM', 'EACCES'] : ['EINVAL', 'ENOTSUP']
+  return unsupported.includes(error?.code)
+}
+
 async function syncDirectory(path) {
   let handle
   try {
@@ -395,7 +504,7 @@ async function syncDirectory(path) {
     await handle.sync()
     return true
   } catch (error) {
-    if (['EINVAL', 'ENOTSUP', 'EISDIR', 'EPERM', 'EACCES'].includes(error.code)) return false
+    if (directorySyncUnsupported(error)) return false
     throw error
   } finally { await handle?.close() }
 }
@@ -412,9 +521,33 @@ async function syncTree(directory, directorySync) {
   await directorySync(directory)
 }
 
+// Commits `source` over `destination` through the bundled native helper, which
+// flushes the bytes and directory entries before confirming.
+export async function durableReplace(lockPython, durabilityHelper, source, destination) {
+  if (!lockPython || !durabilityHelper) throw new Error('The bundled native durability helper is required')
+  return new Promise((resolveCommit, reject) => {
+    const child = spawn(lockPython, ['-I', '-B', durabilityHelper, '--durable-replace', source, destination],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    let output = '', errorOutput = ''
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60000)
+    child.stdout.on('data', chunk => { output += chunk.toString('utf8'); if (output.length > 4096) child.kill('SIGKILL') })
+    child.stderr.on('data', chunk => { errorOutput = (errorOutput + chunk.toString('utf8')).slice(-4096) })
+    child.once('error', error => { clearTimeout(timer); reject(error) })
+    child.once('close', code => {
+      clearTimeout(timer)
+      if (code !== 0) { reject(new Error(errorOutput.trim() || 'Native runtime durability could not be established')); return }
+      try {
+        const result = JSON.parse(output)
+        if (result.schema !== 1 || result.durable !== true) throw new Error('Invalid native durability confirmation')
+        resolveCommit()
+      } catch (error) { reject(error) }
+    })
+  })
+}
+
 export class RuntimeManager {
   constructor(root, identity, { fetchImpl = globalThis.fetch, diskFree, progress = () => {}, lockPython,
-    durabilityHelper, nativeBin, directorySync = syncDirectory, activationHook = async () => {}, trustedLocks = [] } = {}) {
+    durabilityHelper, nativeBin, nativeRuntimeId = null, directorySync = syncDirectory, activationHook = async () => {}, trustedLocks = [] } = {}) {
     if (!isAbsolute(root)) throw new Error('Runtime store must be absolute')
     this.root = resolve(root)
     this.identity = identity
@@ -424,10 +557,13 @@ export class RuntimeManager {
     this.lockPython = lockPython
     this.durabilityHelper = durabilityHelper
     this.nativeBin = nativeBin
+    // The bundled native runtime a recorded self-test result is bound to.
+    this.nativeRuntimeId = nativeRuntimeId
     this.directorySync = directorySync
     this.activationHook = activationHook
     this.trustedLocks = trustedLocks
     this.busy = false
+    this.fullyVerifiedAtLaunch = new Set()
   }
 
   // The on-disk name for an identity's pack and staging trees (per store).
@@ -447,32 +583,43 @@ export class RuntimeManager {
 
   validate(manifest) { return validateProcessingManifest(manifest, this.identity, this.trustedLocks) }
 
-  async durableReplace(source, destination) {
-    if (!this.lockPython || !this.durabilityHelper) throw new Error('The bundled native durability helper is required')
-    return new Promise((resolveCommit, reject) => {
-      const child = spawn(this.lockPython, ['-I', '-B', this.durabilityHelper, '--durable-replace', source, destination],
-        { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-      let output = '', errorOutput = ''
-      const timer = setTimeout(() => child.kill('SIGKILL'), 60000)
-      child.stdout.on('data', chunk => { output += chunk.toString('utf8'); if (output.length > 4096) child.kill('SIGKILL') })
-      child.stderr.on('data', chunk => { errorOutput = (errorOutput + chunk.toString('utf8')).slice(-4096) })
-      child.once('error', error => { clearTimeout(timer); reject(error) })
-      child.once('close', code => {
-        clearTimeout(timer)
-        if (code !== 0) { reject(new Error(errorOutput.trim() || 'Native runtime durability could not be established')); return }
-        try {
-          const result = JSON.parse(output)
-          if (result.schema !== 1 || result.durable !== true) throw new Error('Invalid native durability confirmation')
-          resolveCommit()
-        } catch (error) { reject(error) }
-      })
-    })
+  async durableReplace(source, destination) { return durableReplace(this.lockPython, this.durabilityHelper, source, destination) }
+
+  // The result is recorded only for a pack object returned by a full
+  // verification (verify(), active(), install()), or with an explicit
+  // `generation` observed before one, and only if the pack's record was not
+  // withdrawn since that verification began. Otherwise the self-test still
+  // runs and returns, but records nothing.
+  async probe(active, { timeout, signal, generation } = {}) {
+    if (generation === undefined) {
+      const proof = fullVerifications.get(active)
+      if (proof && proof.path === this.recordPath(active.id)) generation = proof.generation
+    }
+    // Check the tree again immediately before executing the selected
+    // interpreter. Every caller has just verified it (install and repair with
+    // full hashes, launch with the structural check); this is the same
+    // structural check, so no caller reaches the interpreter unverified.
+    active = await this.verify(active.id, { quick: true })
+    signal?.throwIfAborted()
+    let raw, result, source
+    try {
+      ({ raw, source } = await this.runProbe(active, { timeout, signal }))
+      result = acceptProbeResult(raw, active.manifest)
+    } catch (error) {
+      // A failed self-test withdraws any earlier recorded success for this
+      // pack, so a later launch cannot admit it from that record. Cancellation
+      // says nothing about the pack and leaves the record alone.
+      if (!signal?.aborted) {
+        try { await this.forgetVerified(active.id) }
+        catch (withdrawal) { throw withdrawalFailure(error, withdrawal) }
+      }
+      throw error
+    }
+    if (generation !== undefined) await this.saveProbe(active, raw, source, generation)
+    return result
   }
 
-  async probe(active, { timeout, signal } = {}) {
-    // Verify again immediately before executing the selected interpreter.
-    active = await this.verify(active.id)
-    signal?.throwIfAborted()
+  async runProbe(active, { timeout, signal }) {
     const manifest = active.manifest
     const env = Object.fromEntries(['PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR']
       .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
@@ -494,12 +641,9 @@ export class RuntimeManager {
       }
       env.PATH = this.nativeBin
     }
-    // This fixed source belongs to the integrity-checked application package.
-    // Electron's ASAR entries have virtual identities that differ from the
-    // extracted descriptors used by open(); read through its archive-aware API.
-    const source = functional ? await readFile(new URL('./processing_probe.py', import.meta.url), 'utf8') : PROBE
+    const source = await probeSource(manifest)
     signal?.throwIfAborted()
-    return new Promise((resolveProbe, reject) => {
+    const raw = await new Promise((resolveProbe, reject) => {
       const child = spawn(toNamespacedPath(join(active.directory, manifest.python)), ['-I', '-B', '-c', source, JSON.stringify(manifest.capabilities), manifest.accelerator, JSON.stringify(manifest.probe.modules)],
         { cwd: toNamespacedPath(active.directory), env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
       if (process.platform !== 'win32') watchOwnedGroup(child)
@@ -518,20 +662,184 @@ export class RuntimeManager {
         clearTimeout(timer)
         signal?.removeEventListener('abort', abort)
         if (failure || code !== 0) { reject(failure || new Error('Processing dependencies could not be loaded')); return }
-        try {
-          const result = JSON.parse(output)
-          if (result.schema !== manifest.probe.schema || result.hardwareAvailable !== true
-              || ['pythonVersion', 'backendVersion', 'lyricsyncVersion', 'accelerator'].some(key => result[key] !== manifest[key])
-              || JSON.stringify(result.capabilities) !== JSON.stringify(manifest.capabilities)
-              || !result.components || JSON.stringify(Object.keys(result.components).sort()) !== JSON.stringify([...manifest.probe.modules].sort())
-              || Object.values(result.components).some(value => typeof value !== 'string' || !value)) throw new Error('Processing runtime self-test did not match its manifest or hardware')
-          if (functional && !validFunctionalChecks(result.checks, manifest.capabilities)) {
-            throw new Error('Processing functional checks were incomplete')
-          }
-          resolveProbe({ ...result, verifiedCapabilities: functional ? [...manifest.capabilities] : [], capabilitiesReady: functional })
-        } catch (error) { reject(error) }
+        try { resolveProbe(JSON.parse(output)) } catch (error) { reject(error) }
       })
     })
+    return { raw, source }
+  }
+
+  // Where a pack's accepted self-test result is kept: beside the packs, never
+  // inside one (each pack's inventory must match its manifest exactly), and
+  // named by the full identity.
+  probeResultPath(id) {
+    if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity')
+    return join(this.root, 'probe-results', `${id}.json`)
+  }
+
+  // The verification record for a pack identity in this store.
+  recordPath(id) { return this.probeResultPath(id) }
+
+  recordGeneration(id) { return recordGeneration(this.recordPath(id)) }
+
+  // When this pack last passed a full verification (installation, a full
+  // launch verification, or a background re-check), bound to its full
+  // identity. It only schedules background re-checks; it never admits a pack.
+  verifiedAtPath(id) {
+    if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity')
+    return join(this.root, 'verified-at', `${id}.json`)
+  }
+
+  // Records a full verification at `now`, unless this pack's verification
+  // record was withdrawn after `generation` was observed.
+  async markVerifiedAt(id, generation, now = Date.now()) {
+    await this.writeRecord(this.verifiedAtPath(id), { schema: 1, runtimeManifestId: id, verifiedAt: now },
+      generation, this.recordPath(id))
+  }
+
+  // True when the last full verification is missing, unreadable, from the
+  // future (clock skew) or older than RECHECK_INTERVAL_MS.
+  async recheckDue(id, now = Date.now()) {
+    const value = await this.readRecord(this.verifiedAtPath(id))
+    if (!exactKeys(value, ['runtimeManifestId', 'schema', 'verifiedAt']) || value.schema !== 1
+        || value.runtimeManifestId !== id || !Number.isSafeInteger(value.verifiedAt)) return true
+    return value.verifiedAt > now || now - value.verifiedAt >= RECHECK_INTERVAL_MS
+  }
+
+  // Durably writes a small record beside the packs, unless a withdrawal of the
+  // same record happened after `generation` was observed. These records are
+  // caches: a failure to write one only means more checking at the next
+  // launch, so it never fails the operation that produced it, unless a record
+  // that must not be trusted could not then be withdrawn. Each write uses
+  // its own pending file, so concurrent writers never interleave.
+  // `guard` is the record whose withdrawals cancel this write (by default the
+  // record itself).
+  // A commit that fails after its rename may have happened leaves a record of
+  // uncertain durability, which is invalidated. Whether the commit succeeded
+  // or failed, a withdrawal that landed meanwhile wins.
+  async writeRecord(destination, value, generation, guard = destination) {
+    generation ??= recordGeneration(guard)
+    const current = () => recordGeneration(guard) === generation
+    let pending, committing = false, landed = false, uncertain = false
+    recordWriters.set(destination, (recordWriters.get(destination) ?? 0) + 1)
+    try {
+      if (!current()) return
+      await plainDirectory(dirname(destination))
+      await this.directorySync(this.root)
+      pending = `${destination}.${randomBytes(8).toString('hex')}.pending`
+      const file = await checkedFile(pending, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR)
+      try {
+        await file.writeFile(JSON.stringify(value))
+        await file.sync()
+      } finally { await file.close() }
+      if (!current()) return
+      committing = true
+      await this.durableReplace(pending, destination)
+      pending = null
+      landed = true
+    } catch {
+      // The pending file is gone only if the commit renamed it into place.
+      if (committing && pending && !await lstat(pending).then(() => true, () => false)) {
+        pending = null
+        landed = uncertain = true
+      }
+    } finally {
+      if (pending) await rm(pending, { force: true }).catch(() => {})
+      const writers = recordWriters.get(destination) - 1
+      if (writers) recordWriters.set(destination, writers)
+      else recordWriters.delete(destination)
+      // A record that may have landed but must not be trusted is withdrawn;
+      // a failure to do so durably is raised (its guard stays in place).
+      if (landed) {
+        if (uncertain || !current()) await this.withdrawRecord(destination)
+        else releaseWithdrawn(destination)
+      }
+    }
+  }
+
+  // Withdraws a verification record so no later launch admits its pack from
+  // it, and fails closed. Removal is retried (an indexer or scanner may hold
+  // the file briefly); then the record is renamed aside, or else truncated in
+  // place so it no longer parses. A removal or rename counts only once the
+  // containing directory is flushed (where the platform supports that), so a
+  // power loss cannot bring the record back. If none of these succeed, this
+  // process never trusts the record again and the error is raised for the
+  // caller to report.
+  async withdrawRecord(path) {
+    recordGenerations.set(path, recordGeneration(path) + 1)
+    withdrawnRecords.add(path)
+    let failure, moved = false
+    for (let attempt = 0; attempt < 3 && !moved; attempt++) {
+      if (attempt) await pause(50 * attempt)
+      try { await rm(path, { force: true }); moved = true }
+      catch (error) { failure = error }
+    }
+    if (!moved) {
+      try { await rename(path, `${path}.${randomBytes(8).toString('hex')}.withdrawn`); moved = true }
+      catch { /* Try invalidating it in place. */ }
+    }
+    if (moved) {
+      try { await this.directorySync(dirname(path)) }
+      catch (error) {
+        throw new Error(`The removal of the record of an earlier successful check could not be confirmed on disk (${error.code || 'unknown error'}). `
+          + 'It is ignored until the app is closed; check that the application data folder is writable before reopening the app.', { cause: error })
+      }
+      releaseWithdrawn(path)
+      return
+    }
+    try {
+      const file = await checkedFile(path, constants.O_RDWR)
+      try { await file.truncate(0); await file.sync() } finally { await file.close() }
+      releaseWithdrawn(path)
+      return
+    } catch { /* Reported below. */ }
+    throw new Error(`The record of an earlier successful check could not be removed (${failure?.code || 'unknown error'}). `
+      + 'It is ignored until the app is closed; check that the application data folder is writable before reopening the app.', { cause: failure })
+  }
+
+  // Reads a record beside the packs; null if it is absent, unreadable, or
+  // withdrawn by this process.
+  async readRecord(path) {
+    if (withdrawnRecords.has(path)) return null
+    try {
+      const directory = await lstat(dirname(path))
+      if (!directory.isDirectory() || directory.isSymbolicLink()) return null
+      return JSON.parse(await checkedRead(path))
+    } catch { return null }
+  }
+
+  // Records an accepted result so launches need not run the probe again.
+  async saveProbe(active, result, source, generation) {
+    await this.writeRecord(this.probeResultPath(active.id), { schema: 1, runtimeManifestId: active.id,
+      nativeRuntimeId: this.nativeRuntimeId ?? null, probeSourceSha256: digest(source), result }, generation)
+  }
+
+  // The result recorded when this exact pack was installed or last probed, if
+  // it is bound to this pack identity, the bundled native runtime and the
+  // probe source, and still passes every check a fresh result must pass;
+  // otherwise (missing, unreadable, tampered, or from another pack or
+  // application build) null.
+  async recordedProbe(active) {
+    try {
+      const value = await this.readRecord(this.probeResultPath(active.id))
+      if (exactKeys(value, ['nativeRuntimeId', 'probeSourceSha256', 'result', 'runtimeManifestId', 'schema']) && value.schema === 1
+          && value.runtimeManifestId === active.id && manifestMatches(active.manifest, active.id)
+          && value.nativeRuntimeId === (this.nativeRuntimeId ?? null)
+          && value.probeSourceSha256 === digest(await probeSource(active.manifest))) {
+        return acceptProbeResult(value.result, active.manifest)
+      }
+    } catch { /* Not usable. */ }
+    return null
+  }
+
+  // The launch path: reuse the recorded result, or run the probe once. A
+  // fresh self-test follows a full launch verification; `before` (if given)
+  // is awaited first, so the self-test's cold imports need not compete for
+  // the disk with another store's full verification.
+  async launchProbe(active, { before, ...options } = {}) {
+    const recorded = await this.recordedProbe(active)
+    if (recorded) return recorded
+    await before?.()
+    return this.probe(active, options)
   }
 
   async fetchSource(url, options) {
@@ -948,9 +1256,10 @@ export class RuntimeManager {
         catch (error) {
           // A shortened name shared with a different runtime is never overwritten.
           if (error.collision) throw error
-          if (manifest.kind !== 'models' || (error.code && error.code !== 'ENOENT')) throw error
-          // Repair only ordinary model trees. Unsafe links or special files
-          // still require operator attention; never move or overwrite them.
+          if (error.code && error.code !== 'ENOENT') throw error
+          // Repair only ordinary pack trees (models, or a processing pack
+          // whose files changed after installation). Unsafe links or special
+          // files still require operator attention; never move or overwrite them.
           const info = await lstat(destination)
           if (!info.isDirectory() || info.isSymbolicLink()) throw error
           await inventory(destination)
@@ -967,14 +1276,18 @@ export class RuntimeManager {
           // Keep damaged evidence and the previous pointer slots intact. If
           // interrupted here, a retry can finish from the verified staging tree.
           await this.durableReplace(destination, join(retained, 'pack'))
-          await this.activationHook('model-quarantined')
+          await this.activationHook(manifest.kind === 'models' ? 'model-quarantined' : 'pack-quarantined')
           signal.throwIfAborted()
           await this.durableReplace(staging, destination)
         } else await this.durableReplace(destination, destination)
       } else await this.durableReplace(staging, destination)
       if (archive) await rm(streamMarker, { force: true })
-      await this.verify(id)
-      if (manifest.kind === 'processing') await this.probe({ id }, { timeout: probeTimeout, signal })
+      // A withdrawal after this point (a concurrent failed check) wins over
+      // the records written below.
+      const generation = this.recordGeneration(id)
+      await this.markVerified(await this.verify(id), generation)
+      await this.markVerifiedAt(id, generation)
+      if (manifest.kind === 'processing') await this.probe({ id }, { timeout: probeTimeout, signal, generation })
       signal?.throwIfAborted()
       await this.activationHook('pack-durable')
       // A native durable replacement commits the inactive pointer slot. Keep
@@ -1002,11 +1315,53 @@ export class RuntimeManager {
       signal.throwIfAborted()
       await this.durableReplace(pending, join(this.root, `active.${slot}.json`))
       await this.activationHook('pointer-durable')
-      return { id, directory: destination, manifest }
+      this.selectedId = id
+      const installed = { id, directory: destination, manifest }
+      fullVerifications.set(installed, { path: this.recordPath(id), generation })
+      return installed
     } finally { this.busy = false; await lock.release() }
   }
 
-  async verify(id) {
+  // Full verification hashes every payload file and is what installation,
+  // repair, recovery and activation use. `quick` is the structural check:
+  // the manifest still digests to the full identity, one walk finds an exact
+  // inventory (no missing, extra, linked or special entries at any level) and
+  // every file has its recorded size. It never reads payload bytes. Launch
+  // uses it only for a pack whose full verification is on record (see
+  // launchVerify()). A failed full verification withdraws that record, so
+  // detected damage is never forgotten by a later launch.
+  // `workers` bounds concurrent file checks; `signal` cancels a full
+  // verification, which then withdraws nothing.
+  async verify(id, { quick = false, signal, workers = 4 } = {}) {
+    const recordPath = !quick && hashPattern.test(id || '') ? this.recordPath(id) : null
+    const generation = recordPath && recordGeneration(recordPath)
+    try {
+      const verified = await this.verifyTree(id, quick, { signal, workers })
+      if (recordPath) fullVerifications.set(verified, { path: recordPath, generation })
+      return verified
+    }
+    catch (error) {
+      if (!quick && !signal?.aborted && hashPattern.test(id || '')) {
+        try { await this.forgetVerified(id) }
+        catch (withdrawal) { throw withdrawalFailure(error, withdrawal) }
+      }
+      throw error
+    }
+  }
+
+  // A low-priority full verification of an installed pack, for use after the
+  // application window is shown: one file at a time, and cancellable. A
+  // failure withdraws the pack's record like any full verification, so the
+  // next launch verifies it in full.
+  // A successful re-check records the time of this full verification.
+  async recheck(id, { signal } = {}) {
+    const generation = this.recordGeneration(id)
+    const verified = await this.verify(id, { signal, workers: 1 })
+    await this.markVerifiedAt(id, generation)
+    return verified
+  }
+
+  async verifyTree(id, quick, { signal, workers = 4 } = {}) {
     if (!hashPattern.test(id || '')) throw new Error('Invalid active runtime identity')
     const directory = await this.packDirectory(id)
     for (const path of [this.root, join(this.root, 'packs'), directory]) {
@@ -1023,6 +1378,13 @@ export class RuntimeManager {
       throw Object.assign(new Error('Runtime directory holds a different or modified runtime; it was not changed'), { collision: true })
     }
     const allowed = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
+    if (quick) {
+      const sizes = await structuralTree(directory)
+      if (sizes.size !== allowed.size || [...sizes.keys()].some(path => !allowed.has(path))) throw new Error('Runtime file inventory does not match its manifest')
+      if (manifest.files.some(file => sizes.get(file.path) !== file.size)) throw new Error('Installed runtime verification failed')
+      verifiedManifests.set(manifest, id)
+      return { id, directory, manifest }
+    }
     const present = await inventory(directory)
     if (present.length !== allowed.size || present.some(path => !allowed.has(path))) throw new Error('Runtime file inventory does not match its manifest')
     // Bound both open descriptors and streaming hash buffers. Every file still
@@ -1032,22 +1394,51 @@ export class RuntimeManager {
       while (!failure && next < manifest.files.length) {
         const file = manifest.files[next++]
         try {
+          signal?.throwIfAborted()
           let ancestor = directory
           for (const part of file.path.split('/').slice(0, -1)) {
             ancestor = join(ancestor, part)
             const info = await lstat(ancestor)
             if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid runtime directory')
           }
-          if (!await matches(join(directory, file.path), file)) throw new Error('Installed runtime verification failed')
+          if (!await matches(join(directory, file.path), file, signal)) throw new Error('Installed runtime verification failed')
         } catch (error) { failure ??= error }
       }
     }
     // Workers catch failures so all in-flight checks close their handles before
     // rejection (and before active() can try a different runtime).
-    await Promise.all(Array.from({ length: Math.min(4, manifest.files.length) }, worker))
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(workers, manifest.files.length)) }, worker))
     if (failure) throw failure
+    verifiedManifests.set(manifest, id)
     return { id, directory, manifest }
   }
+
+  // The launch check for one pack: structural when this pack's full
+  // verification is on record, otherwise (first launch after an upgrade, a
+  // withdrawn or unreadable record) a full verification, which is recorded.
+  // `fullyVerifiedAtLaunch` names the packs this launch verified in full.
+  async launchVerify(id) {
+    const generation = this.recordGeneration(id)
+    const structural = await this.verify(id, { quick: true })
+    if (await this.verifiedOnRecord(structural)) return structural
+    const verified = await this.verify(id)
+    await this.markVerified(verified, generation)
+    await this.markVerifiedAt(id, generation)
+    this.fullyVerifiedAtLaunch.add(id)
+    return verified
+  }
+
+  // A processing pack's full verification is on record exactly when its
+  // self-test result is: install, repair and activation record the result
+  // only after a full verification, and a later failure withdraws it.
+  async verifiedOnRecord(active) { return (await this.recordedProbe(active)) !== null }
+
+  // The probe records processing results itself, after its own check.
+  async markVerified() {}
+
+  // Withdraws this pack's record; raises if that could not be done on disk
+  // (see withdrawRecord()).
+  async forgetVerified(id) { await this.withdrawRecord(this.recordPath(id)) }
 
   async readPointers() {
     const values = []
@@ -1062,17 +1453,48 @@ export class RuntimeManager {
     return values.sort((left, right) => right.sequence - left.sequence)
   }
 
-  async active() {
+  // Whether damage found in pack `id` is still unrepaired: the pack is still
+  // the one selected (by this store's last active() call, or its last
+  // activation by install(); before either, the newest pointer or the legacy
+  // pointer), and its record of a full verification, withdrawn when the
+  // damage was found, has not been written again. Only a later full
+  // verification (a repair, reinstall or full launch check) writes that
+  // record. Unknown state counts as outstanding.
+  async damageOutstanding(id) {
+    try {
+      let selected = this.selectedId
+      if (selected === undefined) {
+        selected = (await this.readPointers())[0]?.id
+        if (!selected) {
+          try { selected = JSON.parse(await checkedRead(join(this.root, 'active.json'))).id }
+          catch (error) { if (error.code !== 'ENOENT') throw error }
+        }
+      }
+      if (selected !== id) return false
+      return await this.readRecord(this.recordPath(id)) === null
+    } catch { return true }
+  }
+
+  // `launch` selects the launch check for each candidate (see launchVerify()).
+  // The selected pack's id (or null) is remembered for damageOutstanding().
+  async active(options) {
+    const selected = await this.selectActive(options)
+    this.selectedId = selected?.id ?? null
+    return selected
+  }
+
+  async selectActive({ launch = false } = {}) {
+    const check = id => launch ? this.launchVerify(id) : this.verify(id)
     const pointers = await this.readPointers()
     let failure
     for (const pointer of pointers) {
-      try { return await this.verify(pointer.id) }
+      try { return await check(pointer.id) }
       catch (error) { failure = error }
     }
     try {
       const value = JSON.parse(await checkedRead(join(this.root, 'active.json')))
       if (value.schema !== 1) throw new Error('Invalid active runtime pointer')
-      return await this.verify(value.id)
+      return await check(value.id)
     } catch (error) { if (failure) throw failure; if (error.code === 'ENOENT') return null; throw error }
   }
 }
@@ -1082,6 +1504,57 @@ function validFunctionalChecks(checks, capabilities) {
   return checks && typeof checks === 'object' && !Array.isArray(checks)
     && JSON.stringify(Object.keys(checks).sort()) === JSON.stringify(names)
     && Object.values(checks).every(value => value === true)
+}
+
+// Combines the two independent launch checks (processing pack with its
+// self-test attestation, and model cache) into the launch selection. A
+// processing failure clears the processing selection; messages are reported
+// processing first, then models.
+export function launchSelection(processing, models) {
+  const selection = { activeProcessing: null, processingProbe: undefined, activeModels: undefined, processingError: undefined }
+  if (processing.status === 'fulfilled') {
+    selection.activeProcessing = processing.value.active
+    if (selection.activeProcessing) selection.processingProbe = processing.value.probe
+  } else { selection.processingProbe = null; selection.processingError = processing.reason?.message }
+  if (models.status === 'fulfilled') selection.activeModels = models.value
+  else selection.processingError = [selection.processingError, models.reason?.message].filter(Boolean).join('\n')
+  return selection
+}
+
+// The background re-check after launch: launch admits a pack whose full
+// verification is on record from structural checks alone, which cannot see a
+// same-size change. Once the application is shown, each such pack (one store
+// at a time, one file at a time) is verified in full again when its last full
+// verification is older than RECHECK_INTERVAL_MS, or missing, unreadable or
+// in the future. A pack this launch already verified in full is skipped. A
+// failure has already withdrawn the pack's record when
+// `onFailure({ label, store, id, error })` is called; cancellation reports nothing.
+export async function recheckPacks(checks, { signal, onFailure, now = Date.now() }) {
+  for (const { store, active, label } of checks) {
+    if (signal?.aborted) return
+    if (!active || store.fullyVerifiedAtLaunch.has(active.id) || !await store.recheckDue(active.id, now)) continue
+    try { await store.recheck(active.id, { signal }) }
+    catch (error) {
+      if (signal?.aborted) return
+      await onFailure({ label, store, id: active.id, error })
+    }
+  }
+}
+
+// The acceptance checks for a self-test result, applied identically to a
+// fresh result and to one recorded earlier for the same pack.
+function acceptProbeResult(result, manifest) {
+  const functional = manifest.probe.schema === 2
+  if (!result || typeof result !== 'object' || Array.isArray(result)
+      || result.schema !== manifest.probe.schema || result.hardwareAvailable !== true
+      || ['pythonVersion', 'backendVersion', 'lyricsyncVersion', 'accelerator'].some(key => result[key] !== manifest[key])
+      || JSON.stringify(result.capabilities) !== JSON.stringify(manifest.capabilities)
+      || !result.components || JSON.stringify(Object.keys(result.components).sort()) !== JSON.stringify([...manifest.probe.modules].sort())
+      || Object.values(result.components).some(value => typeof value !== 'string' || !value)) throw new Error('Processing runtime self-test did not match its manifest or hardware')
+  if (functional && !validFunctionalChecks(result.checks, manifest.capabilities)) {
+    throw new Error('Processing functional checks were incomplete')
+  }
+  return { ...result, verifiedCapabilities: functional ? [...manifest.capabilities] : [], capabilitiesReady: functional }
 }
 
 export function processingAttestation(active, probeResult) {
@@ -1156,6 +1629,25 @@ export class ModelCache extends RuntimeManager {
   // Model cache trees keep the full-length identity as their directory name.
   directoryName(id) { if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity'); return id }
   validate(manifest) { return validateModelManifest(manifest, this.policy) }
+
+  // Model packs run no self-test, so a separate record marks a full
+  // verification; it plays the probe record's part for launch.
+  verifiedRecordPath(id) {
+    if (!hashPattern.test(id || '')) throw new Error('Invalid runtime identity')
+    return join(this.root, 'verified', `${id}.json`)
+  }
+
+  async verifiedOnRecord(active) {
+    const value = await this.readRecord(this.verifiedRecordPath(active.id))
+    return exactKeys(value, ['runtimeManifestId', 'schema']) && value.schema === 1 && value.runtimeManifestId === active.id
+      && manifestMatches(active.manifest, active.id)
+  }
+
+  async markVerified(active, generation) {
+    await this.writeRecord(this.verifiedRecordPath(active.id), { schema: 1, runtimeManifestId: active.id }, generation)
+  }
+
+  recordPath(id) { return this.verifiedRecordPath(id) }
 
   async install(manifest, options = {}) {
     this.validate(manifest)

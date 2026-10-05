@@ -3,7 +3,7 @@
 // has no Electron dependency, so a broken target application cannot prevent a
 // rollback.
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmodSync, closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -94,11 +94,23 @@ function appImageMount(mountInfo, executablePath) {
     const mountPath = procMountValue(before[4]), options = before[5].split(','), filesystem = after[0]
     const rel = relative(mountPath, executablePath)
     if ((rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) && /^fuse(?:\.|$)/.test(filesystem) && options.includes('ro')) {
-      matches.push({ mountPath, filesystem })
+      matches.push({ mountPath, filesystem, device: before[2] })
     }
   }
   matches.sort((left, right) => right.mountPath.length - left.mountPath.length)
   return matches[0] || null
+}
+
+// Every mount point listed in a mountinfo table, whatever its filesystem.
+function mountPoints(mountInfo) {
+  const points = []
+  for (const line of mountInfo.split('\n')) {
+    const separator = line.indexOf(' - ')
+    if (separator < 0) continue
+    const before = line.slice(0, separator).split(' ')
+    if (before.length >= 6) points.push(procMountValue(before[4]))
+  }
+  return points
 }
 
 function procParent(stat) {
@@ -134,12 +146,10 @@ function ancestorImageBytes(procExecutable, outerPath) {
   }
 }
 
-// Bind the running Electron executable to the immutable outer AppImage using
-// kernel-owned process ancestry and mount-table evidence. APPIMAGE and APPDIR
-// are deliberately not consulted: either can be replaced by the caller.
-export function verifiedAppImageRuntime({ platform = process.platform, executablePath = process.execPath,
-  procRoot = '/proc', maximumAncestors = 64 } = {}) {
-  if (platform !== 'linux') return null
+// Kernel evidence that this process executes the AppImage layout's canonical
+// executable from the root of a read-only FUSE mount. It never consults
+// APPIMAGE/APPDIR and never reads the outer image.
+function appImageMountEvidence(executablePath, procRoot) {
   let actualExecutablePath, selfExecutable
   try {
     actualExecutablePath = realpathSync(executablePath)
@@ -152,11 +162,69 @@ export function verifiedAppImageRuntime({ platform = process.platform, executabl
   // ordinary desktop user mounts and launches the image. The read-only FUSE
   // mount and authenticated outer-image ancestry provide ownership here.
   canonicalFile(actualExecutablePath, 'AppImage runtime executable', { requireOwner: false })
-  let mount
-  try { mount = appImageMount(readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8'), actualExecutablePath) } catch {}
+  let mount, mountInfo
+  try {
+    mountInfo = readFileSync(join(procRoot, 'self', 'mountinfo'), 'utf8')
+    mount = appImageMount(mountInfo, actualExecutablePath)
+  } catch {}
   if (!mount || mount.mountPath !== dirname(actualExecutablePath) || basename(actualExecutablePath) !== APPIMAGE_LAYOUT.actualExecutablePath) {
     throw new Error('AppImage runtime is not executing from its read-only FUSE root')
   }
+  return { mount, actualExecutablePath, mountInfo }
+}
+
+// Whether the running application sits in a read-only FUSE mount, from the
+// same kernel evidence as verifiedAppImageRuntime() but without reading or
+// authenticating the outer image. It establishes only that the mounted files
+// cannot change underneath this process; it confers no installer or recovery
+// trust. Any other mount stacked on, or nested beneath, that mount point could
+// expose writable files, so it also yields null, as does any missing or
+// contrary evidence. A read-only FUSE view of a writable directory (a bindfs
+// or rclone mount the same user created) is indistinguishable here.
+//
+// The files actually reached must also belong to that mount: the device of
+// the mount point and of `applicationRoot` (when given) must equal the
+// selected entry's major:minor. This also rejects a mount stacked later on an
+// ancestor, which hides the FUSE mount without appearing beneath it.
+export function readOnlyAppImageMount({ platform = process.platform, executablePath = process.execPath, procRoot = '/proc', applicationRoot } = {}) {
+  if (platform !== 'linux') return null
+  try {
+    const { mount, actualExecutablePath, mountInfo } = appImageMountEvidence(executablePath, procRoot)
+    const covering = mountPoints(mountInfo).filter(point => {
+      const inside = relative(mount.mountPath, point)
+      return inside === '' || (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+    })
+    if (covering.length !== 1) return null
+    const device = linuxDeviceNumbers(mount.device)
+    if (!device) return null
+    for (const path of [mount.mountPath, actualExecutablePath, ...(applicationRoot === undefined ? [] : [applicationRoot])]) {
+      if (!sameLinuxDevice(statSync(path, { bigint: true }).dev, device)) return null
+    }
+    return { readOnly: true, mountPath: mount.mountPath, actualExecutablePath }
+  } catch { return null }
+}
+
+// A mountinfo "major:minor" field.
+function linuxDeviceNumbers(value) {
+  const match = /^(\d+):(\d+)$/.exec(value || '')
+  return match ? { major: BigInt(match[1]), minor: BigInt(match[2]) } : null
+}
+
+// Compares a stat device number with major:minor using the Linux (glibc
+// gnu_dev_major/gnu_dev_minor) encoding.
+function sameLinuxDevice(dev, { major, minor }) {
+  const devMajor = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n)
+  const devMinor = (dev & 0xffn) | ((dev >> 12n) & 0xffffff00n)
+  return devMajor === major && devMinor === minor
+}
+
+// Bind the running Electron executable to the immutable outer AppImage using
+// kernel-owned process ancestry and mount-table evidence. APPIMAGE and APPDIR
+// are deliberately not consulted: either can be replaced by the caller.
+export function verifiedAppImageRuntime({ platform = process.platform, executablePath = process.execPath,
+  procRoot = '/proc', maximumAncestors = 64 } = {}) {
+  if (platform !== 'linux') return null
+  const { mount, actualExecutablePath } = appImageMountEvidence(executablePath, procRoot)
   let pid
   try { pid = procParent(readFileSync(join(procRoot, 'self', 'stat'), 'utf8')) } catch {
     throw new Error('AppImage runtime ancestry is unavailable')

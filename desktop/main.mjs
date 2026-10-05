@@ -13,16 +13,16 @@ import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { RuntimeManager, ModelCache, launchSelection, processingAttestation, recheckPacks } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
 import { createStartupSurface } from './startup.mjs'
-import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
+import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
-import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readOnlyAppImageMount, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
+import { assertNativeInventoryDeclared, declaredApplicationDigest, observeReceiptApplication, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
 import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
 
@@ -47,6 +47,7 @@ let processingManager, modelCache, activeProcessing, activeModels, processingErr
 let processingProbe
 let installation
 let processingOperation
+let packRecheck
 let heartSetup
 let onboardingSetup, onboardingState, startupSurface, modalCredentials, modalCheck, modalCheckController
 let modalLoadedFingerprint = null
@@ -59,6 +60,13 @@ app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.resto
 let backend, host, projector, quitting = false, shutdownComplete = false, handingOff = false
 let recoveryKitDurability = null, recoveryAnchor = null
 const operationGate = new OperationGate()
+const DAMAGE_NOTICE_POLL_MS = 500
+// Setup checks (preflight verification, the model folder choice) in progress.
+let setupChecks = 0
+const setupCheck = action => async (...args) => {
+  setupChecks++
+  try { return await action(...args) } finally { setupChecks-- }
+}
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
 
@@ -69,9 +77,14 @@ async function installedReleaseIdentity() {
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
   if (hash(filesBytes) !== manifest.runtimeId) throw new Error('Installed native inventory identity mismatch')
   const files = JSON.parse(filesBytes)
-  for (const [name, expected] of Object.entries(files)) {
-    const path = resolve(nativeDir, ...name.split('/'))
-    if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+  // The managed-slot and signed macOS paths hash the native payload here. A
+  // receipt-described installation instead binds files.json to its receipt's
+  // declarations below, without reading the payload at launch.
+  const hashNativePayload = () => {
+    for (const [name, expected] of Object.entries(files)) {
+      const path = resolve(nativeDir, ...name.split('/'))
+      if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+    }
   }
   const provenance = JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8'))
   const assemblyBytes = readFileSync(resolve(nativeDir, 'assembly.json'))
@@ -86,17 +99,19 @@ async function installedReleaseIdentity() {
     platform: process.platform, resourcesPath: process.resourcesPath, applicationRoot,
   })
   if (portableBytes !== null) {
+    hashNativePayload()
     const portable = JSON.parse(portableBytes)
     const identity = assertReleaseIdentity(portable.identity)
     if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed managed release belongs to a different edition policy')
     managedReleaseSlot = true
     return identity
   }
-  const records = process.platform === 'darwin'
-    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
-    : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
+  const bundle = process.platform === 'darwin' ? resolve(process.resourcesPath, '../..') : applicationRoot
+  const leading = process.platform === 'darwin' ? [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory']] : []
   if (signedMarker) {
+    hashNativePayload()
+    const records = [...leading, ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)]
     if (existsSync(receiptPath)) throw new Error('Signed macOS application must keep its release receipt outside the sealed bundle')
     const observed = records.map(([path, value]) => value === 'directory' ? { path, type: 'directory' }
       : value.startsWith('symlink:') ? { path, type: 'symlink', target: value.slice('symlink:'.length) }
@@ -114,29 +129,49 @@ async function installedReleaseIdentity() {
       schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes), applicationInventoryDigest: inventoryDigest,
       ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
   }
-  if (existsSync(receiptPath)) {
-    const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
-    if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
-    const identity = validateInstalledReleaseReceipt(receipt, new Map(records), { platform: process.platform, arch: process.arch })
-    if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
-    const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
-    const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
-    const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
-      : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
-    const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
-    if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
-    const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
-      sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
-      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs), frontendDigest: digestRecords(frontend),
-      backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
-      runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
-      schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
-      applicationInventoryDigest: receipt.application.inventoryDigest,
-      ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
-    if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
-    return identity
+  if (!existsSync(receiptPath)) throw new Error('Installed first-launch application lacks its release receipt')
+  const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
+  if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
+  // Content is hashed at launch only where it can change underneath the
+  // receipt. A read-only AppImage mount (kernel evidence) carries its receipt
+  // in the same immutable image, so digests come from the receipt. A writable
+  // installation is hashed in full on its first launch (or whenever its
+  // launch inventory is missing or stale); later launches compare each file's
+  // size, modification and change times, inode and device with that
+  // inventory. Every path still walks
+  // every entry's type and symlink target against the receipt.
+  const readOnly = process.platform === 'linux' && readOnlyApplicationRoot(readOnlyAppImageMount({ applicationRoot }), applicationRoot)
+  const launchInventoryPath = resolve(runtime.root, 'launch-inventory.json')
+  // The cache is bound to the canonical root, so a different installation
+  // reached through the same path never matches it.
+  const inventoryRoot = physicalFs.realpathSync.native(applicationRoot)
+  const observed = observeReceiptApplication({ rootDirectory: applicationRoot, current: bundle, leading, physicalFs, receipt,
+    target: { platform: process.platform, arch: process.arch }, readOnly, inventoryRoot,
+    launchInventory: readOnly ? null : await readLaunchInventory(launchInventoryPath) })
+  const identity = observed.identity
+  if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
+  const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
+  const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
+  const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
+    : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
+  assertNativeInventoryDeclared(files, receipt, nativePrefix)
+  const electronAppDigest = declaredApplicationDigest(receipt, asarRelative)
+  const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
+  if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
+  const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
+    sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
+    electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest, frontendDigest: digestRecords(frontend),
+    backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
+    runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
+    schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
+    applicationInventoryDigest: receipt.application.inventoryDigest,
+    ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
+  if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
+  if (observed.launchInventory && !await writeLaunchInventory(launchInventoryPath, observed.launchInventory,
+    { lockPython: recoveryKitDurability?.pythonPath, durabilityHelper: recoveryKitDurability?.backendHelperPath })) {
+    console.warn('Could not record the application launch inventory; the next launch checks every file in full.')
   }
-  throw new Error('Installed first-launch application lacks its release receipt')
+  return identity
 }
 
 async function platformTrust({ root: applicationRoot, manifest }) {
@@ -451,6 +486,7 @@ async function installProcessing() {
       message: manifest.kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?',
       detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Runtime packs contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
     if (consent.response !== 1 || quitting) return
+    packRecheck?.abort()
     installation = new AbortController()
     await manager.install(manifest, { signal: installation.signal })
     if (!quitting) await dialog.showMessageBox(host, { message: 'Installation verified. Reopen the app to use it.' })
@@ -535,17 +571,27 @@ async function start() {
     app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
+    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks: processingPolicy.lockSha256 })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
-    try {
-      activeProcessing = await processingManager.active()
-      if (activeProcessing) {
-        const probeResult = await processingManager.probe(activeProcessing)
-        processingProbe = processingAttestation(activeProcessing, probeResult)
-      }
-    } catch (error) { activeProcessing = null; processingProbe = null; processingError = error.message }
-    try { activeModels = await modelCache.active() }
-    catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
+    // Launch uses the structural pack checks and the self-test result recorded
+    // for this exact pack; payload hashes and a fresh self-test belong to
+    // installation, repair and activation. The two stores are independent, so
+    // their checks overlap; failures are reported in the same order as before.
+    // A fresh self-test (only after a full processing verification) starts once
+    // the model check has settled: its cold imports would otherwise compete
+    // with a full model verification for the disk and could exceed the
+    // self-test time limit on slow storage.
+    const models = modelCache.active({ launch: true })
+    const modelsSettled = () => models.then(() => {}, () => {})
+    const selection = launchSelection(...await Promise.allSettled([
+      (async () => {
+        const active = await processingManager.active({ launch: true })
+        if (!active) return { active }
+        return { active, probe: processingAttestation(active, await processingManager.launchProbe(active, { before: modelsSettled })) }
+      })(),
+      models,
+    ]))
+    ;({ activeProcessing, processingProbe, activeModels, processingError } = selection)
   }
   await startupSurface.update('Starting your library…')
   if (quitting) return
@@ -625,8 +671,8 @@ async function start() {
   const setupHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeSetup(event); return action(...args) })
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
-  setupHandler('setup:preflight', () => onboardingSetup.preflight())
-  setupHandler('setup:model-source', async mode => {
+  setupHandler('setup:preflight', setupCheck(() => onboardingSetup.preflight()))
+  setupHandler('setup:model-source', setupCheck(async mode => {
     if (!['offline', 'upstream'].includes(mode)) throw new Error('Unknown model source')
     if (processingOperation || operationGate.active) throw new Error('Wait for the current installation to finish or cancel it.')
     if (mode === 'upstream') onboardingSetup.setOfflineModelsDirectory(null)
@@ -637,7 +683,7 @@ async function start() {
       if (!selected.canceled && selected.filePaths.length === 1) onboardingSetup.setOfflineModelsDirectory(selected.filePaths[0])
     }
     return onboardingSetup.preflight()
-  })
+  }))
   setupHandler('setup:status', () => onboardingSetup.getStatus())
   setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
   setupHandler('setup:modal-status', async () => {
@@ -683,6 +729,7 @@ async function start() {
   })
   setupHandler('setup:start', async request => {
     if (processingOperation || operationGate.active) throw new Error('Another installation or release operation is running.')
+    packRecheck?.abort()
     let accept, reject
     const accepted = new Promise((resolve, fail) => { accept = resolve; reject = fail })
     processingOperation = operationGate.run('song processing setup', async () => {
@@ -747,6 +794,76 @@ async function start() {
       } })
   else { await host.loadURL(launch.origin); host.show() }
   startupSurface.close()
+  if (packaged) recheckInstalledPacks()
+}
+
+// Launch admits packs from structural checks, which cannot see a same-size
+// change. Once the window is shown, packs admitted that way whose last full
+// verification is older than RECHECK_INTERVAL_MS (or unknown) are verified in
+// full again in the background, one file at a time. A failure has withdrawn
+// the pack's record, so the next launch verifies it in full; this session is
+// told now and offered setup, which repairs it.
+function recheckInstalledPacks() {
+  packRecheck = new AbortController()
+  void recheckPacks([
+    { store: processingManager, active: activeProcessing, label: 'song processing runtime' },
+    { store: modelCache, active: activeModels, label: 'separation and Heart model files' },
+  ], { signal: packRecheck.signal, onFailure: reportDamagedPack }).catch(error => {
+    console.error(`Could not complete the background check of installed processing files: ${error.message}`)
+  })
+}
+
+// Packs the background check found damaged, awaiting one notice, by label.
+const damagedPacks = new Map()
+let damageNotice = null
+
+// The failure is recorded at once; the dialog is shown by showDamageNotice().
+function reportDamagedPack({ label, store, id, error }) {
+  console.error(`Background verification of the installed ${label} failed: ${error.message}`)
+  if (quitting) return
+  const notice = `The installed ${label} failed verification. Repair it with Set up song processing, then reopen the app.`
+  if (!String(processingError || '').split('\n').includes(notice)) processingError = [processingError, notice].filter(Boolean).join('\n')
+  damagedPacks.set(label, { label, store, id })
+  damageNotice ??= Promise.resolve().then(showDamageNotice)
+    .catch(failure => console.error(`Could not show the damaged processing files notice: ${failure.message}`))
+    .finally(() => { damageNotice = null })
+}
+
+const damageNoticeBlocked = () => Boolean(processingOperation || updateOperation || installation || heartSetup?.operation
+  || operationGate.active || setupChecks > 0)
+
+// The dialog waits until no operation of any kind is running (a backup, an
+// update, recovery information, Heart model setup, or a processing
+// installation or setup, including its selection and consent). It then covers,
+// in one dialog, every queued pack that is still damaged: still the pack its
+// store would select, and not fully verified since (see damageOutstanding()).
+// A pack repaired or replaced meanwhile is dropped; its failure stays recorded
+// in the processing status.
+async function showDamageNotice() {
+  while (damagedPacks.size) {
+    if (quitting || !host) return
+    if (damageNoticeBlocked()) {
+      await new Promise(resolve => setTimeout(resolve, DAMAGE_NOTICE_POLL_MS))
+      continue
+    }
+    // Check every queued pack, including any queued while checking, so all
+    // of them are presented in one dialog.
+    const checked = new Map()
+    for (let fresh; (fresh = [...damagedPacks.values()].filter(pack => !checked.has(pack))).length;) {
+      for (const pack of fresh) checked.set(pack, await pack.store.damageOutstanding(pack.id).catch(() => true))
+    }
+    // An operation that started while the packs were checked delays the dialog again.
+    if (damageNoticeBlocked()) continue
+    const current = [...checked.keys()].filter(pack => damagedPacks.get(pack.label) === pack)
+    for (const pack of current) damagedPacks.delete(pack.label)
+    const outstanding = current.filter(pack => checked.get(pack))
+    if (!outstanding.length || quitting || !host) continue
+    const labels = outstanding.map(pack => pack.label).join(' and ')
+    const choice = await dialog.showMessageBox(host, { type: 'warning', buttons: ['Later', 'Set up song processing…'], defaultId: 1, cancelId: 0,
+      message: `The installed ${labels} failed verification`,
+      detail: 'Some of its files no longer match what was installed. Song processing may fail until it is repaired. Set up song processing to repair it, then reopen the app.' })
+    if (choice.response === 1 && !quitting) host?.webContents.send('setup:open')
+  }
 }
 
 app.on('before-quit', event => {
@@ -759,6 +876,7 @@ app.on('before-quit', event => {
     return
   }
   quitting = true
+  packRecheck?.abort()
   installation?.abort()
   heartSetup?.cancel()
   onboardingSetup?.cancel()
