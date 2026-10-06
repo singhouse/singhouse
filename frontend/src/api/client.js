@@ -232,6 +232,12 @@ export const songApi = {
     return client.get('/lyrics', { params: { artist, title } })
   },
 
+  /** GET /api/lyrics/lookup — preview reference lyrics before a file is
+   *  added: `{ found, plain_lyrics, synced }`. 404 when lookup is off. */
+  lookupLyrics(artist, title) {
+    return client.get('/lyrics/lookup', { params: { artist, title } })
+  },
+
   /** PATCH /api/songs/:id — update song metadata. The server accepts
    *  `artist`, `title`, `lyrics_synced` and `custom_lyrics`; every field is
    *  optional and an omitted one is left as it is. */

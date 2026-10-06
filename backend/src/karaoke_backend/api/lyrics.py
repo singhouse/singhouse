@@ -5,6 +5,10 @@ Lyrics fetch endpoint.
 GET /api/lyrics?artist=<artist>&title=<title>
     -> Returns plain + synced (LRC) lyrics from the selected provider
 
+GET /api/lyrics/lookup?artist=<artist>&title=<title>
+    -> ``{found, plain_lyrics, synced}`` from the built-in provider, for
+       previewing reference lyrics before a file is added
+
 The built-in lrclib provider is opt-in and OFF by default, so on a stock
 install this route answers 503 instead of proxying a third-party service.
 
@@ -33,6 +37,7 @@ from karaoke_backend.workers.lyrics_worker import (
     LyricsServiceError,
     fetch_lyrics,
     fetch_lyrics_by_provider,
+    lrclib_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,12 @@ class LyricsResponse(BaseModel):
     lines: list[str] = []                     # plain lyrics as individual lines
     has_sync: bool = False
     source: str = BUILTIN_LYRICS_LABEL        # shown in the UI, never blank
+
+
+class LyricsLookupResponse(BaseModel):
+    found: bool
+    plain_lyrics: Optional[str] = None
+    synced: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -125,3 +136,40 @@ async def get_lyrics(
     )
 
 
+@router.get(
+    "/lookup",
+    response_model=LyricsLookupResponse,
+    summary="Look up reference lyrics before adding a file",
+)
+async def lookup_lyrics(
+    artist: str = Query(..., description="Artist name", min_length=1, max_length=255),
+    title: str = Query(..., description="Song title", min_length=1, max_length=255),
+    _user: Identity = Depends(require_user),
+) -> LyricsLookupResponse:
+    """
+    Preview the plain lyrics ingest would use for ``artist`` + ``title``.
+
+    Same lookup as ingest (``fetch_lyrics``). A miss is an ordinary answer
+    (``found: false``), not an error. When the operator has not opted in to
+    the built-in provider this answers 404 without contacting anything.
+    """
+    if not lrclib_enabled():
+        raise HTTPException(status_code=404, detail="Lyrics lookup is turned off on this server.")
+
+    try:
+        result = await fetch_lyrics(artist=artist, title=title)
+    except LyricsNotFoundError:
+        return LyricsLookupResponse(found=False)
+    except LyricsProviderDisabledError as exc:
+        raise HTTPException(
+            status_code=404, detail="Lyrics lookup is turned off on this server."
+        ) from exc
+    except LyricsServiceError as exc:
+        logger.warning("Lyrics lookup failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to reach lyrics service -- please try again later",
+        ) from exc
+
+    plain = (result.plain_lyrics or "").strip() or None
+    return LyricsLookupResponse(found=plain is not None, plain_lyrics=plain, synced=result.has_sync)

@@ -136,3 +136,53 @@ export function validateUpload(file) {
 export function isRoutableUpload(file) {
   return routeUpload(file) !== 'unsupported'
 }
+
+/**
+ * The playing time of a local audio or video file, in seconds, or null when
+ * the browser cannot tell. Reads only the container's metadata from an object
+ * URL (revoked afterwards); nothing leaves the machine. Never rejects.
+ *
+ * @returns {Promise<number|null>}
+ */
+export function probeMediaDuration(file, { timeoutMs = 10000 } = {}) {
+  return new Promise(resolve => {
+    let url
+    let el
+    try {
+      url = URL.createObjectURL(file)
+      el = document.createElement(routeUpload(file) === 'video' ? 'video' : 'audio')
+    } catch {
+      if (url) URL.revokeObjectURL(url)
+      resolve(null)
+      return
+    }
+    let done = false
+    const finish = (value) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      el.onloadedmetadata = null
+      el.onerror = null
+      el.removeAttribute('src')
+      URL.revokeObjectURL(url)
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    el.preload = 'metadata'
+    el.onloadedmetadata = () => {
+      const d = el.duration
+      finish(Number.isFinite(d) && d > 0 ? d : null)
+    }
+    el.onerror = () => finish(null)
+    el.src = url
+  })
+}
+
+/** `m:ss`, or `h:mm:ss` from an hour up. */
+export function formatDuration(seconds) {
+  const total = Math.round(Number(seconds) || 0)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = String(total % 60).padStart(2, '0')
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
+}
