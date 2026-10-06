@@ -704,7 +704,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
               <button
                 class="pause"
                 data-testid="onboarding-pause"
-                :title="paused ? 'Resume download' : 'Pause — finished parts are kept'"
+                :title="paused ? 'Resume setup' : 'Pause setup'"
                 :disabled="busy"
                 @click="paused ? setup.resume() : setup.pause()"
               >
