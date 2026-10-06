@@ -2,7 +2,7 @@
 // @vitest-environment happy-dom
 //
 // The library list as a keyboard grid: one roving Tab stop among the rows,
-// arrows/Home/End move it, Enter or Space loads a ready song, Delete opens the
+// the arrow, Home and End keys move it, Enter or Space loads a ready song, Delete opens the
 // existing confirm on Cancel, and → reaches the row's ⋯ button, which is
 // never hidden.
 
