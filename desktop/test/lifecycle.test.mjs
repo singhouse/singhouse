@@ -6,7 +6,11 @@ import { existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { projectorBlocker, stopChild, createRuntime, stopRuntime } from '../lifecycle.mjs'
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { projectorBlocker, processingLaunchArguments, stopChild, createRuntime, stopRuntime } from '../lifecycle.mjs'
+import { resolveInstallRoot } from '../onboarding_state.mjs'
+import { managedStoreDirectories } from '../runtime_manager.mjs'
 
 test('projector sleep blocker is acquired once and released once across duplicate events', () => {
   const actions = []
@@ -187,4 +191,24 @@ assert result.stdout.strip() == str(runtime / 'cache')
     }
     assert.equal(persistentRuntime(join(temporary.root, 'persistent profile')).backend, persistent.backend)
   } finally { temporary.remove() }
+})
+
+test('a custom install root flows into the backend launch arguments with its own store paths', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'singhouse-launch-root-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const fallback = join(directory, 'application-data')
+  const custom = join(directory, 'chosen')
+  await mkdir(custom)
+  const installRoot = await resolveInstallRoot(fallback, custom)
+  const stores = managedStoreDirectories(installRoot)
+  const processing = { directory: join(stores.processing, 'packs', 'a'.repeat(16)), id: 'a'.repeat(64) }
+  const models = { directory: join(stores.models, 'packs', 'b'.repeat(16)), id: 'b'.repeat(64) }
+  const args = processingLaunchArguments({ installRoot, processing, probe: { probePassed: true }, models })
+  assert.deepEqual(args, ['--processing-root', custom, '--processing', processing.directory, '--processing-id', processing.id,
+    '--processing-probe', '{"probePassed":true}', '--models', models.directory, '--models-id', models.id])
+  assert.deepEqual(processingLaunchArguments({ installRoot: null }), [])
+  // The packaged launch passes the resolved root it opened the stores from.
+  const main = await readFile(new URL('../main.mjs', import.meta.url), 'utf8')
+  assert.match(main, /processingLaunchArguments\(\{ installRoot: packaged \? installRoot : null/)
+  assert.match(main, /installRoot = await resolveInstallRoot\(runtime\.root, savedInstallLocation\)/)
 })
