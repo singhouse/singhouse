@@ -11,10 +11,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertReleasePolicy } from '../release.mjs'
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
-import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
+import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, pauseFromUi,
   catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, control, createStatusTracker, installedModelsIdentity,
   installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, parsePackServerLog, partialRuntimeBytes,
-  readPlan, readStatus, resolveRetryTarget, retryFromUi, shouldInterrupt, stagedArchivePartBytes, summarizeCatalog, waitForIdle,
+  readPlan, readStatus, resolveRetryTarget, resumeFromUi, retryFromUi, shouldInterrupt, stagedArchivePartBytes, summarizeCatalog, waitForIdle,
   waitForSetupStart, waitForStep } from './packaged-wizard-driver.mjs'
 
 const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval',
@@ -679,12 +679,12 @@ export async function run(options) {
     wizard.consent.acceptedAt = await accept()
     evidence.consent.modelRetrieval = 'application-setup-consent-screen'; save()
 
-    // Optional recovery exercise: a cancel from the UI, or an injected source
-    // failure, followed by "Review setup and retry" and the same plan.
-    const recoveryMode = options.interruptRuntimeRetrieval ? 'cancel' : options.expectRetrievalFailure ? 'injected-failure' : null
+    // Optional recovery exercise: a pause from the UI followed by Resume, or an
+    // injected source failure followed by "Review setup and retry"; both with
+    // the same plan.
+    const recoveryMode = options.interruptRuntimeRetrieval ? 'pause' : options.expectRetrievalFailure ? 'injected-failure' : null
     let recovery = null, lastRuntimeFile = null
-    async function retryAfter(stoppedStep) {
-      await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
+    function recordStaged() {
       // Every archive part's staged size, read now: the part the server
       // failed is known only from its log, after retrieval is over.
       if (summary.delivery === 'archive') recovery.stagedPartsAfterStop = stagedArchivePartBytes(profile, summary.runtimeId, manifest)
@@ -692,10 +692,25 @@ export async function run(options) {
         : recovery.stagedPartsAfterStop ? recovery.stagedPartsAfterStop[recovery.file] ?? null
           : partialRuntimeBytes(profile, summary.runtimeId, recovery.file, manifest)
       tracker.nextAttempt()
+    }
+    async function retryAfter(stoppedStep) {
+      await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
+      recordStaged()
       await retryFromUi(host, { timeoutMs: stepTimeout() })
       const retryPlan = await bounded(readPlan(host), 60000)
       assert.equal(retryPlan.planId, plan.planId, 'Retry offered a different installation plan')
       recovery.retryAcceptedAt = await accept()
+      save()
+    }
+    async function resumeAfterPause() {
+      await waitForStep(host, 'progress', { timeoutMs: stepTimeout() })
+      recordStaged()
+      const resumePlan = await bounded(readPlan(host), 60000)
+      assert.equal(resumePlan.planId, plan.planId, 'Resume found a different installation plan')
+      const before = await readLiveStatus()
+      await resumeFromUi(host, { timeoutMs: stepTimeout() })
+      recovery.retryAcceptedAt = new Date().toISOString()
+      tracker.observe(await bounded(waitForSetupStart(readLiveStatus, { before, timeoutMs: SETUP_START_TIMEOUT_MS }), SETUP_START_TIMEOUT_MS + 30000))
       save()
     }
     for (;;) {
@@ -704,17 +719,17 @@ export async function run(options) {
       if (observation.transition) { wizard.transitions = tracker.transitions; save() }
       // Unpacking progress names unpacked files, never a retrieved unit.
       if (status.phase === 'runtime' && typeof status.progress?.file === 'string' && status.progress.phase !== 'extract') lastRuntimeFile = status.progress.file
-      if (recoveryMode === 'cancel' && !recovery && shouldInterrupt(observation, status)) {
-        recovery = wizard.recovery = { kind: 'cancel', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
-          atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtCancel: observation.progress.received }
-        await cancelFromUi(host)
+      if (recoveryMode === 'pause' && !recovery && shouldInterrupt(observation, status)) {
+        recovery = wizard.recovery = { kind: 'pause', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
+          atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtPause: observation.progress.received }
+        await pauseFromUi(host)
         let after = status
         while (after.state === 'running') { remaining(); await pause(250); after = await readLiveStatus(); tracker.observe(after) }
         recovery.statusAfterStop = { state: after.state, retryable: after.retryable === true, message: after.message ?? null }
         save()
-        assert.equal(after.state, 'cancelled', `Cancelling runtime retrieval ended in ${after.state}`)
-        assert.equal(after.retryable, true, 'Cancelled setup is not retryable')
-        await retryAfter('cancelled')
+        assert.equal(after.state, 'paused', `Pausing runtime retrieval ended in ${after.state}`)
+        assert.equal(after.retryable, true, 'Paused setup is not resumable')
+        await resumeAfterPause()
         continue
       }
       if (recoveryMode === 'injected-failure' && !recovery && observation.terminal === 'error') {
@@ -740,7 +755,7 @@ export async function run(options) {
     evidence.timingsMs.wizardSetup = Date.now() - setupStarted
     save()
     if (recoveryMode) {
-      assert.ok(recovery, recoveryMode === 'cancel'
+      assert.ok(recovery, recoveryMode === 'pause'
         ? 'Runtime retrieval finished before the 5% interruption point was observed; throttle the pack server (--throttle-bytes-per-second) or use a larger runtime'
         : 'Setup completed without the expected retrieval failure; start the pack server with --fail-after-bytes smaller than a runtime file')
       // Classified only from the source server's request log, read now that

@@ -13,7 +13,7 @@ import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalize
   assertWizardPlan, assertConsentText, createStatusTracker, shouldInterrupt, classifyRetry, partialRuntimeBytes, installedRuntimeIdentity,
   installedModelsIdentity, assertPostRestart, stagedArchivePartBytes, resolveRetryTarget, UNPROVEN_RESUME, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
   parsePackServerLog, runtimeFileUrlPath, runtimeFileForUrlPath, judgePostRestart, observePostRestart, waitForIdle, acceptConsent,
-  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, cancelFromUi, clickRestart } from './packaged-wizard-driver.mjs'
+  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, pauseFromUi, resumeFromUi, clickRestart } from './packaged-wizard-driver.mjs'
 
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const LOCK = 'a'.repeat(64)
@@ -504,9 +504,13 @@ test('controls are judged only after the wizard is idle (aria-busy=false)', asyn
   await retryFromUi(retry.page, { timeoutMs: 2000 })
   assert.equal(retry.state.calls[0], 'click:onboarding-retry:false')
 
-  const progress = fakeWizard({ step: 'progress', heading: 'We’ll take it from here.' })
-  await cancelFromUi(progress.page)
-  assert.deepEqual(progress.state.calls, ['click:onboarding-setup-controls summary:false', 'click:onboarding-cancel:false'])
+  const progress = fakeWizard({ step: 'progress', heading: 'Installing processing tools' })
+  await pauseFromUi(progress.page)
+  assert.deepEqual(progress.state.calls, ['click:onboarding-pause:false'])
+  const paused = fakeWizard({ busy: true, step: 'progress', heading: 'Installing processing tools' })
+  setTimeout(() => { paused.state.busy = false }, 30)
+  await resumeFromUi(paused.page, { timeoutMs: 2000 })
+  assert.deepEqual(paused.state.calls, ['click:onboarding-pause:false'])
   const restart = fakeWizard({ step: 'restart', heading: 'Restart to finish setup.' })
   await clickRestart(restart.page)
   assert.deepEqual(restart.state.calls, ['click:onboarding-restart:false'])

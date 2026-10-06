@@ -39,7 +39,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   function applyStatus(next) {
     status.value = next
     if (next?.state === 'restart-required') step.value = 'restart'
-    else if (next?.state === 'running') step.value = 'progress'
+    else if (next?.state === 'running' || next?.state === 'paused') step.value = 'progress'
     else if (next?.state === 'checking') step.value = 'checking'
     else if (next?.state === 'ready') {
       if (next.restartRequired) step.value = 'restart'
@@ -87,7 +87,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   }
   async function applyModalStatus() {
     if (choice.value !== 'modal' || !bridge.getModalStatus
-        || ['running', 'restart-required'].includes(status.value?.state)
+        || ['running', 'paused', 'restart-required'].includes(status.value?.state)
         || status.value?.restartRequired) return
     const snapshot = navigation()
     const modal = await bridge.getModalStatus()
@@ -178,7 +178,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
     step.value = 'choose'
     return planNavigation(async next => {
       plan.value = next
-      if (status.value?.state === 'running' || status.value?.state === 'restart-required') applyStatus(status.value)
+      if (['running', 'paused', 'restart-required'].includes(status.value?.state)) applyStatus(status.value)
       if (!localAvailable.value) choice.value = 'modal'
       await persist()
     }, { routeIndependent: true })
@@ -221,8 +221,29 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       await persist()
     })
   }
-  async function cancel() {
-    return guarded(async () => { applyStatus(await bridge.cancelSetup()); await persist() })
+  async function pause() {
+    return guarded(async () => { applyStatus(await bridge.pauseSetup()); await persist() })
+  }
+  // Resuming repeats the consented start request; the installer continues
+  // from the files it already saved.
+  async function resume() {
+    return guarded(async () => {
+      if (!plan.value?.planId) plan.value = await preflight()
+      if (!plan.value?.available || !plan.value.planId) throw new Error(plan.value?.reason || 'Setup could not continue. Please try again.')
+      applyStatus(await bridge.startSetup({ consent: true, planId: plan.value.planId }))
+      await persist()
+    })
+  }
+  // Stopping for good leaves the paused state and returns to the choice step.
+  async function stop() {
+    let stopped = false
+    const done = await guarded(async () => {
+      const next = await bridge.cancelSetup()
+      applyStatus(next)
+      stopped = next?.state === 'idle'
+      if (!stopped) await persist()
+    })
+    return done && stopped ? chooseProcessing() : done
   }
   async function chooseModelSource(mode) {
     return guarded(async () => {
@@ -235,5 +256,5 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
   return { step, choice, plan, status, busy, planning, error, localAvailable, canStart,
-    lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource }
+    lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, pause, resume, stop, restart, skip, complete, openHelp, chooseModelSource }
 }
