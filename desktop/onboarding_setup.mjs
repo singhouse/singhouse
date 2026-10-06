@@ -88,22 +88,22 @@ const GIB = 1024 ** 3
 // A nominal 16 GB machine reports slightly less than 16 GiB of total memory.
 const LOW_MEMORY_BYTES = 15 * GIB
 const EXTRAPOLATED = 'the range is extrapolated from published component timings.'
-const CPU_EXTRAPOLATED = `This pack uses the CPU, even if your computer has a graphics card; ${EXTRAPOLATED}`
+const CPU_EXTRAPOLATED = `These tools and models use the CPU, even if your computer has a graphics card; ${EXTRAPOLATED}`
 // Ordered fastest to slowest; less than 15 GiB RAM moves one row slower.
 const CPU_TIERS = Object.freeze([
   { minCpus: 16, minutes: [9, 16], evidence: 'measured',
-    basis: 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' },
+    basis: 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' },
   { minCpus: 12, minutes: [12, 20], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
   { minCpus: 8, minutes: [15, 28], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
   { minCpus: 1, minutes: [25, 45], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
 ])
-const METAL_BASIS = `This pack uses Apple Metal; ${EXTRAPOLATED}`
+const METAL_BASIS = `These tools and models use Apple Metal; ${EXTRAPOLATED}`
 const METAL_TIERS = Object.freeze({
   performance: { minutes: [5, 12], evidence: 'extrapolated', basis: METAL_BASIS },
   base: { minutes: [8, 20], evidence: 'extrapolated', basis: METAL_BASIS },
   lowMemory: { minutes: [15, 35], evidence: 'extrapolated', basis: METAL_BASIS },
 })
-const CUDA_BASIS = `This pack uses your NVIDIA graphics card; ${EXTRAPOLATED}`
+const CUDA_BASIS = `These tools and models use your NVIDIA graphics card; ${EXTRAPOLATED}`
 // Ordered fastest to slowest; demotions move toward the last row, never past it.
 const CUDA_TIERS = Object.freeze([
   { id: 'high', minutes: [1, 3], evidence: 'extrapolated', basis: CUDA_BASIS },
@@ -158,7 +158,7 @@ function metalTier(hardware) {
 // admission; estimates never enable installation or processing.
 function processingEstimate(runtime, hardware = {}, { cudaEstimateAllowed = false } = {}) {
   const unknown = { level: null, label: 'Not enough information', minutes: null,
-    basis: 'A matching supported processing pack and computer details are needed for an estimate.' }
+    basis: 'Matching supported processing tools and models, and computer details, are needed for an estimate.' }
   if (!runtime || !complete(runtime) || runtime.models.length !== LOCAL_MODEL_IDS.length
       || !runtime.provenance?.lockSha256
       || !['cpu', 'metal', 'cuda'].includes(runtime.accelerator)

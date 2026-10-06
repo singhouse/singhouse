@@ -716,7 +716,7 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
 const CPU_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cpu' }
 const METAL_PACK = { platform: 'darwin', arch: 'arm64', accelerator: 'metal' }
 const CUDA_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cuda' }
-const MEASURED_BASIS = 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.'
+const MEASURED_BASIS = 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.'
 const measured = measuredPeakBytes => ({ measuredPeakBytes, evidenceReference: 'measured-fixture',
   representativeHardware: { verified: true, description: 'Test measurement host' } })
 // Matching measured memory evidence: 10 GiB RAM and 5 GiB VRAM after headroom.
@@ -749,7 +749,7 @@ test('processing planning estimate follows the selected pack, never the display 
   hardware.cpuCount = 4
   const slow = (await estimateFixture(CPU_PACK, hardware).setup.preflight()).processingEstimate
   assert.deepEqual(slow.minutes, [25, 45])
-  assert.match(slow.basis, /uses the CPU/)
+  assert.match(slow.basis, /use the CPU/)
   assert.equal(slow.evidence, 'extrapolated')
 })
 
@@ -829,9 +829,10 @@ test('processing estimate tiers cover every hardware boundary', async () => {
     assert.equal(estimate.evidence, evidence, name)
     if (evidence === 'measured') assert.equal(estimate.basis, MEASURED_BASIS, name)
     else {
-      assert.match(estimate.basis, { cpu: /uses the CPU/, metal: /uses Apple Metal/, cuda: /uses your NVIDIA graphics card/ }[pack.accelerator], name)
+      assert.match(estimate.basis, { cpu: /use the CPU/, metal: /use Apple Metal/, cuda: /use your NVIDIA graphics card/ }[pack.accelerator], name)
       assert.match(estimate.basis, /extrapolated from published component timings/, name)
     }
+    assert.doesNotMatch(estimate.basis, /\bpacks?\b/i, name)
   }
 })
 
@@ -869,6 +870,7 @@ test('CUDA estimates require an admitted, recognized single CUDA device with eno
     const estimate = (await setup.preflight()).processingEstimate
     assert.equal(estimate.minutes, null, JSON.stringify(hardware.cudaDevices))
     assert.equal(estimate.level, null)
+    assert.doesNotMatch(estimate.basis, /\bpacks?\b/i)
   }
   // Withholding the advisory range never blocks an otherwise available plan.
   const { setup } = estimateFixture(CUDA_PACK, cudaHost('NVIDIA RTX A5000', 24))
@@ -978,7 +980,7 @@ test('Metal planning range requires an Apple silicon unified-memory target', asy
   Object.assign(setup.catalog.qualification, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
   const plan = await setup.preflight()
   assert.deepEqual(plan.processingEstimate.minutes, [8, 20])
-  assert.match(plan.processingEstimate.basis, /uses Apple Metal/)
+  assert.match(plan.processingEstimate.basis, /use Apple Metal/)
   hardware.unifiedMemory = false
   assert.equal((await setup.preflight()).processingEstimate.minutes, null)
 })

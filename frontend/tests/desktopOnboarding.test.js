@@ -5,6 +5,8 @@ import { defineComponent, h, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { useDesktopOnboarding } from '../src/composables/useDesktopOnboarding'
 import DesktopOnboarding from '../src/components/DesktopOnboarding.vue'
+import onboardingSource from '../src/components/DesktopOnboarding.vue?raw'
+import modalSetupSource from '../src/components/DesktopModalSetup.vue?raw'
 
 function bridge(overrides = {}) {
   return {
@@ -710,7 +712,7 @@ it('shows a qualitative machine rating and estimated three-minute-track range wi
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
       processingEstimate: { level: 2, label: 'Moderate', minutes: [9, 16], evidence: 'measured',
-        basis: 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' } }),
+        basis: 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' } }),
   })
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
@@ -718,8 +720,8 @@ it('shows a qualitative machine rating and estimated three-minute-track range wi
   expect(estimate.text()).toContain('Estimated processing time*')
   expect(estimate.text()).not.toMatch(/rough/i)
   expect(estimate.text()).toContain('9–16 minutes to prepare a 3-minute track')
-  expect(estimate.text()).toContain('Based on one measured run on a 16-core desktop processor')
-  expect(estimate.text()).toContain('Estimate for vocal separation and timed lyrics. Excludes installation and time in queue.')
+  expect(wrapper.text()).not.toContain('These tools and models use')
+  expect(wrapper.text()).not.toContain('Estimate for vocal separation')
   expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
   expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
@@ -732,17 +734,105 @@ it('shows extrapolated estimates with the same calm variability note', async () 
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
       processingEstimate: { level: 3, label: 'Faster', minutes: [1, 3], evidence: 'extrapolated',
-        basis: 'This pack uses your NVIDIA graphics card; the range is extrapolated from published component timings.' } }),
+        basis: 'These tools and models use your NVIDIA graphics card; the range is extrapolated from published component timings.' } }),
   })
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
   const estimate = wrapper.find('[aria-label="Local processing estimate"]')
   expect(estimate.text()).toContain('1–3 minutes to prepare a 3-minute track')
-  expect(estimate.text()).toContain('uses your NVIDIA graphics card')
+  expect(estimate.text()).not.toContain('uses your NVIDIA graphics card')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(3)
   expect(wrapper.text()).not.toContain('Extrapolated estimate')
   expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
   wrapper.unmount()
+})
+
+describe('processing choice summary', () => {
+  const GiB = 1024 ** 3
+  const estimatedPlan = {
+    available: true, planId: 'estimated', diskFreeBytes: 412.6 * GiB,
+    hardware: { platform: 'linux', arch: 'x64', cpu: 'Synthetic 8-core processor', cpuCount: 16,
+      totalMemoryBytes: 31.2 * GiB, availableMemoryBytes: 22.4 * GiB, gpu: 'Synthetic graphics',
+      gpuDevices: [{ name: 'Synthetic graphics', dedicatedMemoryBytes: 12 * GiB }] },
+    processingEstimate: { level: 3, label: 'Faster', minutes: [1, 3], evidence: 'extrapolated',
+      basis: 'These tools and models use your graphics card.' },
+  }
+  async function mountChoice(plan = estimatedPlan) {
+    globalThis.window.karaokeDesktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
+      preflightSetup: vi.fn().mockResolvedValue(plan),
+    })
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    return wrapper
+  }
+  const modalCard = wrapper => wrapper.findAll('.choice').find(button => button.text().includes('My Modal account'))
+
+  it('shows one local container with a hardware strip, the estimate bar, and its footnote', async () => {
+    const wrapper = await mountChoice()
+    const estimate = wrapper.find('[aria-label="Local processing estimate"]')
+    const strip = estimate.find('dl[aria-label="Computer details"]')
+    expect(strip.findAll('dt').map(term => term.text())).toEqual(['CPU', 'GPU', 'RAM', 'Free disk'])
+    expect(strip.findAll('dd').map(value => value.text())).toEqual(
+      ['Synthetic 8-core processor', 'Synthetic graphics · 12.0 GiB', '31.2 GiB', '412.6 GiB'])
+    expect(strip.attributes('title')).toContain('Operating system: Linux · x64')
+    expect(estimate.text()).toContain('Estimated processing time*')
+    expect(estimate.text()).toContain('1–3 minutes to prepare a 3-minute track')
+    expect(estimate.find('.speed-bar').exists()).toBe(true)
+    expect(estimate.text()).toContain('*Actual processing time varies by hardware and song.')
+    expect(wrapper.find('table').exists()).toBe(false)
+    expect(wrapper.find('details').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-modal-summary"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-modal-footnote"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-continue"]').text()).toBe('Continue →')
+    wrapper.unmount()
+  })
+
+  it('omits unknown sizes from the hardware strip', async () => {
+    const wrapper = await mountChoice({ ...estimatedPlan, diskFreeBytes: null,
+      hardware: { ...estimatedPlan.hardware, gpuDevices: [{ name: 'Synthetic graphics', dedicatedMemoryBytes: null }] } })
+    const strip = wrapper.find('dl[aria-label="Computer details"]')
+    expect(strip.findAll('dt').map(term => term.text())).toEqual(['CPU', 'GPU', 'RAM'])
+    expect(strip.findAll('dd').map(value => value.text())).toEqual(['Synthetic 8-core processor', 'Synthetic graphics', '31.2 GiB'])
+    expect(strip.text()).not.toContain('Not yet known')
+    wrapper.unmount()
+  })
+
+  it('shows memory qualification warnings inside the local estimate', async () => {
+    const wrapper = await mountChoice({ ...estimatedPlan,
+      memoryQualification: { status: 'meets-measured-requirements', reason: 'Synthetic reason.', warnings: ['Synthetic memory warning.'] } })
+    const warning = wrapper.find('[aria-label="Local processing estimate"]').findAll('p.quiet').find(line => line.text() === 'Synthetic memory warning.')
+    expect(warning).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('swaps the local estimate for the Modal usage summary when Modal is chosen', async () => {
+    const wrapper = await mountChoice()
+    await modalCard(wrapper).trigger('click')
+    expect(wrapper.find('[aria-label="Local processing estimate"]').exists()).toBe(false)
+    expect(wrapper.find('.speed-bar').exists()).toBe(false)
+    expect(wrapper.find('.estimate-range').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Estimated processing time')
+    expect(wrapper.text()).not.toContain('You can enable Modal later')
+    const summary = wrapper.find('[data-testid="onboarding-modal-summary"]')
+    expect(summary.attributes('aria-label')).toBe('My Modal account')
+    expect(summary.text()).toContain('Processing runs in your own Modal account. Audio needed for processing is sent to that deployment.')
+    expect(summary.text()).toContain('At the time of writing, $30 of monthly usage is included with a Modal account*')
+    expect(summary.text()).toContain('Roughly 200 or more 3–4 minute songs per $30')
+    expect(wrapper.find('[data-testid="onboarding-continue"]').text()).toBe('Connect Modal account →')
+    expect(wrapper.find('[data-testid="onboarding-modal-footnote"]').text()).toBe('*Subject to change. See Modal’s current pricing and terms.')
+    await wrapper.find('[data-testid="onboarding-choice-local"]').trigger('click')
+    expect(wrapper.find('[aria-label="Local processing estimate"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="onboarding-modal-summary"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+it('uses "tools and models" instead of "pack" in setup copy', () => {
+  for (const [name, raw] of [['DesktopOnboarding.vue', onboardingSource], ['DesktopModalSetup.vue', modalSetupSource]]) {
+    const source = raw.replace(/<style[\s\S]*?<\/style>/g, '')
+    expect(source, name).not.toMatch(/\bpacks?\b/i)
+  }
 })
 
 it('does not invent a range when the desktop supplies no estimate', async () => {
