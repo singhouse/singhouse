@@ -250,7 +250,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, inject, watch, nextTick, onUnmounted } from 'vue'
 import { songApi } from '@/api/client'
 import { useFeaturesStore } from '@/stores/features'
 import { useSongsStore } from '@/stores/songs'
@@ -277,6 +277,12 @@ const submitting = ref(false)
 const optKaraokeModel = ref(DEFAULT_KARAOKE_MODEL)
 const optLlmPaging = ref(false)
 let dragCounter = 0
+
+// Hold the surrounding dialog open while a file is being handed off.
+const modal = inject('ui-modal', null)
+const busyToken = Symbol('upload')
+watch(() => pendingFiles.value.some(p => p.submitting), (on) => modal?.setBusy(busyToken, on))
+onUnmounted(() => modal?.setBusy(busyToken, false))
 
 // Route choice, allowlists and size caps all live in @/utils/uploadRouting —
 // the two ingest routes each have a server-side allowlist behind them and the

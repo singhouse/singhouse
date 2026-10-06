@@ -284,3 +284,40 @@ describe('errors', () => {
     expect(bodyEl('.export-error').textContent).toContain('timeout of 300000ms exceeded')
   })
 })
+
+describe('dialog behaviour', () => {
+  it('is a dialog named Export CD+G that starts on the format choice', async () => {
+    wrapper = await openModal()
+    const dialog = bodyEl('dialog.modal-overlay')
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(document.getElementById(dialog.getAttribute('aria-labelledby')).textContent).toBe('Export CD+G')
+    expect(document.activeElement).toBe(radio('mp3g'))
+  })
+
+  it('Escape closes when idle', async () => {
+    wrapper = await openModal()
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(wrapper.emitted('close')).toBeTruthy()
+  })
+
+  it('holds the dialog open while an export is running', async () => {
+    let finish
+    exportSong.mockReturnValue(new Promise((r) => { finish = r }))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+
+    const dialog = bodyEl('dialog.modal-overlay')
+    expect(confirmBtn().disabled).toBe(true)
+    expect(bodyEl('.modal__close').disabled).toBe(true)
+    expect(bodyEl('.modal__footer .ui-btn--ghost').disabled).toBe(true)
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(wrapper.emitted('close')).toBeFalsy()
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    finish({ data: new Blob(['x']), headers: { get: () => null } })
+    await flushPromises()
+  })
+})

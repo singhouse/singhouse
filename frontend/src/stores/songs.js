@@ -27,7 +27,12 @@ export const useSongsStore = defineStore('songs', () => {
   const loading = ref(false)
   const error = ref(null)
 
-
+  // When each processing song's ingest last visibly moved, keyed by song id:
+  // { sig, at }. The list endpoint carries no update timestamp, so `at` is the
+  // local time at which a poll first saw the current phase/message/progress.
+  // A stage that has gone quiet and one that has died look the same on the
+  // row otherwise.
+  const jobProgress = ref({})
 
   // ─── Getters ──────────────────────────────────────────────────────────────
   const filteredSongs = computed(() => {
@@ -60,9 +65,11 @@ export const useSongsStore = defineStore('songs', () => {
     loading.value = true
     error.value = null
     try {
-      const result = await fetchAllSongs(searchQuery.value || undefined)
+      const query = searchQuery.value || undefined
+      const result = await fetchAllSongs(query)
       if (seq !== _fetchSeq) return          // superseded mid-walk; discard
       songs.value = result
+      _trackProgress(result, { complete: !query })
       _scheduleProcessingPoll()
     } catch (e) {
       console.warn('fetchSongs failed:', e.message)
@@ -93,14 +100,52 @@ export const useSongsStore = defineStore('songs', () => {
         // Must paginate the same way fetchSongs does: this overwrites the
         // list wholesale, so a single-page refresh here would silently snap
         // a fully-loaded library back to its first page every 3s.
-        const next = await fetchAllSongs(searchQuery.value || undefined)
-        if (seq === _fetchSeq) songs.value = next
+        const query = searchQuery.value || undefined
+        const next = await fetchAllSongs(query)
+        if (seq === _fetchSeq) {
+          songs.value = next
+          _trackProgress(next, { complete: !query })
+        }
       } catch (e) {
         console.warn('processing-poll failed:', e.message)
       } finally {
         _scheduleProcessingPoll()
       }
     }, 3000)
+  }
+
+  // Only a change in phase, message or percent counts as progress; an
+  // identical poll keeps the old time. Songs absent from a searched list keep
+  // theirs, so clearing the search does not restart the clock; an unfiltered
+  // (`complete`) walk is the whole library, so anything absent from it is gone.
+  function _trackProgress(list, { complete = false } = {}) {
+    if (!Array.isArray(list)) return
+    const now = Date.now()
+    const next = { ...jobProgress.value }
+    let changed = false
+    if (complete) {
+      const present = new Set(list.map(s => String(s.id)))
+      for (const id of Object.keys(next)) {
+        if (!present.has(id)) { delete next[id]; changed = true }
+      }
+    }
+    for (const s of list) {
+      if (s.status !== 'processing') {
+        if (s.id in next) { delete next[s.id]; changed = true }
+        continue
+      }
+      const sig = JSON.stringify([s.phase ?? null, s.message ?? null, s.progress ?? null])
+      if (next[s.id]?.sig !== sig) {
+        next[s.id] = { sig, at: now }
+        changed = true
+      }
+    }
+    if (changed) jobProgress.value = next
+  }
+
+  /** Local ms timestamp of the last observed progress for a processing song, or null. */
+  function jobLastChangeAt(songId) {
+    return jobProgress.value[songId]?.at ?? null
   }
 
   // All ingest paths — separation, prepared video, and CDG — have the
@@ -236,6 +281,11 @@ export const useSongsStore = defineStore('songs', () => {
     try {
       await songApi.delete(id)
       songs.value = songs.value.filter(s => s.id !== id)
+      if (id in jobProgress.value) {
+        const next = { ...jobProgress.value }
+        delete next[id]
+        jobProgress.value = next
+      }
       if (currentSong.value?.id === id) {
         currentSong.value = null
       }
@@ -547,6 +597,7 @@ export const useSongsStore = defineStore('songs', () => {
   return {
     songs, currentSong, uploads, statusFilter, searchQuery, loading, error,
     filteredSongs, readySongs, processingCount,
+    jobLastChangeAt,
     fetchSongs, uploadSong, importVideoSong, importCdgSong, loadSong, deleteSong,
     fetchLyrics,
     listLyricsSets, activateLyricsSet, verifyLyricsSet, deleteLyricsSet,
