@@ -471,9 +471,9 @@ export const historyApi = {
 }
 
 // ─── Export API (CD+G / MP3+G) ──────────────────────────────────────────────
-// Single-song export of the host's own library material. The attribution-card
-// preference is a server-side setting; per-request `card` exists only as an
-// explicit override and is normally omitted.
+// Single-song export of the host's own library material. The export dialog
+// always asks for the attribution card (`card: true`); the stored server-side
+// preference applies only when a caller omits `card`.
 
 export const exportApi = {
   /** GET /api/export/settings — { attribution_card } */

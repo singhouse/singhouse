@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 const { contextBridge, ipcRenderer } = require('electron')
-// Fixed host-only setup actions; no renderer-selected paths or generic IPC.
+// Fixed host-only setup and export actions; no renderer-selected paths or generic IPC.
 // Modal credentials flow inward only; status never returns stored secrets.
 contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   isDesktop: true,
@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   cancelSetup: () => ipcRenderer.invoke('setup:cancel'),
   restartApp: () => ipcRenderer.invoke('setup:restart'),
   openSetupHelp: topic => ipcRenderer.invoke('setup:help', topic),
+  getExportDefaults: () => ipcRenderer.invoke('export:defaults'),
+  chooseExportFolder: () => ipcRenderer.invoke('export:choose-folder'),
+  saveExportDefaults: defaults => ipcRenderer.invoke('export:save-defaults', defaults),
+  exportSong: request => ipcRenderer.invoke('export:write', request),
   onOpenSetup: callback => {
     const listener = () => callback()
     ipcRenderer.on('setup:open', listener)
