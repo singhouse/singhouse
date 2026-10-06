@@ -281,7 +281,7 @@ let dragCounter = 0
 // Hold the surrounding dialog open while a file is being handed off.
 const modal = inject('ui-modal', null)
 const busyToken = Symbol('upload')
-watch(() => pendingFiles.value.some(p => p.submitting), (on) => modal?.setBusy(busyToken, on))
+watch(submitting, (on) => modal?.setBusy(busyToken, on))
 onUnmounted(() => modal?.setBusy(busyToken, false))
 
 // Route choice, allowlists and size caps all live in @/utils/uploadRouting —

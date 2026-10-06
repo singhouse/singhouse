@@ -136,7 +136,7 @@ it('holds the surrounding dialog open while a file is being handed off', async (
   const escape = () => wrapper.find('dialog').trigger('keydown', { key: 'Escape' })
 
   await drop(file('song.mp3', 'audio/mpeg'))
-  await wrapper.find('.btn-upload').trigger('click')
+  await wrapper.find(ADD).trigger('click')
   await escape()
   expect(onClose).not.toHaveBeenCalled()
   expect(wrapper.find('.modal__close').element.disabled).toBe(true)
