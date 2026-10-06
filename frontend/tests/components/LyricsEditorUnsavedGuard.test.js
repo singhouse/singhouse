@@ -73,6 +73,7 @@ vi.mock('@/components/editor/EditorWorkbench.vue', async () => {
 })
 
 import LyricsEditorView from '@/views/LyricsEditorView.vue'
+import { BRAND_NAME } from '@/brand.js'
 
 // Synthetic words only.
 function syntheticDoc() {
@@ -127,7 +128,7 @@ beforeEach(() => {
   wb.saveImpl = vi.fn(async () => ({ id: 5, label: 'edited from Synthetic words' }))
   wb.exported = 0
   delete window.karaokeDesktop
-  document.title = 'singhouse'
+  document.title = BRAND_NAME
 })
 
 afterEach(() => {
@@ -149,10 +150,10 @@ describe('lyrics editor unsaved-edits guard', () => {
     await mountEditor()
     wb.session.apply(MERGE)
     await flushPromises()
-    expect(document.title).toBe('● singhouse')
+    expect(document.title).toBe(`● ${BRAND_NAME}`)
     wb.session.undo()
     await flushPromises()
-    expect(document.title).toBe('singhouse')
+    expect(document.title).toBe(BRAND_NAME)
   })
 
   it('leaving with edits prompts, and Discard proceeds', async () => {
@@ -332,7 +333,7 @@ describe('lyrics editor unsaved-edits guard', () => {
 
       const answered = desktop.request()
       await flushPromises()
-      expect(dialog()?.textContent).toContain('Close singhouse with unsaved lyric edits?')
+      expect(dialog()?.textContent).toContain(`Close ${BRAND_NAME} with unsaved lyric edits?`)
       expect(desktop.answerCloseRequest).not.toHaveBeenCalled()
       await click('Keep editing')
       await answered
