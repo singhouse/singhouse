@@ -18,6 +18,7 @@ import { authorizedHeartCaller } from './heart_setup.mjs'
 import { LyricsLookupPreference } from './lyrics_lookup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { ExportPreferences, defaultExportFolder, writeExport } from './export_files.mjs'
 import { relaunchForSetup } from './setup_relaunch.mjs'
 import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
@@ -720,6 +721,25 @@ async function start() {
     host.webContents.send('setup:open')
     return { installed: false, restartRequired: false, reason: 'Complete song processing setup before trying this action again.' }
   })
+  // Export writes into the folder chosen through the native picker; the
+  // renderer names a song and options, never a path.
+  const exportPreferences = new ExportPreferences({
+    state: new OnboardingState(resolve(runtime.root, 'export.json')),
+    defaultFolder: defaultExportFolder({ getPath: name => app.getPath(name), home: app.getPath('home'), brand }),
+    home: app.getPath('home') })
+  const exportHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Export is only available in the host window')
+    return action(...args)
+  })
+  exportHandler('export:defaults', () => exportPreferences.get())
+  exportHandler('export:choose-folder', () => exportPreferences.chooseFolder(async () => {
+    const selected = await dialog.showOpenDialog(host, { properties: ['openDirectory', 'createDirectory'] })
+    return !selected.canceled && selected.filePaths.length === 1 ? selected.filePaths[0] : null
+  }))
+  exportHandler('export:save-defaults', value => exportPreferences.saveDefaults(value))
+  exportHandler('export:write', async request => writeExport({
+    fetch: (path, init) => ses.fetch(`${launch.origin}${path}`, { ...init, redirect: 'error' }),
+    folder: (await exportPreferences.get()).folder, request, signal: AbortSignal.timeout(300000) }))
   host.webContents.on('did-create-window', child => {
     projector = child
     popupReserved = false
