@@ -120,9 +120,7 @@ describe('vocabulary', () => {
     await exportButtons()[0].trigger('click')
     await flushPromises()
 
-    // The browser build names where the file goes; that label is the one
-    // permitted use.
-    const label = "Your browser's download folder"
+    const label = "Where your browser saves files"
     expect(wrapper.html().replaceAll(label, '')).not.toMatch(/download/i)
     expect(document.body.innerHTML.replaceAll(label, '')).not.toMatch(/download/i)
   })

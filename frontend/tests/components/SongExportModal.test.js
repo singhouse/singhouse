@@ -188,9 +188,9 @@ describe('video format', () => {
 })
 
 describe('browser build', () => {
-  it('shows the browser download folder and no Browse button', async () => {
+  it('shows where the browser saves files and no Browse button', async () => {
     wrapper = await openModal()
-    expect(bodyEl('.export-path__input').value).toBe("Your browser's download folder")
+    expect(bodyEl('.export-path__input').value).toBe("Where your browser saves files")
     expect(button('Browse…')).toBeUndefined()
   })
 
@@ -293,10 +293,10 @@ describe('desktop build', () => {
   beforeEach(() => {
     bridge = {
       isDesktop: true,
-      getExportDefaults: vi.fn().mockResolvedValue({ folder: '/home/someone/Music/singhouse', label: '~/Music/singhouse', format: 'mp3g', audio: 'karaoke' }),
-      chooseExportFolder: vi.fn().mockResolvedValue({ folder: '/home/someone/Desktop/gig', label: '~/Desktop/gig', format: 'mp3g', audio: 'karaoke' }),
+      getExportDefaults: vi.fn().mockResolvedValue({ folder: '/data/someone/Music/karaoke', label: '~/Music/karaoke', format: 'mp3g', audio: 'karaoke' }),
+      chooseExportFolder: vi.fn().mockResolvedValue({ folder: '/data/someone/Desktop/gig', label: '~/Desktop/gig', format: 'mp3g', audio: 'karaoke' }),
       saveExportDefaults: vi.fn().mockResolvedValue({}),
-      exportSong: vi.fn().mockResolvedValue({ path: '/home/someone/Music/singhouse/Ackerman - Zither Blues.zip' }),
+      exportSong: vi.fn().mockResolvedValue({ path: '/data/someone/Music/karaoke/Ackerman - Zither Blues.zip' }),
     }
     window.karaokeDesktop = bridge
   })
@@ -305,8 +305,8 @@ describe('desktop build', () => {
     wrapper = await openModal()
     expect(bridge.getExportDefaults).toHaveBeenCalled()
     expect(radio('mp3g').checked).toBe(true)
-    expect(bodyEl('.export-path__input').value).toBe('~/Music/singhouse')
-    expect(bodyEl('.export-path__input').getAttribute('title')).toBe('/home/someone/Music/singhouse')
+    expect(bodyEl('.export-path__input').value).toBe('~/Music/karaoke')
+    expect(bodyEl('.export-path__input').getAttribute('title')).toBe('/data/someone/Music/karaoke')
     expect(button('Browse…')).toBeTruthy()
   })
 
@@ -316,7 +316,7 @@ describe('desktop build', () => {
     await flushPromises()
     expect(bridge.chooseExportFolder).toHaveBeenCalledWith()
     expect(bodyEl('.export-path__input').value).toBe('~/Desktop/gig')
-    expect(bodyEl('.export-path__input').getAttribute('title')).toBe('/home/someone/Desktop/gig')
+    expect(bodyEl('.export-path__input').getAttribute('title')).toBe('/data/someone/Desktop/gig')
   })
 
   it('shows the full folder when the host sends no label', async () => {
@@ -334,7 +334,7 @@ describe('desktop build', () => {
     expect(exportSong).not.toHaveBeenCalled()
     expect(savedAnchor).toBeNull()
     expect(bodyEl('.export-form')).toBeNull()
-    expect(bodyEl('.modal__body').textContent.trim()).toBe('/home/someone/Music/singhouse/Ackerman - Zither Blues.zip')
+    expect(bodyEl('.modal__body').textContent.trim()).toBe('/data/someone/Music/karaoke/Ackerman - Zither Blues.zip')
     expect(buttons().map(b => b.textContent.trim())).toEqual(['Done'])
     expect(wrapper.emitted('close')).toBeFalsy()
 
@@ -373,7 +373,7 @@ describe('desktop build', () => {
     confirmBtn().click()
     await flushPromises()
     expect(bridge.saveExportDefaults).not.toHaveBeenCalled()
-    finish({ path: '/home/someone/Music/singhouse/x.zip' })
+    finish({ path: '/data/someone/Music/karaoke/x.zip' })
     await flushPromises()
     expect(bridge.saveExportDefaults).toHaveBeenCalledWith({ format: 'mp3g', audio: 'karaoke' })
   })
@@ -386,7 +386,7 @@ describe('desktop build', () => {
   })
 
   it('opens on Video with Export disabled when that is the stored default', async () => {
-    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/singhouse', format: 'video', audio: 'karaoke' })
+    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/karaoke', format: 'video', audio: 'karaoke' })
     wrapper = await openModal()
     expect(radio('video').checked).toBe(true)
     expect(confirmBtn().disabled).toBe(true)
@@ -439,16 +439,16 @@ describe('errors', () => {
 })
 
 describe('vocabulary', () => {
-  it('uses the word only in the browser folder label', async () => {
+  it('keeps the word out of the dialog', async () => {
     wrapper = await openModal()
     const card = bodyEl('.modal-card')
-    const text = card.textContent.replace("Your browser's download folder", '')
+    const text = card.textContent.replace("Where your browser saves files", '')
     expect(text).toContain('Export')
     expect(text).not.toMatch(/download/i)
-    expect(card.innerHTML.replaceAll("Your browser's download folder", '')).not.toMatch(/download/i)
+    expect(card.innerHTML.replaceAll("Where your browser saves files", '')).not.toMatch(/download/i)
   })
 
-  it('keeps the word out of both component sources, except the anchor property and folder label', () => {
+  it('keeps the word out of both component sources, except the anchor property', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     for (const file of [
       resolve(here, '../../src/components/SongExportModal.vue'),
@@ -456,7 +456,7 @@ describe('vocabulary', () => {
     ]) {
       const source = readFileSync(file, 'utf8')
         .replaceAll('a.download = ', '')
-        .replaceAll("Your browser's download folder", '')
+        .replaceAll("Where your browser saves files", '')
       expect(source).not.toMatch(/download/i)
     }
   })

@@ -169,7 +169,7 @@ const AUDIO = [
   { value: 'instrumental', label: 'Instrumental', detail: 'Instrumental only' },
 ]
 const DEFAULTS_KEY = 'karaoke:exportDefaults'
-const BROWSER_FOLDER = "Your browser's download folder"
+const BROWSER_FOLDER = "Where your browser saves files"
 
 const bridge = globalThis.window?.karaokeDesktop
 const desktop = bridge?.isDesktop === true && typeof bridge.exportSong === 'function' ? bridge : null

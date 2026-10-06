@@ -30,11 +30,11 @@ function streamResponse(chunks, { status = 200, headers = {} } = {}) {
 const request = { songId: 7, format: 'mp3g', audio: 'karaoke' }
 
 test('default folder is the brand folder under music, falling back to home', () => {
-  assert.equal(defaultExportFolder({ getPath: () => '/home/someone/Music', home: '/home/someone' }),
-    join('/home/someone/Music', 'singhouse'))
-  assert.equal(defaultExportFolder({ getPath: () => { throw new Error('no music folder') }, home: '/home/someone' }),
-    join('/home/someone', 'singhouse'))
-  assert.equal(defaultExportFolder({ getPath: () => '', home: '/home/someone' }), join('/home/someone', 'singhouse'))
+  assert.equal(defaultExportFolder({ getPath: () => '/data/someone/Music', home: '/data/someone' }),
+    join('/data/someone/Music', 'singhouse'))
+  assert.equal(defaultExportFolder({ getPath: () => { throw new Error('no music folder') }, home: '/data/someone' }),
+    join('/data/someone', 'singhouse'))
+  assert.equal(defaultExportFolder({ getPath: () => '', home: '/data/someone' }), join('/data/someone', 'singhouse'))
 })
 
 test('defaults are validated and never invent a relative folder', () => {
@@ -47,19 +47,19 @@ test('defaults are validated and never invent a relative folder', () => {
 })
 
 test('folders under home are labelled with ~ and others are shown in full', async t => {
-  assert.equal(folderLabel('/home/someone/Music/singhouse', '/home/someone'), join('~', 'Music', 'singhouse'))
-  assert.equal(folderLabel('/home/someone', '/home/someone'), '~')
-  assert.equal(folderLabel('/home/someoneelse/x', '/home/someone'), '/home/someoneelse/x')
-  assert.equal(folderLabel('/home/someone/..data', '/home/someone'), join('~', '..data'))
-  assert.equal(folderLabel('/srv/exports', '/home/someone'), '/srv/exports')
+  assert.equal(folderLabel('/data/someone/Music/singhouse', '/data/someone'), join('~', 'Music', 'singhouse'))
+  assert.equal(folderLabel('/data/someone', '/data/someone'), '~')
+  assert.equal(folderLabel('/data/someoneelse/x', '/data/someone'), '/data/someoneelse/x')
+  assert.equal(folderLabel('/data/someone/..data', '/data/someone'), join('~', '..data'))
+  assert.equal(folderLabel('/srv/exports', '/data/someone'), '/srv/exports')
   assert.equal(folderLabel('/srv/exports', undefined), '/srv/exports')
 
   const directory = await fixture(t)
   const preferences = new ExportPreferences({ state: new OnboardingState(join(directory, 'export.json')),
-    defaultFolder: '/home/someone/Music/singhouse', home: '/home/someone' })
+    defaultFolder: '/data/someone/Music/singhouse', home: '/data/someone' })
   assert.equal((await preferences.get()).label, join('~', 'Music', 'singhouse'))
-  const chosen = await preferences.chooseFolder(async () => '/home/someone/Desktop/gig friday')
-  assert.deepEqual([chosen.folder, chosen.label], ['/home/someone/Desktop/gig friday', join('~', 'Desktop', 'gig friday')])
+  const chosen = await preferences.chooseFolder(async () => '/data/someone/Desktop/gig friday')
+  assert.deepEqual([chosen.folder, chosen.label], ['/data/someone/Desktop/gig friday', join('~', 'Desktop', 'gig friday')])
 })
 
 test('reading defaults does not create the folder', async t => {
