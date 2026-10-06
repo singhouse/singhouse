@@ -249,9 +249,9 @@ export function validateProcessingManifest(value, expected, trustedLocks = []) {
     if (!archived) sourceUrl(file.url)
     else if (Object.hasOwn(file, 'url')) throw new Error('Processing manifest mixes per-file and archive delivery')
   }
-  if (!value.files.some(file => file.path === value.python && file.executable)) throw new Error('Pack lacks its managed Python executable')
+  if (!value.files.some(file => file.path === value.python && file.executable)) throw new Error('Processing tools and models lack their managed Python executable')
   const total = value.files.reduce((sum, file) => sum + file.size, 0)
-  if (!Number.isSafeInteger(total)) throw new Error('Processing pack is too large')
+  if (!Number.isSafeInteger(total)) throw new Error('Processing tools and models are too large')
   return value
 }
 
@@ -493,6 +493,11 @@ export async function durableReplace(lockPython, durabilityHelper, source, desti
       } catch (error) { reject(error) }
     })
   })
+}
+
+// The processing and model stores share one install root.
+export function managedStoreDirectories(root) {
+  return { processing: join(root, 'processing'), models: join(root, 'model-cache') }
 }
 
 export class RuntimeManager {

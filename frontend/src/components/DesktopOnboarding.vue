@@ -41,6 +41,33 @@ const progress = computed(() => {
   const value = status.value?.progress
   return value?.total > 0 && Number.isFinite(value.received) ? Math.max(0, Math.min(100, value.received / value.total * 100)) : undefined
 })
+const SETUP_STAGES = [['retrieve', 'Retrieve tools'], ['unpack', 'Unpack and check'], ['models', 'Models'], ['verify', 'Verify']]
+const stageIndex = computed(() => {
+  const current = status.value?.stage
+  return current === 'complete' ? SETUP_STAGES.length : Math.max(0, SETUP_STAGES.findIndex(([id]) => id === current))
+})
+const stageName = computed(() => SETUP_STAGES[Math.min(stageIndex.value, SETUP_STAGES.length - 1)][1])
+const paused = computed(() => status.value?.state === 'paused')
+const progressCount = computed(() => {
+  if (progress.value === undefined) return ''
+  const percent = `${Math.round(progress.value)}%`
+  const { part, parts } = status.value.progress
+  return part && parts > 1 ? `part ${part} of ${parts} · ${percent}` : percent
+})
+// Hiding only collapses the card; setup keeps its state.
+const collapsed = ref(false)
+const hideButton = ref(null)
+const showButton = ref(null)
+async function collapse(value) {
+  collapsed.value = value
+  await nextTick()
+  ;(value ? showButton : hideButton).value?.focus()
+}
+watch(step, value => { if (value !== 'progress') collapsed.value = false })
+async function stopSetup() {
+  await setup.stop()
+  if (step.value === 'choose') emit('open')
+}
 const transferBytes = computed(() => {
   const files = plan.value?.components
   const onlineFiles = files?.filter(file => file.sourceMode !== 'offline')
@@ -50,23 +77,38 @@ const localCopyBytes = computed(() => {
   const files = plan.value?.components?.filter(file => file.sourceMode === 'offline')
   return files?.length && files.every(file => Number.isFinite(file.bytes)) ? files.reduce((total, file) => total + file.bytes, 0) : null
 })
-const hardwareDetails = computed(() => {
+const hardwareStrip = computed(() => {
   const hardware = plan.value?.hardware
   if (!hardware) return []
-  const platforms = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
-  const details = [
-    ['Operating system', [platforms[hardware.platform] || hardware.platform, hardware.arch].filter(Boolean).join(' · ') || 'Unknown'],
-    ['Processor', hardware.cpu || 'Unknown'],
-    ['Logical processors', hardware.cpuCount || 'Unknown'],
-    [hardware.unifiedMemory ? 'Unified memory' : 'Memory', size(hardware.totalMemoryBytes)],
-    ['Currently available memory', size(hardware.availableMemoryBytes)],
-    ['Graphics', hardware.gpu || 'Unknown'],
+  const memory = bytes => Number.isFinite(bytes) ? ` · ${size(bytes)}` : ''
+  let gpu
+  if (hardware.unifiedMemory) gpu = hardware.gpu || 'Unknown'
+  else if (hardware.gpuDevices?.length) gpu = hardware.gpuDevices.map(device => `${device.name}${memory(device.dedicatedMemoryBytes)}`).join(', ')
+  else gpu = `${hardware.gpu || 'Unknown'}${memory(hardware.videoMemoryBytes)}`
+  const strip = [
+    ['CPU', hardware.cpu || 'Unknown'],
+    ['GPU', gpu],
   ]
-  if (hardware.unifiedMemory) details.push(['Graphics memory', 'Shared with unified memory'])
-  else if (hardware.gpuDevices?.length) {
-    for (const device of hardware.gpuDevices) details.push([`${device.name} dedicated memory`, size(device.dedicatedMemoryBytes)])
-  } else details.push(['Dedicated graphics memory', size(hardware.videoMemoryBytes)])
-  return details
+  if (Number.isFinite(hardware.totalMemoryBytes)) strip.push(['RAM', size(hardware.totalMemoryBytes)])
+  if (Number.isFinite(plan.value?.diskFreeBytes)) strip.push(['Free disk', size(plan.value.diskFreeBytes)])
+  return strip
+})
+const hardwareNotes = computed(() => {
+  const hardware = plan.value?.hardware
+  if (!hardware) return undefined
+  const platforms = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
+  const notes = [
+    `Operating system: ${[platforms[hardware.platform] || hardware.platform, hardware.arch].filter(Boolean).join(' · ') || 'Unknown'}`,
+    `Logical processors: ${hardware.cpuCount || 'Unknown'}`,
+    `Currently available memory: ${size(hardware.availableMemoryBytes)}`,
+  ]
+  const memory = plan.value?.memoryRequirements
+  if (memory?.evidenceAvailable) {
+    notes.push(`Measured memory requirement, including headroom: ${size(memory.ramBytes)} RAM${memory.dedicatedVideoMemoryBytes ? ` and ${size(memory.dedicatedVideoMemoryBytes)} dedicated graphics memory` : ''}.`)
+    if (plan.value.memoryQualification?.reason) notes.push(plan.value.memoryQualification.reason)
+    notes.push(...(plan.value.memoryQualification?.warnings || []))
+  } else notes.push('No measured memory recommendation is available for this release target.')
+  return notes.join('\n')
 })
 function size(bytes) {
   if (!Number.isFinite(bytes)) return 'Not yet known'
@@ -119,7 +161,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
   <dialog
     ref="dialog"
     class="onboarding"
-    :class="{ compact }"
+    :class="{ compact, collapsed: step === 'progress' && collapsed }"
     :aria-modal="!compact"
     :aria-label="`${BRAND_NAME} setup`"
     data-testid="onboarding-dialog"
@@ -241,13 +283,36 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           </button>
         </div>
         <section
+          v-if="choice === 'local'"
           class="speed-estimate"
           aria-label="Local processing estimate"
         >
+          <dl
+            v-if="plan?.hardware"
+            class="hw"
+            aria-label="Computer details"
+            :title="hardwareNotes"
+          >
+            <div
+              v-for="[label, value] in hardwareStrip"
+              :key="label"
+            >
+              <dt>{{ label }}</dt><dd>{{ value }}</dd>
+            </div>
+          </dl>
           <div class="speed-heading">
             <strong>Estimated processing time*</strong>
-            <span>{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
+            <span class="level">{{ plan?.processingEstimate?.label || 'Not enough information' }}</span>
           </div>
+          <p
+            v-if="plan?.processingEstimate?.minutes"
+            class="estimate-range"
+          >
+            <strong>{{ plan.processingEstimate.minutes[0] }}–{{ plan.processingEstimate.minutes[1] }} minutes</strong> to prepare a 3-minute track
+          </p>
+          <p v-else>
+            A time estimate is unavailable for this setup.
+          </p>
           <div
             class="speed-bar"
             role="img"
@@ -266,21 +331,27 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             <span>Slower</span><span>Moderate</span><span>Faster</span>
           </div>
           <p
-            v-if="plan?.processingEstimate?.minutes"
-            class="estimate-range"
+            v-for="warning in plan?.memoryQualification?.warnings || []"
+            :key="warning"
+            class="quiet"
           >
-            <strong>{{ plan.processingEstimate.minutes[0] }}–{{ plan.processingEstimate.minutes[1] }} minutes</strong> to prepare a 3-minute track
-          </p>
-          <p v-else>
-            A time estimate is unavailable for this setup.
-          </p>
-          <p>{{ plan?.processingEstimate?.basis }}</p>
-          <p class="quiet">
-            Estimate for vocal separation and timed lyrics. Excludes installation and time in queue.
+            {{ warning }}
           </p>
           <p class="quiet">
             *Actual processing time varies by hardware and song.
           </p>
+        </section>
+        <section
+          v-else
+          class="modal-panel"
+          aria-label="My Modal account"
+          data-testid="onboarding-modal-summary"
+        >
+          <p>Processing runs in your own Modal account. Audio needed for processing is sent to that deployment.</p>
+          <div class="usage">
+            <span>At the time of writing, <strong>$30</strong> of monthly usage is included with a Modal account*</span>
+            <span title="Based on a measured full-song run on a T4 graphics card">Roughly <strong>200 or more</strong> 3–4 minute songs per $30</span>
+          </div>
         </section>
         <div class="actions">
           <button
@@ -289,7 +360,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             :disabled="busy || (choice === 'local' && !localAvailable)"
             @click="setup.chooseLyrics"
           >
-            Continue →
+            {{ choice === 'modal' ? 'Connect Modal account →' : 'Continue →' }}
           </button>
           <button
             v-if="!localAvailable"
@@ -307,36 +378,12 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         >
           ← Back to welcome
         </button>
-        <p class="quiet">
+        <p
+          v-if="choice === 'local'"
+          class="quiet"
+        >
           You can enable Modal later via Settings → Song processing… → My Modal account.
         </p>
-        <details>
-          <summary>Computer details</summary>
-          <template v-if="plan?.hardware">
-            <p
-              v-for="[label, value] in hardwareDetails"
-              :key="label"
-            >
-              {{ label }}: {{ value }}
-            </p>
-          </template>
-          <p v-else>
-            Hardware information is not available.
-          </p>
-          <template v-if="plan?.memoryRequirements?.evidenceAvailable">
-            <p>Measured memory requirement, including headroom: {{ size(plan.memoryRequirements.ramBytes) }} RAM<span v-if="plan.memoryRequirements.dedicatedVideoMemoryBytes"> and {{ size(plan.memoryRequirements.dedicatedVideoMemoryBytes) }} dedicated graphics memory</span>.</p>
-            <p>{{ plan.memoryQualification?.reason }}</p>
-            <p
-              v-for="warning in plan.memoryQualification?.warnings || []"
-              :key="warning"
-            >
-              {{ warning }}
-            </p>
-          </template>
-          <p v-else>
-            No measured memory recommendation is available for this release target.
-          </p>
-        </details>
       </template>
 
       <template v-else-if="step === 'lyrics'">
@@ -408,8 +455,22 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           <div v-if="localCopyBytes !== null">
             <dt>Local model files</dt><dd>{{ size(localCopyBytes) }}</dd>
           </div>
-          <div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.diskFreeBytes) }}</dd></div>
+          <div><dt>Space needed</dt><dd>{{ size(plan?.diskRequiredBytes) }}</dd></div><div><dt>Available</dt><dd>{{ size(plan?.freeBytes ?? plan?.diskFreeBytes) }}</dd></div>
         </dl>
+        <p
+          v-if="plan?.installLocation"
+          class="install-location"
+          data-testid="onboarding-install-location"
+        >
+          Install to <strong>{{ plan.installLocation }}</strong>
+          <button
+            class="text-button"
+            :disabled="busy"
+            @click="setup.chooseInstallLocation()"
+          >
+            Change…
+          </button>
+        </p>
         <details>
           <summary>Have a complete model folder?</summary>
           <p v-if="plan?.modelSource === 'offline'">
@@ -534,6 +595,39 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         </div>
       </template>
 
+      <div
+        v-else-if="step === 'progress' && collapsed"
+        class="mini"
+        :class="{ paused }"
+        role="status"
+        data-testid="onboarding-mini"
+      >
+        <span class="name">{{ stageName }}<small v-if="paused">Paused</small></span>
+        <progress
+          :value="progress"
+          max="100"
+          aria-label="Setup progress"
+        />
+        <button
+          ref="showButton"
+          data-testid="onboarding-show"
+          title="Show setup progress"
+          @click="collapse(false)"
+        >
+          <svg
+            viewBox="0 0 12 12"
+            aria-hidden="true"
+          ><path
+            d="M2.5 7.5 6 4l3.5 3.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          /></svg>Show
+        </button>
+      </div>
+
       <template v-else-if="step === 'progress'">
         <p class="eyebrow">
           Setting up song processing
@@ -549,35 +643,115 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         </p>
         <div
           class="panel"
-          role="status"
+          :class="{ paused }"
         >
-          <h2>{{ status?.phase || 'Setup in progress' }}</h2><p>{{ status?.message || 'Waiting for setup status…' }}</p><progress
-            :value="progress"
-            max="100"
-            aria-label="Setup progress"
-          /><p
-            v-if="progress !== undefined"
-            class="quiet"
+          <ol
+            class="stages"
+            aria-label="Setup stages"
+            data-testid="onboarding-stages"
           >
-            <template v-if="status?.progress?.phase === 'retrieve'">
-              Retrieving the processing tools archive{{ status.progress.part && status.progress.parts ? `, part ${status.progress.part} of ${status.progress.parts}` : '' }}
-            </template><template v-else-if="status?.progress?.phase === 'extract'">
-              Unpacking and checking processing tools
-            </template><template v-else>
-              {{ status?.progress?.file }}
-            </template> · {{ status?.progress?.received?.toLocaleString() }} / {{ status?.progress?.total?.toLocaleString() }} bytes ({{ Math.round(progress) }}% of {{ status?.progress?.phase === 'retrieve' ? 'this part' : status?.progress?.phase === 'extract' ? 'the processing tools' : 'this file' }})
-          </p>
+            <li
+              v-for="([id, label], index) in SETUP_STAGES"
+              :key="id"
+              :class="{ done: index < stageIndex, current: index === stageIndex }"
+              :aria-current="index === stageIndex ? 'step' : undefined"
+            >
+              <span
+                class="dot"
+                aria-hidden="true"
+              >{{ index < stageIndex ? '✓' : '' }}</span><span>{{ label }}</span>
+              <div
+                v-if="index === stageIndex"
+                class="detail"
+              >
+                <p
+                  id="setup-stage-status"
+                  class="status"
+                  role="status"
+                >
+                  {{ status?.message || 'Waiting for setup status…' }}
+                </p>
+                <progress
+                  :value="progress"
+                  max="100"
+                  aria-labelledby="setup-stage-status"
+                />
+                <p
+                  v-if="progressCount"
+                  class="count"
+                >
+                  {{ progressCount }}
+                </p>
+              </div>
+            </li>
+          </ol>
+          <div class="controls">
+            <button
+              ref="hideButton"
+              class="hide"
+              data-testid="onboarding-hide"
+              title="Hide — setup keeps running"
+              @click="collapse(true)"
+            >
+              <svg
+                viewBox="0 0 12 12"
+                aria-hidden="true"
+              ><path
+                d="M2.5 4.5 6 8l3.5-3.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              /></svg>Hide
+            </button>
+            <span class="control-group">
+              <button
+                v-if="paused"
+                class="stop"
+                data-testid="onboarding-stop"
+                :disabled="busy"
+                @click="stopSetup"
+              >
+                Stop setup
+              </button>
+              <button
+                class="pause"
+                data-testid="onboarding-pause"
+                :title="paused ? 'Resume setup' : 'Pause setup'"
+                :disabled="busy"
+                @click="paused ? setup.resume() : setup.pause()"
+              >
+                <svg
+                  v-if="paused"
+                  viewBox="0 0 12 12"
+                  aria-hidden="true"
+                ><path
+                  d="M3 1.8v8.4L10 6z"
+                  fill="currentColor"
+                /></svg><svg
+                  v-else
+                  viewBox="0 0 12 12"
+                  aria-hidden="true"
+                ><rect
+                  x="2.5"
+                  y="2"
+                  width="2.4"
+                  height="8"
+                  rx=".6"
+                  fill="currentColor"
+                /><rect
+                  x="7.1"
+                  y="2"
+                  width="2.4"
+                  height="8"
+                  rx=".6"
+                  fill="currentColor"
+                /></svg>{{ paused ? 'Resume' : 'Pause' }}
+              </button>
+            </span>
+          </div>
         </div>
-        <details data-testid="onboarding-setup-controls">
-          <summary>Setup controls</summary><button
-            class="text-button"
-            data-testid="onboarding-cancel"
-            :disabled="busy"
-            @click="setup.cancel"
-          >
-            Cancel setup
-          </button>
-        </details>
       </template>
 
       <template v-else-if="step === 'error'">
@@ -681,19 +855,31 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         {{ error }}
       </p>
       <button
-        v-if="step !== 'welcome'"
+        v-if="step !== 'welcome' && step !== 'progress'"
         class="text-button library"
         :disabled="busy"
         @click="leave()"
       >
-        {{ compact ? (['progress', 'checking', 'restart'].includes(step) ? 'Continue in library →' : 'Dismiss') : 'Skip setup and open my library' }}
+        {{ compact ? (['checking', 'restart'].includes(step) ? 'Continue in library →' : 'Dismiss') : 'Skip setup and open my library' }}
       </button>
+      <p
+        v-if="step === 'choose' && choice === 'modal'"
+        class="quiet"
+        data-testid="onboarding-modal-footnote"
+      >
+        *Subject to change. See Modal’s current pricing and terms.
+      </p>
     </main>
   </dialog>
 </template>
 
 <style scoped>
-.onboarding{position:fixed;inset:0;margin:0;width:100vw;height:100dvh;max-width:none;max-height:none;border:0;overflow-y:auto;z-index:1000;box-sizing:border-box;background:#0e1118;color:#f7eee2;padding:30px 40px 60px;font-family:inherit;color-scheme:dark}.setup-header{max-width:1020px;margin:auto;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:22px;font-weight:750;letter-spacing:-.7px}nav{display:flex;gap:20px;color:#8992a4;font-size:12px}nav>span{display:flex;align-items:center;gap:7px}nav b{display:grid;place-items:center;width:23px;height:23px;border:1px solid #465063;border-radius:50%}nav .active{color:#f7e7c8}nav .active b{border-color:#e23e57;background:#e23e5722}.focused{max-width:620px;margin:60px auto 0}h1{font-size:42px;line-height:1.12;letter-spacing:-1.4px;font-weight:650;margin:16px 0 22px}h1:focus{outline:none}h2{font-size:19px;margin:0 0 8px}p{color:#a9afbd;line-height:1.7;font-size:14px}.lead{font-size:16px;margin-bottom:28px}.eyebrow{color:#e98694;font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}.quiet{font-size:12px;color:#9ba4b4}.actions{display:flex;flex-direction:column;align-items:flex-start;gap:7px;margin-top:28px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.65}button:focus-visible,summary:focus-visible{outline:3px solid #f2cf7a;outline-offset:4px}.primary{background:#e23e57;border:1px solid #e23e57;border-radius:7px;color:white;font-weight:600;padding:15px 23px;font-size:14px;min-width:210px}.text-button{border:0;background:none;color:#bbc3d2;padding:10px 0;font-size:12px;text-align:left}.library{margin-top:12px}.wave{height:140px;display:flex;align-items:center;gap:9px;margin:20px 0 30px}.wave i{width:10px;border-radius:8px;background:linear-gradient(#eb6c80,#e23e57)}.choices{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:28px 0}.choice{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#191e29;color:#eee8df;border:1px solid #3b4353;border-radius:12px;padding:22px;gap:16px}.choice.chosen{border-color:#e23e57;box-shadow:0 0 0 1px #e23e57;background:#e23e570b}.choice strong{font-size:18px}.choice>span:not(.badge):not(.choice-symbol){color:#b4bbc9;font-size:13px;line-height:1.65}.choice small{color:#a4adbd;font-size:12px;line-height:1.7}.choice-symbol{font-size:25px}.badge{font-size:10px;color:#bcddc0;background:#294034;padding:5px 8px;border-radius:4px;margin-top:auto}.badge.neutral{background:#282f3d;color:#b8c0ce}details{margin-top:20px;font-size:12px;color:#b8c0d0}summary{cursor:pointer}details p{font-size:12px;overflow-wrap:anywhere}details li{margin:12px 0;line-height:1.7}.facts{display:flex;gap:32px;border-block:1px solid #323947;padding:25px 0;margin:20px 0}.facts dt{color:#9ba4b4;font-size:12px;margin-bottom:9px}.facts dd{margin:0;font-size:20px}.panel{padding:24px;background:#191e29;border:1px solid #323947;border-radius:12px}.panel p:last-child{margin-bottom:0}.alert{border-left:3px solid #e8bc6f;padding:12px 16px;background:#e8bc6f0b;color:#e9d3ad}.ready-mark{display:grid;place-items:center;border:1px solid #53664e;border-radius:50%;width:76px;height:76px;color:#d9e6b1;font-size:30px;margin:32px 0}progress{width:100%;accent-color:#e23e57;margin-top:16px}.components{padding-left:20px}@media(max-width:600px){.onboarding{padding:24px 18px 40px}.focused{margin-top:38px}h1{font-size:34px}.lead{font-size:14px}nav{gap:8px}nav>span>span{display:none}.choices{grid-template-columns:1fr}.facts{flex-wrap:wrap;gap:20px}.wave{gap:6px}.wave i{width:8px}}
+.onboarding{position:fixed;inset:0;margin:0;width:100vw;height:100dvh;max-width:none;max-height:none;border:0;overflow-y:auto;z-index:1000;box-sizing:border-box;background:#0e1118;color:#f7eee2;padding:30px 40px 60px;font-family:inherit;color-scheme:dark}.setup-header{max-width:1020px;margin:auto;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:22px;font-weight:750;letter-spacing:-.7px}nav{display:flex;gap:20px;color:#8992a4;font-size:12px}nav>span{display:flex;align-items:center;gap:7px}nav b{display:grid;place-items:center;width:23px;height:23px;border:1px solid #465063;border-radius:50%}nav .active{color:#f7e7c8}nav .active b{border-color:#e23e57;background:#e23e5722}.focused{max-width:620px;margin:60px auto 0}h1{font-size:42px;line-height:1.12;letter-spacing:-1.4px;font-weight:650;margin:16px 0 22px}h1:focus{outline:none}h2{font-size:19px;margin:0 0 8px}p{color:#a9afbd;line-height:1.7;font-size:14px}.lead{font-size:16px;margin-bottom:28px}.eyebrow{color:#e98694;font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}.quiet{font-size:12px;color:#9ba4b4}.actions{display:flex;flex-direction:column;align-items:flex-start;gap:7px;margin-top:28px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.65}button:focus-visible,summary:focus-visible{outline:3px solid #f2cf7a;outline-offset:4px}.primary{background:#e23e57;border:1px solid #e23e57;border-radius:7px;color:white;font-weight:600;padding:15px 23px;font-size:14px;min-width:210px}.text-button{border:0;background:none;color:#bbc3d2;padding:10px 0;font-size:12px;text-align:left}.library{margin-top:12px}.wave{height:140px;display:flex;align-items:center;gap:9px;margin:20px 0 30px}.wave i{width:10px;border-radius:8px;background:linear-gradient(#eb6c80,#e23e57)}.choices{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:28px 0}.choice{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#191e29;color:#eee8df;border:1px solid #3b4353;border-radius:12px;padding:22px;gap:16px}.choice.chosen{border-color:#e23e57;box-shadow:0 0 0 1px #e23e57;background:#e23e570b}.choice strong{font-size:18px}.choice>span:not(.badge):not(.choice-symbol){color:#b4bbc9;font-size:13px;line-height:1.65}.choice small{color:#a4adbd;font-size:12px;line-height:1.7}.choice-symbol{font-size:25px}.badge{font-size:10px;color:#bcddc0;background:#294034;padding:5px 8px;border-radius:4px;margin-top:auto}.badge.neutral{background:#282f3d;color:#b8c0ce}details{margin-top:20px;font-size:12px;color:#b8c0d0}summary{cursor:pointer}details p{font-size:12px;overflow-wrap:anywhere}details li{margin:12px 0;line-height:1.7}.facts{display:flex;gap:32px;border-block:1px solid #323947;padding:25px 0;margin:20px 0}.facts dt{color:#9ba4b4;font-size:12px;margin-bottom:9px}.facts dd{margin:0;font-size:20px}.panel{padding:24px;background:#191e29;border:1px solid #323947;border-radius:12px}.panel p:last-child{margin-bottom:0}.alert{border-left:3px solid #e8bc6f;padding:12px 16px;background:#e8bc6f0b;color:#e9d3ad}.ready-mark{display:grid;place-items:center;border:1px solid #53664e;border-radius:50%;width:76px;height:76px;color:#d9e6b1;font-size:30px;margin:32px 0}progress{width:100%;accent-color:#e23e57;margin-top:16px}.components{padding-left:20px}.install-location{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin-top:-6px}.install-location strong{color:#eee8df;font-weight:600;overflow-wrap:anywhere}@media(max-width:600px){.onboarding{padding:24px 18px 40px}.focused{margin-top:38px}h1{font-size:34px}.lead{font-size:14px}nav{gap:8px}nav>span>span{display:none}.choices{grid-template-columns:1fr}.facts{flex-wrap:wrap;gap:20px}.wave{gap:6px}.wave i{width:8px}}
 .compact{inset:auto 20px 20px auto;width:min(390px,calc(100vw - 40px));height:auto;max-height:45vh;padding:18px 22px;border:1px solid #3b4353;border-radius:12px;box-shadow:0 8px 30px #0006;z-index:100}.compact .focused{margin:0}.compact h1{font-size:20px;letter-spacing:-.3px;margin:6px 0 10px}.compact .eyebrow,.compact .ready-mark{display:none}.compact .lead,.compact p{font-size:12px;line-height:1.5;margin:8px 0}.compact .panel{padding:12px}.compact h2{font-size:13px}.compact .actions{margin-top:12px}.compact .primary{padding:10px 14px;min-width:0}.compact details{margin-top:8px}.compact .library{margin-top:4px}.lookup-option{display:flex;align-items:center;gap:10px}
-.speed-estimate{margin:22px 0;padding:18px;border:1px solid #3b4353;border-radius:10px;background:#191e29}.speed-heading,.speed-labels{display:flex;justify-content:space-between;gap:12px}.speed-heading{color:#eee8df}.speed-labels{color:#9ba4b4;font-size:11px}.speed-bar{display:flex;gap:5px;margin:14px 0 7px}.speed-bar i{height:9px;flex:1;background:#343b48;border-radius:4px}.speed-bar i.filled{background:#e23e57}.speed-estimate .estimate-range{font-size:14px;margin-top:20px}.estimate-range strong{color:#f7eee2}
+.speed-estimate,.modal-panel{margin:22px 0;padding:18px;border:1px solid #3b4353;border-radius:10px;background:#191e29}.speed-heading,.speed-labels{display:flex;justify-content:space-between;gap:12px}.speed-heading{color:#eee8df}.speed-labels{color:#9ba4b4;font-size:11px}.speed-bar{display:flex;gap:5px;margin:14px 0 7px}.speed-bar i{height:9px;flex:1;background:#343b48;border-radius:4px}.speed-bar i.filled{background:#e23e57}.speed-estimate .estimate-range{font-size:14px;margin-top:6px}.estimate-range strong,.modal-panel strong{color:#f7eee2}.speed-heading .level{color:#9ba4b4;font-size:12px}.speed-labels{margin-bottom:12px}.speed-estimate p,.modal-panel p{margin:6px 0}
+.hw{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 16px;padding:0 0 14px;border-bottom:1px solid #323947}.hw dt{color:#9ba4b4;font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}.hw dd{margin:0;font-size:12px;color:#e3ddd3;line-height:1.45;overflow-wrap:anywhere}.modal-panel .usage{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px;font-size:13px;color:#cfd5e0}@media(max-width:600px){.hw{grid-template-columns:1fr 1fr}}
+.stages{list-style:none;margin:0;padding:0;display:grid;gap:7px;font-size:12px}.stages li{display:grid;grid-template-columns:16px 1fr;column-gap:8px;align-items:center;color:#8992a4}.stages .dot{width:10px;height:10px;border-radius:50%;border:1px solid #465063;box-sizing:border-box;justify-self:center}.stages li.done{color:#b9c0cd}.stages li.done .dot{border:0;width:auto;height:auto;color:#d9e6b1;font-size:12px;line-height:1}.stages li.current{color:#f7e7c8;font-weight:600}.stages li.current .dot{border-color:#e23e57;background:#e23e5755}.stages .detail{grid-column:2;font-weight:400;margin-top:4px}.compact .stages .status{margin:0;color:#d9dce4;font-size:12px;line-height:1.4}.stages progress{display:block;width:100%;height:6px;margin:7px 0 4px}.compact .stages .count{margin:0;font-size:11px;color:#8f98a8;font-variant-numeric:tabular-nums}.paused .stages li.current .dot{border-color:#8992a4;background:transparent}
+.controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding-top:9px;border-top:1px solid #2a303c}.controls button,.mini button{border:0;background:none;display:inline-flex;align-items:center;gap:5px}.controls svg,.mini svg{width:12px;height:12px;flex:none}.control-group{display:inline-flex;align-items:center;gap:14px}.hide,.stop{color:#8992a4;font-size:11px;padding:4px 0}.hide:hover,.stop:hover{color:#bbc3d2}.pause{color:#f7eee2;font-size:12px;font-weight:600;padding:4px 0}.pause:hover{color:#fff}
+.compact.collapsed{width:auto;max-width:calc(100vw - 40px);padding:0;border-radius:8px;box-shadow:0 4px 18px #0006}.mini{display:flex;align-items:center;gap:10px;padding:6px 8px 6px 12px;font-size:12px;color:#f7e7c8}.mini .name{white-space:nowrap}.mini .name small{color:#8f98a8;font-size:11px;margin-left:4px}.mini progress{width:72px;height:5px;margin:0}.mini button{color:#bbc3d2;font-size:11px;padding:4px}.mini button:hover{color:#f7eee2}.mini button:focus-visible{outline-offset:1px}
+.stages progress,.mini progress{-webkit-appearance:none;appearance:none;border:0;border-radius:3px;background:#2a303c;overflow:hidden}.stages progress::-webkit-progress-bar,.mini progress::-webkit-progress-bar{background:#2a303c;border-radius:3px}.stages progress::-webkit-progress-value,.mini progress::-webkit-progress-value{background:#e23e57;border-radius:3px}.stages progress::-moz-progress-bar,.mini progress::-moz-progress-bar{background:#e23e57;border-radius:3px}.paused progress::-webkit-progress-value{background:#6b7487}.paused progress::-moz-progress-bar{background:#6b7487}
 </style>

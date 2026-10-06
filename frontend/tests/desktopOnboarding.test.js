@@ -5,6 +5,8 @@ import { defineComponent, h, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { useDesktopOnboarding } from '../src/composables/useDesktopOnboarding'
 import DesktopOnboarding from '../src/components/DesktopOnboarding.vue'
+import onboardingSource from '../src/components/DesktopOnboarding.vue?raw'
+import modalSetupSource from '../src/components/DesktopModalSetup.vue?raw'
 
 function bridge(overrides = {}) {
   return {
@@ -63,7 +65,7 @@ describe('desktop setup consent and recovery', () => {
     const setup = useDesktopOnboarding(desktop)
     await setup.chooseProcessing()
     await setup.start()
-    await setup.cancel()
+    await setup.stop()
     expect(setup.step.value).toBe('error')
     desktop.preflightSetup.mockResolvedValue({ available: false, reason: 'Not enough disk space' })
     await setup.chooseProcessing()
@@ -249,6 +251,45 @@ describe('desktop setup screens', () => {
     expect(desktop.startSetup).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it('shows the install location with its free space and changes it through the fixed desktop action', async () => {
+    const first = { available: true, planId: 'plan-a', installLocation: '/data/karaoke', freeBytes: 20 * 1024 ** 3,
+      diskRequiredBytes: 10 * 1024 ** 3, diskFreeBytes: 20 * 1024 ** 3, components: [] }
+    const second = { ...first, planId: 'plan-b', installLocation: '/mnt/media/karaoke-tools', freeBytes: 300 * 1024 ** 3, diskFreeBytes: 300 * 1024 ** 3 }
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+      preflightSetup: vi.fn().mockResolvedValue(first),
+      chooseInstallLocation: vi.fn().mockResolvedValue(second),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    const row = wrapper.find('[data-testid=onboarding-install-location]')
+    expect(row.text()).toContain('Install to')
+    expect(row.find('strong').text()).toBe('/data/karaoke')
+    const facts = () => Object.fromEntries(wrapper.findAll('.facts > div').map(item => [item.find('dt').text(), item.find('dd').text()]))
+    expect(facts().Available).toBe('20.0 GiB')
+    const change = row.find('button')
+    expect(change.text()).toBe('Change…')
+    await change.trigger('click')
+    await flushPromises()
+    expect(desktop.chooseInstallLocation).toHaveBeenCalledTimes(1)
+    expect(desktop.chooseInstallLocation).toHaveBeenCalledWith()
+    expect(wrapper.find('[data-testid=onboarding-install-location] strong').text()).toBe('/mnt/media/karaoke-tools')
+    expect(facts().Available).toBe('300.0 GiB')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'plan-b' })
+    wrapper.unmount()
+  })
+  it('omits the install location row when the plan does not report one', async () => {
+    const desktop = bridge({ getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(wrapper.find('[data-testid=onboarding-install-location]').exists()).toBe(false)
+    wrapper.unmount()
+  })
   it('states a private-smoke qualification before consent and nothing extra otherwise', async () => {
     const notice = 'Private test build: local processing in this build passed a single-song smoke test only.'
     for (const [qualificationScope, shown] of [['private-smoke', true], ['full', false], [null, false], [undefined, false]]) {
@@ -304,34 +345,129 @@ describe('desktop setup screens', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
     wrapper.unmount()
   })
-  it('shows per-file byte progress in a nonmodal panel', async () => {
-    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', progress: { file: 'model.bin', received: 250, total: 1000 } }) })
+  it('shows the setup stages with the current stage status, bar and compact count in a nonmodal card', async () => {
+    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', phase: 'models', stage: 'models',
+      message: 'Installing separation and Heart model files.', progress: { file: 'model.bin', received: 410, total: 1000 } }) })
     globalThis.window.karaokeDesktop = desktop
     const wrapper = mount(DesktopOnboarding)
     await flushPromises()
     expect(wrapper.find('dialog').attributes('open')).toBeDefined()
-    expect(wrapper.find('progress').attributes('value')).toBe('25')
-    expect(wrapper.text()).toContain('model.bin · 250 / 1,000 bytes (25% of this file)')
+    const stages = wrapper.findAll('[data-testid="onboarding-stages"] > li')
+    expect(stages.map(stage => stage.find('span:not(.dot)').text())).toEqual(['Retrieve tools', 'Unpack and check', 'Models', 'Verify'])
+    expect(stages.map(stage => stage.classes().includes('done'))).toEqual([true, true, false, false])
+    expect(stages.map(stage => stage.find('.dot').text())).toEqual(['✓', '✓', '', ''])
+    expect(stages[2].attributes('aria-current')).toBe('step')
+    expect(wrapper.findAll('.detail')).toHaveLength(1)
+    expect(stages[2].find('.status').text()).toBe('Installing separation and Heart model files.')
+    expect(stages[2].find('progress').attributes('value')).toBe('41')
+    expect(stages[2].find('.count').text()).toBe('41%')
+    expect(wrapper.text()).not.toMatch(/bytes|1,000|410 \/|model\.bin|MiB|GiB/)
+    expect(wrapper.find('details').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-cancel"]').exists()).toBe(false)
+    expect(wrapper.find('.library').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-pause"]').text()).toBe('Pause')
+    expect(wrapper.find('[data-testid="onboarding-stop"]').exists()).toBe(false)
     wrapper.unmount()
   })
-  it('describes processing tools archive retrieval and unpacking from structured progress fields', async () => {
+  it('counts archive parts during retrieval and ticks stages as setup moves on', async () => {
     const cases = [
-      [{ file: 'tools.pack.gz.002', phase: 'retrieve', part: 2, parts: 3, received: 500, total: 1000 },
-        'Retrieving the processing tools archive, part 2 of 3 · 500 / 1,000 bytes (50% of this part)'],
-      [{ file: 'tools.pack.gz.001', phase: 'retrieve', received: 100, total: 1000 },
-        'Retrieving the processing tools archive · 100 / 1,000 bytes (10% of this part)'],
-      [{ file: 'python/bin/python3', phase: 'extract', received: 750, total: 1000 },
-        'Unpacking and checking processing tools · 750 / 1,000 bytes (75% of the processing tools)'],
+      [{ state: 'running', stage: 'retrieve', progress: { file: 'tools.pack.gz.002', phase: 'retrieve', part: 2, parts: 6, received: 410, total: 1000 } }, 0, 'part 2 of 6 · 41%'],
+      [{ state: 'running', stage: 'retrieve', progress: { file: 'tools.pack.gz.001', phase: 'retrieve', part: 1, parts: 1, received: 100, total: 1000 } }, 0, '10%'],
+      [{ state: 'running', stage: 'unpack', progress: { file: 'python/bin/python3', phase: 'extract', received: 750, total: 1000 } }, 1, '75%'],
+      [{ state: 'running', stage: 'verify', message: 'Verifying all local processing components.' }, 3, null],
     ]
-    for (const [progress, line] of cases) {
-      globalThis.window.karaokeDesktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', progress }) })
+    for (const [status, current, count] of cases) {
+      globalThis.window.karaokeDesktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue(status) })
       const wrapper = mount(DesktopOnboarding)
       await flushPromises()
-      expect(wrapper.find('.quiet').text().replace(/\s+/g, ' ')).toBe(line)
-      expect(wrapper.text()).not.toContain(progress.file)
-      expect(wrapper.text()).not.toMatch(/download/i)
+      const stages = wrapper.findAll('[data-testid="onboarding-stages"] > li')
+      expect(stages.map(stage => stage.classes().includes('done'))).toEqual([0, 1, 2, 3].map(index => index < current))
+      expect(stages[current].classes()).toContain('current')
+      if (count) expect(stages[current].find('.count').text()).toBe(count)
+      else {
+        expect(stages[current].find('.count').exists()).toBe(false)
+        expect(stages[current].find('progress').attributes('value')).toBeUndefined()
+      }
+      expect(wrapper.text()).not.toContain(status.progress?.file ?? 'no file')
+      expect(wrapper.text()).not.toMatch(/bytes|download/i)
       wrapper.unmount()
     }
+  })
+  it('pauses in place, offers Resume and a secondary stop, and resumes with the same request', async () => {
+    const running = { state: 'running', phase: 'runtime', stage: 'retrieve', message: 'Installing the local processing runtime.',
+      progress: { phase: 'retrieve', part: 2, parts: 6, received: 410, total: 1000 } }
+    const pausedStatus = { ...running, state: 'paused', phase: 'paused', message: 'Setup paused.', retryable: true }
+    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue(running),
+      pauseSetup: vi.fn().mockResolvedValue(pausedStatus),
+      startSetup: vi.fn().mockResolvedValue(running) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    const hook = id => wrapper.find(`[data-testid="${id}"]`)
+    await hook('onboarding-pause').trigger('click')
+    await flushPromises()
+    expect(desktop.pauseSetup).toHaveBeenCalledOnce()
+    expect(desktop.cancelSetup).not.toHaveBeenCalled()
+    expect(hook('onboarding-dialog').attributes('data-step')).toBe('progress')
+    expect(hook('onboarding-pause').text()).toBe('Resume')
+    expect(hook('onboarding-stop').text()).toBe('Stop setup')
+    expect(wrapper.find('.stages .status').text()).toBe('Setup paused.')
+    expect(wrapper.find('.stages .count').text()).toBe('part 2 of 6 · 41%')
+    expect(wrapper.find('.panel').classes()).toContain('paused')
+    // Resuming needs a plan: one is checked first when the card was reopened mid-setup.
+    await hook('onboarding-pause').trigger('click')
+    await flushPromises()
+    expect(desktop.preflightSetup).toHaveBeenCalledOnce()
+    expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'plan-1' })
+    expect(hook('onboarding-pause').text()).toBe('Pause')
+    expect(hook('onboarding-stop').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('stopping a paused setup returns to the processing choice', async () => {
+    const pausedStatus = { state: 'paused', phase: 'paused', stage: 'models', message: 'Setup paused.', retryable: true }
+    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue(pausedStatus),
+      cancelSetup: vi.fn().mockResolvedValue({ state: 'idle', phase: 'preflight' }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding, { props: { open: false } })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('progress')
+    desktop.getSetupStatus.mockResolvedValue({ state: 'idle', phase: 'preflight' })
+    await wrapper.find('[data-testid="onboarding-stop"]').trigger('click')
+    await flushPromises()
+    expect(desktop.cancelSetup).toHaveBeenCalledOnce()
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('choose')
+    expect(wrapper.emitted('open')).toHaveLength(1)
+    wrapper.unmount()
+  })
+  it('hides the card to a slim indicator and shows it again without touching setup', async () => {
+    const desktop = bridge({ getSetupStatus: vi.fn().mockResolvedValue({ state: 'running', stage: 'models', message: 'Installing separation and Heart model files.',
+      progress: { received: 410, total: 1000 } }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding, { attachTo: globalThis.document.body })
+    await flushPromises()
+    const hook = id => wrapper.find(`[data-testid="${id}"]`)
+    const calls = () => ({ pause: desktop.pauseSetup?.mock.calls.length ?? 0, cancel: desktop.cancelSetup.mock.calls.length,
+      start: desktop.startSetup.mock.calls.length, saved: desktop.setOnboardingState.mock.calls.length })
+    const before = calls()
+    await hook('onboarding-hide').trigger('click')
+    await flushPromises()
+    expect(hook('onboarding-stages').exists()).toBe(false)
+    expect(hook('onboarding-mini').text()).toContain('Models')
+    expect(hook('onboarding-mini').find('progress').attributes('value')).toBe('41')
+    expect(globalThis.document.activeElement).toBe(hook('onboarding-show').element)
+    expect(hook('onboarding-dialog').attributes('data-step')).toBe('progress')
+    desktop.getSetupStatus.mockResolvedValue({ state: 'paused', stage: 'models', message: 'Setup paused.', progress: { received: 410, total: 1000 } })
+    await wrapper.vm.$.setupState.setup.refresh()
+    await flushPromises()
+    expect(hook('onboarding-mini').text().replace(/\s+/g, ' ')).toContain('ModelsPaused')
+    await hook('onboarding-show').trigger('click')
+    await flushPromises()
+    expect(hook('onboarding-mini').exists()).toBe(false)
+    expect(hook('onboarding-stages').exists()).toBe(true)
+    expect(globalThis.document.activeElement).toBe(hook('onboarding-hide').element)
+    expect(calls()).toEqual(before)
+    wrapper.unmount()
   })
   it('renders real download details before a consent action', async () => {
     const desktop = bridge()
@@ -587,7 +723,7 @@ describe('desktop setup after reopening', () => {
 
 describe('desktop setup test hooks and sizes', () => {
   it('exposes stable hooks through the setup sequence', async () => {
-    const desktop = bridge({ cancelSetup: vi.fn().mockResolvedValue({ state: 'cancelled' }) })
+    const desktop = bridge()
     globalThis.window.karaokeDesktop = desktop
     const wrapper = mount(DesktopOnboarding)
     await flushPromises()
@@ -604,10 +740,8 @@ describe('desktop setup test hooks and sizes', () => {
     await hook('onboarding-install').trigger('click')
     await flushPromises()
     expect(hook('onboarding-dialog').attributes('data-step')).toBe('progress')
-    expect(hook('onboarding-setup-controls').exists()).toBe(true)
-    await hook('onboarding-cancel').trigger('click')
-    await flushPromises()
-    expect(hook('onboarding-retry').exists()).toBe(true)
+    expect(hook('onboarding-pause').exists()).toBe(true)
+    expect(hook('onboarding-hide').exists()).toBe(true)
     wrapper.unmount()
   })
   it('names retrieval and installed sizes only where they differ', async () => {
@@ -710,7 +844,7 @@ it('shows a qualitative machine rating and estimated three-minute-track range wi
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
       processingEstimate: { level: 2, label: 'Moderate', minutes: [9, 16], evidence: 'measured',
-        basis: 'This pack uses the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' } }),
+        basis: 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' } }),
   })
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
@@ -718,8 +852,8 @@ it('shows a qualitative machine rating and estimated three-minute-track range wi
   expect(estimate.text()).toContain('Estimated processing time*')
   expect(estimate.text()).not.toMatch(/rough/i)
   expect(estimate.text()).toContain('9–16 minutes to prepare a 3-minute track')
-  expect(estimate.text()).toContain('Based on one measured run on a 16-core desktop processor')
-  expect(estimate.text()).toContain('Estimate for vocal separation and timed lyrics. Excludes installation and time in queue.')
+  expect(wrapper.text()).not.toContain('These tools and models use')
+  expect(wrapper.text()).not.toContain('Estimate for vocal separation')
   expect(wrapper.find('.speed-bar').attributes('aria-label')).toBe('Estimated processing speed: Moderate')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(2)
   expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
@@ -732,17 +866,105 @@ it('shows extrapolated estimates with the same calm variability note', async () 
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
     preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'estimated',
       processingEstimate: { level: 3, label: 'Faster', minutes: [1, 3], evidence: 'extrapolated',
-        basis: 'This pack uses your NVIDIA graphics card; the range is extrapolated from published component timings.' } }),
+        basis: 'These tools and models use your NVIDIA graphics card; the range is extrapolated from published component timings.' } }),
   })
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
   const estimate = wrapper.find('[aria-label="Local processing estimate"]')
   expect(estimate.text()).toContain('1–3 minutes to prepare a 3-minute track')
-  expect(estimate.text()).toContain('uses your NVIDIA graphics card')
+  expect(estimate.text()).not.toContain('uses your NVIDIA graphics card')
   expect(wrapper.findAll('.speed-bar .filled')).toHaveLength(3)
   expect(wrapper.text()).not.toContain('Extrapolated estimate')
   expect(wrapper.text()).toContain('*Actual processing time varies by hardware and song.')
   wrapper.unmount()
+})
+
+describe('processing choice summary', () => {
+  const GiB = 1024 ** 3
+  const estimatedPlan = {
+    available: true, planId: 'estimated', diskFreeBytes: 412.6 * GiB,
+    hardware: { platform: 'linux', arch: 'x64', cpu: 'Synthetic 8-core processor', cpuCount: 16,
+      totalMemoryBytes: 31.2 * GiB, availableMemoryBytes: 22.4 * GiB, gpu: 'Synthetic graphics',
+      gpuDevices: [{ name: 'Synthetic graphics', dedicatedMemoryBytes: 12 * GiB }] },
+    processingEstimate: { level: 3, label: 'Faster', minutes: [1, 3], evidence: 'extrapolated',
+      basis: 'These tools and models use your graphics card.' },
+  }
+  async function mountChoice(plan = estimatedPlan) {
+    globalThis.window.karaokeDesktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose' }),
+      preflightSetup: vi.fn().mockResolvedValue(plan),
+    })
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    return wrapper
+  }
+  const modalCard = wrapper => wrapper.findAll('.choice').find(button => button.text().includes('My Modal account'))
+
+  it('shows one local container with a hardware strip, the estimate bar, and its footnote', async () => {
+    const wrapper = await mountChoice()
+    const estimate = wrapper.find('[aria-label="Local processing estimate"]')
+    const strip = estimate.find('dl[aria-label="Computer details"]')
+    expect(strip.findAll('dt').map(term => term.text())).toEqual(['CPU', 'GPU', 'RAM', 'Free disk'])
+    expect(strip.findAll('dd').map(value => value.text())).toEqual(
+      ['Synthetic 8-core processor', 'Synthetic graphics · 12.0 GiB', '31.2 GiB', '412.6 GiB'])
+    expect(strip.attributes('title')).toContain('Operating system: Linux · x64')
+    expect(estimate.text()).toContain('Estimated processing time*')
+    expect(estimate.text()).toContain('1–3 minutes to prepare a 3-minute track')
+    expect(estimate.find('.speed-bar').exists()).toBe(true)
+    expect(estimate.text()).toContain('*Actual processing time varies by hardware and song.')
+    expect(wrapper.find('table').exists()).toBe(false)
+    expect(wrapper.find('details').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-modal-summary"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-modal-footnote"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-continue"]').text()).toBe('Continue →')
+    wrapper.unmount()
+  })
+
+  it('omits unknown sizes from the hardware strip', async () => {
+    const wrapper = await mountChoice({ ...estimatedPlan, diskFreeBytes: null,
+      hardware: { ...estimatedPlan.hardware, gpuDevices: [{ name: 'Synthetic graphics', dedicatedMemoryBytes: null }] } })
+    const strip = wrapper.find('dl[aria-label="Computer details"]')
+    expect(strip.findAll('dt').map(term => term.text())).toEqual(['CPU', 'GPU', 'RAM'])
+    expect(strip.findAll('dd').map(value => value.text())).toEqual(['Synthetic 8-core processor', 'Synthetic graphics', '31.2 GiB'])
+    expect(strip.text()).not.toContain('Not yet known')
+    wrapper.unmount()
+  })
+
+  it('shows memory qualification warnings inside the local estimate', async () => {
+    const wrapper = await mountChoice({ ...estimatedPlan,
+      memoryQualification: { status: 'meets-measured-requirements', reason: 'Synthetic reason.', warnings: ['Synthetic memory warning.'] } })
+    const warning = wrapper.find('[aria-label="Local processing estimate"]').findAll('p.quiet').find(line => line.text() === 'Synthetic memory warning.')
+    expect(warning).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('swaps the local estimate for the Modal usage summary when Modal is chosen', async () => {
+    const wrapper = await mountChoice()
+    await modalCard(wrapper).trigger('click')
+    expect(wrapper.find('[aria-label="Local processing estimate"]').exists()).toBe(false)
+    expect(wrapper.find('.speed-bar').exists()).toBe(false)
+    expect(wrapper.find('.estimate-range').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Estimated processing time')
+    expect(wrapper.text()).not.toContain('You can enable Modal later')
+    const summary = wrapper.find('[data-testid="onboarding-modal-summary"]')
+    expect(summary.attributes('aria-label')).toBe('My Modal account')
+    expect(summary.text()).toContain('Processing runs in your own Modal account. Audio needed for processing is sent to that deployment.')
+    expect(summary.text()).toContain('At the time of writing, $30 of monthly usage is included with a Modal account*')
+    expect(summary.text()).toContain('Roughly 200 or more 3–4 minute songs per $30')
+    expect(wrapper.find('[data-testid="onboarding-continue"]').text()).toBe('Connect Modal account →')
+    expect(wrapper.find('[data-testid="onboarding-modal-footnote"]').text()).toBe('*Subject to change. See Modal’s current pricing and terms.')
+    await wrapper.find('[data-testid="onboarding-choice-local"]').trigger('click')
+    expect(wrapper.find('[aria-label="Local processing estimate"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="onboarding-modal-summary"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+it('uses "tools and models" instead of "pack" in setup copy', () => {
+  for (const [name, raw] of [['DesktopOnboarding.vue', onboardingSource], ['DesktopModalSetup.vue', modalSetupSource]]) {
+    const source = raw.replace(/<style[\s\S]*?<\/style>/g, '')
+    expect(source, name).not.toMatch(/\bpacks?\b/i)
+  }
 })
 
 it('does not invent a range when the desktop supplies no estimate', async () => {

@@ -131,6 +131,37 @@ class ProcessingEnvironmentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
             self.admit()
 
+    def test_custom_install_root_is_admitted_only_for_its_own_store(self):
+        # A chosen install root outside the directory holding the backend runtime.
+        self.runtime = self.root / "application-data" / "backend"
+        def admit(processing_root):
+            return processing_environment(self.runtime, self.identity, self.processing, None, self.probe,
+                                          trusted_locks=[self.lock_hash], processing_id=self.identifier,
+                                          processing_root=processing_root)
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+            admit(None)
+        self.assertEqual(admit(self.root)["KARAOKE_PROCESSING_PYTHON"], self.probe["pythonPath"])
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+            admit(self.root / "other-root")
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed processing path"):
+            admit(Path("relative-root"))
+
+    @unittest.skipIf(os.name == "nt", "ordinary Windows users cannot create symlinks")
+    def test_custom_install_root_store_must_not_be_a_symlink(self):
+        target = self.root / "real-root"
+        target.mkdir()
+        (self.root / "processing").rename(target / "processing")
+        alias = self.root / "alias-root"
+        alias.mkdir()
+        (alias / "processing").symlink_to(target / "processing", target_is_directory=True)
+        self.processing = alias / "processing" / "packs" / self.identifier
+        self.probe["pythonPath"] = str(self.processing / "python/python.exe")
+        self.runtime = self.root / "application-data" / "backend"
+        with self.assertRaisesRegex(RuntimeError, "symbolic links"):
+            processing_environment(self.runtime, self.identity, self.processing, None, self.probe,
+                                   trusted_locks=[self.lock_hash], processing_id=self.identifier,
+                                   processing_root=alias)
+
     @unittest.skipIf(os.name == "nt", "ordinary Windows users cannot create symlinks")
     def test_inventory_symlink_is_rejected(self):
         payload = self.processing / self.relative
