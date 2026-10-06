@@ -93,6 +93,7 @@
         :tracks="tracks"
         :lyricsState="lyricsState"
         :lyricsOffset="lyricsOffset"
+        :showLyricsOffset="hasLyricsOrVocals"
         :keyOffset="engine.keyOffset.value"
         :keySupported="engine.keyShiftSupported.value"
         :currentTime="engine.currentTime.value"
@@ -206,6 +207,16 @@ const hasStems = computed(() => {
   return !!(s.instrumental || (Array.isArray(s.vocals) && s.vocals.length))
 })
 
+// The lyrics offset only moves lyrics, so it is offered only when the song has
+// something it can move: a vocal lane or lyrics. Read from the loaded tracks
+// and lyrics rather than the media type, so a karaoke video that later gains
+// stems gets the control.
+const hasLyricsOrVocals = computed(() =>
+  tracks.value.some((t) => t.kind === 'vocal') ||
+  lyricsState.value !== 'none' ||
+  !!props.song.word_sync?.segments
+)
+
 // Vocal regions for the progress bar. One block per lyric line,
 // then merged across short gaps so adjacent phrases read as one chunk instead
 // of a stutter of slivers. Falls back gracefully when word-level sync isn't
@@ -275,6 +286,7 @@ onUnmounted(() => {
 
 watch(() => props.song?.id, () => {
   mixerOpen.value = false   // avoid acting on a previous song's (stale) mixer state
+  lyricsOffset.value = 0    // the player store's offset is cleared on song change too
   stemCacheBust.value = 0
   engine.cleanup()
   loadState.value = 'idle'
@@ -458,11 +470,32 @@ function toggleMute(track) {
   engine.setVolume(track.key, track.volume)
 }
 
+// Space is play/pause only when it would otherwise do nothing. On a focused
+// control it presses that control, and inside a dialog or menu it belongs to
+// that surface; a held modifier is left to the browser too.
+const ACTIVATABLE = [
+  'button', 'a[href]', 'input', 'textarea', 'select',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="button"]', '[role="menuitem"]', '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]', '[role="option"]', '[role="switch"]', '[role="tab"]',
+].join(', ')
+const SPACE_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
+
+function spaceBelongsElsewhere(e) {
+  if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return true
+  for (const el of [e.target, document.activeElement]) {
+    if (!el || typeof el.closest !== 'function') continue
+    if (el.closest(ACTIVATABLE) || el.closest(SPACE_OWNERS)) return true
+  }
+  return false
+}
+
 // Keyboard shortcuts
 function handleKeyboard(e) {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return
   switch (e.code) {
     case 'Space':
+      if (spaceBelongsElsewhere(e)) return
       e.preventDefault()
       togglePlayPause()
       break
