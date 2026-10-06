@@ -260,13 +260,20 @@
               </p>
               <!-- Ingest progress rides under the title so it stays visible
                    no matter which columns the host has switched off. -->
-              <p v-if="song.status === 'processing' && song.phase" class="song-item__sub">
+              <p
+                v-if="song.status === 'processing' && song.phase"
+                class="song-item__sub"
+                :title="statusLineText(song)"
+              >
                 <span class="song-item__phase">{{ phaseLabel(song.phase) }}</span>
                 <span v-if="song.progress != null" class="song-item__phase-pct">
                   · {{ song.progress }}%
                 </span>
                 <span v-else-if="song.message" class="song-item__phase-msg">
                   · {{ song.message }}
+                </span>
+                <span v-if="staleMinutes(song) != null" class="song-item__phase-msg song-item__stale">
+                  · last update {{ staleMinutes(song) }} min ago
                 </span>
               </p>
               <p v-else-if="compact" class="song-item__line2">{{ song.artist || 'Unknown Artist' }}</p>
@@ -852,6 +859,34 @@ const PHASE_LABELS = {
 
 function phaseLabel(phase) {
   return PHASE_LABELS[phase] || phase
+}
+
+// A processing row whose stage has not moved for STALE_AFTER_MIN minutes gets
+// its age appended, so a slow stage can be told from a dead one. One shared
+// clock re-renders the age between polls.
+const STALE_AFTER_MIN = 2
+const now = ref(Date.now())
+let nowTimer = null
+onMounted(() => { nowTimer = setInterval(() => { now.value = Date.now() }, 30_000) })
+onUnmounted(() => { if (nowTimer) clearInterval(nowTimer); nowTimer = null })
+
+function staleMinutes(song) {
+  if (song.status !== 'processing') return null
+  const at = store.jobLastChangeAt(song.id)
+  if (at == null) return null
+  const mins = Math.floor((now.value - at) / 60_000)
+  return mins >= STALE_AFTER_MIN ? mins : null
+}
+
+// The status line truncates at narrow widths and the age is its last part,
+// so the whole line also rides on its title.
+function statusLineText(song) {
+  let text = phaseLabel(song.phase)
+  if (song.progress != null) text += ` · ${song.progress}%`
+  else if (song.message) text += ` · ${song.message}`
+  const mins = staleMinutes(song)
+  if (mins != null) text += ` · last update ${mins} min ago`
+  return text
 }
 
 // The row's view of a Song tools job: a spinner while it runs, a ✗ when the
