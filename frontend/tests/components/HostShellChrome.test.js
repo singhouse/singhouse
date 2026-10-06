@@ -57,7 +57,10 @@ function mountShell() {
       stubs: {
         SongList: SongListStub,
         QueuePanel: true, AudioPlayer: true, ScreenStage: true,
-        UploadZone: { template: '<div class="upload-zone-stub" />' },
+        UploadZone: {
+          emits: ['close'],
+          template: `<div class="upload-zone-stub"><button class="upload-zone-stub__cancel" @click="$emit('close')">Cancel</button></div>`,
+        },
         DesktopOnboarding: { name: 'DesktopOnboarding', props: ['open'], template: '<div class="desktop-setup-stub" />', emits: ['close', 'add-song'] },
         PlexImportModal: { template: '<div class="plex-stub" />' },
         BrandLogo: true, BrandMark: true,
@@ -129,6 +132,20 @@ describe('HostShell chrome', () => {
     await wrapper.find('.add-btn').trigger('click')
     await items()[1].trigger('click')
     expect(wrapper.find('.plex-stub').exists()).toBe(true)
+  })
+
+  it('titles the add-files dialog and closes it from the dialog\'s Cancel', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
+    mountShell()
+    await flushPromises()
+    await wrapper.find('.add-btn').trigger('click')
+    await wrapper.findAll('[role="menuitem"]')[0].trigger('click')
+    expect(wrapper.find('.upload-modal__title h2').text()).toBe('Add files')
+    expect(wrapper.find('.upload-modal__title .title-icon svg').exists()).toBe(true)
+
+    await wrapper.find('.upload-zone-stub__cancel').trigger('click')
+    expect(wrapper.find('.upload-zone-stub').exists()).toBe(false)
+    expect(wrapper.find('.upload-modal').exists()).toBe(false)
   })
 
   it('preserves desktop setup in the account menu and collapsed rail', async () => {

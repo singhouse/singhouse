@@ -368,10 +368,14 @@
     <Modal :visible="uploadOpen" size="lg" @close="uploadOpen = false">
       <div class="upload-modal">
         <div class="upload-modal__title">
-          <span class="title-icon">☁️</span>
-          <h2>Upload</h2>
+          <span class="title-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          </span>
+          <h2>Add files</h2>
         </div>
-        <UploadZone />
+        <UploadZone @close="uploadOpen = false" />
       </div>
     </Modal>
 
@@ -1298,6 +1302,6 @@ async function checkApiHealth() {
   font-size: 1.05rem; font-weight: 700; color: white;
   letter-spacing: -0.01em; margin: 0;
 }
-.upload-modal__title .title-icon { font-size: 1.2rem; }
+.upload-modal__title .title-icon { display: flex; color: rgba(255,255,255,0.6); }
 
 </style>
