@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // @vitest-environment happy-dom
 //
-// Gate contract for the library's per-row export action: the button exists
+// Gate contract for the library's per-row export action (an item in the
+// row's ⋯ menu): the item exists
 // only when the server reports the cdg_export capability AND the song is
 // ready, it opens the export dialog for that song, and nothing the row or
 // dialog renders uses the banned verb. Feature flags are a UI hint — the
@@ -54,8 +55,22 @@ async function mountList() {
   return w
 }
 
-function exportButtons() {
-  return wrapper.findAll('.action-btn--export')
+// The row ⋯ menu teleports to <body>; find its panel through the trigger.
+async function rowMenu(title) {
+  const row = wrapper.findAll('.song-item').find(r => r.text().includes(title))
+  const btn = row.find('.more-btn')
+  await btn.trigger('click')
+  await flushPromises()
+  return document.getElementById(btn.attributes('aria-controls'))
+}
+
+async function closeMenus() {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+  await flushPromises()
+}
+
+async function exportItem(title = 'Ready Song') {
+  return (await rowMenu(title)).querySelector('.row-menu__export')
 }
 
 beforeEach(() => {
@@ -78,32 +93,28 @@ afterEach(() => {
 })
 
 describe('export action gating', () => {
-  it('hides the export button when the capability is off', async () => {
+  it('hides the export item when the capability is off', async () => {
     getFeatures.mockResolvedValue({ data: { cdg_export: false } })
     wrapper = await mountList()
-    expect(exportButtons()).toHaveLength(0)
+    expect(await exportItem()).toBeNull()
   })
 
-  it('hides the export button when the flags never load', async () => {
+  it('hides the export item when the flags never load', async () => {
     getFeatures.mockRejectedValue(new Error('unreachable'))
     wrapper = await mountList()
-    expect(exportButtons()).toHaveLength(0)
+    expect(await exportItem()).toBeNull()
   })
 
-  it('shows the export button only on ready songs when the capability is on', async () => {
+  it('offers export only on ready songs when the capability is on', async () => {
     wrapper = await mountList()
-    expect(exportButtons()).toHaveLength(1)
-    const readyRow = wrapper.findAll('.song-item')
-      .find(r => r.text().includes('Ready Song'))
-    expect(readyRow.find('.action-btn--export').exists()).toBe(true)
-    const busyRow = wrapper.findAll('.song-item')
-      .find(r => r.text().includes('Busy Song'))
-    expect(busyRow.find('.action-btn--export').exists()).toBe(false)
+    expect(await exportItem('Ready Song')).not.toBeNull()
+    await closeMenus()
+    expect(await exportItem('Busy Song')).toBeNull()
   })
 
-  it('opens the export dialog for the clicked song', async () => {
+  it('opens the export dialog for the chosen song', async () => {
     wrapper = await mountList()
-    await exportButtons()[0].trigger('click')
+    ;(await exportItem()).click()
     await flushPromises()
 
     const card = document.body.querySelector('.modal-card')
@@ -117,7 +128,7 @@ describe('export action gating', () => {
 describe('vocabulary', () => {
   it('renders no banned verb anywhere in the list or the open dialog', async () => {
     wrapper = await mountList()
-    await exportButtons()[0].trigger('click')
+    ;(await exportItem()).click()
     await flushPromises()
 
     expect(wrapper.html()).not.toMatch(/download/i)

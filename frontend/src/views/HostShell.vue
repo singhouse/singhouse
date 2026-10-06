@@ -783,7 +783,9 @@ onBeforeUnmount(() => stopSetupListener?.())
 const plexOpen = ref(false)
 
 const MIN_PANEL_WIDTH = 300
-const DEFAULT_SIDEBAR_WIDTH = 320
+// Wide enough for the library's default columns; narrower panels get its
+// compact rows.
+const DEFAULT_SIDEBAR_WIDTH = 400
 const SIDEBAR_WIDTH_KEY = 'karaoke:sidebarWidth'
 
 function loadSavedWidth() {
@@ -962,7 +964,7 @@ async function checkApiHealth() {
 .app--resizing-y * { cursor: row-resize !important; }
 
 .sidebar {
-  width: 320px; min-width: 320px;
+  width: 400px; min-width: 400px;
   background: rgba(0, 0, 0, 0.55);
   border-right: 1px solid rgba(255,255,255,0.07);
   display: flex; flex-direction: column;
