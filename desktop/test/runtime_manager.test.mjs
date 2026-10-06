@@ -5,11 +5,12 @@ import fsPromises, { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, ren
 import { syncBuiltinESMExports } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, toNamespacedPath } from 'node:path'
+import { join, sep, toNamespacedPath } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { resolveInstallRoot } from '../onboarding_state.mjs'
 import { createHash } from 'node:crypto'
 import zlib, { crc32, deflateRawSync, gzipSync } from 'node:zlib'
-import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, launchSelection, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
+import { RuntimeManager as NativeRuntimeManager, ModelCache as NativeModelCache, acquireInstallLock, launchSelection, managedStoreDirectories, validateProcessingManifest, validateModelManifest, processingAttestation, runtimeDirectoryName } from '../runtime_manager.mjs'
 
 // Production passes its absolute bundled interpreter; fixtures use the test OS.
 const lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
@@ -82,6 +83,38 @@ test('installs, verifies and persists selection across restart; retains prior ru
   assert.equal((await new RuntimeManager(join(root, 'processing'), identity).active()).id, second.id)
   await writeFile(join(second.directory, second.manifest.python), 'tampered')
   assert.equal((await manager.active()).id, first.id)
+})
+
+test('install, update and repair use the resolved install root and leave the default root untouched', async t => {
+  const { root, source, manifest } = await fixture(t)
+  const fallback = join(root, 'default-root')
+  await mkdir(fallback)
+  const custom = join(root, 'chosen-root')
+  await mkdir(join(custom, 'native-fixture'), { recursive: true })
+  const installRoot = await resolveInstallRoot(fallback, custom)
+  assert.equal(installRoot, custom)
+  const directories = managedStoreDirectories(installRoot)
+  assert.deepEqual(directories, { processing: join(custom, 'processing'), models: join(custom, 'model-cache') })
+  const manager = new RuntimeManager(directories.processing, identity)
+  manager.probe = async () => {}
+  const first = await manager.install(manifest)
+  assert.ok(first.directory.startsWith(join(custom, 'processing') + sep))
+  await writeFile(source, 'second python!')
+  const updated = structuredClone(manifest)
+  updated.files[0].sha256 = sha('second python!')
+  bindProvenance(updated)
+  const second = await manager.install(updated)
+  assert.ok(second.directory.startsWith(join(custom, 'processing') + sep))
+  // Repair: a damaged active pack is replaced by reinstalling into the same root.
+  await writeFile(join(second.directory, second.manifest.python), 'tampered')
+  await rm(second.directory, { recursive: true, force: true })
+  const repaired = await manager.install(updated)
+  assert.equal(repaired.id, second.id)
+  assert.equal((await new RuntimeManager(managedStoreDirectories(await resolveInstallRoot(fallback, custom)).processing, identity).active()).id, second.id)
+  assert.deepEqual(await readdir(fallback), [])
+  // Without a saved folder the default root is used again; nothing was installed there.
+  assert.equal(await resolveInstallRoot(fallback, undefined), fallback)
+  assert.equal(await new RuntimeManager(managedStoreDirectories(fallback).processing, identity).active(), null)
 })
 
 test('bad checksum and low disk leave the previous active pack unchanged', async t => {

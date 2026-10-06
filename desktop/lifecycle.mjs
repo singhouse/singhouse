@@ -25,6 +25,17 @@ export function persistentRuntime(userData) {
   return { root: userData, backend, electron: userData, remove() {} }
 }
 
+// Backend arguments for the verified stores. The install root lets the backend
+// check that each selected pack lives in that root's own store.
+export function processingLaunchArguments({ installRoot, processing, probe, models } = {}) {
+  const args = []
+  if (installRoot) args.push('--processing-root', installRoot)
+  if (processing) args.push('--processing', processing.directory, '--processing-id', processing.id)
+  if (probe) args.push('--processing-probe', JSON.stringify(probe))
+  if (models) args.push('--models', models.directory, '--models-id', models.id)
+  return args
+}
+
 export function projectorBlocker(power) {
   let id = null
   return {
