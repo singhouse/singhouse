@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { OnboardingState } from '../onboarding_state.mjs'
 import {
   ExportPreferences, createUniqueFile, defaultExportFolder, exportDefaults, exportRequestPath,
-  filenameFromDisposition, folderLabel, safeFilename, writeExport,
+  filenameFromDisposition, folderLabel, safeFilename, videoFilePath, writeExport, writeVideoExport,
 } from '../export_files.mjs'
 
 async function fixture(t) {
@@ -106,7 +106,7 @@ test('the export request always asks for the card and accepts only known options
   assert.equal(exportRequestPath(request), '/api/export/songs/7?format=mp3g&audio=karaoke&card=true')
   assert.equal(exportRequestPath({ ...request, audio: 'instrumental', lyricsSet: 3 }),
     '/api/export/songs/7?format=mp3g&audio=instrumental&lyrics_set=3&card=true')
-  assert.throws(() => exportRequestPath({ ...request, format: 'video' }), /Video export is not available yet/)
+  assert.throws(() => exportRequestPath({ ...request, format: 'video' }), /Unknown export format/)
   assert.throws(() => exportRequestPath({ ...request, format: 'cdg' }), /Unknown export format/)
   assert.throws(() => exportRequestPath({ ...request, audio: 'loud' }), /Unknown export audio/)
   assert.throws(() => exportRequestPath({ ...request, songId: '7/../../x' }), /Choose a song/)
@@ -205,10 +205,52 @@ test('invalid requests and folders are refused before any fetch', async t => {
   const directory = await fixture(t)
   let fetched = false
   const fetch = async () => { fetched = true; return streamResponse(['x']) }
-  await assert.rejects(writeExport({ fetch, folder: directory, request: { ...request, format: 'video' } }), /not available yet/)
+  await assert.rejects(writeExport({ fetch, folder: directory, request: { ...request, format: 'video' } }), /Unknown export format/)
   await assert.rejects(writeExport({ fetch, folder: 'relative', request }), /Choose a folder/)
   assert.equal(fetched, false)
   await mkdir(join(directory, 'blocked'))
   await writeFile(join(directory, 'blocked', 'file'), '')
   await assert.rejects(writeExport({ fetch, folder: join(directory, 'blocked', 'file'), request }), /Could not create the export folder/)
+})
+
+const session = 'AbCdEfGh_ij-KLmnOPqrstuvWXyz0123'
+
+test('the video file path accepts only a session token', () => {
+  assert.equal(videoFilePath({ session }), `/api/export/video/${session}/file`)
+  for (const bad of [undefined, null, '', 'short', '../../etc/passwd/xxxxxxxxxx', `${session}/../x`, `${session}?x=1`, 42]) {
+    assert.throws(() => videoFilePath({ session: bad }), /Unknown video export/)
+  }
+  assert.throws(() => videoFilePath(undefined), /Unknown video export/)
+})
+
+test('a finished video is written into the folder under its server name, never replacing a file', async t => {
+  const directory = await fixture(t)
+  const folder = join(directory, 'Videos', 'exports')
+  const calls = []
+  const fetch = async (path, init) => {
+    calls.push({ path, init })
+    return streamResponse(['mp4-', 'bytes'], { headers: { 'Content-Disposition': 'attachment; filename="Ackerman - Zither Blues.mp4"' } })
+  }
+  const signal = AbortSignal.timeout(10_000)
+  const first = await writeVideoExport({ fetch, folder, request: { session }, signal })
+  assert.deepEqual(first, { path: join(folder, 'Ackerman - Zither Blues.mp4') })
+  assert.equal(await readFile(first.path, 'utf8'), 'mp4-bytes')
+  assert.equal(calls[0].path, `/api/export/video/${session}/file`)
+  assert.equal(calls[0].init.signal, signal)
+
+  const second = await writeVideoExport({ fetch, folder, request: { session } })
+  assert.equal(second.path, join(folder, 'Ackerman - Zither Blues (2).mp4'))
+})
+
+test('a refused or invalid video write fetches or writes nothing', async t => {
+  const directory = await fixture(t)
+  let fetched = false
+  const fetch = async () => { fetched = true; return streamResponse(['x']) }
+  await assert.rejects(writeVideoExport({ fetch, folder: directory, request: { session: '../x' } }), /Unknown video export/)
+  await assert.rejects(writeVideoExport({ fetch, folder: 'relative', request: { session } }), /Choose a folder/)
+  assert.equal(fetched, false)
+
+  const refused = async () => new Response(JSON.stringify({ detail: 'The video is not ready' }), { status: 409 })
+  await assert.rejects(writeVideoExport({ fetch: refused, folder: directory, request: { session } }), { message: 'The video is not ready' })
+  assert.deepEqual(await readdir(directory), [])
 })
