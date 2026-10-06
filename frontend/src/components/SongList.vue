@@ -181,7 +181,7 @@
             }"
             :draggable="song.status === 'ready'"
             @dragstart="onDragStart($event, song)"
-            @click="song.status === 'ready' && store.loadSong(song)"
+            @click="song.status === 'ready' && usePlayGuard().guard(() => store.loadSong(song), { kind: 'load', title: song.title || song.filename })"
           >
             <div class="lib-cell lib-cell--dot">
               <span class="song-item__dot" :class="`dot--${song.status}`" />
@@ -360,6 +360,7 @@ import Modal from '@/components/ui/Modal.vue'
 import PopoverMenu from '@/components/ui/PopoverMenu.vue'
 import SongExportModal from '@/components/SongExportModal.vue'
 import { getSlot } from '@/plugins/slots'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const libraryPanel = getSlot('library-panel')
 
