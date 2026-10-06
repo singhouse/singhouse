@@ -131,6 +131,24 @@ describe('HostShell chrome', () => {
     expect(wrapper.find('.plex-stub').exists()).toBe(true)
   })
 
+  it('the add-files dialog is named Upload and Escape closes it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
+    mountShell()
+    await flushPromises()
+    await wrapper.find('.add-btn').trigger('click')
+    await wrapper.findAll('[role="menuitem"]')[0].trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('dialog.modal-overlay')
+    expect(dialog.attributes('role')).toBe('dialog')
+    expect(wrapper.find(`#${dialog.attributes('aria-labelledby')}`).text()).toBe('Upload')
+
+    await dialog.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('dialog.modal-overlay').exists()).toBe(false)
+    expect(wrapper.find('.upload-zone-stub').exists()).toBe(false)
+  })
+
   it('preserves desktop setup in the account menu and collapsed rail', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
     const stopListener = vi.fn()

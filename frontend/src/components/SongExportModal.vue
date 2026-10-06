@@ -5,7 +5,7 @@
     title="Export CD+G"
     :confirmLabel="busy ? 'Exporting…' : 'Export'"
     confirmVariant="primary"
-    :closable="!busy"
+    :busy="busy"
     @close="onClose"
     @confirm="doExport"
   >

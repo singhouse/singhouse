@@ -14,7 +14,7 @@
             <circle cx="6" cy="18" r="3"/>
             <circle cx="18" cy="16" r="3"/>
           </svg>
-          <span class="song-list__title-text">Library</span>
+          <span :id="titleTextId" class="song-list__title-text">Library</span>
           <Badge v-if="store.songs.length" variant="synced" class="song-list__count">{{ store.songs.length }}</Badge>
         </h2>
         <span class="song-list__spacer" />
@@ -156,10 +156,13 @@
          narrower than the chosen columns need, rows fall back to a compact
          two-line layout (title over artist) with the same actions button. -->
     <div v-else class="song-list__body">
-      <div class="lib-table">
+      <!-- A grid with one roving Tab stop: the arrow keys move between rows,
+           Enter or Space loads a ready song, Delete asks to remove it, and →
+           steps into the row's ⋯ button. -->
+      <div class="lib-table" role="grid" :aria-labelledby="titleTextId">
         <!-- Sortable header; separators between columns drag their widths. -->
         <div v-if="!compact" ref="headEl" class="lib-head" role="row" :style="gridStyle">
-          <span class="lib-cell lib-cell--dot" />
+          <span class="lib-cell lib-cell--dot" role="columnheader"><span class="sr-only">Status</span></span>
           <button
             v-for="(col, i) in visibleColumns"
             :key="col.key"
@@ -188,7 +191,7 @@
               @click.stop
             />
           </button>
-          <span class="lib-cell lib-cell--more" />
+          <span class="lib-cell lib-cell--more" role="columnheader"><span class="sr-only">Actions</span></span>
         </div>
 
         <TransitionGroup name="list">
@@ -197,6 +200,8 @@
             :key="song.id"
             class="song-item"
             role="row"
+            :data-song-id="song.id"
+            :tabindex="song.id === rovingId ? 0 : -1"
             :style="compact ? null : gridStyle"
             :class="{
               'song-item--compact': compact,
@@ -207,12 +212,14 @@
             :draggable="song.status === 'ready'"
             @dragstart="onDragStart($event, song)"
             @click="song.status === 'ready' && store.loadSong(song)"
+            @focusin="activeRowId = song.id"
+            @keydown="onRowKeydown($event, song)"
           >
-            <div class="lib-cell lib-cell--dot">
+            <div class="lib-cell lib-cell--dot" role="gridcell">
               <span class="song-item__dot" :class="`dot--${song.status}`" />
             </div>
 
-            <div v-if="compact || isVisible('title')" class="lib-cell lib-cell--title">
+            <div v-if="compact || isVisible('title')" class="lib-cell lib-cell--title" role="gridcell">
               <p class="song-item__title">
                 <template v-if="store.currentSong?.id === song.id">
                   <svg
@@ -268,6 +275,7 @@
             <template v-if="compact">
               <div
                 class="song-item__meta"
+                role="gridcell"
                 :class="{ 'song-item__meta--time': song.status === 'ready' && !!song.duration }"
               >
                 <Badge v-if="song.status === 'failed'" variant="failed">Failed</Badge>
@@ -277,19 +285,19 @@
               </div>
             </template>
             <template v-else>
-              <div v-if="isVisible('artist')" class="lib-cell lib-cell--artist">
+              <div v-if="isVisible('artist')" class="lib-cell lib-cell--artist" role="gridcell">
                 <span class="song-item__artist">{{ song.artist || 'Unknown Artist' }}</span>
               </div>
 
-              <div v-if="isVisible('duration')" class="lib-cell lib-cell--duration">
+              <div v-if="isVisible('duration')" class="lib-cell lib-cell--duration" role="gridcell">
                 <span class="song-item__duration">{{ formatDuration(song.duration) }}</span>
               </div>
 
-              <div v-if="isVisible('added')" class="lib-cell lib-cell--added">
+              <div v-if="isVisible('added')" class="lib-cell lib-cell--added" role="gridcell">
                 <span class="song-item__added">{{ formatDate(song.created_at) }}</span>
               </div>
 
-              <div v-if="isVisible('status')" class="lib-cell lib-cell--status">
+              <div v-if="isVisible('status')" class="lib-cell lib-cell--status" role="gridcell">
                 <Badge v-if="song.status !== 'ready' && song.status !== 'done'" :variant="song.status">
                   <span v-if="song.status === 'processing'" class="spinner inline-spinner" />
                   {{ song.status === 'processing' && song.phase ? phaseLabel(song.phase) : song.status }}
@@ -303,13 +311,14 @@
                  status: a processing song's progress and a failed song's error
                  (and its retry) are the two states that most need a way in,
                  and neither can be loaded onto the deck to reach a mixer. -->
-            <div class="lib-cell lib-cell--more" @click.stop>
+            <div class="lib-cell lib-cell--more" role="gridcell" @click.stop>
               <PopoverMenu role="menu" align="end" :label="`Actions for ${songName(song)}`">
                 <template #trigger="{ toggle, attrs, open }">
                   <button
                     type="button"
                     class="more-btn"
                     :class="{ 'more-btn--open': open }"
+                    :tabindex="song.id === rovingId ? 0 : -1"
                     title="Song actions"
                     :aria-label="`Actions for ${songName(song)}`"
                     v-bind="attrs"
@@ -395,6 +404,7 @@
       :message="deleteTarget ? `${deleteTarget.title || deleteTarget.filename} will be permanently removed including all stems.` : ''"
       confirmLabel="Delete"
       confirmVariant="danger"
+      :busy="deleting"
       @close="deleteTarget = null"
       @confirm="doDelete"
     />
@@ -418,7 +428,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted, useId } from 'vue'
 import { useSongsStore, JOB_KIND_LABELS } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
@@ -455,6 +465,7 @@ const store = useSongsStore()
 const songTools = useSongToolsStore()
 const features = useFeaturesStore()
 const deleteTarget = ref(null)
+const deleting = ref(false)
 const exportTarget = ref(null)
 const searchInput = ref(store.searchQuery || '')
 
@@ -864,9 +875,92 @@ function songName(song) {
 }
 
 async function doDelete() {
-  if (deleteTarget.value) {
-    await store.deleteSong(deleteTarget.value.id)
-    deleteTarget.value = null
+  const target = deleteTarget.value
+  if (!target || deleting.value) return
+  const at = sortedSongs.value.findIndex(s => s.id === target.id)
+  const deletedRow = rowEl(target.id)
+  deleting.value = true
+  try {
+    await store.deleteSong(target.id)
+  } finally {
+    deleting.value = false
+  }
+  deleteTarget.value = null
+  // The confirm hands focus back to the row it was opened from. If that row
+  // is gone (or only still leaving, during the list transition), the next
+  // row (or the new last one) takes it.
+  await nextTick()
+  if (sortedSongs.value.some(s => s.id === target.id)) return
+  const rows = sortedSongs.value
+  if (!rows.length) return
+  const active = document.activeElement
+  const lost = !active || active === document.body || !active.isConnected
+    || (deletedRow && deletedRow.contains(active))
+  if (!lost) return
+  focusRow(rows[Math.min(Math.max(at, 0), rows.length - 1)].id)
+}
+
+// ─── Keyboard ───────────────────────────────────────────────────────────────
+// One row at a time is the list's Tab stop. It follows focus, and falls back
+// to the loaded song, then the first row, whenever the list no longer holds it
+// (search, a status tab, a sort or a delete).
+const titleTextId = `song-list-title-${useId()}`
+const activeRowId = ref(null)
+const rovingId = computed(() => {
+  const rows = sortedSongs.value
+  if (rows.some(s => s.id === activeRowId.value)) return activeRowId.value
+  const current = store.currentSong?.id
+  if (current != null && rows.some(s => s.id === current)) return current
+  return rows[0]?.id ?? null
+})
+
+function rowEl(id) {
+  return rootEl.value?.querySelector(`.song-item[data-song-id="${id}"]`) || null
+}
+
+async function focusRow(id) {
+  activeRowId.value = id
+  await nextTick()
+  const el = rowEl(id)
+  if (!el) return
+  el.focus()
+  el.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+}
+
+function moveRow(song, to) {
+  const rows = sortedSongs.value
+  if (!rows.length) return
+  const i = rows.findIndex(s => s.id === song.id)
+  const next = to === 'first' ? 0
+    : to === 'last' ? rows.length - 1
+    : Math.min(rows.length - 1, Math.max(0, i + to))
+  focusRow(rows[next].id)
+}
+
+function onRowKeydown(e, song) {
+  const row = e.currentTarget
+  if (e.target === row) {
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); moveRow(song, 1); break
+      case 'ArrowUp': e.preventDefault(); moveRow(song, -1); break
+      case 'Home': e.preventDefault(); moveRow(song, 'first'); break
+      case 'End': e.preventDefault(); moveRow(song, 'last'); break
+      case 'Enter':
+      case ' ':
+        e.preventDefault()
+        if (song.status === 'ready') store.loadSong(song)
+        break
+      case 'Delete': e.preventDefault(); deleteTarget.value = song; break
+      case 'ArrowRight': e.preventDefault(); row.querySelector('.more-btn')?.focus(); break
+    }
+    return
+  }
+  // From the row's ⋯ button: ← back to the row, ↑/↓ on to the next rows.
+  if (!e.target.classList?.contains('more-btn')) return
+  switch (e.key) {
+    case 'ArrowLeft': e.preventDefault(); row.focus(); break
+    case 'ArrowDown': e.preventDefault(); moveRow(song, 1); break
+    case 'ArrowUp': e.preventDefault(); moveRow(song, -1); break
   }
 }
 
@@ -1070,6 +1164,8 @@ function onDragStart(ev, song) {
 .song-item--active { background: var(--c-primary-bg); border-color: var(--c-primary-border); }
 .song-item--active .song-item__title { color: var(--c-primary); }
 .song-item--disabled { cursor: default; }
+.song-item:focus { outline: none; }
+.song-item:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
 /* Dim what cannot be played, not the actions button that still works. */
 .song-item--disabled > .lib-cell:not(.lib-cell--more),
 .song-item--disabled > .song-item__meta { opacity: 0.7; }
