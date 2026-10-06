@@ -8,7 +8,7 @@
 // half of the flow is exercised directly in tests/stores/history.test.js.)
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 const queueList = vi.fn()
@@ -110,5 +110,28 @@ describe('QueuePanel Sing → recordPlay', () => {
 
     expect(loadSong).toHaveBeenCalledWith({ id: 101 })
     expect(queueRemove).toHaveBeenCalledWith(1)
+  })
+})
+
+describe('play history dialog', () => {
+  it('opens as a named dialog on its search field; Escape closes it and returns to History', async () => {
+    wrapper = mount(QueuePanel, { attachTo: document.body })
+    const opener = wrapper.find('.queue-panel__history').element
+    opener.focus()
+    opener.click()
+    await flushPromises()
+
+    const dialog = document.querySelector('dialog.modal-overlay')
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(document.getElementById(dialog.getAttribute('aria-labelledby')).textContent).toBe('Play history')
+    expect(document.activeElement.classList.contains('history-modal__search')).toBe(true)
+
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(document.querySelector('dialog.modal-overlay')).toBeNull()
+    expect(document.activeElement).toBe(opener)
+    wrapper.unmount()
+    wrapper = null
+    document.body.innerHTML = ''
   })
 })
