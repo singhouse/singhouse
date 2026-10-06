@@ -653,7 +653,8 @@ async function start() {
     return onboardingSetup.preflight()
   })
   setupHandler('setup:status', () => onboardingSetup.getStatus())
-  setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
+  setupHandler('setup:pause', () => onboardingSetup.pause())
+  setupHandler('setup:cancel', () => onboardingSetup.stop())
   setupHandler('setup:modal-status', async () => {
     const status = await modalCredentials.status()
     let matchesLoaded = false

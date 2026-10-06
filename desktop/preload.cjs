@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   forgetModalConfig: () => ipcRenderer.invoke('setup:modal-forget'),
   getSetupStatus: () => ipcRenderer.invoke('setup:status'),
   startSetup: request => ipcRenderer.invoke('setup:start', request),
+  pauseSetup: () => ipcRenderer.invoke('setup:pause'),
   cancelSetup: () => ipcRenderer.invoke('setup:cancel'),
   restartApp: () => ipcRenderer.invoke('setup:restart'),
   openSetupHelp: topic => ipcRenderer.invoke('setup:help', topic),
