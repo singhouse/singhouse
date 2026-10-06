@@ -2,14 +2,16 @@
 // @vitest-environment happy-dom
 //
 // Contract for the single-song export dialog: format and audio are chosen
-// from option cards (Video is the default but not yet exportable), the
+// from option cards (Video is the default), the
 // attribution card is always requested and never a dialog setting, the
 // browser build saves the server-named file through an anchor, the desktop
 // build writes into a folder chosen through the host's picker, and "Save as
-// defaults" remembers the choices.
+// defaults" remembers the choices. A video export shows its progress with a
+// Cancel, and hands the finished file to the same destinations.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -17,6 +19,14 @@ import { dirname, resolve } from 'node:path'
 const getSettings = vi.fn()
 const setSettings = vi.fn()
 const exportSong = vi.fn()
+const openVideo = vi.fn()
+const finishVideo = vi.fn()
+const videoStatus = vi.fn()
+const videoFile = vi.fn()
+const cancelVideo = vi.fn()
+const putVideoFrames = vi.fn()
+const getSong = vi.fn()
+const renderVideo = vi.fn()
 
 vi.mock('@/api/client', () => ({
   default: { get: vi.fn(), post: vi.fn() },
@@ -24,10 +34,24 @@ vi.mock('@/api/client', () => ({
     getSettings: (...a) => getSettings(...a),
     setSettings: (...a) => setSettings(...a),
     exportSong: (...a) => exportSong(...a),
+    openVideo: (...a) => openVideo(...a),
+    finishVideo: (...a) => finishVideo(...a),
+    videoStatus: (...a) => videoStatus(...a),
+    videoFile: (...a) => videoFile(...a),
+    cancelVideo: (...a) => cancelVideo(...a),
+    putVideoFrames: (...a) => putVideoFrames(...a),
+  },
+  songApi: {
+    get: (...a) => getSong(...a),
   },
 }))
 
+vi.mock('@/export/videoRender.js', () => ({
+  renderVideo: (...a) => renderVideo(...a),
+}))
+
 import SongExportModal from '@/components/SongExportModal.vue'
+import { useHostSettings } from '@/stores/hostSettings'
 
 const SONG = { id: 7, title: 'Zither Blues', artist: 'Ackerman', status: 'ready' }
 const DEFAULTS_KEY = 'karaoke:exportDefaults'
@@ -96,7 +120,12 @@ beforeEach(() => {
   getSettings.mockReset()
   setSettings.mockReset()
   exportSong.mockReset()
+  for (const fn of [openVideo, finishVideo, videoStatus, videoFile, cancelVideo, putVideoFrames, getSong, renderVideo]) {
+    fn.mockReset()
+  }
+  cancelVideo.mockResolvedValue({})
   localStorage.clear()
+  setActivePinia(createPinia())
   delete window.karaokeDesktop
 
   savedAnchor = null
@@ -172,18 +201,218 @@ describe('layout', () => {
   })
 })
 
-describe('video format', () => {
-  it('disables Export while Video is selected and explains why', async () => {
-    wrapper = await openModal()
-    expect(confirmBtn().disabled).toBe(true)
-    expect(confirmBtn().getAttribute('title')).toBe('Video export is not available yet')
+const SESSION = 'AbCdEfGh_ij-KLmnOPqrstuvWXyz0123'
+const DETAIL = {
+  id: 7,
+  word_sync: { lines: [[{ text: 'Lorem', start: 0.5, end: 1.0 }]] },
+  stems: { karaoke: '/api/songs/7/stems/karaoke.flac', instrumental: '/api/songs/7/stems/instrumental.flac' },
+}
 
-    await choose('mp3g')
+function framesSession(frames = 90) {
+  openVideo.mockResolvedValue({ data: { session: SESSION, mode: 'frames', duration: frames / 30, frames_expected: frames } })
+  getSong.mockResolvedValue({ data: DETAIL })
+  finishVideo.mockResolvedValue({ data: { ready: true, filename: 'Ackerman - Zither Blues.mp4', bytes: 10 } })
+  videoFile.mockResolvedValue({
+    data: new Blob(['mp4-bytes']),
+    headers: { 'content-disposition': 'attachment; filename="Ackerman - Zither Blues.mp4"' },
+  })
+}
+
+// A renderer that runs until released, and behaves like the real one on
+// abort: it cancels the session and rejects with an AbortError.
+function heldRenderer() {
+  const held = {}
+  renderVideo.mockImplementation(options => new Promise((resolve, reject) => {
+    held.options = options
+    held.finish = resolve
+    options.signal.addEventListener('abort', async () => {
+      await options.api.cancel(options.session)
+      reject(new DOMException('Export cancelled', 'AbortError'))
+    })
+  }))
+  return held
+}
+
+function progressLine() {
+  return bodyEl('.export-progress__line')?.textContent.trim()
+}
+
+describe('video format', () => {
+  it('enables Export with Video selected and no unavailable note', async () => {
+    wrapper = await openModal()
+    expect(radio('video').checked).toBe(true)
     expect(confirmBtn().disabled).toBe(false)
     expect(confirmBtn().hasAttribute('title')).toBe(false)
+  })
 
-    await choose('video')
-    expect(confirmBtn().disabled).toBe(true)
+  it('renders the song with the chosen audio, backdrop and stage model, showing progress and Cancel', async () => {
+    framesSession(90)
+    const held = heldRenderer()
+    useHostSettings().backdrop = 'aurora'
+    wrapper = await openModal()
+    await choose('instrumental')
+    confirmBtn().click()
+    await flushPromises()
+
+    expect(openVideo).toHaveBeenCalledWith(7, { audio: 'instrumental' })
+    expect(getSong).toHaveBeenCalledWith(7)
+    const options = held.options
+    expect(options.session).toBe(SESSION)
+    expect(options.frameCount).toBe(90)
+    expect(options.backdrop).toBe('aurora')
+    expect(options.audioUrl).toBe('/api/songs/7/stems/instrumental.flac')
+    expect(options.model.pages.length).toBeGreaterThan(0)
+
+    expect(bodyEl('.export-form')).toBeNull()
+    expect(progressLine()).toBe('Rendering video… 0%')
+    expect(buttons().map(b => b.textContent.trim())).toEqual(['Cancel'])
+    expect(bodyEl('.modal__close')).toBeNull()
+
+    options.onProgress(0.427)
+    await flushPromises()
+    expect(progressLine()).toBe('Rendering video… 43%')
+    expect(bodyEl('[role="progressbar"]').getAttribute('aria-valuenow')).toBe('43')
+  })
+
+  it('Cancel sends DELETE for the session and returns to the form without an error', async () => {
+    framesSession()
+    const held = heldRenderer()
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(held.options).toBeTruthy()
+
+    button('Cancel').click()
+    await flushPromises()
+    expect(held.options.signal.aborted).toBe(true)
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(finishVideo).not.toHaveBeenCalled()
+    expect(bodyEl('.export-progress')).toBeNull()
+    expect(bodyEl('.export-form')).not.toBeNull()
+    expect(bodyEl('.export-error')).toBeNull()
+    expect(wrapper.emitted('close')).toBeFalsy()
+  })
+
+  it('Cancel while the video is being finished stops before anything is saved', async () => {
+    framesSession()
+    renderVideo.mockResolvedValue()
+    let finished
+    finishVideo.mockReturnValue(new Promise(resolve => { finished = resolve }))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(finishVideo).toHaveBeenCalledWith(SESSION)
+    expect(progressLine()).toBe('Rendering video… 0%')
+
+    button('Cancel').click()
+    await flushPromises()
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    finished({ data: { ready: true, filename: 'x.mp4', bytes: 1 } })
+    await flushPromises()
+
+    expect(videoFile).not.toHaveBeenCalled()
+    expect(savedAnchor).toBeNull()
+    expect(bodyEl('.export-progress')).toBeNull()
+    expect(bodyEl('.export-form')).not.toBeNull()
+    expect(bodyEl('.export-error')).toBeNull()
+    expect(wrapper.emitted('close')).toBeFalsy()
+  })
+
+  it('Escape cancels a running export', async () => {
+    framesSession()
+    const held = heldRenderer()
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(held.options.signal.aborted).toBe(true)
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(bodyEl('.export-form')).not.toBeNull()
+  })
+
+  it('in the browser, finishes, saves the server-named MP4 and removes the session', async () => {
+    framesSession()
+    const held = heldRenderer()
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    held.finish()
+    await flushPromises()
+
+    expect(finishVideo).toHaveBeenCalledWith(SESSION)
+    expect(videoFile).toHaveBeenCalledWith(SESSION)
+    expect(savedAnchor.getAttribute('download')).toBe('Ackerman - Zither Blues.mp4')
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(wrapper.emitted('close')).toBeTruthy()
+  })
+
+  it('shows the server refusal when the session cannot open', async () => {
+    openVideo.mockRejectedValue(Object.assign(new Error('No karaoke mix found for this song; try Instrumental'), { status: 409 }))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(bodyEl('.export-error').textContent).toBe('No karaoke mix found for this song; try Instrumental')
+    expect(renderVideo).not.toHaveBeenCalled()
+    expect(cancelVideo).not.toHaveBeenCalled()
+  })
+
+  it('removes the session when rendering fails', async () => {
+    framesSession()
+    renderVideo.mockRejectedValue(Object.assign(new Error('Expected frame 30, got 60'), { status: 409 }))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(bodyEl('.export-error').textContent).toBe('Expected frame 30, got 60')
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(finishVideo).not.toHaveBeenCalled()
+  })
+
+  it('a prepared video shows Preparing video… and waits for the session without rendering', async () => {
+    openVideo.mockResolvedValue({ data: { session: SESSION, mode: 'remux', ready: false } })
+    let ready
+    videoStatus.mockReturnValue(new Promise(resolve => { ready = resolve }))
+    videoFile.mockResolvedValue({ data: new Blob(['v']), headers: { 'content-disposition': 'attachment; filename="A - B.mp4"' } })
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+
+    expect(progressLine()).toBe('Preparing video…')
+    expect(document.body.textContent).not.toContain('Rendering video')
+    expect(renderVideo).not.toHaveBeenCalled()
+    expect(getSong).not.toHaveBeenCalled()
+    ready({ data: { state: 'ready', received: 0, frames_expected: 0, filename: 'A - B.mp4' } })
+    await flushPromises()
+    expect(videoStatus).toHaveBeenCalledWith(SESSION)
+    expect(finishVideo).not.toHaveBeenCalled()
+    expect(savedAnchor.getAttribute('download')).toBe('A - B.mp4')
+  })
+
+  it('shows no progress line until the session has opened', async () => {
+    let opened
+    openVideo.mockReturnValue(new Promise(resolve => { opened = resolve }))
+    videoStatus.mockReturnValue(new Promise(() => {}))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(bodyEl('.export-progress')).toBeNull()
+    opened({ data: { session: SESSION, mode: 'remux', ready: false } })
+    await flushPromises()
+    expect(progressLine()).toBe('Preparing video…')
+  })
+
+  it('cancelling a prepared video deletes its session', async () => {
+    openVideo.mockResolvedValue({ data: { session: SESSION, mode: 'remux', ready: false } })
+    videoStatus.mockResolvedValue({ data: { state: 'encoding', received: 0, frames_expected: 0 } })
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    button('Cancel').click()
+    await flushPromises()
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(videoFile).not.toHaveBeenCalled()
+    expect(bodyEl('.export-form')).not.toBeNull()
   })
 })
 
@@ -385,12 +614,62 @@ describe('desktop build', () => {
     expect(bridge.saveExportDefaults).not.toHaveBeenCalled()
   })
 
-  it('opens on Video with Export disabled when that is the stored default', async () => {
-    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/karaoke', format: 'video', audio: 'karaoke' })
+  it('writes a finished video through the host channel and shows the saved path', async () => {
+    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/exports', format: 'video', audio: 'karaoke' })
+    bridge.writeVideoExport = vi.fn().mockResolvedValue({ path: '/x/exports/Ackerman - Zither Blues.mp4' })
+    framesSession()
+    const held = heldRenderer()
     wrapper = await openModal()
     expect(radio('video').checked).toBe(true)
-    expect(confirmBtn().disabled).toBe(true)
+    await check(defaultsBox())
+    confirmBtn().click()
+    await flushPromises()
+    held.finish()
+    await flushPromises()
+
+    expect(finishVideo).toHaveBeenCalledWith(SESSION)
+    expect(bridge.writeVideoExport).toHaveBeenCalledWith({ session: SESSION })
     expect(bridge.exportSong).not.toHaveBeenCalled()
+    expect(videoFile).not.toHaveBeenCalled()
+    expect(savedAnchor).toBeNull()
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(bridge.saveExportDefaults).toHaveBeenCalledWith({ format: 'video', audio: 'karaoke' })
+    expect(bodyEl('.modal__body').textContent.trim()).toBe('/x/exports/Ackerman - Zither Blues.mp4')
+    expect(buttons().map(b => b.textContent.trim())).toEqual(['Done'])
+  })
+
+  it('Cancel while the video is being finished does not write through the host', async () => {
+    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/exports', format: 'video', audio: 'karaoke' })
+    bridge.writeVideoExport = vi.fn()
+    framesSession()
+    renderVideo.mockResolvedValue()
+    let finished
+    finishVideo.mockReturnValue(new Promise(resolve => { finished = resolve }))
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    button('Cancel').click()
+    await flushPromises()
+    finished({ data: { ready: true, filename: 'x.mp4', bytes: 1 } })
+    await flushPromises()
+
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
+    expect(bridge.writeVideoExport).not.toHaveBeenCalled()
+    expect(bodyEl('.export-form')).not.toBeNull()
+    expect(bodyEl('.modal__body').textContent).not.toContain('x.mp4')
+  })
+
+  it('shows the host error when the video write fails', async () => {
+    bridge.getExportDefaults.mockResolvedValue({ folder: '/x/exports', format: 'video', audio: 'karaoke' })
+    bridge.writeVideoExport = vi.fn().mockRejectedValue(new Error(
+      "Error invoking remote method 'export:write-video': Error: Could not create the export folder: denied"))
+    framesSession()
+    renderVideo.mockResolvedValue()
+    wrapper = await openModal()
+    confirmBtn().click()
+    await flushPromises()
+    expect(bodyEl('.export-error').textContent).toBe('Could not create the export folder: denied')
+    expect(cancelVideo).toHaveBeenCalledWith(SESSION)
   })
 
   it('shows the host error without the IPC prefix and keeps the form', async () => {
