@@ -68,6 +68,7 @@ async function exercise(phase, intentionalQuit, failure = 'renderer') {
     quitting: false, shutdownComplete: false, updateOperation: null,
     installation: null, heartSetup: null, onboardingSetup: null,
     modalCheckController: null, processingOperation: null, projector: null,
+    closeGuard: { armed: false, release() {} },
     startupHandoff: { state: 'awaiting-presentation' },
     updates: { completeStartup(value) {
       calls.push('complete-startup')
