@@ -380,11 +380,35 @@
     <Modal :visible="plexOpen" size="lg" @close="plexOpen = false">
       <PlexImportModal v-if="plexOpen" />
     </Modal>
+
+    <!-- The one confirmation shown before an action interrupts the song that
+         is playing (usePlayGuard). Enter presses the focused primary button;
+         Escape cancels. -->
+    <Modal :visible="!!playGuard.pending.value" :closable="false" @close="playGuard.cancel()">
+      <div
+        v-if="playGuard.pending.value"
+        ref="playGuardDialog"
+        class="play-guard"
+        role="alertdialog"
+        aria-modal="true"
+        aria-describedby="play-guard-message"
+        tabindex="-1"
+        @focusout="onPlayGuardFocusOut"
+      >
+        <p id="play-guard-message" class="play-guard__message">{{ playGuardMessage }}</p>
+        <div class="play-guard__actions">
+          <Button variant="ghost" @click="playGuard.cancel()">Cancel</Button>
+          <Button ref="playGuardPrimary" variant="primary" @click="playGuard.confirm()">
+            {{ playGuard.pending.value.kind === 'pause' ? 'Pause' : 'Load' }}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSongsStore } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
@@ -407,6 +431,8 @@ import ScreenStage from '@/components/ScreenStage.vue'
 import UploadZone from '@/components/UploadZone.vue'
 import PlexImportModal from '@/components/PlexImportModal.vue'
 import Modal from '@/components/ui/Modal.vue'
+import Button from '@/components/ui/Button.vue'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 import { useFeaturesStore } from '@/stores/features'
 import DesktopOnboarding from '@/components/DesktopOnboarding.vue'
 import { useHistoryStore } from '@/stores/history'
@@ -903,6 +929,89 @@ const apiStatusLabel = computed(() => ({
   offline: 'Backend offline'
 }[apiStatus.value]))
 
+// Play guard confirmation: the primary button takes focus so Enter confirms,
+// Escape cancels from anywhere, and focus goes back where it was afterwards.
+const playGuard = usePlayGuard()
+const playGuardPrimary = ref(null)
+const playGuardDialog = ref(null)
+const playGuardMessage = computed(() => {
+  const p = playGuard.pending.value
+  if (!p) return ''
+  return p.kind === 'pause'
+    ? 'Pause the current song?'
+    : `Stop the current song and load “${p.title}”?`
+})
+let playGuardReturnFocus = null
+function onPlayGuardKey(e) {
+  if (e.key !== 'Escape') return
+  e.preventDefault()
+  e.stopPropagation()
+  playGuard.cancel()
+}
+
+// Keys currently held down. Some browsers press the focused button on the
+// keyup of Space, so a prompt opened by a key press must not move focus onto
+// its primary button until that key is released.
+const heldKeys = new Set()
+function onAnyKeyDown(e) { heldKeys.add(e.code || e.key) }
+function onAnyKeyUp(e) { heldKeys.delete(e.code || e.key) }
+function onWindowBlur() { heldKeys.clear() }
+let pendingPrimaryFocus = null
+function cancelPrimaryFocus() {
+  if (!pendingPrimaryFocus) return
+  window.removeEventListener('keyup', pendingPrimaryFocus, true)
+  pendingPrimaryFocus = null
+}
+function focusPlayGuardPrimary() {
+  cancelPrimaryFocus()
+  if (heldKeys.size === 0) {
+    playGuardPrimary.value?.$el?.focus?.()
+    return
+  }
+  // Until then the dialog itself holds focus; Space there does nothing.
+  playGuardDialog.value?.focus?.()
+  pendingPrimaryFocus = () => {
+    if (heldKeys.size > 0) return
+    cancelPrimaryFocus()
+    if (playGuard.pending.value) playGuardPrimary.value?.$el?.focus?.()
+  }
+  window.addEventListener('keyup', pendingPrimaryFocus, true)
+}
+// A click on the overlay or the message must not drop focus to the page,
+// where Space is play/pause again.
+function onPlayGuardFocusOut(e) {
+  const dialogEl = playGuardDialog.value
+  if (!dialogEl || (e.relatedTarget && dialogEl.contains(e.relatedTarget))) return
+  setTimeout(() => {
+    if (!playGuard.pending.value || !dialogEl.isConnected) return
+    const active = document.activeElement
+    if (!active || active === document.body || !dialogEl.contains(active)) dialogEl.focus()
+  })
+}
+
+watch(() => playGuard.pending.value, async (p, prev) => {
+  if (p && !prev) {
+    playGuardReturnFocus = document.activeElement
+    window.addEventListener('keydown', onPlayGuardKey, true)
+  } else if (!p && prev) {
+    cancelPrimaryFocus()
+    window.removeEventListener('keydown', onPlayGuardKey, true)
+    const el = playGuardReturnFocus
+    playGuardReturnFocus = null
+    if (el && el.isConnected && typeof el.focus === 'function') el.focus()
+    return
+  }
+  if (!p) return
+  await nextTick()
+  if (playGuard.pending.value) focusPlayGuardPrimary()
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', onAnyKeyDown, true)
+  window.addEventListener('keyup', onAnyKeyUp, true)
+  window.addEventListener('blur', onWindowBlur)
+})
+
 let healthInterval = null
 
 onMounted(async () => {
@@ -926,6 +1035,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onVResizeMove)
   window.removeEventListener('mouseup', stopVResize)
   window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onPlayGuardKey, true)
+  window.removeEventListener('keydown', onAnyKeyDown, true)
+  window.removeEventListener('keyup', onAnyKeyUp, true)
+  window.removeEventListener('blur', onWindowBlur)
+  cancelPrimaryFocus()
+  playGuard.cancel()
 })
 
 watch(() => store.currentSong?.id, (id) => {
@@ -1289,6 +1404,19 @@ async function checkApiHealth() {
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .welcome__cta { margin-top: 0.5rem; padding: 0.7rem 1.75rem; font-size: 1rem; }
+
+.play-guard:focus { outline: none; }
+.play-guard__message {
+  margin: 0 0 1.25rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.play-guard__actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
 
 .upload-modal__title {
   display: flex; align-items: center; gap: 0.6rem;

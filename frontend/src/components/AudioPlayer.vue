@@ -120,6 +120,7 @@ import { useSongsStore } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
 import { usePlayerStore } from '@/stores/player'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const props = defineProps({
   song: { type: Object, required: true }
@@ -137,6 +138,7 @@ const store = useSongsStore()
 const songTools = useSongToolsStore()
 const features = useFeaturesStore()
 const player = usePlayerStore()
+const playGuard = usePlayGuard()
 const engine = useAudioEngine()
 
 function endedInfo(reason) {
@@ -497,7 +499,13 @@ function handleKeyboard(e) {
     case 'Space':
       if (spaceBelongsElsewhere(e)) return
       e.preventDefault()
-      togglePlayPause()
+      // A stray Space must not stop the song mid-show: pausing asks first,
+      // resuming does not. The transport button stays unguarded.
+      if (engine.playerState.value === 'playing') {
+        playGuard.guard(() => engine.pause(), { kind: 'pause' })
+      } else {
+        togglePlayPause()
+      }
       break
     case 'ArrowLeft':
       e.preventDefault()
