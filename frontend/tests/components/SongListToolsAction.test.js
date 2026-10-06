@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // @vitest-environment happy-dom
 //
-// The library row's way into Song tools.
+// The library row's way into Song tools, through the row's ⋯ menu.
 //
 // It is offered for EVERY status on purpose: a processing song's progress and
 // a failed song's error (and its retry) are the two states that most need a
@@ -50,8 +50,18 @@ async function mountList() {
   return w
 }
 
-function toolsButtons() {
-  return wrapper.findAll('.action-btn--tools')
+// The row ⋯ menu teleports to <body>; find its panel through the trigger.
+async function openRowMenu(i) {
+  const btn = wrapper.findAll('.song-item .more-btn')[i]
+  await btn.trigger('click')
+  await flushPromises()
+  return document.getElementById(btn.attributes('aria-controls'))
+}
+
+async function pickTools(i) {
+  const panel = await openRowMenu(i)
+  panel.querySelector('.row-menu__tools').click()
+  await flushPromises()
 }
 
 beforeEach(() => {
@@ -64,12 +74,18 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount()
   wrapper = null
+  document.body.innerHTML = ''
 })
 
 describe('the row’s Song tools action', () => {
   it('is offered for ready, processing AND failed songs alike', async () => {
     wrapper = await mountList()
-    expect(toolsButtons()).toHaveLength(3)
+    for (const i of [0, 1, 2]) {
+      const panel = await openRowMenu(i)
+      expect(panel.querySelector('.row-menu__tools')).not.toBeNull()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushPromises()
+    }
   })
 
   it('opens the panel on that song without loading it onto the deck', async () => {
@@ -80,7 +96,7 @@ describe('the row’s Song tools action', () => {
 
     // The failed row: it cannot be played at all, which is exactly why the
     // panel has to be reachable from here.
-    await toolsButtons()[2].trigger('click')
+    await pickTools(2)
 
     expect(tools.songId).toBe(3)
     expect(loadSong).not.toHaveBeenCalled()
@@ -90,9 +106,9 @@ describe('the row’s Song tools action', () => {
     wrapper = await mountList()
     const tools = useSongToolsStore()
 
-    await toolsButtons()[0].trigger('click')
+    await pickTools(0)
     expect(tools.songId).toBe(1)
-    await toolsButtons()[0].trigger('click')
+    await pickTools(0)
     expect(tools.songId).toBeNull()
   })
 
@@ -100,8 +116,8 @@ describe('the row’s Song tools action', () => {
     wrapper = await mountList()
     const tools = useSongToolsStore()
 
-    await toolsButtons()[0].trigger('click')
-    await toolsButtons()[1].trigger('click')
+    await pickTools(0)
+    await pickTools(1)
 
     expect(tools.songId).toBe(2)
   })
