@@ -80,17 +80,77 @@ test('managed descriptor is not read before signed Mac bundle verification', asy
   const read = path => { reads.push(path); return path.endsWith('signed-release.json') ? marker : '{"identity":"forged"}' }
   const args = { platform: 'darwin', resourcesPath: '/tmp/Singhouse.app/Contents/Resources', applicationRoot: '/tmp',
     exists: () => true, read }
-  await assert.rejects(inspectInstalledLaunchBoundary({ ...args, verify: async () => { throw new Error('untrusted app') } }), /untrusted app/)
+  await assert.rejects(inspectInstalledLaunchBoundary({ ...args, verify: async () => { throw new Error('untrusted app') } }), /failed its code signature check/)
   assert.deepEqual(reads, ['/tmp/Singhouse.app/Contents/Resources/signed-release.json'])
   let checked
-  await assert.rejects(inspectInstalledLaunchBoundary({ ...args, verify: async (path, checkedMarker) => { checked = [path, checkedMarker.teamId] } }), /cannot accept adjacent managed-slot metadata/)
-  assert.deepEqual(checked, ['/tmp/Singhouse.app', environment.SINGHOUSE_MAC_TEAM_ID])
+  await assert.rejects(inspectInstalledLaunchBoundary({ ...args, verify: async (path, checkedMarker, options) => { checked = [path, checkedMarker.teamId, options] } }), /cannot accept adjacent managed-slot metadata/)
+  assert.deepEqual(checked, ['/tmp/Singhouse.app', environment.SINGHOUSE_MAC_TEAM_ID, { strict: false }])
   assert.deepEqual(reads, [
     '/tmp/Singhouse.app/Contents/Resources/signed-release.json',
     '/tmp/Singhouse.app/Contents/Resources/signed-release.json',
   ])
   const unsigned = await inspectInstalledLaunchBoundary({ ...args, platform: 'linux' })
   assert.equal(unsigned.portableBytes, '{"identity":"forged"}')
+})
+
+test('build-path Developer ID verification keeps exact strict arguments by default', async () => {
+  const selected = macSigningSelection(environment), calls = []
+  const run = async (_command, args) => {
+    calls.push(args)
+    return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
+  }
+  const requirement = `=${developerIdRequirement(selected.teamId)}`
+  await verifyDeveloperId('/tmp/Singhouse.app', selected, run)
+  await verifyDeveloperId('/tmp/Singhouse.app', selected, run, { deep: true })
+  assert.deepEqual(calls, [
+    ['--verify', '--strict', '--verbose=2', '-R', requirement, '/tmp/Singhouse.app'],
+    ['--display', '--verbose=4', '/tmp/Singhouse.app'],
+    ['--verify', '--deep', '--strict', '--verbose=2', '-R', requirement, '/tmp/Singhouse.app'],
+    ['--display', '--verbose=4', '/tmp/Singhouse.app'],
+  ])
+})
+
+test('non-strict application verification omits --strict everywhere but keeps deep, requirement, and nested walk', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'mac-lenient-'))
+  try {
+    await writeFile(resolve(root, 'nested.dylib'), Buffer.from('cafebabe', 'hex'))
+    const calls = []
+    const selected = macSigningSelection(environment)
+    const requirement = `=${developerIdRequirement(selected.teamId)}`
+    await verifySignedMacApplication(root, selected, async (_command, args) => {
+      calls.push(args)
+      return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
+    }, { strict: false })
+    assert.deepEqual(calls, [
+      ['--verify', '--deep', '--verbose=2', '-R', requirement, root],
+      ['--display', '--verbose=4', root],
+      ['--verify', '-R', requirement, resolve(root, 'nested.dylib')],
+    ])
+    assert.ok(calls.every(args => !args.includes('--strict')))
+    calls.length = 0
+    await verifySignedMacApplication(root, selected, async (_command, args) => {
+      calls.push(args)
+      return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
+    })
+    assert.deepEqual(calls.filter(args => args[0] === '--verify').map(args => args.includes('--strict')), [true, true])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('launch-boundary verification failure is actionable and keeps the detail as cause', async t => {
+  const marker = `${canonicalJson(signedMacMarker(macSigningSelection(environment)))}\n`
+  const original = new Error('/usr/bin/codesign --verify --deep --verbose=2 -R =anchor apple generic /Applications/Singhouse.app: resource fork, Finder information, or similar detritus not allowed')
+  const logged = []
+  t.mock.method(console, 'error', (...values) => { logged.push(values.join(' ')) })
+  let options
+  const error = await inspectInstalledLaunchBoundary({ platform: 'darwin', resourcesPath: '/tmp/Singhouse.app/Contents/Resources', applicationRoot: '/tmp',
+    exists: path => path.endsWith('signed-release.json'), read: () => marker,
+    verify: async (_path, _marker, checkedOptions) => { options = checkedOptions; throw original } }).then(() => null, value => value)
+  assert.ok(error instanceof Error)
+  assert.deepEqual(options, { strict: false })
+  assert.equal(error.message, 'This copy of the application failed its code signature check. Delete it, download the application again, and move the new copy into your Applications folder.')
+  assert.doesNotMatch(error.message, /codesign|--verify|anchor apple|\/Applications|\/tmp/)
+  assert.equal(error.cause, original)
+  assert.ok(logged.some(line => line.includes(original.message)))
 })
 
 test('full application verification deeply checks outer app and pins nested code', async () => {
@@ -249,4 +309,26 @@ test('notarization command failures expose no subprocess details and keep accept
     if (failure === 'staple') assert.match(messages.at(-1), /but stapling failed/)
     if (failure === 'validate') assert.match(messages.at(-1), /but ticket validation failed/)
   }
+})
+
+test('default launch verifier runs non-strict codesign against the real bundle path', async () => {
+  const selected = macSigningSelection(environment), calls = []
+  const root = await mkdtemp(resolve(tmpdir(), 'mac-launch-default-'))
+  try {
+    const bundle = resolve(root, 'Singhouse.app'), resourcesPath = resolve(bundle, 'Contents', 'Resources')
+    await mkdir(resourcesPath, { recursive: true })
+    const marker = `${canonicalJson(signedMacMarker(selected))}\n`
+    await writeFile(resolve(resourcesPath, 'signed-release.json'), marker)
+    const run = async (command, args) => {
+      calls.push([command, args])
+      return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
+    }
+    const result = await inspectInstalledLaunchBoundary({ platform: 'darwin', resourcesPath, applicationRoot: root, run })
+    assert.deepEqual(result, { marker: inspectSignedMacMarker(marker), portableBytes: null })
+    const requirement = `=${developerIdRequirement(selected.teamId)}`
+    assert.deepEqual(calls, [
+      ['/usr/bin/codesign', ['--verify', '--deep', '--verbose=2', '-R', requirement, bundle]],
+      ['/usr/bin/codesign', ['--display', '--verbose=4', bundle]],
+    ])
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

@@ -200,7 +200,7 @@ async function platformTrust({ root: applicationRoot, manifest }) {
     const parts = manifest.entrypoint.split('/'), end = parts.findIndex(part => part.endsWith('.app'))
     if (end < 0) return false
     return new Promise(resolveTrust => {
-      const check = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', resolve(applicationRoot, ...parts.slice(0, end + 1))], { stdio: 'ignore' })
+      const check = spawn('/usr/bin/codesign', ['--verify', '--deep', resolve(applicationRoot, ...parts.slice(0, end + 1))], { stdio: 'ignore' })
       check.once('error', () => resolveTrust(false)); check.once('exit', code => resolveTrust(code === 0))
     })
   }
@@ -223,7 +223,7 @@ async function verifiedFirstInstallerPlatformTrust() {
   }
   if (!releasePolicy.platformTrust?.[process.platform]?.enabled) return { verified: false }
   if (process.platform === 'darwin') return new Promise(resolveTrust => {
-    const check = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
+    const check = spawn('/usr/bin/codesign', ['--verify', '--deep', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
     check.once('error', () => resolveTrust({ verified: false })); check.once('exit', code => resolveTrust({ verified: code === 0 }))
   })
   // The installed application can be verified above, but Windows does not

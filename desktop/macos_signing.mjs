@@ -57,12 +57,16 @@ export function inspectSignedMacMarker(raw) {
 // signed bundle before even reading that descriptor so adding portable.json
 // cannot turn a first installer into an unchecked managed slot.
 export async function inspectInstalledLaunchBoundary({ platform, resourcesPath, applicationRoot,
-  exists = existsSync, read = readFileSync, verify = verifySignedMacApplication }) {
+  exists = existsSync, read = readFileSync, run = execFile,
+  verify = (bundle, marker, options) => verifySignedMacApplication(bundle, marker, run, options) }) {
   const markerPath = resolve(resourcesPath, 'signed-release.json')
   let marker = null
   if (platform === 'darwin' && exists(markerPath)) {
     marker = inspectSignedMacMarker(read(markerPath, 'utf8'))
-    await verify(resolve(resourcesPath, '../..'), marker)
+    try { await verify(resolve(resourcesPath, '../..'), marker, { strict: false }) } catch (error) {
+      console.error(`macOS launch signature verification failed: ${error?.message ?? error}`)
+      throw new Error('This copy of the application failed its code signature check. Delete it, download the application again, and move the new copy into your Applications folder.', { cause: error })
+    }
   }
   const portablePath = resolve(applicationRoot, 'portable.json')
   const portableExists = exists(portablePath)
@@ -85,9 +89,15 @@ export async function isMachO(path) {
   } finally { await file.close() }
 }
 
-export async function verifyDeveloperId(path, selection, run = execFile, { deep = false } = {}) {
+// Packaging verifies strictly before publication. Launch verification passes
+// strict: false so Finder or sync metadata added to an installed bundle does
+// not block a validly signed app, as Gatekeeper also tolerates it. codesign's
+// --strict additionally rejects unsealed bundle-root or framework-root
+// structure and special or unreadable entries; those are accepted at launch
+// because the seal, --deep, and the pinned requirement still cover all code.
+export async function verifyDeveloperId(path, selection, run = execFile, { deep = false, strict = true } = {}) {
   const requirement = developerIdRequirement(selection.teamId)
-  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), '--strict', '--verbose=2', '-R', `=${requirement}`, path])
+  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), ...(strict ? ['--strict'] : []), '--verbose=2', '-R', `=${requirement}`, path])
   const { stderr = '', stdout = '' } = await run('/usr/bin/codesign', ['--display', '--verbose=4', path])
   const details = `${stdout}\n${stderr}`
   if (!details.split('\n').includes(`TeamIdentifier=${selection.teamId}`) ||
@@ -100,8 +110,8 @@ export async function verifyDeveloperId(path, selection, run = execFile, { deep 
 
 const nestedCodeBundle = /\.(?:app|framework|xpc|appex|plugin|bundle)$/i
 
-export async function verifySignedMacApplication(bundle, selection, run = execFile) {
-  await verifyDeveloperId(bundle, selection, run, { deep: true })
+export async function verifySignedMacApplication(bundle, selection, run = execFile, { strict = true } = {}) {
+  await verifyDeveloperId(bundle, selection, run, { deep: true, strict })
   const nested = []
   async function walk(directory) {
     for (const name of await readdir(directory)) {
@@ -116,7 +126,7 @@ export async function verifySignedMacApplication(bundle, selection, run = execFi
   await walk(bundle)
   const requirement = developerIdRequirement(selection.teamId)
   for (const path of nested) {
-    await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${requirement}`, path])
+    await run('/usr/bin/codesign', ['--verify', ...(strict ? ['--strict'] : []), '-R', `=${requirement}`, path])
   }
   return true
 }

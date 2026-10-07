@@ -368,7 +368,7 @@ async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
   if (anchor.platform === 'linux') return false
   const command = anchor.platform === 'darwin' ? '/usr/bin/codesign' : 'powershell.exe'
   const args = anchor.platform === 'darwin'
-    ? ['--verify', '--deep', '--strict', anchor.executablePath]
+    ? ['--verify', '--deep', anchor.executablePath]
     : ['-NoProfile', '-NonInteractive', '-Command', `(Get-AuthenticodeSignature -LiteralPath '${anchor.executablePath.replaceAll("'", "''")}').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }`]
   return new Promise(resolveTrust => {
     const child = spawnImpl(command, args, { stdio: 'ignore', windowsHide: true })
@@ -506,7 +506,7 @@ async function main(args) {
     if (process.platform === 'darwin') {
       const app = manifest.entrypoint.split('/').slice(0, manifest.entrypoint.split('/').findIndex(part => part.endsWith('.app')) + 1)
       return new Promise(resolveTrust => {
-        const child = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', join(root, ...app)], { stdio: 'ignore' })
+        const child = spawn('/usr/bin/codesign', ['--verify', '--deep', join(root, ...app)], { stdio: 'ignore' })
         child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
       })
     }
