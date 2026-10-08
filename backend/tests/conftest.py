@@ -44,6 +44,11 @@ os.environ["KARAOKE_PROVIDERS"] = "none"
 # would otherwise pick multi_user.
 os.environ.setdefault("AUTH_MODE", "single_host")
 
+# The acoustic word-timing stage defaults ON and would spawn the processing
+# Python (GPU models) from any test that aligns with a lyrics reference. Its
+# own tests switch it back on with a fake aligner.
+os.environ["KARAOKE_ACOUSTIC_ALIGNMENT"] = "0"
+
 _tmp_uploads = tempfile.mkdtemp()
 _tmp_stems = tempfile.mkdtemp()
 os.environ["UPLOADS_DIR"] = _tmp_uploads

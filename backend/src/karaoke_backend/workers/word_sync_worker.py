@@ -30,12 +30,19 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
-from lyricsync import PipelineConfig, SyncPipeline
+from lyricsync import CtcFusionAligner, PipelineConfig, SyncPipeline
+from lyricsync.alignment.ctc_aligner import ENGINE as ACOUSTIC_ENGINE
+from lyricsync.alignment.ctc_aligner import METADATA_KEY as ACOUSTIC_METADATA_KEY
 from lyricsync.transcription import FasterWhisperTranscriber, HeartTranscriber
 
 from karaoke_backend import plugins
 from karaoke_backend.workers import modal_offload, transcription_cache
-from karaoke_backend.workers.managed_processing import accelerator_device, require_selected_models
+from karaoke_backend.workers.managed_processing import (
+    InvalidAttestation,
+    accelerator_device,
+    require_selected_models,
+    validated_attestation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +67,138 @@ DEMUCS_PYTHON = Path(
     )
 )
 HEART_SCRIPT = Path(__file__).resolve().parent / "heart_transcriptor.py"
+
+# ── Acoustic word timing ──────────────────────────────────────────────────
+# A final lyricsync stage that re-times every word against the vocal audio
+# with several CTC acoustic models, run in the same processing Python as the
+# Heart transcriber. It only rewrites word start/end and falls back to the
+# existing timing on any failure; the outcome is recorded in the lyric set's
+# metadata under ``acoustic_alignment``.
+ACOUSTIC_ENV = "KARAOKE_ACOUSTIC_ALIGNMENT"          # default on; 0/false/off disables
+ACOUSTIC_CPU_ENV = "KARAOKE_ACOUSTIC_ALIGNMENT_CPU"  # default off: CUDA only
+ACOUSTIC_TIMEOUT_ENV = "KARAOKE_ACOUSTIC_ALIGNMENT_TIMEOUT"
+# Generous because the first run downloads the model weights (~7.5 GB)
+# inside the worker call; a warm run takes a small fraction of this.
+ACOUSTIC_DEFAULT_TIMEOUT = 3600
+ACOUSTIC_REF_MODES = frozenset({"plain", "synced"})
+ACOUSTIC_PROGRESS_MESSAGE = "Aligning words to the vocals"
+# Backing-vocal stem summed with the lead for alignment (preference order).
+_BACKING_STEM_EXTS = (".flac", ".wav", ".mp3")
+_FALSE_VALUES = {"0", "false", "off", "no"}
+_TRUE_VALUES = {"1", "true", "on", "yes"}
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if raw in _FALSE_VALUES:
+        return False
+    if raw in _TRUE_VALUES:
+        return True
+    return default
+
+
+def _ref_mode(plain_lyrics: Optional[str], synced_lyrics: Optional[str]) -> str:
+    return "synced" if synced_lyrics else "plain" if plain_lyrics else "none"
+
+
+def acoustic_disabled_reason(ref_mode: str) -> Optional[str]:
+    """Why the acoustic stage will not run for this request, or None if it will.
+
+    A run that passes these rules can still fall back at run time (no CUDA
+    without ``KARAOKE_ACOUSTIC_ALIGNMENT_CPU``, missing processing Python,
+    worker error); that reason is recorded by the stage itself.
+    """
+    if ref_mode not in ACOUSTIC_REF_MODES:
+        return f"not enabled for reference mode {ref_mode!r}"
+    if not _env_flag(ACOUSTIC_ENV, True):
+        return f"disabled by {ACOUSTIC_ENV}"
+    try:
+        managed = validated_attestation() is not None
+    except InvalidAttestation:
+        managed = True
+    if managed:
+        return "the managed desktop processing runtime does not include the acoustic models"
+    return None
+
+
+def alignment_audio_paths(vocals_path: str) -> tuple[str, list[str]]:
+    """``(primary, extras)`` audio for the acoustic stage.
+
+    The transcriber hears the lead-vocals stem only; alignment hears lead plus
+    backing, so words sung by backing voices still have audio to align to. A
+    full ``vocals.*`` stem (or any other stem) is used alone.
+    """
+    path = Path(vocals_path)
+    if path.stem != "lead_vocals":
+        return str(path), []
+    for ext in _BACKING_STEM_EXTS:
+        backing = path.with_name(f"backing_vocals{ext}")
+        if backing.exists():
+            return str(path), [str(backing)]
+    return str(path), []
+
+
+class _ReportingAligner:
+    """Wraps an aligner to report a progress message when the stage starts."""
+
+    def __init__(self, inner, progress_fn: Optional[Callable[[str], None]]):
+        self._inner = inner
+        self._progress_fn = progress_fn
+
+    def align_words(self, audio_paths, words):
+        if self._progress_fn is not None:
+            try:
+                self._progress_fn(ACOUSTIC_PROGRESS_MESSAGE)
+            except Exception as exc:  # noqa: BLE001 — progress must not fail the stage
+                logger.warning("Could not report acoustic alignment progress: %s", exc)
+        return self._inner.align_words(audio_paths, words)
+
+
+def _acoustic_timeout() -> int:
+    raw = os.getenv(ACOUSTIC_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        logger.warning("Ignoring invalid %s=%r", ACOUSTIC_TIMEOUT_ENV, raw)
+    return ACOUSTIC_DEFAULT_TIMEOUT
+
+
+def _make_acoustic_aligner(
+    *,
+    cancel_event: threading.Event | None,
+    progress_fn: Optional[Callable[[str], None]] = None,
+):
+    aligner = CtcFusionAligner(
+        python_path=DEMUCS_PYTHON,
+        allow_cpu=_env_flag(ACOUSTIC_CPU_ENV, False),
+        cancel_event=cancel_event,
+        timeout=_acoustic_timeout(),
+    )
+    return _ReportingAligner(aligner, progress_fn)
+
+
+def _acoustic_setup(
+    pipeline_config: Optional[PipelineConfig],
+    ref_mode: str,
+    *,
+    cancel_event: threading.Event | None,
+    progress_fn: Optional[Callable[[str], None]],
+):
+    """``(effective_config, aligner_or_None, disabled_reason_or_None)``.
+
+    The backend owns the enablement decision: the stored ``pipeline_config``
+    shows whether the stage was asked to run for this set.
+    """
+    pipeline_config = pipeline_config or PipelineConfig()
+    reason = acoustic_disabled_reason(ref_mode)
+    if reason is not None:
+        return dataclasses.replace(pipeline_config, acoustic_alignment=False), None, reason
+    aligner = _make_acoustic_aligner(cancel_event=cancel_event, progress_fn=progress_fn)
+    return dataclasses.replace(pipeline_config, acoustic_alignment=True), aligner, None
 
 
 def available_models() -> set[str]:
@@ -219,6 +358,7 @@ def _make_pipeline(
     correction_progress_fn=None,
     allow_temperature_fallback: bool = False,
     cancel_event: threading.Event | None = None,
+    acoustic_aligner=None,
 ) -> SyncPipeline:
     """Build a configured SyncPipeline.
 
@@ -236,6 +376,7 @@ def _make_pipeline(
     return SyncPipeline(
         transcriber=transcriber, config=cfg,
         correction_progress_fn=correction_progress_fn,
+        acoustic_aligner=acoustic_aligner,
     )
 
 
@@ -257,9 +398,14 @@ def _result_to_dict(
     synced_lyrics: Optional[str],
     pipeline_config: PipelineConfig,
     allow_temperature_fallback: bool,
+    acoustic_disabled: Optional[str] = None,
 ) -> dict:
-    """Shape a SyncResult into the word_data dict the orchestrator expects."""
-    ref_mode = "synced" if synced_lyrics else "plain" if plain_lyrics else "none"
+    """Shape a SyncResult into the word_data dict the orchestrator expects.
+
+    Per-word dicts stay ``{text, start, end}``; the acoustic stage's record
+    (including its low-confidence word indices) lives only in the metadata.
+    """
+    ref_mode = _ref_mode(plain_lyrics, synced_lyrics)
 
     lines_as_dicts = [
         [{"text": w.text, "start": w.start, "end": w.end} for w in line]
@@ -270,6 +416,17 @@ def _result_to_dict(
     # The stored metadata is user-visible; a bearer token must never land
     # in the DB no matter how the config reached us.
     cfg_dict.get("correction", {}).pop("api_key", None)
+
+    extra = dict(result.metadata.extra)
+    if acoustic_disabled is not None and ACOUSTIC_METADATA_KEY not in extra:
+        extra[ACOUSTIC_METADATA_KEY] = {
+            "engine": ACOUSTIC_ENGINE,
+            "enabled": False,
+            "applied": False,
+            "reason": acoustic_disabled,
+        }
+    elif isinstance(extra.get(ACOUSTIC_METADATA_KEY), dict):
+        extra[ACOUSTIC_METADATA_KEY] = {"enabled": True, **extra[ACOUSTIC_METADATA_KEY]}
 
     return {
         "segments": result.segments,
@@ -293,7 +450,7 @@ def _result_to_dict(
             # point of pinning the first pass to greedy.
             "temperature_fallback": bool(allow_temperature_fallback),
             "pipeline_config": cfg_dict,
-            **result.metadata.extra,
+            **extra,
         },
     }
 
@@ -350,6 +507,7 @@ def _run_blocking(
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
     cancel_event: threading.Event | None = None,
+    stage_progress_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Cache-aware transcribe-then-align (synchronous core).
 
@@ -362,6 +520,10 @@ def _run_blocking(
 
     ``cache_write_guard`` is an optional last-moment liveness check consulted
     just before the cache write (see :func:`_may_write_cache`).
+
+    The acoustic word-timing stage (when enabled) runs inside ``align_only``
+    on every run, after the cache read/write, so the cache keeps storing the
+    raw transcription. ``stage_progress_fn(message)`` is called when it starts.
     """
     if not Path(vocals_path).exists():
         logger.warning("Vocals stem not found: %s", vocals_path)
@@ -382,11 +544,17 @@ def _run_blocking(
         )
     else:
         cached = transcription_cache.load(cache_file) if cache_file else None
+    pipeline_config, acoustic_aligner, acoustic_disabled = _acoustic_setup(
+        pipeline_config, _ref_mode(plain_lyrics, synced_lyrics),
+        cancel_event=cancel_event, progress_fn=stage_progress_fn,
+    )
+    align_audio, extra_audio = alignment_audio_paths(vocals_path)
     pipeline = _make_pipeline(
         whisper_model, use_vad=use_vad, config=pipeline_config,
         correction_progress_fn=correction_progress_fn,
         allow_temperature_fallback=allow_temperature_fallback,
         cancel_event=cancel_event,
+        acoustic_aligner=acoustic_aligner,
     )
 
     if cached is not None:
@@ -397,7 +565,8 @@ def _run_blocking(
             whisper_result=cached,
             plain_lyrics=plain_lyrics,
             synced_lyrics=synced_lyrics,
-            audio_path=vocals_path,
+            audio_path=align_audio,
+            extra_audio_paths=extra_audio,
         )
     else:
         try:
@@ -432,7 +601,8 @@ def _run_blocking(
             whisper_result=transcription,
             plain_lyrics=plain_lyrics,
             synced_lyrics=synced_lyrics,
-            audio_path=vocals_path,
+            audio_path=align_audio,
+            extra_audio_paths=extra_audio,
         )
 
     if result is None:
@@ -448,6 +618,7 @@ def _run_blocking(
         synced_lyrics=synced_lyrics,
         pipeline_config=pipeline_config,
         allow_temperature_fallback=allow_temperature_fallback,
+        acoustic_disabled=acoustic_disabled,
     )
 
 
@@ -466,6 +637,7 @@ async def generate_word_sync(
     allow_temperature_fallback: bool = False,
     force_transcribe: bool = False,
     cache_write_guard: Optional[Callable[[], bool]] = None,
+    stage_progress_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Full pipeline: transcribe (cached) → align → word-level sync.
 
@@ -520,6 +692,7 @@ async def generate_word_sync(
             force_transcribe=force_transcribe,
             cache_write_guard=cache_write_guard,
             cancel_event=cancel_event,
+            stage_progress_fn=stage_progress_fn,
         ),
     )
     try:
@@ -549,6 +722,8 @@ def _realign_blocking(
     pipeline_config: PipelineConfig,
     vocals_path: Optional[str],
     correction_progress_fn=None,
+    cancel_event: threading.Event | None = None,
+    stage_progress_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     label = describe_run(whisper_model, use_vad=use_vad)
     cache_file = transcription_cache.cache_path(song_id, label)
@@ -560,15 +735,24 @@ def _realign_blocking(
             f"Run a full transcription first."
         )
 
+    pipeline_config, acoustic_aligner, acoustic_disabled = _acoustic_setup(
+        pipeline_config, _ref_mode(plain_lyrics, synced_lyrics),
+        cancel_event=cancel_event, progress_fn=stage_progress_fn,
+    )
+    align_audio, extra_audio = (
+        alignment_audio_paths(vocals_path) if vocals_path else (None, [])
+    )
     pipeline = _make_pipeline(
         whisper_model, use_vad=use_vad, config=pipeline_config,
         correction_progress_fn=correction_progress_fn,
+        acoustic_aligner=acoustic_aligner,
     )
     result = pipeline.align_only(
         whisper_result=cached,
         plain_lyrics=plain_lyrics,
         synced_lyrics=synced_lyrics,
-        audio_path=vocals_path,
+        audio_path=align_audio,
+        extra_audio_paths=extra_audio,
     )
     if result is None:
         return None
@@ -586,6 +770,7 @@ def _realign_blocking(
         # this result. The cached transcription's own policy is not recorded
         # (the cache label deliberately ignores it).
         allow_temperature_fallback=False,
+        acoustic_disabled=acoustic_disabled,
     )
 
 
@@ -600,6 +785,7 @@ async def realign_only(
     pipeline_config: Optional[PipelineConfig] = None,
     vocals_path: Optional[str] = None,
     correction_progress_fn=None,
+    stage_progress_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Realign cached transcription against new reference lyrics.
 
@@ -616,6 +802,12 @@ async def realign_only(
     reaches no aligner at all. In either of those a correction-enabled config
     is honoured in the sense that nothing rejects it — and corrects nothing.
 
+    ``vocals_path`` is also the acoustic word-timing stage's audio (with a
+    sibling backing-vocals stem, see :func:`alignment_audio_paths`), so a
+    re-align re-times an existing song without re-transcribing it. On
+    cancellation the stage's worker process is terminated; the job cancels
+    without waiting for the rest of the thread, as before.
+
     Raises ``FileNotFoundError`` if no cache exists for the given
     ``(song_id, whisper_model, use_vad)`` triple.
     """
@@ -628,7 +820,8 @@ async def realign_only(
     cfg = pipeline_config or PipelineConfig()
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
+    cancel_event = threading.Event()
+    future = loop.run_in_executor(
         None,
         partial(
             _realign_blocking,
@@ -642,5 +835,12 @@ async def realign_only(
             pipeline_config=cfg,
             vocals_path=vocals_path,
             correction_progress_fn=correction_progress_fn,
+            cancel_event=cancel_event,
+            stage_progress_fn=stage_progress_fn,
         ),
     )
+    try:
+        return await future
+    except asyncio.CancelledError:
+        cancel_event.set()
+        raise
