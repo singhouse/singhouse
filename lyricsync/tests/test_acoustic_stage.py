@@ -184,8 +184,8 @@ def test_enabled_without_aligner_is_a_no_op():
      "worker timed out"),
     (AcousticAlignmentError("CTC worker error: CUDA is not available",
                             kind="CUDA unavailable"), "CUDA unavailable"),
-    (AcousticAlignmentError("CTC worker failed (exit 3): /home/x/boom"), "worker failed"),
-    (ValueError("unexpected /home/x/path"), "unexpected error (ValueError)"),
+    (AcousticAlignmentError("CTC worker failed (exit 3): /opt/example/boom"), "worker failed"),
+    (ValueError("unexpected /opt/example/path"), "unexpected error (ValueError)"),
 ])
 def test_failure_keeps_original_times(mode, exc, reason):
     base = _baseline(mode)
@@ -483,11 +483,11 @@ def test_stored_model_reasons_are_short():
     class Aligner(ShiftAligner):
         def align_words(self, audio_paths, words):
             out = super().align_words(audio_paths, words)
-            out.models_lost = {"phon": "worker error: OSError: /home/x/.cache/model.bin"}
+            out.models_lost = {"phon": "worker error: OSError: /opt/example/.cache/model.bin"}
             return out
 
     al = Aligner(models=("hubl", "w2v2l"),
-                 failed={"hubxl": "OutOfMemoryError: tried to allocate at /home/x"})
+                 failed={"hubxl": "OutOfMemoryError: tried to allocate at /opt/example"})
     al.reference = _times(base)
     meta = _run("plain", al).metadata.extra[METADATA_KEY]
     assert meta["models_skipped"] == {"hubxl": "OutOfMemoryError"}

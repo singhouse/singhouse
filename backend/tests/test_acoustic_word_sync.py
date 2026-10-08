@@ -72,7 +72,7 @@ class FailingAligner:
     def align_words(self, audio_paths, words):
         self.calls += 1
         raise AcousticAlignmentError(
-            "CTC worker error: RuntimeError: /home/someone/.venv failed", kind=self.kind)
+            "CTC worker error: RuntimeError: /opt/example/.venv failed", kind=self.kind)
 
 
 @pytest.fixture
