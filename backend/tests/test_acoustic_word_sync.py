@@ -539,3 +539,42 @@ async def test_progress_callback_bridges_thread_to_loop(monkeypatch, caplog, cla
     assert writes[0][3] == threading.main_thread().name  # ran on the loop's thread
     lost = [r for r in caplog.records if "Could not persist progress" in r.getMessage()]
     assert bool(lost) is (not claimed)
+
+
+# ── no-lyrics regression: odd transcriber tokens ─────────────────────────
+
+
+def _odd_transcription() -> TranscriptionResult:
+    def seg(items, text):
+        tw = [TimedWord(text=t, start=s, end=e) for t, s, e in items]
+        return TranscriptionSegment(start=tw[0].start, end=tw[-1].end, text=text, words=tw)
+
+    return TranscriptionResult(
+        segments=[
+            seg([("Lanterns", 0.5, 0.9), ("...", 0.9, 1.0), ("rock-and-roll", 1.0, 1.6),
+                 ("42", 1.7, 2.0), ("!!", 2.0, 2.05)], "Lanterns ... rock-and-roll 42 !!"),
+            # A short segment dominated by a known hallucination phrase is filtered.
+            seg([("Thanks", 3.0, 3.2), ("for", 3.2, 3.3), ("watching", 3.3, 3.8)],
+                "Thanks for watching"),
+            seg([("&", 4.0, 4.1), ("a", 4.1, 4.12), (".", 4.12, 4.13), ("[*]", 4.2, 4.3),
+                 ("o'er", 4.3, 4.6), ("water,", 4.6, 5.0)], "& a . o'er water,"),
+        ],
+        language="en",
+    )
+
+
+def test_no_reference_odd_tokens_reach_the_aligner_unchanged(env, monkeypatch):
+    monkeypatch.setattr(env["transcriber"], "transcribe",
+                        lambda *a, **k: _odd_transcription())
+    baseline = _baseline(monkeypatch, env["lead"], plain_lyrics=None)
+    data = _run(env["lead"], plain_lyrics=None)
+    meta = data["metadata"]["acoustic_alignment"]
+    assert meta["applied"] is True, meta
+    line_words = [w["text"] for line in data["lines"] for w in line]
+    assert env["aligner"].calls[0][1] == line_words
+    assert line_words == [w["text"] for line in baseline["lines"] for w in line]
+    assert "watching" not in line_words and "[*]" not in line_words and "." not in line_words
+    for tok in ("...", "rock-and-roll", "42", "!!", "&", "a", "o'er", "water,"):
+        assert tok in line_words
+    assert [[w["text"] for w in seg["words"]] for seg in data["segments"]] == [
+        [w["text"] for w in seg["words"]] for seg in baseline["segments"]]
