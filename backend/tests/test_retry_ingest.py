@@ -716,3 +716,20 @@ async def test_deleting_a_song_releases_the_upload_its_retry_would_have_used(
     assert not doomed_upload.exists()
     assert spared_upload.is_file()
     assert (await client.get(f"/api/songs/{spared_id}")).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("song_id", ["not-a-number", "1.5"])
+async def test_retry_rejects_non_numeric_http_song_ids(client, song_id):
+    response = await client.post(f"/api/songs/{song_id}/retry")
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("song_id", ["../outside", "/tmp/outside", "1/../../outside"])
+async def test_direct_retry_rejects_path_ids_before_accessing_database(song_id):
+    from karaoke_backend.api.songs import retry_ingest
+
+    # No DB or identity is supplied: numeric validation must precede any access.
+    with pytest.raises(ValueError):
+        await retry_ingest(song_id, db=None, user=None)

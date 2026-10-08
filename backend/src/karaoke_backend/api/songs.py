@@ -1034,6 +1034,10 @@ async def retry_ingest(
     rows (kind IS NULL), and ``delete_song``, which names this song's own jobs
     — and by then the song, and any retry of it, is gone anyway.
     """
+    # Enforce the numeric boundary for direct callers as well as HTTP routing,
+    # before the ID is used in a query or a filesystem path component.
+    song_id = int(song_id)
+
     # Resolved at call time from the ingest module's own view of the world, and
     # not from this module's snapshot: these two paths have to be the ones the
     # handlers will look at, or the checks answer about different files. The
