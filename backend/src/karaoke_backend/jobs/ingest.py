@@ -57,7 +57,10 @@ from typing import Optional
 from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
-from karaoke_backend.jobs._llm import make_correction_progress_callback
+from karaoke_backend.jobs._llm import (
+    make_correction_progress_callback,
+    make_progress_message_callback,
+)
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import Job, JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import page_word_sync
@@ -357,6 +360,9 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
             song_id=song_id,
             pipeline_config=pipeline_config,
             correction_progress_fn=correction_progress_fn,
+            stage_progress_fn=make_progress_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop(),
+            ),
         )
         if word_data is None:
             raise IngestError("Transcription returned no result")

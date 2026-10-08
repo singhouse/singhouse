@@ -36,7 +36,23 @@ METADATA_KEY = "acoustic_alignment"
 
 
 class AcousticAlignmentError(RuntimeError):
-    """The acoustic aligner could not produce spans (worker error, timeout, cancel)."""
+    """The acoustic aligner could not produce spans (worker error, timeout, cancel).
+
+    ``kind`` is a short, fixed summary safe to store or show (no host paths,
+    no worker output), e.g. ``"worker timed out"``; the message has the detail.
+    """
+
+    def __init__(self, message: str, kind: str = "worker failed"):
+        super().__init__(message)
+        self.kind = kind
+
+
+CUDA_UNAVAILABLE = "CUDA unavailable"
+
+
+def _public_reason(text: str) -> str:
+    """The leading clause of a model failure reason (e.g. the exception type)."""
+    return str(text).split(":", 1)[0].strip()[:80] or "failed"
 
 
 @dataclass
@@ -125,9 +141,11 @@ class CtcFusionAligner:
 
     def align_words(self, audio_paths: list[str], words: list[str]) -> AcousticSpans:
         if not self.python_path.exists():
-            raise AcousticAlignmentError(f"Python interpreter not found: {self.python_path}")
+            raise AcousticAlignmentError(f"Python interpreter not found: {self.python_path}",
+                                        kind="processing Python not found")
         if not self.script_path.exists():
-            raise AcousticAlignmentError(f"CTC worker script not found: {self.script_path}")
+            raise AcousticAlignmentError(f"CTC worker script not found: {self.script_path}",
+                                        kind="worker script not found")
 
         req: dict = {"audio_paths": [str(p) for p in audio_paths], "words": list(words),
                      "allow_cpu": self.allow_cpu}
@@ -159,13 +177,15 @@ class CtcFusionAligner:
                     except subprocess.TimeoutExpired:
                         if self.cancel_event is not None and self.cancel_event.is_set():
                             _terminate_tree_and_reap(
-                                proc, AcousticAlignmentError("CTC worker cancelled"),
+                                proc,
+                                AcousticAlignmentError("CTC worker cancelled", kind="cancelled"),
                             )
                         if time.monotonic() >= deadline:
                             _terminate_tree_and_reap(
                                 proc,
                                 AcousticAlignmentError(
-                                    f"CTC worker timed out after {self.timeout}s"),
+                                    f"CTC worker timed out after {self.timeout}s",
+                                    kind="worker timed out"),
                             )
             except AcousticAlignmentError as e:
                 if self.cancel_event is not None and self.cancel_event.is_set():
@@ -177,11 +197,14 @@ class CtcFusionAligner:
         if killed is not None:
             return _partial_or_raise(raw, str(killed), killed)
         if isinstance(raw, dict) and "error" in raw:
-            err = AcousticAlignmentError(f"CTC worker error: {raw['error']}")
+            kind = (CUDA_UNAVAILABLE if "CUDA is not available" in str(raw["error"])
+                    else "worker error")
+            err = AcousticAlignmentError(f"CTC worker error: {raw['error']}", kind=kind)
             return _partial_or_raise(raw, f"worker error: {raw['error']}", err)
         if proc.returncode != 0 or not isinstance(raw, dict) or not raw.get("complete", True):
             err = AcousticAlignmentError(
-                f"CTC worker failed (exit {proc.returncode}): {stderr_text[-500:]}"
+                f"CTC worker failed (exit {proc.returncode}): {stderr_text[-500:]}",
+                kind=f"worker failed (exit {proc.returncode})",
             )
             return _partial_or_raise(raw, f"worker exited with status {proc.returncode}", err)
         return _to_spans(raw)
@@ -344,11 +367,18 @@ def apply_acoustic_alignment(
         elif not paths:
             meta["reason"] = "no audio available"
         elif missing := [p for p in paths if not Path(p).exists()]:
-            meta["reason"] = f"audio not found: {missing[0]}"
+            logger.warning("Acoustic alignment audio not found: %s", missing[0])
+            meta["reason"] = "audio not found"
         else:
             out = aligner.align_words(paths, [w.text for w in words])
-            meta["models_skipped"] = dict(out.models_failed)
-            meta["models_lost"] = dict(getattr(out, "models_lost", {}) or {})
+            # Stored reasons stay short: model/worker detail can carry host
+            # paths, so it goes to the log only.
+            for name, why in {**out.models_failed,
+                              **(getattr(out, "models_lost", {}) or {})}.items():
+                logger.warning("Acoustic model %s not used: %s", name, why)
+            meta["models_skipped"] = {m: _public_reason(v) for m, v in out.models_failed.items()}
+            meta["models_lost"] = {m: _public_reason(v) for m, v in
+                                   (getattr(out, "models_lost", {}) or {}).items()}
             meta["partial"] = bool(meta["models_lost"])
             if out.device:
                 meta["device"] = out.device
@@ -370,8 +400,12 @@ def apply_acoustic_alignment(
                 meta["applied"] = True
                 meta["flagged_count"] = len(fused.flagged)
                 meta["flagged_words"] = fused.flagged
+    except AcousticAlignmentError as e:
+        logger.warning("Acoustic aligner failed: %s", e)
+        meta["reason"] = e.kind
     except Exception as e:  # noqa: BLE001 — this stage must never fail the sync
-        meta["reason"] = f"{type(e).__name__}: {e}"[:500]
+        logger.warning("Acoustic alignment failed unexpectedly", exc_info=True)
+        meta["reason"] = f"unexpected error ({type(e).__name__})"
     if meta["applied"]:
         logger.info("Acoustic alignment applied (%s; %d flagged)",
                     ", ".join(meta["models_used"]), meta["flagged_count"])

@@ -168,6 +168,60 @@ accumulates their uploads until they are deleted.
 
 ---
 
+## Acoustic Word Timing
+
+When a song is synced against lyrics (plain or synced/LRC, on ingest,
+re-transcribe and re-align), a final stage re-times every word against the
+vocal audio. It runs several CTC acoustic models (HuBERT-Large, wav2vec2-Large,
+HuBERT-XLarge and, when available, a phoneme model) in the same processing
+Python as Heart transcription, and fuses their word times with the existing
+ones. Only word `start`/`end` change — the text, word count and lines never do.
+The models hear the lead-vocals stem plus a sibling `backing_vocals.*` stem
+when there is one (a full `vocals.*` stem is used alone). Runs without a lyrics
+reference are not re-timed.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KARAOKE_ACOUSTIC_ALIGNMENT` | on | `0`, `false`, `off` or `no` disables the stage |
+| `KARAOKE_ACOUSTIC_ALIGNMENT_CPU` | off | `1` lets it run without CUDA (slow) |
+| `KARAOKE_ACOUSTIC_ALIGNMENT_TIMEOUT` | `3600` | worker time limit in seconds, first-run download included |
+
+- **GPU.** It needs a CUDA device by default. Without one (and without
+  `KARAOKE_ACOUSTIC_ALIGNMENT_CPU=1`) the stage is skipped and the previous
+  timing stands; after the first such refusal the backend stops trying until
+  it restarts. If the processing Python does not exist, the stage is off. On a 24 GB card a four-minute song took about 25 s with warm
+  caches and peaked at about 5 GB of GPU memory; models load one at a time.
+- **First use downloads the models** into the processing Python's torch hub
+  and Hugging Face caches: about 3.6 GB for HuBERT-XLarge plus about 1.3 GB
+  each for HuBERT-Large, wav2vec2-Large and the phoneme model (~7.5 GB in all).
+  That download happens inside the first song's run, which is why the time
+  limit is generous. To fetch them ahead of time, run once in the processing
+  Python:
+
+  ```bash
+  .venv-demucs/bin/python -c "import torchaudio as ta; [getattr(ta.pipelines, b).get_model() for b in ('HUBERT_ASR_LARGE', 'WAV2VEC2_ASR_LARGE_LV60K_960H', 'HUBERT_ASR_XLARGE')]"
+  .venv-demucs/bin/python -c "from transformers import AutoModelForCTC, AutoProcessor as P; r='facebook/wav2vec2-lv-60-espeak-cv-ft'; P.from_pretrained(r); AutoModelForCTC.from_pretrained(r)"
+  ```
+
+- **Phoneme voter (optional).** It needs `transformers` and `phonemizer` in the
+  processing Python and the `espeak-ng` program on the system. Without them the
+  stage runs with the three character models.
+- **Never fails a sync.** Any problem (no CUDA, worker error, timeout, missing
+  models) keeps the existing timing. The outcome is stored in the lyrics set's
+  metadata under `acoustic_alignment`: whether it was enabled and applied, a
+  short reason when not (details such as paths and worker output go to the
+  backend log only), the models used and skipped, the boundary parameters, and
+  the indices of low-confidence words (`flagged_words`). Per-word data stays
+  `{text, start, end}`.
+- **Not in the managed desktop runtime yet.** Its processing packs do not ship
+  these models, so the stage is off there and the metadata says so. With Modal
+  offload on, Heart still runs remotely and this stage runs locally when the
+  local processing Python can (otherwise it is skipped).
+- Cached transcriptions keep the raw model output, so re-aligning an existing
+  song re-times it without transcribing again.
+
+---
+
 ## API Reference
 
 ### Authentication
