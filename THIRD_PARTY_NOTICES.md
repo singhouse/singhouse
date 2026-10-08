@@ -170,6 +170,8 @@ containing them must account for their redistribution terms.
 | Transformers | Apache-2.0 | Separate environment. |
 | NumPy | BSD-3-Clause and others | Bundles several separately-licensed components (0BSD, MIT, Zlib, CC0-1.0); its own distribution carries their texts. |
 | SciPy | BSD-3-Clause | Separate environment. |
+| phonemizer | **GPL-3.0-or-later** | Optional, separate environment. Used only by the optional phoneme voter of the acoustic re-timing stage, through the Transformers phoneme tokenizer; when it is absent that voter is skipped. Not installed or bundled by this project. |
+| eSpeak NG | **GPL-3.0-or-later** | Optional system program, the backend phonemizer drives. Same consideration as phonemizer. |
 
 ### Web service
 
@@ -214,6 +216,20 @@ name, and their terms differ:
   it is fetched from upstream for your installation. If you select a
   different checkpoint or redistribute weights yourself, establish the
   terms for that specific file first.
+
+**CTC alignment models (optional acoustic re-timing stage)** — fetched on
+first use into your processing environment's torch hub and Hugging Face
+caches:
+
+- `torchaudio.pipelines.HUBERT_ASR_LARGE`, `HUBERT_ASR_XLARGE` and
+  `WAV2VEC2_ASR_LARGE_LV60K_960H` — originally published by the HuBERT and
+  wav2vec 2.0 authors under the **MIT** license and redistributed by
+  torchaudio under the same license (per the torchaudio documentation).
+- `facebook/wav2vec2-lv-60-espeak-cv-ft` (phoneme voter, Hugging Face) —
+  check the terms on its model card before use or redistribution.
+
+The MMS forced-alignment weights (`torchaudio.pipelines.MMS_FA`, CC-BY-NC)
+are deliberately not used.
 
 **Demucs models** — the Demucs *code* is MIT (Meta Platforms, Inc. and
 affiliates). Terms for the pre-trained weight files are published separately
