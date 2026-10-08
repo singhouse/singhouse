@@ -179,12 +179,15 @@ def test_enabled_without_aligner_is_a_no_op():
 
 
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("exc", [
-    AcousticAlignmentError("CTC worker timed out after 5s"),
-    AcousticAlignmentError("CTC worker error: CUDA is not available"),
-    ValueError("unexpected"),
+@pytest.mark.parametrize("exc,reason", [
+    (AcousticAlignmentError("CTC worker timed out after 5s", kind="worker timed out"),
+     "worker timed out"),
+    (AcousticAlignmentError("CTC worker error: CUDA is not available",
+                            kind="CUDA unavailable"), "CUDA unavailable"),
+    (AcousticAlignmentError("CTC worker failed (exit 3): /home/x/boom"), "worker failed"),
+    (ValueError("unexpected /home/x/path"), "unexpected error (ValueError)"),
 ])
-def test_failure_keeps_original_times(mode, exc):
+def test_failure_keeps_original_times(mode, exc, reason):
     base = _baseline(mode)
     al = FailingAligner(exc)
     res = _run(mode, al)
@@ -195,7 +198,8 @@ def test_failure_keeps_original_times(mode, exc):
     assert _seg_times(res) == _seg_times(base)
     meta = res.metadata.extra[METADATA_KEY]
     assert meta["applied"] is False
-    assert str(exc) in meta["reason"]
+    # Only the short classified reason is stored; the detail is logged.
+    assert meta["reason"] == reason
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -341,22 +345,25 @@ def test_worker_error_is_raised(tmp_path):
         "json.dump({'error': 'CUDA is not available'}, open(out, 'w'))\nsys.exit(1)\n"
     ))
     al = CtcFusionAligner(sys.executable, script_path=script)
-    with pytest.raises(AcousticAlignmentError, match="CUDA is not available"):
+    with pytest.raises(AcousticAlignmentError, match="CUDA is not available") as ei:
         al.align_words([AUDIO], ["a"])
+    assert ei.value.kind == "CUDA unavailable"
 
 
 def test_worker_crash_is_raised(tmp_path):
     script = _write_worker(tmp_path, "sys.stderr.write('boom\\n'); sys.exit(3)\n")
     al = CtcFusionAligner(sys.executable, script_path=script)
-    with pytest.raises(AcousticAlignmentError, match="exit 3"):
+    with pytest.raises(AcousticAlignmentError, match="exit 3") as ei:
         al.align_words([AUDIO], ["a"])
+    assert ei.value.kind == "worker failed (exit 3)"
 
 
 def test_worker_timeout(tmp_path):
     script = _write_worker(tmp_path, "time.sleep(30)\n")
     al = CtcFusionAligner(sys.executable, script_path=script, timeout=1)
-    with pytest.raises(AcousticAlignmentError, match="timed out"):
+    with pytest.raises(AcousticAlignmentError, match="timed out") as ei:
         al.align_words([AUDIO], ["a"])
+    assert ei.value.kind == "worker timed out"
 
 
 def test_worker_cancel(tmp_path):
@@ -370,8 +377,9 @@ def test_worker_cancel(tmp_path):
 
 def test_missing_interpreter(tmp_path):
     al = CtcFusionAligner(tmp_path / "nope" / "python")
-    with pytest.raises(AcousticAlignmentError, match="not found"):
+    with pytest.raises(AcousticAlignmentError, match="not found") as ei:
         al.align_words([AUDIO], ["a"])
+    assert ei.value.kind == "processing Python not found"
 
 
 def test_bundled_worker_script_exists():
@@ -467,6 +475,24 @@ def test_models_lost_recorded_in_metadata():
     assert meta["applied"] is True
     assert meta["partial"] is True
     assert meta["models_lost"] == {"hubxl": "CTC worker timed out after 5s"}
+
+
+def test_stored_model_reasons_are_short():
+    base = _baseline("plain")
+
+    class Aligner(ShiftAligner):
+        def align_words(self, audio_paths, words):
+            out = super().align_words(audio_paths, words)
+            out.models_lost = {"phon": "worker error: OSError: /home/x/.cache/model.bin"}
+            return out
+
+    al = Aligner(models=("hubl", "w2v2l"),
+                 failed={"hubxl": "OutOfMemoryError: tried to allocate at /home/x"})
+    al.reference = _times(base)
+    meta = _run("plain", al).metadata.extra[METADATA_KEY]
+    assert meta["models_skipped"] == {"hubxl": "OutOfMemoryError"}
+    assert meta["models_lost"] == {"phon": "worker error"}
+    assert "/home" not in json.dumps(meta)
     assert meta["models_used"] == ["hubl", "w2v2l"]
 
 

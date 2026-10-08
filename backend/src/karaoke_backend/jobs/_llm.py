@@ -39,26 +39,10 @@ def make_correction_progress_callback(
     loop: asyncio.AbstractEventLoop,
 ):
     """Bridge lyricsync's executor-thread callback to the async DB engine."""
+    progress = make_progress_message_callback(job_id, worker_id, loop)
 
     def correction_progress(ri: int, total: int) -> None:
-        message = f"LLM correction: region {ri + 1}/{total}"
-        future = asyncio.run_coroutine_threadsafe(
-            _persist_correction_progress(job_id, worker_id, message),
-            loop,
-        )
-        try:
-            future.result(timeout=_CORRECTION_PROGRESS_TIMEOUT_SECONDS)
-        # A LeaseLost here is logged, not propagated: this runs on lyricsync's
-        # executor thread, deep inside a synchronous pipeline that has no way
-        # to unwind. The next `set_phase` on the orchestrator's own path is
-        # what actually stops the run — this just refuses to write.
-        except Exception as exc:
-            future.cancel()
-            logger.warning(
-                "Could not persist LLM correction progress for job %s: %s",
-                job_id,
-                exc,
-            )
+        progress(f"LLM correction: region {ri + 1}/{total}")
 
     return correction_progress
 
@@ -77,7 +61,10 @@ def make_progress_message_callback(
         )
         try:
             future.result(timeout=_CORRECTION_PROGRESS_TIMEOUT_SECONDS)
-        # Logged, not propagated, for the same reason as correction progress.
+        # A LeaseLost here is logged, not propagated: this runs on lyricsync's
+        # executor thread, deep inside a synchronous pipeline that has no way
+        # to unwind. The next `set_phase` on the orchestrator's own path is
+        # what actually stops the run — this just refuses to write.
         except Exception as exc:
             future.cancel()
             logger.warning(

@@ -30,7 +30,8 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
-from lyricsync import CtcFusionAligner, PipelineConfig, SyncPipeline
+from lyricsync import AcousticAlignmentError, CtcFusionAligner, PipelineConfig, SyncPipeline
+from lyricsync.alignment.ctc_aligner import CUDA_UNAVAILABLE
 from lyricsync.alignment.ctc_aligner import ENGINE as ACOUSTIC_ENGINE
 from lyricsync.alignment.ctc_aligner import METADATA_KEY as ACOUSTIC_METADATA_KEY
 from lyricsync.transcription import FasterWhisperTranscriber, HeartTranscriber
@@ -81,11 +82,18 @@ ACOUSTIC_TIMEOUT_ENV = "KARAOKE_ACOUSTIC_ALIGNMENT_TIMEOUT"
 # inside the worker call; a warm run takes a small fraction of this.
 ACOUSTIC_DEFAULT_TIMEOUT = 3600
 ACOUSTIC_REF_MODES = frozenset({"plain", "synced"})
-ACOUSTIC_PROGRESS_MESSAGE = "Aligning words to the vocals"
+ACOUSTIC_PROGRESS_MESSAGE = (
+    "Aligning words to the vocals (the first run downloads the models)"
+)
 # Backing-vocal stem summed with the lead for alignment (preference order).
 _BACKING_STEM_EXTS = (".flac", ".wav", ".mp3")
 _FALSE_VALUES = {"0", "false", "off", "no"}
 _TRUE_VALUES = {"1", "true", "on", "yes"}
+
+
+# Set when the worker refuses for lack of CUDA: the device will not appear
+# while this process runs, so later songs skip the spawn.
+_cuda_unavailable = False
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -105,8 +113,9 @@ def acoustic_disabled_reason(ref_mode: str) -> Optional[str]:
     """Why the acoustic stage will not run for this request, or None if it will.
 
     A run that passes these rules can still fall back at run time (no CUDA
-    without ``KARAOKE_ACOUSTIC_ALIGNMENT_CPU``, missing processing Python,
-    worker error); that reason is recorded by the stage itself.
+    without ``KARAOKE_ACOUSTIC_ALIGNMENT_CPU``, worker error, timeout); that
+    reason is recorded by the stage itself. A CUDA refusal is remembered for
+    the rest of the process.
     """
     if ref_mode not in ACOUSTIC_REF_MODES:
         return f"not enabled for reference mode {ref_mode!r}"
@@ -118,6 +127,10 @@ def acoustic_disabled_reason(ref_mode: str) -> Optional[str]:
         managed = True
     if managed:
         return "the managed desktop processing runtime does not include the acoustic models"
+    if not DEMUCS_PYTHON.exists():
+        return "processing Python not found"
+    if _cuda_unavailable:
+        return f"{CUDA_UNAVAILABLE} (remembered from an earlier run in this process)"
     return None
 
 
@@ -151,7 +164,13 @@ class _ReportingAligner:
                 self._progress_fn(ACOUSTIC_PROGRESS_MESSAGE)
             except Exception as exc:  # noqa: BLE001 — progress must not fail the stage
                 logger.warning("Could not report acoustic alignment progress: %s", exc)
-        return self._inner.align_words(audio_paths, words)
+        try:
+            return self._inner.align_words(audio_paths, words)
+        except AcousticAlignmentError as exc:
+            if exc.kind == CUDA_UNAVAILABLE:
+                global _cuda_unavailable
+                _cuda_unavailable = True
+            raise
 
 
 def _acoustic_timeout() -> int:
@@ -652,6 +671,11 @@ async def generate_word_sync(
                          "temperature_fallback": bool,
                          "pipeline_config": {...}},
         }
+
+    ``metadata["acoustic_alignment"]`` records the acoustic word-timing stage:
+    whether it was enabled and applied, a short reason when not, the models
+    used/skipped, its parameters and the low-confidence word indices
+    (``flagged_words``). Per-word dicts stay ``{text, start, end}``.
 
     The raw transcription is cached at
     ``STEMS_DIR/{song_id}/transcription.{label}.json`` so a follow-up

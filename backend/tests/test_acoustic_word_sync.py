@@ -18,6 +18,7 @@ from karaoke_backend.workers import transcription_cache
 from karaoke_backend.workers import word_sync_worker as wsw
 from karaoke_backend.workers.managed_processing import InvalidAttestation
 from lyricsync._types import TimedWord, TranscriptionResult, TranscriptionSegment
+from lyricsync.alignment.ctc_aligner import CUDA_UNAVAILABLE
 
 from lyricsync import AcousticAlignmentError, AcousticSpans, CtcFusionAligner, PipelineConfig
 
@@ -64,12 +65,14 @@ class FakeAligner:
 
 
 class FailingAligner:
-    def __init__(self):
+    def __init__(self, kind=CUDA_UNAVAILABLE):
         self.calls = 0
+        self.kind = kind
 
     def align_words(self, audio_paths, words):
         self.calls += 1
-        raise AcousticAlignmentError("CTC worker error: CUDA is not available")
+        raise AcousticAlignmentError(
+            "CTC worker error: RuntimeError: /home/someone/.venv failed", kind=self.kind)
 
 
 @pytest.fixture
@@ -80,6 +83,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.delenv(wsw.ACOUSTIC_CPU_ENV, raising=False)
     monkeypatch.delenv(wsw.ACOUSTIC_TIMEOUT_ENV, raising=False)
     monkeypatch.delenv("KARAOKE_DESKTOP_PROCESSING_JSON", raising=False)
+    monkeypatch.setattr(wsw, "DEMUCS_PYTHON", Path(sys.executable))
+    monkeypatch.setattr(wsw, "_cuda_unavailable", False)
     transcriber = FakeTranscriber()
     monkeypatch.setattr(wsw, "_make_transcriber", lambda *a, **k: transcriber)
 
@@ -205,12 +210,43 @@ def test_cpu_and_timeout_overrides(monkeypatch):
         wsw.ACOUSTIC_DEFAULT_TIMEOUT)
 
 
-def test_cpu_refusal_falls_back(env):
-    """Without CUDA the worker refuses; the previous timings stand."""
+def test_cpu_refusal_falls_back_and_is_remembered(env):
+    """Without CUDA the worker refuses; the previous timings stand, and later
+    songs in this process skip the spawn."""
     env["aligner"] = FailingAligner()
     data = _run(env["lead"])
     meta = data["metadata"]["acoustic_alignment"]
-    assert meta["applied"] is False and "CUDA" in meta["reason"]
+    assert meta["applied"] is False and meta["reason"] == CUDA_UNAVAILABLE
+    assert env["aligner"].calls == 1 and len(env["built"]) == 1
+
+    data = _run(env["lead"])
+    meta = data["metadata"]["acoustic_alignment"]
+    assert meta["enabled"] is False and CUDA_UNAVAILABLE in meta["reason"]
+    assert env["aligner"].calls == 1 and len(env["built"]) == 1
+
+
+def test_other_worker_failures_are_not_remembered(env):
+    env["aligner"] = FailingAligner(kind="worker timed out")
+    _run(env["lead"])
+    _run(env["lead"])
+    assert env["aligner"].calls == 2
+
+
+def test_missing_processing_python_disables_without_spawning(env, monkeypatch, tmp_path):
+    monkeypatch.setattr(wsw, "DEMUCS_PYTHON", tmp_path / "secret-dir" / "python")
+    data = _run(env["lead"])
+    meta = data["metadata"]["acoustic_alignment"]
+    assert meta["enabled"] is False and meta["reason"] == "processing Python not found"
+    assert env["built"] == []
+    assert "secret-dir" not in json.dumps(data["metadata"])
+
+
+def test_stored_reason_has_no_paths_or_worker_output(env):
+    env["aligner"] = FailingAligner(kind="worker failed (exit 1)")
+    data = _run(env["lead"])
+    meta = data["metadata"]["acoustic_alignment"]
+    assert meta["reason"] == "worker failed (exit 1)"
+    assert "/home" not in json.dumps(data["metadata"])
 
 
 # ── audio ─────────────────────────────────────────────────────────────────
@@ -262,7 +298,7 @@ def test_fallback_keeps_previous_timings_and_records_reason(env, monkeypatch):
     assert data["segments"] == baseline["segments"]
     meta = data["metadata"]["acoustic_alignment"]
     assert meta["enabled"] is True and meta["applied"] is False
-    assert "CTC worker error" in meta["reason"]
+    assert meta["reason"] == CUDA_UNAVAILABLE
 
 
 def test_metadata_record_is_stored_and_serializable(env):
@@ -404,7 +440,8 @@ async def test_cancel_terminates_the_real_worker_process(env, monkeypatch, tmp_p
     script = tmp_path / "sleepy_worker.py"
     script.write_text(
         "import os, sys, time\n"
-        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        f"open({str(pid_file)!r} + '.tmp', 'w').write(str(os.getpid()))\n"
+        f"os.replace({str(pid_file)!r} + '.tmp', {str(pid_file)!r})\n"
         "time.sleep(60)\n"
     )
     monkeypatch.setattr(wsw, "DEMUCS_PYTHON", Path(sys.executable))
@@ -424,11 +461,14 @@ async def test_cancel_terminates_the_real_worker_process(env, monkeypatch, tmp_p
         song_id=song_id, artist="", title="", plain_lyrics=PLAIN,
         vocals_path=str(env["lead"]),
     ))
-    for _ in range(250):
-        if pid_file.exists() and pid_file.read_text():
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if pid_file.exists() and pid_file.read_text().strip():
             break
         await asyncio.sleep(0.02)
-    pid = int(pid_file.read_text())
+    else:
+        pytest.fail("worker never started")
+    pid = int(pid_file.read_text().strip())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -443,3 +483,27 @@ async def test_cancel_terminates_the_real_worker_process(env, monkeypatch, tmp_p
         await asyncio.sleep(0.05)
     else:
         pytest.fail("worker process still running after cancel")
+
+
+# ── job-row progress bridge ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claimed", [True, False])
+async def test_progress_callback_bridges_thread_to_loop(monkeypatch, caplog, claimed):
+    from karaoke_backend.jobs import _llm
+
+    writes = []
+
+    async def fake_update(job_id, worker_id, *, message=None, **kw):
+        writes.append((job_id, worker_id, message, threading.current_thread().name))
+        return claimed
+
+    monkeypatch.setattr(_llm.queue, "update_progress", fake_update)
+    progress = _llm.make_progress_message_callback("job-1", "w-1", asyncio.get_running_loop())
+    with caplog.at_level("WARNING", logger=_llm.logger.name):
+        await asyncio.to_thread(progress, wsw.ACOUSTIC_PROGRESS_MESSAGE)  # must not raise
+    assert writes and writes[0][:3] == ("job-1", "w-1", wsw.ACOUSTIC_PROGRESS_MESSAGE)
+    assert writes[0][3] == threading.main_thread().name  # ran on the loop's thread
+    lost = [r for r in caplog.records if "Could not persist progress" in r.getMessage()]
+    assert bool(lost) is (not claimed)

@@ -188,7 +188,8 @@ reference are not re-timed.
 
 - **GPU.** It needs a CUDA device by default. Without one (and without
   `KARAOKE_ACOUSTIC_ALIGNMENT_CPU=1`) the stage is skipped and the previous
-  timing stands. On a 24 GB card a four-minute song took about 25 s with warm
+  timing stands; after the first such refusal the backend stops trying until
+  it restarts. If the processing Python does not exist, the stage is off. On a 24 GB card a four-minute song took about 25 s with warm
   caches and peaked at about 5 GB of GPU memory; models load one at a time.
 - **First use downloads the models** into the processing Python's torch hub
   and Hugging Face caches: about 3.6 GB for HuBERT-XLarge plus about 1.3 GB
@@ -207,8 +208,9 @@ reference are not re-timed.
   stage runs with the three character models.
 - **Never fails a sync.** Any problem (no CUDA, worker error, timeout, missing
   models) keeps the existing timing. The outcome is stored in the lyrics set's
-  metadata under `acoustic_alignment`: whether it was enabled and applied, the
-  reason when not, the models used and skipped, the boundary parameters, and
+  metadata under `acoustic_alignment`: whether it was enabled and applied, a
+  short reason when not (details such as paths and worker output go to the
+  backend log only), the models used and skipped, the boundary parameters, and
   the indices of low-confidence words (`flagged_words`). Per-word data stays
   `{text, start, end}`.
 - **Not in the managed desktop runtime yet.** Its processing packs do not ship
