@@ -128,7 +128,13 @@ export default {
   // Override electron-builder's legacy AppImage desktop-entry default.
   appImage: { executableArgs: [] },
   mac: { target: ['dmg', 'zip'], category: 'public.app-category.music', minimumSystemVersion: '14.0', identity: null, icon: resolve(icons, 'singhouse.icns') },
-  dmg: { icon: resolve(icons, 'singhouse.icns') },
+  // The background tells first-time users to drag the app into Applications.
+  // electron-builder sizes the Finder window from the background image (540x380),
+  // so icon coordinates are centres inside that image and must match its arrow.
+  dmg: {
+    icon: resolve(icons, 'singhouse.icns'), background: resolve(icons, 'dmg-background.png'), iconSize: 128,
+    contents: [{ x: 140, y: 190, type: 'file' }, { x: 400, y: 190, type: 'link', path: '/Applications' }],
+  },
   win: {
     icon: resolve(icons, 'singhouse.ico'),
     ...windowsBuildConfiguration({ signedRelease, manualAzureCli, azureOidc }),

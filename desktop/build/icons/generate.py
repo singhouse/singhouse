@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Regenerate desktop icons from the existing singhouse SVG brand mark.
+"""Regenerate desktop icons and the macOS disk image background from SVG sources.
 
-Requires librsvg's rsvg-convert. Run from any directory; output is deterministic.
+Requires librsvg's rsvg-convert. Run from any directory; output is deterministic for a given librsvg version
+because neither source uses installed fonts.
 """
 
 from pathlib import Path
@@ -20,9 +21,20 @@ ICNS_TYPES = {16: b"icp4", 32: b"icp5", 64: b"icp6", 128: b"ic07",
               256: b"ic08", 512: b"ic09", 1024: b"ic10"}
 
 
+BACKGROUND = ICONS / "dmg-background.svg"
+BACKGROUND_SIZE = (540, 380)
+
+
 def png(size):
     return subprocess.check_output(
         ["rsvg-convert", "--width", str(size), "--height", str(size), str(SOURCE)]
+    )
+
+
+def background(scale):
+    width, height = (value * scale for value in BACKGROUND_SIZE)
+    return subprocess.check_output(
+        ["rsvg-convert", "--width", str(width), "--height", str(height), str(BACKGROUND)]
     )
 
 
@@ -55,6 +67,8 @@ def main():
         (linux / f"{size}x{size}.png").write_bytes(images[size])
     (ICONS / "singhouse.ico").write_bytes(ico(images))
     (ICONS / "singhouse.icns").write_bytes(icns(images))
+    (ICONS / "dmg-background.png").write_bytes(background(1))
+    (ICONS / "dmg-background@2x.png").write_bytes(background(2))
 
 
 if __name__ == "__main__":
