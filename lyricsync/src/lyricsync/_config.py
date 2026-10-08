@@ -133,6 +133,21 @@ class PipelineConfig:
     # reference times and the whisper transcription, and shifts LRC times by
     # that offset before alignment. Public LRCs are commonly off by 0.1–1.5s.
     detect_lrc_offset: bool = True
+    # Acoustic re-timing stage (off by default). When True and the pipeline
+    # was given an ``acoustic_aligner``, the final result's word starts/ends
+    # are re-timed by fusing several CTC acoustic models with the existing
+    # timing; text and line structure never change, and any failure keeps the
+    # existing timing. The three boundary parameters: a constant shift added
+    # to every start; a word whose end is within ``acoustic_join_gap`` of the
+    # next start runs up to it; otherwise its end extends by
+    # ``acoustic_tail_extend`` (never past the next start). A word is flagged
+    # low-confidence when two or more start voters deviate from the fused
+    # median start by more than ``acoustic_flag_threshold`` seconds.
+    acoustic_alignment: bool = False
+    acoustic_start_shift: float = -0.02
+    acoustic_join_gap: float = 0.0
+    acoustic_tail_extend: float = 0.2
+    acoustic_flag_threshold: float = 0.2
     hallucination_phrases: tuple[str, ...] = (
         "thanks for watching", "thank you for watching", "subscribe",
         "like and subscribe", "please subscribe", "see you next time",

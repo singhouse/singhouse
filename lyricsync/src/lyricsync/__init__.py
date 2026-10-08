@@ -9,6 +9,12 @@ from lyricsync._config import (
 from lyricsync._types import TimedWord, TranscriptionResult, SyncResult, SyncMetadata
 from lyricsync._pipeline import SyncPipeline
 from lyricsync._async_pipeline import AsyncPipeline
+from lyricsync.alignment.ctc_aligner import (
+    AcousticAligner,
+    AcousticAlignmentError,
+    AcousticSpans,
+    CtcFusionAligner,
+)
 
 __all__ = [
     "SyncPipeline",
@@ -22,4 +28,8 @@ __all__ = [
     "TranscriptionResult",
     "SyncResult",
     "SyncMetadata",
+    "AcousticAligner",
+    "AcousticAlignmentError",
+    "AcousticSpans",
+    "CtcFusionAligner",
 ]

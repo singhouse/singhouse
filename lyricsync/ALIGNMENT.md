@@ -163,6 +163,22 @@ line.
   re-split on sentence-final punctuation followed by a capital, on an inter-word
   gap over 0.5 s, or on a maximum word count.
 
+## 5a. Acoustic re-timing (optional)
+
+When enabled with an acoustic aligner, the finished result is re-timed
+against the vocal audio (plus any extra stems, summed). Three character CTC
+models (HuBERT large and extra-large, wav2vec 2.0 large) and an optional
+phoneme CTC model are each force-aligned to the word list over the whole song
+with a Viterbi pass that has a filler state between words, so unscripted
+vocal sounds need not be absorbed into a word. Each word's start is the
+median over those models and the existing timing, made non-decreasing; each
+end is the median of the character models, clipped to the next word's start.
+A constant start shift and an end extension or join against the next start
+finish the boundaries. Every word is re-timed; words where two or more
+voters disagree with the fused start by more than 0.2 s are additionally
+listed in the metadata (flat word indices in line order) as low-confidence. If fewer than two character models produce output, or
+anything fails, the existing timing is kept.
+
 ## 6. Configuration
 
 Every threshold above lives in a frozen dataclass — `VadConfig`, `MatchConfig`,
