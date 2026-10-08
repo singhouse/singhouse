@@ -473,6 +473,7 @@ plugin is logged and skipped, never fatal.
 |----------|---------|---------|
 | `DATABASE_URL` | `sqlite+aiosqlite:///<cwd>/karaoke.db` | Database connection string |
 | `KARAOKE_DB_AUTO_MIGRATE` | `true` | `false` = startup refuses unless DB is at head (use `kb-db`) |
+| `STEM_FORMAT` | `mp3` | New playback stems: MP3 256 kbps CBR; `flac` selects 16-bit FLAC. Existing MP3/FLAC/WAV stems remain readable and are not converted. MP3+G imports preserve the supplied MP3 audio without another lossy encode. |
 | `UPLOADS_DIR` / `STEMS_DIR` | `uploads/` / `stems/` | Import staging / stem output directories |
 | `MAX_FILE_SIZE_MB` | `500` | Max import file size |
 | `BASE_URL` | `http://localhost:8000` | Absolute base for stem URLs — set to the host's LAN address |

@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from karaoke_backend.api.auth import require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
-from karaoke_backend import stem_storage
+from karaoke_backend import stem_layout, stem_storage
 from lyricsync import (
     MatchConfig,
     PipelineConfig,
@@ -413,7 +413,10 @@ async def _resolve_reference(
 
 def _vocals_path_for(song: Song) -> Path:
     stems_dir = stem_storage.active_stems_dir(song, STEMS_DIR)
-    for name in ("lead_vocals.flac", "lead_vocals.wav", "vocals.wav", "Vocals.wav"):
+    lead = stem_layout.resolve_stem(stems_dir, "lead_vocals")
+    if lead is not None:
+        return lead
+    for name in ("vocals.wav", "Vocals.wav"):
         candidate = stems_dir / name
         if candidate.exists():
             return candidate

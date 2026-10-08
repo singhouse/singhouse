@@ -26,12 +26,13 @@ from karaoke_backend.cdg import (
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import JobPhase, Song
+from karaoke_backend.stem_encoding import stem_codec_args, stem_format
+from karaoke_backend.stem_layout import STEM_EXTS, resolve_stem
 
 logger = logging.getLogger(__name__)
 
 CDG_FILENAME = "graphics.cdg"
 VIDEO_FILENAME = "video.mp4"
-AUDIO_FILENAME = "instrumental.flac"
 # CDG mutates at 300 packets/s, but browsers display video frames. Sampling
 # after each ten-packet interval preserves a smooth 30 fps wipe while bounding
 # a 30-minute import at 54,000 fixed-size frames.
@@ -168,11 +169,16 @@ def _make_audio(source: Path | None, dest: Path, duration: float) -> None:
     _unlink(tmp)
     if source is None:
         cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-               "-t", f"{duration:.6f}", "-map_metadata", "-1", "-c:a", "flac",
-               "-sample_fmt", "s16", "-f", "flac", str(tmp)]
+               "-t", f"{duration:.6f}", "-map_metadata", "-1",
+               *stem_codec_args(dest.suffix.lstrip(".")), str(tmp)]
     else:
+        # MP3+G already supplies MP3: remux to strip metadata without adding
+        # another lossy generation. The MP3 muxer rejects incompatible audio.
+        codec_args = (["-c:a", "copy", "-f", "mp3"]
+                      if dest.suffix == ".mp3" and source.suffix.lower() == ".mp3"
+                      else stem_codec_args(dest.suffix.lstrip(".")))
         cmd = ["ffmpeg", "-y", "-i", str(source), "-vn", "-map_metadata", "-1",
-               "-c:a", "flac", "-sample_fmt", "s16", "-f", "flac", str(tmp)]
+               *codec_args, str(tmp)]
     try:
         _run(cmd, _MEDIA_TIMEOUT)
         if not tmp.is_file():
@@ -247,7 +253,7 @@ def _render(cdg_path: Path, dest: Path) -> float:
 
 
 def completed(stems: Path) -> bool:
-    return all((stems / name).is_file() for name in (VIDEO_FILENAME, AUDIO_FILENAME))
+    return (stems / VIDEO_FILENAME).is_file() and resolve_stem(stems, "instrumental") is not None
 
 
 async def _persist(song_id: int, stems: Path, duration: float) -> None:
@@ -274,7 +280,7 @@ async def run_cdg_import(ctx: JobContext) -> str:
     try:
         await progress(0, "Reading the CD+G file")
         if completed(stems):
-            video_duration = await asyncio.to_thread(_probe_duration, stems / AUDIO_FILENAME)
+            video_duration = await asyncio.to_thread(_probe_duration, resolve_stem(stems, "instrumental"))
             if not await queue.heartbeat(ctx.job_id, ctx.worker_id):
                 raise LeaseLost(ctx.job_id)
             await _persist(ctx.song_id, stems, video_duration)
@@ -294,8 +300,13 @@ async def run_cdg_import(ctx: JobContext) -> str:
         await progress(15, "Rendering the karaoke graphics")
         graphics_duration = await asyncio.to_thread(_render, cdg, stems / VIDEO_FILENAME)
         await progress(70, "Preparing the audio track")
-        await asyncio.to_thread(_make_audio, source_audio, stems / AUDIO_FILENAME, graphics_duration)
-        duration = await asyncio.to_thread(_probe_duration, stems / AUDIO_FILENAME)
+        audio_dest = stems / f"instrumental.{stem_format()}"
+        await asyncio.to_thread(_make_audio, source_audio, audio_dest, graphics_duration)
+        for ext in STEM_EXTS:
+            alternate = stems / f"instrumental{ext}"
+            if alternate != audio_dest:
+                alternate.unlink(missing_ok=True)
+        duration = await asyncio.to_thread(_probe_duration, audio_dest)
         await progress(90, "Saving the song")
         if not await queue.heartbeat(ctx.job_id, ctx.worker_id):
             raise LeaseLost(ctx.job_id)

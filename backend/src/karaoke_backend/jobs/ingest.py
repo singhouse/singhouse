@@ -56,6 +56,8 @@ from typing import Optional
 
 from sqlalchemy import update
 
+from karaoke_backend.stem_encoding import finalize_stems, stem_format
+from karaoke_backend.stem_layout import allowed_stem_filenames, resolve_stem
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs._llm import make_correction_progress_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
@@ -87,11 +89,6 @@ _PHASE_RANGES = {
     JobPhase.ALIGNING.value:        (95, 100),
 }
 
-# The outputs separation is expected to leave behind. Recorded IN the marker,
-# never used as the completion test — see the module docstring for why file
-# existence cannot distinguish a finished mix from a killed one.
-SEPARATION_ARTIFACTS = ("lead_vocals.wav", "instrumental.wav", "karaoke.wav")
-
 SEPARATION_MARKER = ".separation-complete"
 
 
@@ -101,7 +98,18 @@ class IngestError(Exception):
 
 def separation_is_complete(stems_dir: Path) -> bool:
     """Whether a previous attempt finished separation for this song."""
-    return (stems_dir / SEPARATION_MARKER).is_file()
+    try:
+        marker = json.loads((stems_dir / SEPARATION_MARKER).read_text())
+        if not isinstance(marker, dict):
+            return False
+        artifacts = marker["artifacts"]
+        required = {"lead_vocals", "instrumental", "karaoke"}
+        return (isinstance(artifacts, list)
+                and all(isinstance(n, str) and n in allowed_stem_filenames(stems_dir)
+                        for n in artifacts)
+                and required <= {Path(n).stem for n in artifacts})
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def write_separation_marker(stems_dir: Path) -> None:
@@ -111,12 +119,16 @@ def write_separation_marker(stems_dir: Path) -> None:
     so a crash leaves either no marker or a complete one. A half-written
     marker would reintroduce exactly the ambiguity it exists to remove.
     """
+    required = ("lead_vocals", "instrumental", "karaoke")
+    if any(resolve_stem(stems_dir, base) is None for base in required):
+        raise IngestError("Cannot complete separation: a required playback stem is missing")
     marker = stems_dir / SEPARATION_MARKER
     tmp = stems_dir / f"{SEPARATION_MARKER}.tmp"
     payload = json.dumps(
         {
             "artifacts": [
-                name for name in SEPARATION_ARTIFACTS if (stems_dir / name).exists()
+                path.name for base in sorted({Path(name).stem for name in allowed_stem_filenames(stems_dir)})
+                if (path := resolve_stem(stems_dir, base)) is not None
             ],
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -178,6 +190,7 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
     from karaoke_backend.api.separate import STEMS_DIR, UPLOADS_DIR, _make_stems_urls
     from karaoke_backend.database import AsyncSessionLocal
 
+    stem_format()  # Refuse invalid configuration before doing expensive work.
     payload = ctx.payload
     song_id = ctx.song_id
     if song_id is None:
@@ -251,6 +264,7 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
                 timeout_s=900,
             )
             # Only now — separation returned, so every mix ran to completion.
+            await finalize_stems(stems_dir)
             write_separation_marker(stems_dir)
 
         # The stems are the artifact now; the upload is only ever needed to
@@ -317,7 +331,7 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
                 )
 
         # ── 3. Transcription + alignment ──────────────────────────────
-        vocals_path = stems_dir / "lead_vocals.wav"
+        vocals_path = resolve_stem(stems_dir, "lead_vocals") or stems_dir / "lead_vocals.wav"
         if not vocals_path.exists():
             # fallback: any vocals stem
             for name in ("vocals.wav", "Vocals.wav"):

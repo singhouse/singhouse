@@ -176,7 +176,7 @@ class RetryIngestResponse(BaseModel):
 # What a song must already have on disk for a re-split to mean anything: the
 # vocal pair Pass 2 produces and the bed the karaoke mix needs. A video import
 # has an instrumental and nothing else, so this is also what excludes it.
-RESPLIT_REQUIRED_STEMS = ("lead_vocals.wav", "backing_vocals.wav", "instrumental.wav")
+RESPLIT_REQUIRED_STEMS = ("lead_vocals", "backing_vocals", "instrumental")
 
 
 # The kinds that CREATE a song. Every song in the library arrived through
@@ -744,7 +744,7 @@ async def get_stem_file(
     Valid filenames are the recognized stem basenames actually present on disk
     for this song: `instrumental`, `karaoke`, `lead_vocals`, `backing_vocals`
     (numbered variants `lead_vocals_<N>`/`backing_vocals_<N>` included), or
-    any `vocal_<id>` per-voice stem, in `.flac` or `.wav`.
+    any `vocal_<id>` per-voice stem, in `.mp3`, `.flac` or `.wav`.
     """
     # Reject path traversal before anything else — the allowlist below is
     # basenames only, but a malformed filename should 400 regardless of song.
@@ -780,7 +780,7 @@ async def get_stem_file(
         )
 
     stem_path = stems_dir / filename
-    media_type = "audio/flac" if filename.endswith(".flac") else "audio/wav"
+    media_type = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav"}[Path(filename).suffix]
     return FileResponse(
         path=str(stem_path),
         media_type=media_type,
@@ -837,7 +837,8 @@ async def resplit_stems(
 
     stems_dir = _song_stems_dir(song)
     missing = [
-        name for name in RESPLIT_REQUIRED_STEMS if not (stems_dir / name).is_file()
+        name for name in RESPLIT_REQUIRED_STEMS
+        if stem_layout.resolve_stem(stems_dir, name) is None
     ]
     if missing:
         raise HTTPException(
@@ -1033,6 +1034,10 @@ async def retry_ingest(
     rows (kind IS NULL), and ``delete_song``, which names this song's own jobs
     — and by then the song, and any retry of it, is gone anyway.
     """
+    # Enforce the numeric boundary for direct callers as well as HTTP routing,
+    # before the ID is used in a query or a filesystem path component.
+    song_id = int(song_id)
+
     # Resolved at call time from the ingest module's own view of the world, and
     # not from this module's snapshot: these two paths have to be the ones the
     # handlers will look at, or the checks answer about different files. The

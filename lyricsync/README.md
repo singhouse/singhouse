@@ -15,6 +15,10 @@ pip install -e ".[whisper,metaphone]"     # + phonetic matching
 pip install -e ".[all]"                   # everything
 ```
 
+PCM WAV audio uses the built-in reader. Reading MP3 or FLAC audio for VAD and
+alignment also requires `ffmpeg` on `PATH`. Compressed files are decoded in a
+temporary directory without changing the source.
+
 ## Quick start
 
 ```python

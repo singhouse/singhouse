@@ -327,3 +327,15 @@ def test_numbered_generics_and_compound_ids_coexist(tmp_path):
         "vocal_7+8.flac",
         "vocal_9.flac",
     }
+
+
+def test_mp3_lanes_and_format_independent_lookup(tmp_path, monkeypatch):
+    monkeypatch.setenv("STEM_FORMAT", "flac")
+    names = {"instrumental.mp3", "instrumental.flac", "lead_vocals.mp3",
+             "lead_vocals_2.mp3", "backing_vocals.mp3", "vocal_7+8.mp3"}
+    _touch(tmp_path, *names)
+    assert stem_layout.resolve_stem(tmp_path, "instrumental").name == "instrumental.mp3"
+    payload = stem_layout.stem_urls_payload(tmp_path, "", 1)
+    assert [v["id"] for v in payload["vocals"]] == ["lead", "lead_2", "backing", "7+8"]
+    assert all(v["url"].endswith(".mp3") for v in payload["vocals"])
+    assert stem_layout.allowed_stem_filenames(tmp_path) == names
