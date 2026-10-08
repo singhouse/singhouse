@@ -3,15 +3,15 @@
 
 Core stems live on disk under a song's stems_path; the read side derives the
 stem model from filenames on every request — there is no DB column for stems.
-Recognized shapes (mp3 preferred over flac over wav when both exist):
+Recognized shapes (mp3, m4a, webm, flac, wav preference order):
 
-    instrumental.{mp3,flac,wav}    -> the no-vocals bed (standard + named songs)
-    karaoke.{mp3,flac,wav}         -> derived instrumental+backing mix (standard)
-    lead_vocals.{mp3,flac,wav}     -> vocal id "lead"    (standard, unnamed)
-    backing_vocals.{mp3,flac,wav}  -> vocal id "backing" (standard, unnamed)
-    lead_vocals_<N>.{mp3,flac,wav} -> vocal id "lead_<N>"    (N >= 2, always unnamed)
+    instrumental.{mp3,m4a,webm,flac,wav}    -> the no-vocals bed (standard + named songs)
+    karaoke.{mp3,m4a,webm,flac,wav}         -> derived instrumental+backing mix (standard)
+    lead_vocals.{mp3,m4a,webm,flac,wav}     -> vocal id "lead"    (standard, unnamed)
+    backing_vocals.{mp3,m4a,webm,flac,wav}  -> vocal id "backing" (standard, unnamed)
+    lead_vocals_<N>.{mp3,m4a,webm,flac,wav} -> vocal id "lead_<N>"    (N >= 2, always unnamed)
     backing_vocals_<N>.{...}   -> vocal id "backing_<N>" (N >= 2, always unnamed)
-    vocal_<id>.{mp3,flac,wav}      -> vocal id "<id>", display name from voices[]
+    vocal_<id>.{mp3,m4a,webm,flac,wav}      -> vocal id "<id>", display name from voices[]
 
 A vocal id may be COMPOUND ("7+8"): one audio file carrying the combined
 track of several rostered voices. Its display name is the constituent names
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-STEM_EXTS = (".mp3", ".flac", ".wav")  # independent of the new-output setting
+STEM_EXTS = (".mp3", ".m4a", ".webm", ".flac", ".wav")  # independent of the new-output setting
 
 INSTRUMENTAL = "instrumental"
 KARAOKE = "karaoke"

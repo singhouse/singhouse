@@ -56,3 +56,27 @@ def test_failed_decode_cleans_temporary_audio(monkeypatch, tmp_path, failure):
         read_wav_mono(str(source))
     assert source.read_bytes() == b"original compressed stem"
     assert temporary and not temporary[0].parent.exists()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+@pytest.mark.parametrize("extension,codec", [
+    ("m4a", "aac"), ("webm", "libopus"), ("webm", "libvorbis"),
+])
+def test_retained_container_decode_uses_playback_timeline(tmp_path, extension, codec):
+    source = tmp_path / f"source.{extension}"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1", "-c:a", codec, str(source),
+    ], check=True, timeout=30)
+    original = source.read_bytes()
+    # Codec padding may change duration; compare to decoding the retained file,
+    # which is the same timeline playback receives, rather than the encoder input.
+    reference = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", str(source), "-map", "0:a:0",
+        "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1",
+    ], timeout=30)
+    decoded, rate = read_wav_mono(str(source))
+    assert rate == 48000
+    assert len(decoded) >= rate
+    np.testing.assert_array_equal(decoded, np.frombuffer(reference, dtype=np.int16).astype(np.float32) / 32768)
+    assert source.read_bytes() == original
