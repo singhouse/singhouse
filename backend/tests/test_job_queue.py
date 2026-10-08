@@ -341,13 +341,22 @@ async def _ingest_fixture(tmp_path_unused=None) -> tuple[JobContext, Path, Path]
     return ctx, upload, stems_dir
 
 
+@pytest.fixture(autouse=True)
+def fake_final_encoding(monkeypatch):
+    async def encode(source, target):
+        shutil.copy2(source, target)
+    monkeypatch.setenv("STEM_FORMAT", "mp3")
+    monkeypatch.setattr("karaoke_backend.stem_encoding.encode_stem", encode)
+
+
 def _write_stems(stems_dir: Path, *, marker: bool = True) -> None:
     """Simulate a separation run. ``marker=False`` is the killed-mid-mix case."""
     stems_dir.mkdir(parents=True, exist_ok=True)
     for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
         (stems_dir / name).write_bytes(b"stem")
     if marker:
-        (stems_dir / SEPARATION_MARKER).write_text("{}")
+        from karaoke_backend.jobs.ingest import write_separation_marker
+        write_separation_marker(stems_dir)
 
 
 @pytest.mark.asyncio
@@ -441,9 +450,9 @@ async def test_the_marker_is_written_atomically_and_names_the_artifacts():
         await run_ingest(ctx)
 
     marker = stems_dir / SEPARATION_MARKER
-    assert json.loads(marker.read_text())["artifacts"] == [
-        "lead_vocals.wav", "instrumental.wav", "karaoke.wav",
-    ]
+    assert set(json.loads(marker.read_text())["artifacts"]) == {
+        "lead_vocals.mp3", "instrumental.mp3", "karaoke.mp3",
+    }
     assert not (stems_dir / f"{SEPARATION_MARKER}.tmp").exists(), (
         "the temp file must be renamed, never left beside the marker"
     )
@@ -1347,3 +1356,19 @@ async def test_ingest_plain_lookup_alignment(monkeypatch, enabled, plain, pasted
     assert lookup.await_count == int(enabled and not pasted)
     if enabled and not pasted and not expected:
         assert any("No plain lyrics found" in str(c) for c in progress.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_encoding_failure_keeps_upload_and_wavs_without_completion_marker(monkeypatch):
+    ctx, upload, stems_dir = await _ingest_fixture()
+    async def separate(**kwargs):
+        _write_stems(stems_dir, marker=False)
+    async def broken_encode(source, target):
+        raise RuntimeError("encoder failed")
+    monkeypatch.setattr("karaoke_backend.jobs.ingest.separate_stems", separate)
+    monkeypatch.setattr("karaoke_backend.stem_encoding.encode_stem", broken_encode)
+    with pytest.raises(JobFailure):
+        await run_ingest(ctx)
+    assert upload.exists()
+    assert not separation_is_complete(stems_dir)
+    assert len(list(stems_dir.glob("*.wav"))) == 3

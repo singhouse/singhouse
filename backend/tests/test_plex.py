@@ -1078,6 +1078,11 @@ async def test_handler_skips_materialisation_once_separation_is_complete(
 
     stems_dir = STEMS_DIR / "7"
     stems_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = [stems_dir / name for name in (
+        "lead_vocals.wav", "instrumental.wav", "karaoke.wav",
+    )]
+    for artifact in artifacts:
+        artifact.write_bytes(b"test stem")
     write_separation_marker(stems_dir)
     try:
         ctx = _ctx(job_id="job-8", payload={
@@ -1091,6 +1096,8 @@ async def test_handler_skips_materialisation_once_separation_is_complete(
         assert ingest_spy["ctx"].payload["upload_path"] is None
     finally:
         (stems_dir / ".separation-complete").unlink(missing_ok=True)
+        for artifact in artifacts:
+            artifact.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio

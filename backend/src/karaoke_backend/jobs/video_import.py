@@ -16,7 +16,8 @@ that would have to grow its own copy of all of it. The song is therefore an
 ordinary one-stem song to every reader downstream; the only new fact is
 ``Song.video_filename``, which names the retained file.
 
-**Why 16-bit.** The extracted stem is written ``-sample_fmt s16``. A 32-bit
+**Storage.** New audio defaults to MP3; ``STEM_FORMAT=flac`` selects
+16-bit FLAC. For FLAC the extracted stem is written ``-sample_fmt s16``. A 32-bit
 FLAC decodes fine in most tools and then silently fails in Web Audio in the
 player, which is the worst shape a bug can take: the import reports success and
 the song is silent. The flag is not an optimisation and must not be dropped.
@@ -76,6 +77,8 @@ from sqlalchemy import update
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import JobPhase, Song
+from karaoke_backend.stem_encoding import stem_codec_args, stem_format
+from karaoke_backend.stem_layout import STEM_EXTS, resolve_stem
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +90,8 @@ VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".webm", ".mov", ".mkv"})
 # The retained video's basename inside the stems directory, extension aside.
 VIDEO_BASENAME = "video"
 
-# The extracted audio lands on the well-known instrumental stem name, so
-# stem_layout, the stem route and the player all recognise it with no change.
+# Compatibility for extensions that still produce the original FLAC artifact.
+# New core imports select their output through stem_format() at job time.
 AUDIO_STEM_FILENAME = "instrumental.flac"
 
 _PROBE_TIMEOUT = 120
@@ -215,7 +218,7 @@ async def _probe(path: Path) -> tuple[Optional[float], bool, bool]:
 
 
 async def _extract_audio(src: Path, dest: Path) -> None:
-    """Write ``src``'s audio track to ``dest`` as 16-bit FLAC, atomically."""
+    """Write ``src``'s audio track to ``dest`` in the selected format, atomically."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / f".{dest.name}.tmp"
     # A leftover from a run that was killed mid-write is a whole file's worth
@@ -224,15 +227,8 @@ async def _extract_audio(src: Path, dest: Path) -> None:
     _unlink_quietly(tmp)
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
-        # No video, no inherited metadata, and 16-bit samples — see the module
-        # docstring for why the sample format is load-bearing.
         "-vn", "-map_metadata", "-1",
-        "-codec:a", "flac", "-sample_fmt", "s16",
-        # The muxer is named explicitly because the output is a TEMP name:
-        # ffmpeg infers the container from the filename's extension, and
-        # ".instrumental.flac.tmp" ends in .tmp, which it cannot resolve. Left
-        # implicit, every extraction fails at muxer init.
-        "-f", "flac",
+        *stem_codec_args(dest.suffix.lstrip(".")),
         str(tmp),
     ]
     proc = await _run(cmd, timeout=_EXTRACT_TIMEOUT)
@@ -285,7 +281,7 @@ def completed_video_name(stems_dir: Path) -> Optional[str]:
     far as the persist — the stem alone is a half-finished import, and its song
     was never ``ready``.
     """
-    if not (stems_dir / AUDIO_STEM_FILENAME).is_file():
+    if resolve_stem(stems_dir, "instrumental") is None:
         return None
     for extension in sorted(VIDEO_EXTENSIONS):
         candidate = stems_dir / f"{VIDEO_BASENAME}{extension}"
@@ -425,8 +421,15 @@ async def run_video_import(ctx: JobContext) -> Optional[str]:
             )
         await set_phase(_PROGRESS_PROBED, "Extracting the audio track")
 
-        audio_dest = stems_dir / AUDIO_STEM_FILENAME
+        audio_dest = stems_dir / f"instrumental.{stem_format()}"
         await _extract_audio(upload_path, audio_dest)
+        # A retry may use a different output setting than its failed attempt.
+        # Only retire the old format after the replacement landed atomically;
+        # otherwise lookup precedence could select the stale extraction.
+        for ext in STEM_EXTS:
+            alternate = stems_dir / f"instrumental{ext}"
+            if alternate != audio_dest:
+                alternate.unlink(missing_ok=True)
         await set_phase(_PROGRESS_EXTRACTED, "Storing the video")
 
         video_filename = f"{VIDEO_BASENAME}{extension}"

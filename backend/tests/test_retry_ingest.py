@@ -40,7 +40,6 @@ from sqlalchemy.orm import Session as SyncSession
 from karaoke_backend.database import AsyncSessionLocal
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs.ingest import write_separation_marker
-from karaoke_backend.jobs.video_import import AUDIO_STEM_FILENAME
 from karaoke_backend.jobs.worker import run_queued_jobs_once
 from karaoke_backend.models.song import Job, JobKind, Song
 from karaoke_backend.plex.config import PLEX_URL_ENV
@@ -275,6 +274,8 @@ async def test_retry_after_separation_finished_needs_no_upload(client: AsyncClie
     stems — so this must be retryable with no upload anywhere on disk."""
     song_id, job_id = await _failed_song(client)
     _upload_file(job_id).unlink()
+    for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
+        (_stems_dir(song_id) / name).write_bytes(WAV)
     write_separation_marker(_stems_dir(song_id))
 
     resp = await client.post(f"/api/songs/{song_id}/retry")
@@ -309,6 +310,8 @@ async def test_retry_without_a_recoverable_payload_uses_defaults(client: AsyncCl
     """No ingest job row left to replay: the retry is still worth offering,
     but it is not the same run and the response does not pretend it is."""
     song_id, job_id = await _failed_song(client, karaoke_model="mdxnet_kara2")
+    for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
+        (_stems_dir(song_id) / name).write_bytes(WAV)
     write_separation_marker(_stems_dir(song_id))
     async with AsyncSessionLocal() as db:
         await db.execute(update(Song).where(Song.id == song_id).values(job_id=None))
@@ -443,6 +446,8 @@ async def test_retry_that_loses_the_row_queues_nothing(client: AsyncClient):
     second ingest writing one stems directory.
     """
     song_id, _ = await _failed_song(client)
+    for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
+        (_stems_dir(song_id) / name).write_bytes(WAV)
     write_separation_marker(_stems_dir(song_id))
 
     taken = []
@@ -575,6 +580,8 @@ async def test_retry_of_a_plex_import_past_separation_needs_no_server(
     song_id = await _failed_import_song(
         kind=JobKind.PLEX_IMPORT.value, job_id="plex-marker", payload=PLEX_PAYLOAD,
     )
+    for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
+        (_stems_dir(song_id) / name).write_bytes(WAV)
     write_separation_marker(_stems_dir(song_id))
 
     resp = await client.post(f"/api/songs/{song_id}/retry")
@@ -655,7 +662,7 @@ async def test_retry_of_a_finished_video_import_needs_no_upload(client: AsyncCli
     )
     upload.unlink()
     stems_dir = _stems_dir(song_id)
-    (stems_dir / AUDIO_STEM_FILENAME).write_bytes(b"flac")
+    (stems_dir / "instrumental.mp3").write_bytes(b"flac")
     (stems_dir / "video.mp4").write_bytes(b"fake video bytes")
 
     resp = await client.post(f"/api/songs/{song_id}/retry")

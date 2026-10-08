@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
-import json
 import os
 import shutil
 from pathlib import Path
@@ -37,7 +36,9 @@ from datetime import datetime, timezone
 
 from karaoke_backend.jobs import queue
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
-from karaoke_backend.jobs.ingest import write_separation_marker
+from karaoke_backend.jobs.ingest import write_separation_marker, separation_is_complete
+from karaoke_backend.stem_encoding import finalize_stems, stem_format
+from karaoke_backend.stem_layout import resolve_stem
 from karaoke_backend.models.song import JobPhase
 from karaoke_backend.workers import karaoke_models, modal_worker, transcription_cache
 from karaoke_backend.workers.modal_worker import StemSeparationError
@@ -112,13 +113,10 @@ REPLACEMENTS = (
 )
 
 def _complete_generation(path: Path) -> bool:
-    try:
-        marker = json.loads((path / ".separation-complete").read_text())
-    except (OSError, ValueError):
-        return False
-    required_files = {*REPLACEMENTS, "instrumental.wav"}
-    canonical_marker = {"lead_vocals.wav", "instrumental.wav", "karaoke.wav"}
-    return canonical_marker <= set(marker.get("artifacts", ())) and all((path / n).is_file() for n in required_files)
+    return separation_is_complete(path) and all(
+        resolve_stem(path, base) is not None
+        for base in ("lead_vocals", "backing_vocals", "instrumental", "karaoke")
+    )
 
 async def _durability_barrier(generation: Path, stems_root: Path) -> None:
     await asyncio.to_thread(_sync_generation, generation)
@@ -201,6 +199,7 @@ async def _mix_vocals(lead: Path, backing: Path, out: Path) -> None:
 
 async def run_resplit(ctx: JobContext) -> Optional[str]:
     """Split this song's vocals again with a different Pass-2 model."""
+    format = stem_format()
     payload = ctx.payload
     stems_dir = Path(payload["stems_dir"])
     stems_root = Path(payload.get("stems_root", payload["stems_dir"]))
@@ -237,8 +236,8 @@ async def run_resplit(ctx: JobContext) -> Optional[str]:
             await _announce(ctx, progress=10, message="Rebuilding the vocal track")
             vocals_src = scratch / "vocals.wav"
             await _mix_vocals(
-                stems_dir / "lead_vocals.wav",
-                stems_dir / "backing_vocals.wav",
+                resolve_stem(stems_dir, "lead_vocals"),
+                resolve_stem(stems_dir, "backing_vocals"),
                 vocals_src,
             )
 
@@ -281,13 +280,15 @@ async def run_resplit(ctx: JobContext) -> Optional[str]:
 
         await _announce(ctx, progress=85, message="Mixing the karaoke track")
         mixed = await modal_worker.mix_karaoke(
-            stems_dir / "instrumental.wav", new_backing, new_karaoke
+            resolve_stem(stems_dir, "instrumental"), new_backing, new_karaoke
         )
         if not mixed:
             raise JobFailure(
                 "Could not mix the karaoke track — this song's stems are unchanged",
                 f"mix_karaoke fell back to the instrumental alone for {stems_dir}",
             )
+
+        await finalize_stems(scratch, bases=("lead_vocals", "backing_vocals", "karaoke"))
 
         # Last check before the only irreversible step in the job. Pass 2 runs
         # for minutes with no job-row write of its own in between, which is
@@ -314,10 +315,11 @@ async def run_resplit(ctx: JobContext) -> Optional[str]:
         # then move the replacement trio; the DB pointer changes only after all
         # files are durable and visible under one directory.
         for source in stems_dir.iterdir():
-            if source.is_file() and source.name not in REPLACEMENTS:
+            if source.is_file() and source.stem not in {"lead_vocals", "backing_vocals", "karaoke"} and source.name != ".separation-complete":
                 shutil.copy2(source, attempt_dir / source.name)
         for name in REPLACEMENTS:
-            os.replace(scratch / name, attempt_dir / name)
+            encoded = Path(name).with_suffix(f".{format}").name
+            os.replace(scratch / encoded, attempt_dir / encoded)
         write_separation_marker(attempt_dir)
         await asyncio.to_thread(_sync_generation, attempt_dir)
         generation_dir.parent.mkdir(parents=True, exist_ok=True)

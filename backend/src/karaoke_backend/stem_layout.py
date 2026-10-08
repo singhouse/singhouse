@@ -3,15 +3,15 @@
 
 Core stems live on disk under a song's stems_path; the read side derives the
 stem model from filenames on every request — there is no DB column for stems.
-Recognized shapes (flac preferred over wav when both exist):
+Recognized shapes (mp3 preferred over flac over wav when both exist):
 
-    instrumental.{flac,wav}    -> the no-vocals bed (standard + named songs)
-    karaoke.{flac,wav}         -> derived instrumental+backing mix (standard)
-    lead_vocals.{flac,wav}     -> vocal id "lead"    (standard, unnamed)
-    backing_vocals.{flac,wav}  -> vocal id "backing" (standard, unnamed)
-    lead_vocals_<N>.{flac,wav} -> vocal id "lead_<N>"    (N >= 2, always unnamed)
+    instrumental.{mp3,flac,wav}    -> the no-vocals bed (standard + named songs)
+    karaoke.{mp3,flac,wav}         -> derived instrumental+backing mix (standard)
+    lead_vocals.{mp3,flac,wav}     -> vocal id "lead"    (standard, unnamed)
+    backing_vocals.{mp3,flac,wav}  -> vocal id "backing" (standard, unnamed)
+    lead_vocals_<N>.{mp3,flac,wav} -> vocal id "lead_<N>"    (N >= 2, always unnamed)
     backing_vocals_<N>.{...}   -> vocal id "backing_<N>" (N >= 2, always unnamed)
-    vocal_<id>.{flac,wav}      -> vocal id "<id>", display name from voices[]
+    vocal_<id>.{mp3,flac,wav}      -> vocal id "<id>", display name from voices[]
 
 A vocal id may be COMPOUND ("7+8"): one audio file carrying the combined
 track of several rostered voices. Its display name is the constituent names
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-STEM_EXTS = (".flac", ".wav")  # flac preferred
+STEM_EXTS = (".mp3", ".flac", ".wav")  # independent of the new-output setting
 
 INSTRUMENTAL = "instrumental"
 KARAOKE = "karaoke"
@@ -69,12 +69,18 @@ class VocalStem:
     name: Optional[str] = None
 
 
-def _resolve(stems_dir: Path, base: str) -> Optional[str]:
-    """Basename for a stem base (flac-preferred), or None if absent."""
+def resolve_stem(stems_dir: Path, base: str) -> Optional[Path]:
+    """Resolve existing audio independently of the configured output format."""
     for ext in STEM_EXTS:
-        if (stems_dir / f"{base}{ext}").exists():
-            return f"{base}{ext}"
+        candidate = stems_dir / f"{base}{ext}"
+        if candidate.is_file():
+            return candidate
     return None
+
+
+def _resolve(stems_dir: Path, base: str) -> Optional[str]:
+    path = resolve_stem(stems_dir, base)
+    return path.name if path else None
 
 
 def _voice_names(voices) -> dict[str, str]:
@@ -259,8 +265,8 @@ def stem_urls_payload(
 
 def allowed_stem_filenames(stems_dir: Path) -> set[str]:
     """Per-song download allowlist: every recognized stem basename actually on
-    disk. Basenames only -> path-traversal-safe by construction. Includes both
-    exts when both are present."""
+    disk. Basenames only -> path-traversal-safe by construction. Includes all
+    recognized extensions when several are present."""
     allowed: set[str] = set()
     if not stems_dir.exists():
         return allowed

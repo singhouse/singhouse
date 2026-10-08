@@ -46,6 +46,18 @@ FAKE_VIDEO_BYTES = b"\x00\x01\x02\x03" * 64
 PROBE_DURATION = 12.5
 
 
+def test_legacy_audio_symbol_and_completed_flac_with_mp3_default(tmp_path, monkeypatch):
+    from karaoke_backend.jobs.video_import import AUDIO_STEM_FILENAME
+
+    monkeypatch.delenv("STEM_FORMAT", raising=False)
+    assert video_import_job.stem_format() == "mp3"
+    assert AUDIO_STEM_FILENAME == "instrumental.flac"
+    (tmp_path / AUDIO_STEM_FILENAME).write_bytes(b"legacy audio")
+    assert video_import_job.completed_video_name(tmp_path) is None
+    (tmp_path / "video.mp4").write_bytes(FAKE_VIDEO_BYTES)
+    assert video_import_job.completed_video_name(tmp_path) == "video.mp4"
+
+
 @pytest.fixture(autouse=True)
 def _isolated_stems():
     """Give every test a clean per-song stems directory.
@@ -402,7 +414,7 @@ async def test_the_job_extracts_audio_retains_the_video_and_readies_the_song(
     assert await run_queued_jobs_once() == 1
 
     stems_dir = STEMS_DIR / str(song_id)
-    assert (stems_dir / "instrumental.flac").read_bytes() == b"fake flac bytes"
+    assert (stems_dir / "instrumental.mp3").read_bytes() == b"fake flac bytes"
     assert (stems_dir / "video.mp4").read_bytes() == FAKE_VIDEO_BYTES
     # Nothing half-written is left where the atomic moves staged their files.
     assert [p.name for p in stems_dir.iterdir() if p.name.endswith(".tmp")] == []
@@ -419,12 +431,12 @@ async def test_the_job_extracts_audio_retains_the_video_and_readies_the_song(
 
     assert not upload_path.exists(), "the consumed upload should be released"
 
-    # 16-bit is load-bearing: 32-bit FLAC decodes everywhere except Web Audio,
-    # where it fails silently and the song plays as nothing at all.
+    # Default new imports use MP3 at the shared constant bitrate.
     ffmpeg_cmd = next(cmd for cmd in calls if cmd[0] == "ffmpeg")
     assert "-vn" in ffmpeg_cmd
-    assert ffmpeg_cmd[ffmpeg_cmd.index("-sample_fmt") + 1] == "s16"
-    assert ffmpeg_cmd[ffmpeg_cmd.index("-codec:a") + 1] == "flac"
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-c:a") + 1] == "libmp3lame"
+    assert ffmpeg_cmd[ffmpeg_cmd.index("-b:a") + 1] == "256k"
+    assert "-q:a" not in ffmpeg_cmd
 
 
 @pytest.mark.asyncio
@@ -479,7 +491,7 @@ async def test_a_file_with_no_picture_is_refused(
     assert "Download" not in job.message
     assert (await _song(submitted["song_id"])).status == "failed"
     # Refused on the probe, so nothing was extracted on the way to finding out.
-    assert not (STEMS_DIR / str(submitted["song_id"]) / "instrumental.flac").exists()
+    assert not (STEMS_DIR / str(submitted["song_id"]) / "instrumental.mp3").exists()
 
 
 @pytest.mark.asyncio
@@ -611,7 +623,7 @@ async def test_a_stale_temp_file_from_a_crashed_run_is_cleared(
     stems_dir = STEMS_DIR / str(song_id)
     stems_dir.mkdir(parents=True, exist_ok=True)
     (stems_dir / ".video.mp4.tmp").write_bytes(b"\x00" * 4096)
-    (stems_dir / ".instrumental.flac.tmp").write_bytes(b"\x00" * 4096)
+    (stems_dir / ".instrumental.mp3.tmp").write_bytes(b"\x00" * 4096)
 
     assert await run_queued_jobs_once() == 1
 
@@ -674,7 +686,7 @@ async def test_a_failed_extraction_leaves_the_song_failed_and_keeps_the_upload(
     assert (await _song(submitted["song_id"])).status == "failed"
 
     stems_dir = STEMS_DIR / str(submitted["song_id"])
-    assert not (stems_dir / "instrumental.flac").exists()
+    assert not (stems_dir / "instrumental.mp3").exists()
     assert not (stems_dir / "video.mp4").exists()
 
     assert (UPLOADS_DIR / upload_name).is_file()
@@ -878,12 +890,14 @@ def test_the_guest_projection_withholds_has_video():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg/ffprobe not on PATH")
-async def test_end_to_end_with_real_ffmpeg(client: AsyncClient, tmp_path: Path):
+@pytest.mark.parametrize("format", ["mp3", "flac"])
+async def test_end_to_end_with_real_ffmpeg(client: AsyncClient, tmp_path: Path, monkeypatch, format):
     """A generated one-second clip, through the whole path, unpatched.
 
     The clip is ffmpeg's own synthetic test pattern and a sine tone — no
     recording, no third-party media.
     """
+    monkeypatch.setenv("STEM_FORMAT", format)
     clip = tmp_path / "generated.mp4"
     subprocess.run(
         [
@@ -904,20 +918,64 @@ async def test_end_to_end_with_real_ffmpeg(client: AsyncClient, tmp_path: Path):
     assert song.video_filename == "video.mp4"
     assert song.duration is not None and song.duration > 0
 
-    stem = STEMS_DIR / str(submitted["song_id"]) / "instrumental.flac"
+    stem = STEMS_DIR / str(submitted["song_id"]) / f"instrumental.{format}"
     assert stem.is_file()
 
     probed = subprocess.run(
         [
             "ffprobe", "-v", "error",
             "-select_streams", "a:0",
-            "-show_entries", "stream=sample_fmt",
+            "-show_entries", "stream=codec_name,sample_fmt",
             "-of", "csv=p=0", str(stem),
         ],
         capture_output=True, text=True, timeout=120,
     )
-    assert probed.stdout.strip() == "s16", "32-bit FLAC fails silently in Web Audio"
+    assert probed.stdout.strip() == ("mp3,fltp" if format == "mp3" else "flac,s16")
+    audio = await client.get(f"/api/songs/{submitted['song_id']}/stems/{stem.name}")
+    assert audio.status_code == 200
+    assert audio.headers["content-type"] == ("audio/mpeg" if format == "mp3" else "audio/flac")
 
     streamed = await client.get(f"/api/songs/{submitted['song_id']}/video")
     assert streamed.status_code == 200
     assert streamed.content == clip.read_bytes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_format,next_format", [("mp3", "flac"), ("flac", "mp3")])
+async def test_retry_changed_format_retires_stale_audio_only_after_success(
+    client, monkeypatch, first_format, next_format
+):
+    _install_fake_media_tools(monkeypatch)
+    monkeypatch.setenv("STEM_FORMAT", first_format)
+    adopt = video_import_job._adopt_video
+
+    async def fail_adopt(*args):
+        raise video_import_job.VideoImportError("synthetic video copy failure")
+
+    monkeypatch.setattr(video_import_job, "_adopt_video", fail_adopt)
+    submitted = (await _submit(client)).json()
+    song_id, job_id = submitted["song_id"], submitted["job_id"]
+    upload_name = queue.payload_of(await _job(job_id))["upload_name"]
+    assert await run_queued_jobs_once() == 1
+    stems = STEMS_DIR / str(song_id)
+    old_audio = stems / f"instrumental.{first_format}"
+    assert old_audio.is_file()
+    assert not (stems / "video.mp4").exists()
+    assert (UPLOADS_DIR / upload_name).is_file()
+
+    # Failed encoding of the new format preserves the earlier audio and input.
+    monkeypatch.setenv("STEM_FORMAT", next_format)
+    monkeypatch.setattr(video_import_job, "_adopt_video", adopt)
+    _install_fake_media_tools(monkeypatch, ffmpeg_returncode=1)
+    await _requeue(job_id)
+    assert await run_queued_jobs_once() == 1
+    assert old_audio.is_file()
+    assert (UPLOADS_DIR / upload_name).is_file()
+
+    _install_fake_media_tools(monkeypatch)
+    await _requeue(job_id)
+    assert await run_queued_jobs_once() == 1
+    assert (await _song(song_id)).status == "ready"
+    assert not old_audio.exists()
+    assert video_import_job.resolve_stem(stems, "instrumental").name == f"instrumental.{next_format}"
+    assert not (UPLOADS_DIR / upload_name).exists()
