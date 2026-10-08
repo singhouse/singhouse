@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: MIT
-"""CTC worker internals on tiny synthetic emissions. Skipped when torch is absent."""
+"""CTC worker internals on tiny synthetic emissions.
+
+Tests that need torch (or phonemizer/espeak) skip when it is absent.
+"""
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from lyricsync.alignment import _ctc_worker as worker
 
-torch = pytest.importorskip("torch")
+try:
+    import torch
+except ImportError:
+    torch = None
 
-from lyricsync.alignment import _ctc_worker as worker  # noqa: E402
+needs_torch = pytest.mark.skipif(torch is None, reason="torch not installed")
 
 # Toy character vocabulary in the torchaudio label layout: blank first, "|" separator.
 LABELS = ["-", "|", "A", "B", "'"]
@@ -52,6 +60,7 @@ def test_targets_hyphens_are_not_blank_tokens():
     assert owner == [0, 0, -1, 1, 1, -1, 3]
 
 
+@needs_torch
 def test_run_checkpoints_after_each_model(monkeypatch, tmp_path):
     class FakeModel:
         def __init__(self, kind, device):
@@ -91,6 +100,7 @@ def test_run_checkpoints_after_each_model(monkeypatch, tmp_path):
     assert not (tmp_path / "result.json.tmp").exists()
 
 
+@needs_torch
 def test_viterbi_spans_follow_the_dominant_path():
     B, S, A, Bc = 0, 1, 2, 3
     frames = [B] * 5 + [A] * 3 + [Bc] * 2 + [S] * 5 + [Bc] * 2 + [A] * 3 + [B] * 5
@@ -102,6 +112,7 @@ def test_viterbi_spans_follow_the_dominant_path():
     assert spans == [[5, 8], [8, 10], [10, 15], [15, 17], [17, 20]]
 
 
+@needs_torch
 def test_garbage_state_absorbs_non_lyric_sound():
     B, A, Bc = 0, 2, 3
     # an extra, unscripted "B" burst at frames 8-11 between the two words
@@ -114,6 +125,7 @@ def test_garbage_state_absorbs_non_lyric_sound():
     assert spans[1][0] == 14
 
 
+@needs_torch
 def test_word_spans_seconds_and_fill():
     B, S, A, Bc = 0, 1, 2, 3
     frames = [B] * 5 + [A] * 3 + [Bc] * 2 + [S] * 5 + [Bc] * 2 + [A] * 3 + [B] * 5
@@ -135,18 +147,21 @@ def test_fill_leading_and_trailing_runs():
     assert st[3] == pytest.approx(1.8) and en[3] == pytest.approx(2.1)
 
 
+@needs_torch
 def test_word_spans_rejects_untokenisable_lyrics():
     em = _emissions([0] * 10)
     with pytest.raises(RuntimeError, match="no word produced"):
         worker.word_spans(em, 0.02, _char_model(), ["123", "456"])
 
 
+@needs_torch
 def test_word_spans_rejects_audio_shorter_than_tokens():
     em = _emissions([0] * 3)
     with pytest.raises(RuntimeError, match="too short"):
         worker.word_spans(em, 0.02, _char_model(), ["ABABAB"])
 
 
+@needs_torch
 def test_load_audio_sums_and_pads(tmp_path):
     sf = pytest.importorskip("soundfile")
     a = np.full(16000, 0.25, dtype=np.float32)
@@ -159,8 +174,37 @@ def test_load_audio_sums_and_pads(tmp_path):
     assert y[8000:] == pytest.approx(0.25, abs=1e-3)
 
 
+@needs_torch
 def test_cpu_refused_without_permission(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="CPU alignment was not allowed"):
         worker.pick_device(False)
     assert worker.pick_device(True) == "cpu"
+
+
+def test_make_phonemizer_applies_tokenizer_separators():
+    pytest.importorskip("phonemizer")
+    why = worker.check_phonemizer()
+    if why:
+        pytest.skip(why)
+    # the attributes a Wav2Vec2PhonemeCTCTokenizer exposes for its phonemizer
+    tk = SimpleNamespace(phonemizer_backend="espeak", phonemizer_lang="en-us",
+                         phone_delimiter_token=" ", word_delimiter_token=None)
+    phonemize = worker.make_phonemizer(tk)
+    assert phonemize("hello") == "h ə l oʊ"
+    assert phonemize("the cat") == "ð ə k æ t"
+    tk.word_delimiter_token = "|"
+    assert worker.make_phonemizer(tk)("the cat") == "ð ə | k æ t |"
+
+
+def test_phon_targets_use_own_phonemizer():
+    m = worker.CtcModel.__new__(worker.CtcModel)
+    m.kind = "phon"
+    m.dict = {"<pad>": 0, "h": 1, "ə": 2, "l": 3, "oʊ": 4}
+    m.blank = 0
+    # a tokenizer whose own phonemize() is broken, as under transformers 5.x
+    m.proc = SimpleNamespace(tokenizer=SimpleNamespace(phonemize=None))
+    m._phonemize = {"hello": "h ə l oʊ", "zz": "z z"}.get
+    toks, owner = m.targets(["hello", "zz", "hello"])
+    assert toks == [1, 2, 3, 4, 1, 2, 3, 4]
+    assert owner == [0, 0, 0, 0, 2, 2, 2, 2]

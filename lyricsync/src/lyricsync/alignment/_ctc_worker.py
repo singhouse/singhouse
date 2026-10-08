@@ -110,6 +110,7 @@ class CtcModel:
 
         self.kind = kind
         self.device = device
+        self._phonemize = None  # built lazily from the tokenizer (phoneme model only)
         if kind in CHAR_BUNDLES:
             bundle = getattr(torchaudio.pipelines, CHAR_BUNDLES[kind])
             self.model = bundle.get_model().to(device).eval()
@@ -165,9 +166,10 @@ class CtcModel:
         """Token ids and their owning word index (-1 for the word separator)."""
         toks, owner = [], []
         if self.kind == "phon":
-            tk = self.proc.tokenizer
+            if getattr(self, "_phonemize", None) is None:
+                self._phonemize = make_phonemizer(self.proc.tokenizer)
             for i, w in enumerate(words):
-                for p in tk.phonemize(w).split():
+                for p in self._phonemize(w).split():
                     if p in self.dict and self.dict[p] != self.blank:
                         toks.append(self.dict[p])
                         owner.append(i)
@@ -191,6 +193,32 @@ class CtcModel:
         self.model = None
         self.hf = None
         self.proc = None
+        self._phonemize = None
+
+
+def make_phonemizer(tk):
+    """Return ``phonemize(word) -> str`` matching ``tk.phonemize(word)`` for a
+    Wav2Vec2PhonemeCTCTokenizer ``tk``.
+
+    The tokenizer's own method is not used: in transformers 5.x its base-class
+    ``__init__`` overwrites the phonemizer backend that the subclass set up with
+    a plain ``backend`` attribute, so ``tk.phonemize`` raises AttributeError.
+    This builds the same backend and separator from the tokenizer's settings.
+    """
+    from phonemizer.backend import BACKENDS
+    from phonemizer.separator import Separator
+
+    backend = BACKENDS[getattr(tk, "phonemizer_backend", "espeak")](
+        getattr(tk, "phonemizer_lang", "en-us"), language_switch="remove-flags"
+    )
+    wd = tk.word_delimiter_token
+    sep = Separator(phone=tk.phone_delimiter_token,
+                    word=(wd + " ") if wd is not None else "", syllable="")
+
+    def phonemize(word):
+        return backend.phonemize([word], separator=sep)[0].strip()
+
+    return phonemize
 
 
 def check_phonemizer():
