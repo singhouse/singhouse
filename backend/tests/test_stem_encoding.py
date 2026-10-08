@@ -125,7 +125,8 @@ async def test_all_recognized_lanes_are_finalized_and_old_formats_retired(tmp_pa
     monkeypatch.setenv("STEM_FORMAT", "flac")
     for base in names:
         (tmp_path / f"{base}.wav").write_bytes(b"new")
-        (tmp_path / f"{base}.mp3").write_bytes(b"stale")
+        for extension in ("mp3", "m4a", "webm"):
+            (tmp_path / f"{base}.{extension}").write_bytes(b"stale")
     intermediate = tmp_path / "vocals.wav"
     intermediate.write_bytes(b"separator intermediate")
 
@@ -135,7 +136,9 @@ async def test_all_recognized_lanes_are_finalized_and_old_formats_retired(tmp_pa
     monkeypatch.setattr(encoding, "encode_stem", encode)
     await encoding.finalize_stems(tmp_path)
     assert intermediate.read_bytes() == b"separator intermediate"
-    assert not list(tmp_path.glob("*.mp3"))
+    assert not any(tmp_path.glob("*.mp3"))
+    assert not any(tmp_path.glob("*.m4a"))
+    assert not any(tmp_path.glob("*.webm"))
     assert sorted(p.stem for p in tmp_path.glob("*.flac")) == sorted(names)
     assert list(tmp_path.glob("*.wav")) == [intermediate]
 
