@@ -155,7 +155,8 @@ print(result.metadata.extra["acoustic_alignment"])
   fewer than two character models) keeps the existing timing; the reason is
   recorded in `metadata.extra["acoustic_alignment"]`, alongside the models
   used and skipped, the boundary parameters and the indices of words whose
-  voters disagree (`flagged_words`).
+  voters disagree (`flagged_words`: flat word indices across `result.lines` in
+  line order; flagged words are still re-timed, the flag is informational).
 - Boundary parameters: `PipelineConfig.acoustic_start_shift` (-0.02 s),
   `acoustic_join_gap` (0.0 s), `acoustic_tail_extend` (0.2 s),
   `acoustic_flag_threshold` (0.2 s).

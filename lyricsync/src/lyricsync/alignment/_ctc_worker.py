@@ -16,13 +16,16 @@ Request JSON:
      "models": ["hubl", "w2v2l", "hubxl", "phon"],  # optional, this order
      "allow_cpu": false}                             # optional
 
-Result JSON (written to --output):
+Result JSON (written to --output, atomically, after every model and at the end):
     {"engine": "ctc-worker-1", "device": "cuda",
      "models_run": ["hubl", ...],
      "models_failed": {"phon": "reason", ...},
      "spans": {"hubl": [[start, end] | [null, null], ...], ...},
+     "models_pending": [],                 # not yet attempted (partial file only)
+     "complete": true,                     # false while models are still pending
      "duration": 123.4}
-or, on a fatal error, {"error": "..."} with a non-zero exit status.
+On a fatal error the file also carries {"error": "..."} and the exit status is
+non-zero; spans of models that finished before the failure are kept.
 
 Each model is loaded, run over the whole song, and freed before the next one
 is loaded, so peak GPU memory is that of the largest single model.
@@ -165,14 +168,17 @@ class CtcModel:
             tk = self.proc.tokenizer
             for i, w in enumerate(words):
                 for p in tk.phonemize(w).split():
-                    if p in self.dict:
+                    if p in self.dict and self.dict[p] != self.blank:
                         toks.append(self.dict[p])
                         owner.append(i)
             return toks, owner
         for i, w in enumerate(words):
             w = w.upper() if self.upper else w.lower()
             w = w.replace("’", "'")
-            ids = [self.dict[ch] for ch in w if ch in self.dict and ch != self.sep]
+            # Never target the blank (torchaudio labels it "-", so hyphens would
+            # otherwise become blank tokens) or the word separator.
+            ids = [self.dict[ch] for ch in w
+                   if ch in self.dict and ch != self.sep and self.dict[ch] != self.blank]
             if self.sep and toks and ids:
                 toks.append(self.dict[self.sep])
                 owner.append(-1)
@@ -340,7 +346,19 @@ def _json_span(a, b):
     return [float(a), float(b)]
 
 
-def run(req):
+def write_json_atomic(path, obj):
+    """Write ``obj`` as JSON so a reader never sees a half-written file."""
+    import os
+
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def run(req, out=None, checkpoint=None):
+    """Align every requested model. ``out`` is filled in place; ``checkpoint(out)``
+    is called after each model so a partial result survives a later crash or kill."""
     import torch
 
     words = [str(w) for w in req["words"]]
@@ -357,16 +375,21 @@ def run(req):
         raise RuntimeError("audio is empty")
     log(f"device={device} audio={len(y) / SR:.1f}s words={len(words)} models={models}")
 
-    out = {"engine": ENGINE, "device": device, "models_run": [], "models_failed": {},
-           "spans": {}, "duration": len(y) / SR}
+    if out is None:
+        out = {}
+    out.update({"engine": ENGINE, "device": device, "models_run": [], "models_failed": {},
+                "spans": {}, "duration": len(y) / SR, "models_pending": list(models),
+                "complete": False})
     for kind in models:
         if kind not in CHAR_BUNDLES and kind != "phon":
             out["models_failed"][kind] = "unknown model"
+            out["models_pending"].remove(kind)
             continue
         if kind == "phon":
             why = check_phonemizer()
             if why:
                 out["models_failed"][kind] = why
+                out["models_pending"].remove(kind)
                 log(f"{kind}: skipped: {why}")
                 continue
         model = None
@@ -388,10 +411,14 @@ def run(req):
             del model, em
             if device == "cuda":
                 torch.cuda.empty_cache()
+            out["models_pending"].remove(kind)
+            if checkpoint is not None:
+                checkpoint(out)
     if device == "cuda":
         out["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 2**20, 1)
         out["peak_vram_reserved_mb"] = round(torch.cuda.max_memory_reserved() / 2**20, 1)
     out["elapsed"] = round(time.monotonic() - t0, 2)
+    out["complete"] = True
     return out
 
 
@@ -403,16 +430,17 @@ def main():
 
     # Keep stdout clean of library chatter: everything diagnostic goes to stderr.
     sys.stdout = sys.stderr
+    out = {}
     try:
         with open(args.input, encoding="utf-8") as f:
             req = json.load(f)
-        result = run(req)
+        run(req, out, checkpoint=lambda o: write_json_atomic(args.output, o))
         code = 0
     except Exception as e:  # noqa: BLE001
-        result = {"error": f"{type(e).__name__}: {e}"[:1000]}
+        # Keep any models that finished before the failure alongside the error.
+        out["error"] = f"{type(e).__name__}: {e}"[:1000]
         code = 1
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(result, f)
+    write_json_atomic(args.output, out)
     sys.exit(code)
 
 

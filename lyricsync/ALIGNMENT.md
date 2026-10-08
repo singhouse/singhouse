@@ -174,8 +174,9 @@ vocal sounds need not be absorbed into a word. Each word's start is the
 median over those models and the existing timing, made non-decreasing; each
 end is the median of the character models, clipped to the next word's start.
 A constant start shift and an end extension or join against the next start
-finish the boundaries. Words whose voters disagree by more than 0.2 s are
-reported, not changed. If fewer than two character models produce output, or
+finish the boundaries. Every word is re-timed; words where two or more
+voters disagree with the fused start by more than 0.2 s are additionally
+listed in the metadata (flat word indices in line order) as low-confidence. If fewer than two character models produce output, or
 anything fails, the existing timing is kept.
 
 ## 6. Configuration

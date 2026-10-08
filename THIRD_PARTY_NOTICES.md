@@ -170,7 +170,7 @@ containing them must account for their redistribution terms.
 | Transformers | Apache-2.0 | Separate environment. |
 | NumPy | BSD-3-Clause and others | Bundles several separately-licensed components (0BSD, MIT, Zlib, CC0-1.0); its own distribution carries their texts. |
 | SciPy | BSD-3-Clause | Separate environment. |
-| phonemizer | **GPL-3.0-or-later** | Optional, separate environment. Used only by the optional phoneme voter of the acoustic re-timing stage, through the Transformers phoneme tokenizer; when it is absent that voter is skipped. Not installed or bundled by this project. |
+| phonemizer | **GPL-3.0-or-later** | Optional, separate environment. Used only by the optional phoneme voter of the acoustic re-timing stage: the alignment worker imports it directly to check that the espeak backend works, and the Transformers phoneme tokenizer calls it to phonemize words. When it is absent that voter is skipped. Not installed or bundled by this project. |
 | eSpeak NG | **GPL-3.0-or-later** | Optional system program, the backend phonemizer drives. Same consideration as phonemizer. |
 
 ### Web service
@@ -226,7 +226,7 @@ caches:
   wav2vec 2.0 authors under the **MIT** license and redistributed by
   torchaudio under the same license (per the torchaudio documentation).
 - `facebook/wav2vec2-lv-60-espeak-cv-ft` (phoneme voter, Hugging Face) —
-  check the terms on its model card before use or redistribution.
+  **Apache-2.0**, per its model card.
 
 The MMS forced-alignment weights (`torchaudio.pipelines.MMS_FA`, CC-BY-NC)
 are deliberately not used.

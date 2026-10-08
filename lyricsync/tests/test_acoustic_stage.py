@@ -8,7 +8,12 @@ from dataclasses import replace
 
 import pytest
 from lyricsync._types import TimedWord, TranscriptionResult, TranscriptionSegment
-from lyricsync.alignment.ctc_aligner import METADATA_KEY, apply_acoustic_alignment
+from lyricsync.alignment.ctc_aligner import (
+    METADATA_KEY,
+    _log_worker_stderr,
+    _retime,
+    apply_acoustic_alignment,
+)
 
 from lyricsync import (
     AcousticAligner,
@@ -142,6 +147,7 @@ def test_enabled_retimes_and_keeps_structure(mode, use_align_only):
     assert meta["engine"] == "ctc-fusion-1"
     assert meta["models_used"] == ["hubl", "w2v2l", "hubxl", "phon"]
     assert meta["models_skipped"] == {}
+    assert meta["models_lost"] == {} and meta["partial"] is False
     assert meta["params"] == {"start_shift": -0.02, "join_gap": 0.0, "tail_extend": 0.2,
                               "flag_threshold": 0.2}
     assert meta["flagged_count"] == 0 and meta["flagged_words"] == []
@@ -371,3 +377,129 @@ def test_missing_interpreter(tmp_path):
 def test_bundled_worker_script_exists():
     assert CtcFusionAligner(sys.executable).script_path.name == "_ctc_worker.py"
     assert CtcFusionAligner(sys.executable).script_path.exists()
+
+
+def _partial_body(models, pending, then):
+    spans = "{" + ", ".join(
+        f"'{m}': [[i * 1.0, i + 0.5] for i in range(len(req['words']))]" for m in models
+    ) + "}"
+    return (
+        f"json.dump({{'engine': 'ctc-worker-1', 'device': 'cuda', 'spans': {spans},"
+        f" 'models_failed': {{}}, 'models_pending': {pending!r}, 'complete': False}},"
+        " open(out, 'w'))\n" + then
+    )
+
+
+def test_timed_out_worker_partial_result_is_used(tmp_path):
+    script = _write_worker(tmp_path, _partial_body(
+        ["hubl", "w2v2l"], ["hubxl", "phon"], "time.sleep(30)\n"))
+    al = CtcFusionAligner(sys.executable, script_path=script, timeout=2)
+    res = al.align_words([AUDIO], ["a", "b"])
+    assert set(res.spans) == {"hubl", "w2v2l"}
+    assert set(res.models_lost) == {"hubxl", "phon"}
+    assert "timed out" in res.models_lost["hubxl"]
+
+
+def test_crashed_worker_partial_result_is_used(tmp_path):
+    script = _write_worker(tmp_path, _partial_body(
+        ["hubl", "w2v2l"], ["hubxl"], "sys.exit(9)\n"))
+    al = CtcFusionAligner(sys.executable, script_path=script)
+    res = al.align_words([AUDIO], ["a", "b"])
+    assert res.models_lost == {"hubxl": "worker exited with status 9"}
+
+
+def test_worker_error_with_enough_models_is_partial(tmp_path):
+    body = _partial_body(["hubl", "hubxl"], ["phon"], "").replace(
+        "'complete': False", "'complete': False, 'error': 'late failure'")
+    script = _write_worker(tmp_path, body + "sys.exit(1)\n")
+    al = CtcFusionAligner(sys.executable, script_path=script)
+    res = al.align_words([AUDIO], ["a"])
+    assert set(res.spans) == {"hubl", "hubxl"}
+    assert "late failure" in res.models_lost["phon"]
+
+
+def test_partial_with_one_character_model_still_fails(tmp_path):
+    script = _write_worker(tmp_path, _partial_body(
+        ["hubl", "phon"], ["w2v2l", "hubxl"], "time.sleep(30)\n"))
+    al = CtcFusionAligner(sys.executable, script_path=script, timeout=2)
+    with pytest.raises(AcousticAlignmentError, match="timed out"):
+        al.align_words([AUDIO], ["a"])
+
+
+def test_cancel_ignores_partial_result(tmp_path):
+    script = _write_worker(tmp_path, _partial_body(
+        ["hubl", "w2v2l"], ["hubxl"], "open(out + '.ready', 'w').close()\ntime.sleep(30)\n"))
+    ev = threading.Event()
+    al = CtcFusionAligner(sys.executable, script_path=script, cancel_event=ev, timeout=60)
+
+    import tempfile
+    import time as _time
+    from pathlib import Path
+
+    def cancel_when_ready():
+        root = Path(tempfile.gettempdir())
+        for _ in range(200):
+            if any(root.glob("lyricsync-ctc-*/result.json.ready")):
+                break
+            _time.sleep(0.05)
+        ev.set()
+
+    t = threading.Thread(target=cancel_when_ready)
+    t.start()
+    with pytest.raises(AcousticAlignmentError, match="cancelled"):
+        al.align_words([AUDIO], ["a"])
+    t.join()
+
+
+def test_models_lost_recorded_in_metadata():
+    base = _baseline("plain")
+
+    class Lossy(ShiftAligner):
+        def align_words(self, audio_paths, words):
+            out = super().align_words(audio_paths, words)
+            out.models_lost = {"hubxl": "CTC worker timed out after 5s"}
+            return out
+
+    al = Lossy(models=("hubl", "w2v2l"))
+    al.reference = _times(base)
+    res = _run("plain", al)
+    meta = res.metadata.extra[METADATA_KEY]
+    assert meta["applied"] is True
+    assert meta["partial"] is True
+    assert meta["models_lost"] == {"hubxl": "CTC worker timed out after 5s"}
+    assert meta["models_used"] == ["hubl", "w2v2l"]
+
+
+def test_retime_is_atomic():
+    import numpy as np
+
+    base = _baseline("plain")
+    before_lines = _times(base)
+    before_segs = _seg_times(base)
+    n = len(before_lines)
+    with pytest.raises(ValueError):
+        _retime(base, np.zeros((n - 1, 2)))
+    assert _times(base) == before_lines and _seg_times(base) == before_segs
+    base.segments[0]["words"].append({"text": "extra", "start": 0.0, "end": 0.1})
+    with pytest.raises(ValueError):
+        _retime(base, np.zeros((n, 2)))
+    assert _times(base) == before_lines
+
+
+def test_worker_stderr_logging(caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="lyricsync.alignment.ctc_aligner")
+    text = _log_worker_stderr(
+        b"model.pt:  10%|#  \r model.pt:  60%|###  \r model.pt: 100%|#####\n"
+        b"ctc-worker: hubl: aligned in 3.1s\n"
+        b"UserWarning: something odd\n"
+        b"ctc-worker: phon: failed: boom\n"
+    )
+    recs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert (logging.DEBUG, "CTC worker:  model.pt: 100%|#####") in recs
+    assert not any("10%" in m for _, m in recs)
+    assert (logging.DEBUG, "CTC worker: ctc-worker: hubl: aligned in 3.1s") in recs
+    assert (logging.WARNING, "CTC worker: UserWarning: something odd") in recs
+    assert (logging.WARNING, "CTC worker: ctc-worker: phon: failed: boom") in recs
+    assert "10%" not in text

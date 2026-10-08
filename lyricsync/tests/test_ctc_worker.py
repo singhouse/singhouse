@@ -43,6 +43,54 @@ def test_targets_char_model():
     assert owner == [0, 0, -1, 1, 1, 1, -1, 3]
 
 
+def test_targets_hyphens_are_not_blank_tokens():
+    m = _char_model()
+    toks, owner = m.targets(["ab-", "a-b", "-", "b"])
+    assert VOCAB["-"] == m.blank
+    assert m.blank not in toks
+    assert toks == [2, 3, 1, 2, 3, 1, 3]
+    assert owner == [0, 0, -1, 1, 1, -1, 3]
+
+
+def test_run_checkpoints_after_each_model(monkeypatch, tmp_path):
+    class FakeModel:
+        def __init__(self, kind, device):
+            if kind == "w2v2l":
+                raise RuntimeError("weights unavailable")
+            self.kind = kind
+
+        def emissions(self, y):
+            return None, 0.02
+
+        def free(self):
+            pass
+
+    monkeypatch.setattr(worker, "CtcModel", FakeModel)
+    monkeypatch.setattr(worker, "load_audio", lambda paths: np.zeros(16000, np.float32))
+    monkeypatch.setattr(worker, "pick_device", lambda allow: "cpu")
+    monkeypatch.setattr(worker, "word_spans",
+                        lambda em, spf, model, words: (np.array([0.1]), np.array([0.2])))
+    monkeypatch.setattr(worker, "check_phonemizer", lambda: "no espeak")
+    snaps = []
+    out_path = tmp_path / "result.json"
+
+    def checkpoint(o):
+        worker.write_json_atomic(str(out_path), o)
+        snaps.append((sorted(o["spans"]), list(o["models_pending"]), o["complete"]))
+
+    out = worker.run({"words": ["a"], "audio_paths": ["x.wav"]}, {}, checkpoint)
+    assert snaps == [
+        (["hubl"], ["w2v2l", "hubxl", "phon"], False),
+        (["hubl"], ["hubxl", "phon"], False),
+        (["hubl", "hubxl"], ["phon"], False),
+    ]
+    assert out["complete"] is True and out["models_pending"] == []
+    assert set(out["models_failed"]) == {"w2v2l", "phon"}
+    import json
+    assert json.loads(out_path.read_text())["models_pending"] == ["phon"]
+    assert not (tmp_path / "result.json.tmp").exists()
+
+
 def test_viterbi_spans_follow_the_dominant_path():
     B, S, A, Bc = 0, 1, 2, 3
     frames = [B] * 5 + [A] * 3 + [Bc] * 2 + [S] * 5 + [Bc] * 2 + [A] * 3 + [B] * 5
