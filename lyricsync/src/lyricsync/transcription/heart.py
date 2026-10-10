@@ -117,6 +117,10 @@ class HeartTranscriber:
             tf.close()
             vad_tmp = tf.name
             cmd.extend(["--vad-segments", vad_tmp])
+            # The decode script knows the device and its free memory, so it
+            # resolves "auto" there; an explicit cap is forwarded as-is.
+            cap = (self.vad_config or VadConfig()).max_segment_duration
+            cmd.extend(["--max-segment-seconds", "auto" if cap is None else repr(float(cap))])
             logger.info(
                 "HeartTranscriber: VAD produced %d segments (%.1fs audio)",
                 len(vad_segs), len(samples) / sr,

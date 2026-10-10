@@ -261,6 +261,24 @@ def modal_separate(
 # --------------------------------------------------------------------------- #
 # Transcription
 # --------------------------------------------------------------------------- #
+def _modal_vad_config(vad_config=None):
+    """The VAD config the Modal runner splits with.
+
+    The remote function receives finished segments and has no device-memory
+    probe, so an "auto" cap (``max_segment_duration=None``) resolves to the
+    fixed safe cap here. An explicit cap is passed through unchanged.
+    """
+    import dataclasses
+
+    from lyricsync._config import VadConfig
+    from lyricsync.audio.vad import SAFE_MAX_SEGMENT_DURATION
+
+    cfg = vad_config or VadConfig()
+    if cfg.max_segment_duration is None:
+        cfg = dataclasses.replace(cfg, max_segment_duration=SAFE_MAX_SEGMENT_DURATION)
+    return cfg
+
+
 class ModalHeartTranscriber:
     """Drop-in for ``lyricsync.transcription.HeartTranscriber`` that runs the
     Heart model on Modal GPU instead of a local subprocess.
@@ -299,7 +317,7 @@ class ModalHeartTranscriber:
             from lyricsync.audio.vad import rms_vad_segments
 
             samples, sr = read_wav_mono(audio_path)
-            vad_segments = rms_vad_segments(samples, sr, self.vad_config)
+            vad_segments = rms_vad_segments(samples, sr, _modal_vad_config(self.vad_config))
             logger.info(
                 "ModalHeartTranscriber: VAD produced %d segments (%.1fs audio)",
                 len(vad_segments), len(samples) / sr,

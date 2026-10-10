@@ -134,7 +134,9 @@ class VadConfigIn(BaseModel):
     onset_threshold: float = Field(0.03, ge=0, le=1)
     offset_threshold: float = Field(0.02, ge=0, le=1)
     min_silence_duration: float = Field(1.5, ge=0)
-    max_segment_duration: float = Field(30.0, gt=0)
+    # None = auto: the transcriber sizes slices to the device (see
+    # lyricsync VadConfig.max_segment_duration). A number is a fixed cap.
+    max_segment_duration: Optional[float] = Field(None, gt=0)
 
 
 class MatchConfigIn(BaseModel):

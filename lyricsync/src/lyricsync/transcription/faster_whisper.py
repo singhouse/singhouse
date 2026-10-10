@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import site
@@ -10,7 +11,7 @@ from typing import Optional
 from lyricsync._config import VadConfig
 from lyricsync._types import TimedWord, TranscriptionResult, TranscriptionSegment
 from lyricsync.audio.io import read_wav_mono
-from lyricsync.audio.vad import rms_vad_segments
+from lyricsync.audio.vad import SAFE_MAX_SEGMENT_DURATION, rms_vad_segments
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,12 @@ class FasterWhisperTranscriber:
     ) -> TranscriptionResult:
         if vad_config is None:
             vad_config = VadConfig()
+        if vad_config.max_segment_duration is None:
+            # "Auto" needs a device-memory probe this in-process path does not
+            # have, so it keeps the fixed cap that is safe on ~8 GB cards.
+            vad_config = dataclasses.replace(
+                vad_config, max_segment_duration=SAFE_MAX_SEGMENT_DURATION,
+            )
 
         samples, sample_rate = read_wav_mono(audio_path)
         vad_segs = rms_vad_segments(samples, sample_rate, vad_config)
