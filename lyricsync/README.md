@@ -108,6 +108,11 @@ config = PipelineConfig(
 pipeline = SyncPipeline(transcriber=..., config=config)
 ```
 
+`VadConfig.max_segment_duration=None` (the default) means auto: VAD splits at
+a 30 s ceiling and expects a device-aware decoder to re-split longer slices to
+fit the available memory. Callers without such a decoder should pass an
+explicit value, such as `max_segment_duration=15.0`.
+
 ## Alignment methods
 
 | Method | When | Description |

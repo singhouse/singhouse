@@ -310,7 +310,11 @@ def transcribe_remote(
 
         audio, sr = librosa.load(str(audio_path), sr=16000, mono=True)
         for seg_start, seg_end in vad_segments:
-            s_idx, e_idx = int(float(seg_start) * sr), int(float(seg_end) * sr)
+            s_idx = int(float(seg_start) * sr)
+            # Never cut a slice longer than the pipeline window: a 30 s
+            # segment can round to one sample over, which makes the pipeline
+            # emit a second strided chunk (an extra decode).
+            e_idx = min(int(float(seg_end) * sr), s_idx + int(30 * sr))
             slice_audio = audio[s_idx:e_idx].astype(np.float32)
             if len(slice_audio) < sr * 0.1:
                 continue
