@@ -26,9 +26,10 @@ class VadConfig:
     # are split, and word timestamps are offset back to global time), but it
     # needlessly limits context on cards with more headroom. Auto keeps 15 s
     # on ~8 GB cards and allows up to 30 s on large ones; CPU decode keeps
-    # 15 s (host RAM is not probed). Transcribers that cannot measure memory
-    # (faster-whisper, the Modal runner) treat ``None`` as a fixed 15 s, and
-    # the whole-file window used when VAD finds no usable region is 15 s.
+    # 15 s (host RAM is not probed). faster-whisper cannot measure memory and
+    # treats ``None`` as a fixed 15 s. The Modal runner cannot either, but
+    # runs on data-centre GPUs, so it takes the 30 s ceiling as is. The
+    # whole-file window used when VAD finds no usable region is 15 s.
     max_segment_duration: float | None = None
     # Shortest region worth transcribing. Sub-second RMS blips (breaths,
     # cymbal bleed, stem-separation artifacts) carry no lyric but still get

@@ -158,38 +158,58 @@ def test_the_backend_runner_is_the_script_heart_jobs_use():
 
 
 # ---------------------------------------------------------------------------
-# Modal keeps the fixed safe cap
+# Modal takes the 30 s ceiling as is
 # ---------------------------------------------------------------------------
 
 
-def test_modal_resolves_auto_to_the_safe_cap(tmp_path: Path):
+def _modal_vad_run(tmp_path: Path, vad_config, samples, sr):
     from karaoke_backend.workers import modal_offload
-    from lyricsync._config import VadConfig
 
-    assert modal_offload._modal_vad_config(None).max_segment_duration == 15.0
-    assert modal_offload._modal_vad_config(VadConfig()).max_segment_duration == 15.0
-    assert modal_offload._modal_vad_config(
-        VadConfig(max_segment_duration=25.0)
-    ).max_segment_duration == 25.0
-
-    seen: dict = {}
-
-    def fake_vad(samples, sr, config):
-        seen["config"] = config
-        return [(0.0, 1.0)]
+    sent: dict = {}
 
     class _Fn:
         def remote(self, *args):
+            sent["args"] = args
             return {"segments": [], "language": "en", "full_text": ""}
 
     audio = tmp_path / "lead_vocals.wav"
     audio.write_bytes(b"audio")
-    transcriber = modal_offload.ModalHeartTranscriber(use_vad=True)
-    with patch("lyricsync.audio.io.read_wav_mono", return_value=([0.0] * 16000, 16000)), \
-            patch("lyricsync.audio.vad.rms_vad_segments", side_effect=fake_vad), \
+    transcriber = modal_offload.ModalHeartTranscriber(use_vad=True, vad_config=vad_config)
+    with patch("lyricsync.audio.io.read_wav_mono", return_value=(samples, sr)), \
             patch.object(modal_offload, "_lookup", return_value=_Fn()):
         transcriber.transcribe(str(audio))
-    assert seen["config"].max_segment_duration == 15.0
+    return next(a for a in sent["args"] if isinstance(a, list))
+
+
+def test_modal_auto_splits_at_the_30s_ceiling(tmp_path: Path):
+    import numpy as np
+
+    sr = 16000
+    t = np.arange(int(70 * sr)) / sr
+    loud = (0.5 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    segs = _modal_vad_run(tmp_path, None, loud, sr)
+    lengths = [round(e - s, 3) for s, e in segs]
+    assert max(lengths) <= 30.0 + 1e-6
+    assert any(abs(n - 30.0) < 0.1 for n in lengths)
+
+
+def test_modal_auto_keeps_15s_window_for_silent_stems(tmp_path: Path):
+    import numpy as np
+
+    sr = 16000
+    segs = _modal_vad_run(tmp_path, None, np.zeros(int(60 * sr), dtype=np.float32), sr)
+    assert [tuple(map(float, s)) for s in segs] == [(0.0, 15.0)]
+
+
+def test_modal_explicit_cap_is_passed_through(tmp_path: Path):
+    import numpy as np
+    from lyricsync._config import VadConfig
+
+    sr = 16000
+    t = np.arange(int(70 * sr)) / sr
+    loud = (0.5 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    segs = _modal_vad_run(tmp_path, VadConfig(max_segment_duration=12.0), loud, sr)
+    assert max(e - s for s, e in segs) <= 12.0 + 1e-6
 
 
 # ---------------------------------------------------------------------------
