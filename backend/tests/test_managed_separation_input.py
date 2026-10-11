@@ -404,6 +404,9 @@ async def test_ingest_uses_the_guarded_whole_separation_deadline(clean_dirs, cli
     job_id = await _queue_upload(client)
     # The worker, not the upload route, sees the guarded CUDA runtime here.
     monkeypatch.setenv("KARAOKE_DESKTOP_PROCESSING_JSON", "managed")
+    # This test isolates the claimed job's deadline; the fake attestation is
+    # intentionally not a readiness fixture for the independent queue gate.
+    monkeypatch.setattr("karaoke_backend.workers.managed_processing.deferred_job_kinds", lambda: set())
     monkeypatch.setattr(modal_worker.modal_offload, "is_enabled", lambda: False)
     monkeypatch.setattr(modal_worker, "configured_accelerator", lambda: "cuda")
     deadlines = []
@@ -455,13 +458,12 @@ async def test_ingest_shows_missing_policy_refusal_and_does_not_retry(clean_dirs
 
 @pytest.mark.asyncio
 async def test_transcription_device_notice_reaches_the_job_message(clean_dirs, client: AsyncClient):
-    from karaoke_backend.jobs import ingest
     job_id = await _queue_upload(client)
     stems_seen = {}
 
     async def separated(*, stems_dir, **_kwargs):
         stems_dir.mkdir(parents=True, exist_ok=True)
-        for name in ingest.SEPARATION_ARTIFACTS:
+        for name in ("lead_vocals.wav", "backing_vocals.wav", "instrumental.wav", "karaoke.wav"):
             (stems_dir / name).write_bytes(WAV)
         stems_seen["dir"] = stems_dir
         return {}
@@ -474,10 +476,15 @@ async def test_transcription_device_notice_reaches_the_job_message(clean_dirs, c
         stems_seen["message"] = job["message"]
         return None
 
+    # Storage encoding has separate real-audio regressions. Keep this fixture
+    # about notice publication, without trying to encode its empty WAV header.
+    finalized = AsyncMock()
     with patch("karaoke_backend.jobs.ingest.separate_stems", new=separated), \
+            patch("karaoke_backend.jobs.ingest.finalize_stems", new=finalized), \
             patch("karaoke_backend.jobs.ingest.generate_word_sync", new=transcribe):
         assert await run_queued_jobs_once() == 1
     assert "dir" in stems_seen
+    finalized.assert_awaited_once_with(stems_seen["dir"])
     assert stems_seen["message"].startswith("Transcribing vocals on the CPU because there is not enough")
 
 
