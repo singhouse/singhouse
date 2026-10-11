@@ -4,6 +4,10 @@
     "transcription",
     "separation"
   ],
+  "excludedPackages": {
+    "diffq": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.",
+    "diffq-fixed": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed."
+  },
   "glibcMinimum": "2.39",
   "kind": "processing-requirements",
   "modelCapabilities": {
@@ -274,12 +278,12 @@
     },
     {
       "license": "License :: OSI Approved :: The Unlicense (Unlicense)",
-      "licenseSource": "https://pypi.org/pypi/email-validator/2.2.0/json",
+      "licenseSource": "https://pypi.org/pypi/email-validator/2.3.0/json",
       "name": "email-validator",
-      "sha256": "561977c2d73ce3611850a06fa56b414621e0c8faa9d66f2611407d87465da631",
-      "size": 33521,
-      "url": "https://files.pythonhosted.org/packages/d7/ee/bf0adb559ad3c786f12bcbc9296b3f5675f529199bef03e2df281fa1fadb/email_validator-2.2.0-py3-none-any.whl",
-      "version": "2.2.0"
+      "sha256": "80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4",
+      "size": 35604,
+      "url": "https://files.pythonhosted.org/packages/de/15/545e2b6cf2e3be84bc1ed85613edd75b8aea69807a71c26f4ca6a9258e82/email_validator-2.3.0-py3-none-any.whl",
+      "version": "2.3.0"
     },
     {
       "license": "License :: OSI Approved :: MIT License",
@@ -874,13 +878,13 @@
       "version": "1.2.2"
     },
     {
-      "license": "License :: OSI Approved :: Apache Software License",
-      "licenseSource": "https://pypi.org/pypi/python-multipart/0.0.12/json",
+      "license": "Apache-2.0",
+      "licenseSource": "https://pypi.org/pypi/python-multipart/0.0.32/json",
       "name": "python-multipart",
-      "sha256": "43dcf96cf65888a9cd3423544dd0d75ac10f7aa0c3c28a175bbcd00c9ce1aebf",
-      "size": 23246,
-      "url": "https://files.pythonhosted.org/packages/f5/0b/c316262244abea7481f95f1e91d7575f3dfcf6455d56d1ffe9839c582eb1/python_multipart-0.0.12-py3-none-any.whl",
-      "version": "0.0.12"
+      "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+      "size": 30042,
+      "url": "https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl",
+      "version": "0.0.32"
     },
     {
       "license": "License :: OSI Approved :: MIT License",
@@ -1043,13 +1047,13 @@
       "version": "1.1.0"
     },
     {
-      "license": "License :: OSI Approved :: MIT License",
-      "licenseSource": "https://pypi.org/pypi/sqlalchemy/2.0.36/json",
+      "license": "MIT",
+      "licenseSource": "https://pypi.org/pypi/sqlalchemy/2.1.1/json",
       "name": "sqlalchemy",
-      "sha256": "ac9dfa18ff2a67b09b372d5db8743c27966abf0e5344c555d86cc7199f7ad83a",
-      "size": 3243044,
-      "url": "https://files.pythonhosted.org/packages/8a/ab/81d4514527c068670cb1d7ab62a81a185df53a7c379bd2a5636e83d09ede/SQLAlchemy-2.0.36-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-      "version": "2.0.36"
+      "sha256": "0fad3dc37851b096ef72538b18152a5c1ae9c8b2013cd89f51eca83fc6eba36b",
+      "size": 4701803,
+      "url": "https://files.pythonhosted.org/packages/b2/95/37b6846549a76c69beca71974905446130d78bddd88a4414b5b88c88af16/sqlalchemy-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "version": "2.1.1"
     },
     {
       "license": "License :: OSI Approved :: BSD License",
@@ -1236,11 +1240,7 @@
     }
   ],
   "pythonVersion": "3.12.14",
-  "resolutionSha256": "9024640bd067b168e875258ca8cfbbf1fee13e3e7bad9fd0c485bb8885d2ce11",
+  "resolutionSha256": "b9fb2729bb96ba63039dda50cf24ad9c4ca172e22b6ea8e8e082cb1da87b7003",
   "schema": 1,
-  "target": "linux-x64",
-  "excludedPackages": {
-    "diffq": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed.",
-    "diffq-fixed": "Excluded from release packs: selected separation models are non-quantized and CC BY-NC code is not redistributed."
-  }
+  "target": "linux-x64"
 }
