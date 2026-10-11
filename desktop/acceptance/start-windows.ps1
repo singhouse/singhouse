@@ -76,7 +76,9 @@ try {
         $SetupArguments = @((Join-Path $PSScriptRoot 'windows-bootstrap.mjs'), '--bundle', $Bundle, '--profile', $Profile, '--accelerator', $Accelerator)
         if ($DependenciesOnly) { $SetupArguments += '--dependencies-only' } else { $SetupArguments += '--accept-model-downloads' }
         if ($Repair) { $SetupArguments += '--repair' }
-        & $App @SetupArguments
+        # Piping output makes Windows PowerShell wait for the GUI-subsystem
+        # Electron executable and populate LASTEXITCODE before we inspect it.
+        & $App @SetupArguments | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Setup failed (exit $LASTEXITCODE). Details are in $Log. Retry after resolving the error." }
         Remove-Item Env:ELECTRON_RUN_AS_NODE
     }
