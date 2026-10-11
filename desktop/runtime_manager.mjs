@@ -1087,7 +1087,7 @@ function validFunctionalChecks(checks, capabilities) {
 export function processingAttestation(active, probeResult) {
   const manifest = active.manifest
   const functional = manifest.probe.schema === 2
-  const pythonRecord = manifest.files.find(file => file.path === manifest.python)
+  const pythonRecord = (active.installedFiles || manifest.files).find(file => file.path === manifest.python)
   if (!pythonRecord || probeResult?.schema !== manifest.probe.schema || probeResult.accelerator !== manifest.accelerator
       || !probeResult.components || typeof probeResult.components !== 'object' || Array.isArray(probeResult.components)
       || JSON.stringify(Object.keys(probeResult.components).sort()) !== JSON.stringify([...manifest.probe.modules].sort())

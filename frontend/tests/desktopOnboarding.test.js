@@ -608,3 +608,36 @@ describe('desktop setup test hooks and sizes', () => {
     wrapper.unmount()
   })
 })
+
+it('changing hardware selection refreshes consent without starting downloads', async () => {
+  const desktop = bridge({ setHardwareSelection: vi.fn().mockResolvedValue({ available: true, planId: 'new-variant' }) })
+  const setup = useDesktopOnboarding(desktop)
+  await setup.chooseProcessing()
+  await setup.setHardwareSelection('qualified-cpu')
+  expect(desktop.setHardwareSelection).toHaveBeenCalledWith({ mode: 'manual', variantId: 'qualified-cpu' })
+  expect(setup.plan.value.planId).toBe('new-variant')
+  expect(desktop.startSetup).not.toHaveBeenCalled()
+  desktop.setHardwareSelection.mockRejectedValue(new Error('Variant is no longer supported'))
+  expect(await setup.setHardwareSelection('qualified-cpu')).toBe(false)
+  expect(setup.plan.value).toBe(null)
+  expect(setup.canStart.value).toBe(false)
+})
+
+it('automatic hardware selection uses a fixed host request', async () => {
+  const desktop = bridge({ setHardwareSelection: vi.fn().mockResolvedValue({ available: false }) })
+  const setup = useDesktopOnboarding(desktop)
+  await setup.setHardwareSelection('')
+  expect(desktop.setHardwareSelection).toHaveBeenCalledWith({ mode: 'automatic' })
+})
+
+it('reviewing an update from a working setup requires fresh explicit download consent', async () => {
+  const desktop = bridge({ reviewProcessingUpdate: vi.fn().mockResolvedValue({ available: true, ready: false, planId: 'update-plan' }) })
+  const setup = useDesktopOnboarding(desktop)
+  setup.step.value = 'ready'
+  await setup.reviewProcessingUpdate()
+  expect(setup.step.value).toBe('consent')
+  expect(setup.plan.value.planId).toBe('update-plan')
+  expect(desktop.startSetup).not.toHaveBeenCalled()
+  await setup.start()
+  expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'update-plan' })
+})

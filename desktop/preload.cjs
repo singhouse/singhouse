@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   prepareHeart: () => ipcRenderer.invoke('heart:prepare'),
   getOnboardingState: () => ipcRenderer.invoke('setup:preferences'),
   setOnboardingState: state => ipcRenderer.invoke('setup:save-preferences', state),
+  setHardwareSelection: value => ipcRenderer.invoke('setup:hardware-selection', value),
+  reviewProcessingUpdate: () => ipcRenderer.invoke('setup:runtime-update'),
   preflightSetup: () => ipcRenderer.invoke('setup:preflight'),
   chooseModelSource: mode => ipcRenderer.invoke('setup:model-source', mode),
   getModalStatus: () => ipcRenderer.invoke('setup:modal-status'),

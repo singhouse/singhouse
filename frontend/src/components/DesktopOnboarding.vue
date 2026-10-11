@@ -215,6 +215,44 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             Check local setup again
           </button>
         </div>
+        <details v-if="plan?.hardwareAssessment">
+          <summary>Processing quality and hardware selection</summary>
+          <label for="hardware-variant">Processing option</label>
+          <select
+            id="hardware-variant"
+            :value="plan.hardwareSelection?.variantId || ''"
+            :disabled="busy"
+            @change="setup.setHardwareSelection($event.target.value)"
+          >
+            <option value="">
+              Automatic (recommended)
+            </option>
+            <option
+              v-for="variant in plan.hardwareAssessment.variants"
+              :key="variant.id"
+              :value="variant.id"
+              :disabled="!variant.supported"
+            >
+              {{ variant.label }} — {{ variant.supported ? 'Supported' : variant.status }}
+            </option>
+          </select>
+          <p>{{ plan.hardwareAssessment.reason }}</p>
+          <p v-if="!plan.hardwareAssessment.variants.length">
+            No measured processing variants are published for this release. The existing setup remains available when its own release checks pass.
+          </p>
+          <div
+            v-for="variant in plan.hardwareAssessment.variants"
+            :key="variant.id"
+          >
+            <p><strong>{{ variant.label }}</strong>: {{ variant.qualityTradeoff }} {{ variant.reason }}</p>
+            <p v-if="variant.requirements">
+              Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              <span v-if="variant.requirements.vramBytes"> · Dedicated graphics memory: {{ size(variant.requirements.vramBytes) }}</span>.
+              Model transfer: {{ size(variant.requirements.transferBytes) }} · Installed: {{ size(variant.requirements.installedBytes) }}.
+            </p>
+          </div>
+          <p>Available memory is checked again before processing. Changes to quality and additional model transfers require your choice.</p>
+        </details>
         <details>
           <summary>Computer details and processing estimates</summary>
           <template v-if="plan?.hardware">
@@ -510,6 +548,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             @click="leave('add-song')"
           >
             Add a song →
+          </button>
+          <button
+            v-if="choice === 'local' && plan?.updateAvailable"
+            :disabled="busy"
+            @click="setup.reviewProcessingUpdate"
+          >
+            Review processing update
           </button>
         </div>
       </template>

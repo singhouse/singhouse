@@ -111,7 +111,7 @@ async function main() {
   // it below), so its channel is the one the installed application applies.
   const appVersion = JSON.parse(await readFile(resolve(config.directories.app, 'package.json'), 'utf8')).version
   const processingGate = await prepareProcessingGate({ desktopDir: config.directories.app, nativeManifest, appVersion,
-    releaseChannel: policy.channel, argv: process.argv, env: process.env })
+    releaseChannel: policy.channel, nativeLockSha256: provenance.locks?.['native.json'], argv: process.argv, env: process.env })
   for (const notice of processingGate.notices) console.warn(notice)
   const processing = processingGate.result
   console.log(`Processing catalog: ${processing.mode}${processing.catalogSha256 ? ` (catalog sha256 ${processing.catalogSha256}, runtime lock sha256 ${processing.runtimeLockSha256})` : ''}`)

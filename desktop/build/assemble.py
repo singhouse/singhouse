@@ -99,6 +99,28 @@ def unpack_executable(archive_path, record, executable):
     executable.chmod(0o755)
 
 
+def unpack_uv(archive_path, record, executable):
+    """Extract only the pinned uv member, then verify its executable bytes."""
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    if record.get("archive") == "zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            with archive.open(record["member"]) as source, executable.open("wb") as target:
+                shutil.copyfileobj(source, target)
+    elif record.get("archive") == "tar.gz":
+        with tarfile.open(archive_path, "r:gz") as archive:
+            member = archive.getmember(record["member"])
+            if not member.isfile():
+                raise ValueError("Pinned uv member must be a regular file")
+            with archive.extractfile(member) as source, executable.open("wb") as target:
+                shutil.copyfileobj(source, target)
+    else:
+        raise ValueError("Unsupported uv archive format")
+    if digest(executable) != record.get("executableSha256"):
+        executable.unlink()
+        raise ValueError("Bundled uv executable digest mismatch")
+    executable.chmod(0o755)
+
+
 def host_target():
     arch = {"x86_64": "x64", "AMD64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine()]
     return f"{sys.platform}-{arch}"
@@ -266,6 +288,10 @@ def main():
     notices = output / "notices"
     notices.mkdir()
     copy_launcher_notices(inputs, notices)
+    bundled_uv = output / "uv" / ("uv.exe" if target.startswith("win32-") else "uv")
+    unpack_uv(fetch(inputs["uv"], cache), inputs["uv"], bundled_uv)
+    for index, notice in enumerate(lock["uvNotices"]):
+        shutil.copyfile(fetch(notice, cache), notices / f"uv-{index:03d}.txt")
     versions = {}
     for name in ("ffmpeg", "ffprobe"):
         executable = ffbin / (name + (".exe" if target.startswith("win32-") else ""))
@@ -290,7 +316,7 @@ def main():
         shutil.copyfile(DESKTOP / "modal-contract.json", output / "modal-contract.json")
     # Backend admission reads these beside backend.py. Include them in the
     # native inventory so direct native boot and installer boot use one policy.
-    for policy in ("models.json", "processing-locks.json"):
+    for policy in ("models.json", "processing-locks.json", "hardware-policy.json"):
         shutil.copyfile(DESKTOP / policy, output / policy)
     shutil.copyfile(ROOT / "frontend/src/brand.js", output / "brand.mjs")
     for source in DESKTOP.glob("runtime*.py"):

@@ -549,7 +549,7 @@ prevents activation; a failed startup check leaves playback available. Legacy
 only, and never grant a runnable capability. Functional runtime readiness is separate from installed model sets,
 model quality, and physical platform qualification.
 
-The pack assembler consumes an already-built target environment and a complete
+Legacy archive migration uses an already-built target environment and a complete
 input lock. The lock identifies application/Python versions, target, accelerator,
 managed Python path, capabilities, each model's capability, required model IDs,
 source commit, upstream package artifact hashes, licenses, retained notice paths,
@@ -558,7 +558,7 @@ SHA-256, and executable flag. Unlisted files, modified inputs, and symlinks fail
 assembly. Linux preserves case-distinct names; Windows and macOS reject names
 that collide without case sensitivity. Model weights are never part of a runtime.
 
-`build_processing.py` constructs this input from the exact artifact recipes in
+`build_processing.py` constructs a uv installation recipe from the exact artifact recipes in
 `desktop/locks/processing-*.json`, the pinned standalone Python archive, and
 application wheels built from a clean source commit. Source distributions use
 the locked build dependencies. Native extensions additionally require a verified
@@ -577,17 +577,48 @@ python3 desktop/build/build_processing.py \
 
 Build native source extensions on their target runner. Dependency locks for
 other targets describe build inputs, not successful hardware qualification.
-The build writes its pack to `<output>/pack` through the assembler below and
-accepts the same delivery options (`--archive-base-url`, `--archive-part-size`,
-`--archive-name`, `--blobs`, `--base-url`), validated the same way before any
-build work starts. To package a separately constructed locked payload:
+The default output is a schema 2 recipe and the small set of source-built and
+application wheels plus license notices. Upstream wheels keep their pinned
+upstream URLs; use `--artifact-base-url` to name the immutable HTTPS publication
+directory for built wheels and notices. There is no dependency resolution or
+source compilation on installed desktops. Model downloads and native audio
+tools remain separate.
+
+The release bundles the exact uv executable pinned in `locks/native.json`.
+The installer keeps verified artifacts and uv's cache under the chosen
+processing root, creates an environment at its final versioned path, verifies
+the release-pinned file inventory, and runs functional checks before selecting
+it with durable activation pointers. Repair creates a new environment and keeps
+the previous working runtime. Existing archive installations remain usable
+without a forced download. Cache repair can rebuild from retained verified
+artifacts; missing artifacts require an explicit online retry.
+
+uv's clone mode can reuse filesystem storage when supported. Any fallback
+hardlinks are detached before activation so damaged cache entries cannot change
+an active environment. Copy fallback costs must be measured on each filesystem;
+no universal deduplication saving is promised. The immutable recipe also binds
+Python, native tool versions, exclusions, licenses and application compatibility.
+
+Hardware recommendations come from the separately versioned
+`hardware-policy.json`. Automatic and supported manual selection use measured
+end-to-end evidence, available resources and configurable headroom. The shipped
+policy currently has no qualified variants; new recipe choices stay unavailable
+until target-specific qualification supplies them. A startup check and fresh
+checks before local worker execution enforce the selected resource limits.
+Playback remains available, and changing models requires reviewing setup and
+consenting to their download and terms.
+
+`--legacy-pack` retains the previous archive builder for migration and comparison
+while the replacement is being qualified. Its retirement requires the native
+qualification results; it is not a second supported release delivery route.
+For legacy maintenance only, package a separately constructed locked payload:
 
 ```sh
 python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
   --lock /path/to/processing-input-lock.json --output /path/to/new-pack
 ```
 
-By default the output is archive form: `manifest.json`, `input-lock.json`, and
+The legacy assembler defaults to archive form: `manifest.json`, `input-lock.json`, and
 `archive/<name>.001`, `.002`, … The archive format (`concat-gzip-v1`) has no
 internal paths or headers. Its uncompressed stream is every locked file's bytes
 concatenated in manifest order. That stream is gzip-compressed deterministically

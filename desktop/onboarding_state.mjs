@@ -60,3 +60,12 @@ export async function restartForSetup({ activity, quiesce, resume, restart }) {
     throw error
   }
 }
+
+// A saved selection is a preference, never qualification evidence. Version
+// changes restore automatic selection so stale overrides cannot pick new content.
+export function hardwareSelectionPreferences(value, policy) {
+  const automatic = { mode: 'automatic', variantId: null, policyVersion: policy.version }
+  if (!value || value.policyVersion !== policy.version || value.mode !== 'manual') return automatic
+  if (typeof value.variantId !== 'string' || !policy.variants.some(v => v.id === value.variantId)) return automatic
+  return { mode: 'manual', variantId: value.variantId, policyVersion: policy.version }
+}

@@ -356,12 +356,12 @@ test('CUDA memory uses its single observed NVIDIA device, never a larger mixed d
     getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA GPU' }] }),
     runCommand: async () => output,
   })
-  const observed = await inventory('NVIDIA GPU, 4096\n')
+  const observed = await inventory('NVIDIA GPU, 4096, 4096\n')
   observed.gpuDevices[0].dedicatedMemoryBytes = 24 * GiB
   observed.videoMemoryBytes = 24 * GiB
   setup.hardware = async () => observed
   assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
-  setup.hardware = async () => inventory('NVIDIA GPU, 8192\n')
+  setup.hardware = async () => inventory('NVIDIA GPU, 8192, 8192\n')
   assert.equal((await setup.preflight()).memoryQualification.status, 'meets-measured-requirements')
 })
 
@@ -710,4 +710,67 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
   assert.equal((await setup.getStatus()).state, 'idle')
   assert.equal((await setup.preflight()).available, true)
   assert.equal((await setup.getStatus()).state, 'idle')
+})
+
+test('hardware selection restores automatic for stale versions and rejects unknown overrides', async () => {
+  const hardwarePolicy = { schema: 1, version: '1.0.0', recipes: [{ id: 'standard', label: 'Standard', modelIds: LOCAL_MODEL_IDS }], variants: [] }
+  const saved = []
+  const { setup } = fixture({ hardwarePolicy, loadHardwareSelection: async () => ({ mode: 'manual', policyVersion: 'old', variantId: 'old' }),
+    saveHardwareSelection: async value => saved.push(value) })
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+  assert.deepEqual(plan.hardwareSelection, { mode: 'automatic', variantId: null, policyVersion: '1.0.0' })
+  await assert.rejects(() => setup.setHardwareSelection({ mode: 'manual', variantId: 'unknown' }), /Unknown processing/)
+  await setup.setHardwareSelection({ mode: 'automatic' })
+  assert.deepEqual(saved, [{ mode: 'automatic', variantId: null, policyVersion: '1.0.0' }])
+})
+
+test('new processing recipes require matching qualified hardware selection before any transfer', async () => {
+  const { setup, calls } = fixture()
+  setup.catalog.runtime.schema = 2
+  const plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.match(plan.reason, /qualified hardware policy/)
+  await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
+})
+
+test('working runtime stays selected until the user reviews and consents to a catalog update', async () => {
+  const { setup, runtime, cache, calls, saved } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.pythonVersion = '3-next'
+  // Keep the fixture functional probe aligned with the new runtime after install.
+  const probe = runtime.probe
+  runtime.probe = async (...args) => ({ ...await probe(...args), pythonVersion: runtime.value.manifest.pythonVersion })
+  const before = await setup.preflight()
+  assert.equal(before.ready, true)
+  assert.equal(before.updateAvailable, true)
+  assert.equal(before.runtimeTransferRequired, false)
+  assert.equal(runtime.value, previous)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.ready, false)
+  assert.equal(update.runtimeTransferRequired, true)
+  assert.equal(runtime.value, previous)
+  assert.equal(saved.at(-1).runtimeUpdateRequested, true)
+  await setup.start({ planId: update.planId })
+  assert.equal(runtime.value, previous)
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'models', 'runtime'])
+  assert.notEqual(runtime.value.id, previous.id)
+})
+
+test('unqualified recipe cannot replace a working legacy runtime or block its ordinary setup', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.schema = 2
+  assert.equal((await setup.preflight()).ready, true)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.available, false)
+  assert.match(update.reason, /qualified hardware policy/)
+  assert.equal(runtime.value, previous)
 })

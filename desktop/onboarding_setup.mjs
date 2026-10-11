@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { recipeTransferBytes, recipeTransfers } from './processing_recipe.mjs'
+import { assessHardwarePolicy, validateHardwarePolicy } from './hardware_policy.mjs'
+import { hardwareSelectionPreferences } from './onboarding_state.mjs'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
@@ -97,14 +100,20 @@ export class OnboardingSetup {
   // releaseChannel is the validated release policy's channel; it decides
   // whether private-smoke qualification evidence is acceptable.
   constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
+    hardwarePolicy = null, loadHardwareSelection = async () => null, saveHardwareSelection = async () => {},
     loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
     Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
+    this.hardwarePolicy = hardwarePolicy && validateHardwarePolicy(hardwarePolicy)
+    this.loadHardwareSelection = loadHardwareSelection
+    this.saveHardwareSelection = saveHardwareSelection
+    this.hardwareSelection = this.hardwarePolicy ? hardwareSelectionPreferences(null, this.hardwarePolicy) : null
     this.state = initial()
     this.operation = null
     this.controller = null
     this.restoring = null
     this.check = null
+    this.runtimeUpdateRequested = false
   }
 
   async getStatus() {
@@ -115,6 +124,11 @@ export class OnboardingSetup {
   }
 
   async restore() {
+    if (this.hardwarePolicy) {
+      let saved = null
+      try { saved = await this.loadHardwareSelection() } catch { /* restore automatic */ }
+      this.hardwareSelection = hardwareSelectionPreferences(saved, this.hardwarePolicy)
+    }
     let previous = null
     // An unreadable checkpoint is treated as none.
     try { previous = await this.load() } catch { /* start from idle */ }
@@ -124,6 +138,7 @@ export class OnboardingSetup {
     // one, is only checked again: the next preflight settles it from live
     // verification. It is not saved, so an exit while checking leaves the
     // checkpoint to be checked again.
+    this.runtimeUpdateRequested = previous?.runtimeUpdateRequested === true
     if (previous?.state === 'restart-required' || (previous?.state === 'error' && previous.phase === 'verification')) {
       this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
     } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
@@ -139,9 +154,39 @@ export class OnboardingSetup {
     return !this.catalogError && QUALIFICATION_SCOPES.includes(scope) && !qualificationScopeError(scope, this.releaseChannel) ? scope : null
   }
 
+  async requestRuntimeUpdate() {
+    await this.getStatus()
+    if (this.operation) throw new Error('Wait for setup to finish before reviewing an update.')
+    this.runtimeUpdateRequested = true
+    await this.update({})
+    return this.preflight()
+  }
+
+  async setHardwareSelection(value) {
+    await this.getStatus()
+    if (this.operation) throw new Error('Wait for setup to finish before changing processing options.')
+    if (!this.hardwarePolicy) throw new Error('Hardware selection is unavailable in this release.')
+    if (!value || !['automatic', 'manual'].includes(value.mode)
+        || (value.mode === 'manual' && !this.hardwarePolicy.variants.some(v => v.id === value.variantId))) {
+      throw new Error('Unknown processing selection.')
+    }
+    const next = { mode: value.mode, variantId: value.mode === 'manual' ? value.variantId : null,
+      policyVersion: this.hardwarePolicy.version }
+    if (next.mode === 'manual') {
+      const current = await this.preflight()
+      if (!current.hardwareAssessment?.variants.some(v => v.id === next.variantId && v.supported)) {
+        throw new Error('This processing variant is not supported by the current qualification and resources.')
+      }
+    }
+    await this.saveHardwareSelection(next)
+    this.hardwareSelection = next
+    return this.preflight()
+  }
+
   async update(values) {
     this.state = { ...this.state, ...values }
-    await this.save({ schema: 1, state: this.state.state, phase: this.state.phase })
+    await this.save({ schema: 1, state: this.state.state, phase: this.state.phase,
+      ...(this.runtimeUpdateRequested ? { runtimeUpdateRequested: true } : {}) })
     this.notify(structuredClone(this.state))
     return this.getStatus()
   }
@@ -157,14 +202,16 @@ export class OnboardingSetup {
     }
     signal?.throwIfAborted()
     const installed = functional && LOCAL_MODEL_IDS.every(id => models?.manifest.models.includes(id))
-    const ready = installed && this.loaded.runtimeId === runtime.id && this.loaded.modelsId === models.id
+    const sameSelection = runtime?.manifest.schema !== 2
+      || JSON.stringify(this.loaded.hardwareSelection) === JSON.stringify(this.hardwareSelection)
+    const ready = installed && sameSelection && this.loaded.runtimeId === runtime.id && this.loaded.modelsId === models.id
     return { runtime, models, installed, ready, restartRequired: installed && !ready }
   }
 
   selection(active) {
     if (this.catalogError) throw new Error(this.catalogError)
     const catalog = this.catalog
-    if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
+    if (!catalog || ![1, 2].includes(catalog.schema) || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
     if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
@@ -256,22 +303,33 @@ export class OnboardingSetup {
     } else installed = await this.installed({ signal })
     const hardware = await this.hardware()
     signal?.throwIfAborted()
-    const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
+    const updateAvailable = Boolean(installed.installed && this.catalog?.runtime
+      && (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime))
+    const updating = updateAvailable && this.runtimeUpdateRequested
+    const memory = memoryAssessment(this.catalog, installed.installed && !updating ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
-    const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
+    const hardwareAssessment = this.hardwarePolicy ? assessHardwarePolicy({ policy: this.hardwarePolicy, hardware,
+      runtimeLockSha256: this.catalog?.runtime?.provenance?.lockSha256, accelerator: this.catalog?.runtime?.accelerator, releaseChannel: this.releaseChannel,
+      variantId: this.hardwareSelection?.variantId, installedModelIds: installed.models?.manifest.models || [],
+      diskFreeBytes: this.diskFree ? await this.diskFree() : null }) : null
+    const base = { ...memoryFields, hardwareAssessment, hardwareSelection: this.hardwareSelection, available: false, ready: installed.ready && !updating, restartRequired: installed.restartRequired && !updating, hardware, updateAvailable,
       qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
-    if (installed.installed) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+    if (installed.installed && !updating) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+    if (this.catalog?.runtime?.schema === 2 && !hardwareAssessment?.selectedVariantId) {
+      return { ...base, reason: hardwareAssessment?.reason || 'No matching qualified hardware policy is available for this processing recipe.' }
+    }
     try {
       const selected = this.selection(installed.models)
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
-      const runtimeNeeded = installed.runtime?.id !== hash(selected.runtime)
+      const runtimeNeeded = (installed.runtime?.recipeId || installed.runtime?.id) !== hash(selected.runtime)
       const modelsNeeded = installed.models?.id !== hash(selected.models)
       if (modelsNeeded && offlineDirectory !== null) await this.inspectOfflineModels(selected.models, offlineDirectory, signal)
       // Archive-form runtimes transfer their compressed parts, then extract the
       // full uncompressed tree; per-file runtimes transfer the tree itself.
       const runtimeParts = selected.runtime.archive?.parts
-      const runtimeInstalledBytes = runtimeNeeded ? bytes(selected.runtime) : 0
-      const runtimeBytes = !runtimeNeeded ? 0 : runtimeParts ? runtimeParts.reduce((sum, part) => sum + part.size, 0) : runtimeInstalledBytes
+      const isRecipe = selected.runtime.schema === 2
+      const runtimeInstalledBytes = runtimeNeeded ? (isRecipe ? selected.runtime.recipe.installedSize : bytes(selected.runtime)) : 0
+      const runtimeBytes = !runtimeNeeded ? 0 : isRecipe ? recipeTransferBytes(selected.runtime) : runtimeParts ? runtimeParts.reduce((sum, part) => sum + part.size, 0) : runtimeInstalledBytes
       const modelBytes = modelsNeeded ? bytes(selected.models) : 0
       // Never weaker than the reservation each installer makes. A per-file
       // runtime and the models need their staged copy plus the activated tree
@@ -279,19 +337,19 @@ export class OnboardingSetup {
       // be retrieved yet) plus the uncompressed tree. Each install adds 64 MiB.
       // Conservative: existing model files are reused, but their staged copies
       // still need space.
-      const runtimeReserve = !runtimeNeeded ? 0 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
+      const runtimeReserve = !runtimeNeeded ? 0 : isRecipe ? runtimeBytes + runtimeInstalledBytes * 2 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
       const diskRequiredBytes = runtimeReserve + modelBytes * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
       const diskFreeBytes = this.diskFree ? await this.diskFree() : null
       signal?.throwIfAborted()
-      const runtimeSources = runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
+      const runtimeSources = isRecipe ? recipeTransfers(selected.runtime).map(file => file.url) : runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
       const components = [
         ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, installedBytes: runtimeInstalledBytes, sourceMode: 'catalog',
           sources: [...new Set(runtimeSources.map(url => new URL(url).origin))],
-          terms: selected.runtime.provenance.packages.map(p => ({ label: `${p.name}: ${p.license}`, url: p.sourceUrl })) }] : []),
+          terms: (isRecipe ? selected.runtime.recipe.wheels : selected.runtime.provenance.packages).map(p => ({ label: `${p.name}: ${p.license}`, url: p.sourceUrl })) }] : []),
         ...selected.entries.map(entry => ({ label: entry.id, sourceMode: modelSource, bytes: installed.models?.manifest.models.includes(entry.id) ? 0 : bytes(entry),
           sources: offlineDirectory === null ? [...new Set(entry.files.map(file => new URL(file.url).origin))] : ['Selected model folder'], terms: entry.terms })),
       ]
-      const planId = hash([selected.runtime, selected.models, components, modelSource, offlineDirectory, memory.memoryRequirements])
+      const planId = hash([selected.runtime, selected.models, components, modelSource, offlineDirectory, memory.memoryRequirements, ...(this.hardwareSelection ? [this.hardwareSelection] : [])])
       const result = { ...base, planId, components, diskRequiredBytes, diskFreeBytes, runtimeTransferRequired: runtimeNeeded }
       if (!Number.isSafeInteger(diskFreeBytes) || diskFreeBytes < diskRequiredBytes) {
         return { ...result, reason: diskFreeBytes === null ? 'Available disk space could not be checked.' : 'Not enough free disk space for complete local setup.' }
@@ -333,7 +391,7 @@ export class OnboardingSetup {
           ['runtime', this.runtime, selected.runtime, active.runtime], ['models', this.cache, selected.models, active.models],
         ]) {
           signal.throwIfAborted()
-          if (existing?.id === hash(manifest)) continue
+          if ((existing?.recipeId || existing?.id) === hash(manifest)) continue
           await this.update({ phase, message: phase === 'runtime' ? 'Installing the local processing runtime.' : 'Installing separation and Heart model files.' })
           manager.progress = progress => { this.state.progress = progress; this.notify(structuredClone(this.state)) }
           if (phase === 'models' && this.#offlineModelsDirectory !== null) {

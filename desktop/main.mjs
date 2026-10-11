@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
+import { validateHardwarePolicy, assessHardwarePolicy } from './hardware_policy.mjs'
 import { validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
 import { checkModalConnection } from './modal_connection.mjs'
@@ -13,10 +14,11 @@ import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { UvRuntimeManager } from './uv_runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
-import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { OnboardingState, onboardingPreferences, hardwareSelectionPreferences, restartForSetup } from './onboarding_state.mjs'
 import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
@@ -43,7 +45,7 @@ const ownsInstance = !packaged || app.requestSingleInstanceLock()
 const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userData')) : createRuntime()) : null
 if (!packaged) app.setPath('userData', runtime.electron)
 let expectedIdentity
-let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus
+let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus, processingUsage, loadedHardwareSelection
 let processingProbe
 let installation
 let processingOperation
@@ -194,6 +196,26 @@ async function launchBackend() {
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
+  if (activeProcessing?.manifest.schema === 2) {
+    try {
+      const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
+      const selection = hardwareSelectionPreferences((await onboardingState.read())?.hardwareSelection, policy)
+      const disk = await statfs(runtime.root)
+      const assessment = assessHardwarePolicy({ policy, hardware: await collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
+        runtimeLockSha256: activeProcessing.manifest.provenance.lockSha256, accelerator: activeProcessing.manifest.accelerator,
+        variantId: selection.mode === 'manual' ? selection.variantId : undefined,
+        installedModelIds: activeModels?.manifest.models || [], diskFreeBytes: disk.bavail * disk.bsize,
+        phase: 'execution', releaseChannel: releasePolicy.channel })
+      if (assessment.status !== 'supported') throw new Error(assessment.reason)
+      const variant = assessment.variants.find(entry => entry.id === assessment.selectedVariantId)
+      if (Object.keys(variant.settings).length) throw new Error('This processing option requires settings this application does not support.')
+      args.push('--processing-variant', assessment.selectedVariantId)
+      loadedHardwareSelection = selection
+    } catch (error) {
+      await processingUsage?.release(); processingUsage = null
+      activeProcessing = null; processingProbe = null; processingError = error.message
+    }
+  }
   // Directory names may be shortened; the backend checks each manifest against the full identity.
   if (activeProcessing) args.push('--processing', activeProcessing.directory, '--processing-id', activeProcessing.id)
   if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
@@ -218,6 +240,8 @@ async function launchBackend() {
   // stdout is a private one-line credential channel. Never forward it to logs.
   backend.stderr.on('data', data => process.stderr.write(data))
   backend.once('exit', (code, signal) => {
+    const usage = processingUsage; processingUsage = null
+    usage?.release().catch(error => console.error(`Processing runtime lease could not be released: ${error.message}`))
     if (!quitting && !handingOff && host) {
       dialog.showErrorBox(`${brand} backend stopped`, `The backend exited (${signal || code}). Your library is preserved. Quit and reopen ${brand} to recover.`)
       app.quit()
@@ -535,15 +559,19 @@ async function start() {
     app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
+    processingManager = new UvRuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256, nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv') })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
     try {
       activeProcessing = await processingManager.active()
       if (activeProcessing) {
+        if (activeProcessing.manifest.schema === 2) processingUsage = await processingManager.acquireUsage(activeProcessing.id)
         const probeResult = await processingManager.probe(activeProcessing)
         processingProbe = processingAttestation(activeProcessing, probeResult)
       }
-    } catch (error) { activeProcessing = null; processingProbe = null; processingError = error.message }
+    } catch (error) {
+      await processingUsage?.release(); processingUsage = null
+      activeProcessing = null; processingProbe = null; processingError = error.message
+    }
     try { activeModels = await modelCache.active() }
     catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
   }
@@ -612,7 +640,11 @@ async function start() {
       } catch (error) { rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
     }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel,
+      hardwarePolicy: validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8'))),
+      loadHardwareSelection: async () => (await onboardingState.read())?.hardwareSelection,
+      saveHardwareSelection: selection => onboardingState.save('hardwareSelection', selection),
+      loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id, hardwareSelection: loadedHardwareSelection },
       hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
       diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,
@@ -626,6 +658,8 @@ async function start() {
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
   setupHandler('setup:preflight', () => onboardingSetup.preflight())
+  setupHandler('setup:runtime-update', () => onboardingSetup.requestRuntimeUpdate())
+  setupHandler('setup:hardware-selection', value => onboardingSetup.setHardwareSelection(value))
   setupHandler('setup:model-source', async mode => {
     if (!['offline', 'upstream'].includes(mode)) throw new Error('Unknown model source')
     if (processingOperation || operationGate.active) throw new Error('Wait for the current installation to finish or cancel it.')
