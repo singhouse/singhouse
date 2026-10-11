@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { validateManifest } from '../policy.mjs'
-import { validateShippedCatalog } from '../setup_catalog.mjs'
+import { channelTrustedLocks, validateShippedCatalog } from '../setup_catalog.mjs'
 
 export const PROCESSING_READY = 'processing-ready'
 export const PLAYBACK_ONLY = 'playback-only'
@@ -59,7 +59,8 @@ export function packagedCatalogIdentity(nativeManifest, appVersion) {
 // model policy are the application's own desktop/processing-locks.json and
 // desktop/models.json. releaseChannel is the channel of the release policy
 // being packaged: the installed application validates the catalog against that
-// channel, so a private-smoke catalog cannot be packaged under any other.
+// channel, so a private-smoke or hardware-test catalog cannot be packaged under
+// any other.
 export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, modelPolicy, releaseChannel }) {
   if (![PROCESSING_READY, PLAYBACK_ONLY].includes(mode)) throw new Error('Invalid processing packaging mode')
   const target = `${identity?.platform}-${identity?.arch}`
@@ -74,7 +75,8 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
   if (!present) throw new Error(`--${PROCESSING_READY} requires ${source}. ${regenerate(target)}`)
   let catalog
   try {
-    if (locks?.schema !== 1 || !Array.isArray(locks.lockSha256)) throw new Error('Invalid application processing lock policy')
+    // The same channel-scoped lock trust the installed application applies.
+    const trustedLocks = channelTrustedLocks(locks, releaseChannel)
     const text = Buffer.from(catalogBytes).toString('utf8')
     let parsed
     try { parsed = JSON.parse(text) } catch (error) { throw new Error(`not JSON: ${error.message}`) }
@@ -82,7 +84,7 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
       throw new Error(`catalog runtime targets ${parsed.runtime.platform}-${parsed.runtime.arch}, not the packaged ${target}`)
     }
     // The exact validation the installed application applies at start.
-    catalog = validateShippedCatalog(text, { identity, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel })
+    catalog = validateShippedCatalog(text, { identity, trustedLocks, modelPolicy, releaseChannel })
     // The shipped bytes must be exactly what desktop/build/setup_catalog.mjs
     // writes for the validated result, so duplicate keys (JSON.parse keeps the
     // last), unknown fields, or reordered keys cannot ride along unreviewed.

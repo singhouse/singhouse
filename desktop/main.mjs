@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { realpath, statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
-import { validateShippedCatalog } from './setup_catalog.mjs'
+import { channelTrustedLocks, validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
 import { checkModalConnection } from './modal_connection.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -241,6 +241,7 @@ async function launchBackend() {
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
   // Directory names may be shortened; the backend checks each manifest against the full identity.
   args.push(...processingLaunchArguments({ installRoot: packaged ? installRoot : null, processing: activeProcessing, probe: processingProbe, models: activeModels }))
+  if (packaged && releasePolicy) args.push('--release-channel', releasePolicy.channel)
   let privateModal = null
   if (packaged) {
     args.push('--desktop-config-stdin')
@@ -629,12 +630,11 @@ async function start() {
     brand = names.BRAND_NAME
     if (typeof brand !== 'string' || !brand || typeof names.BRAND_INSTALLED_NAME !== 'string' || !names.BRAND_INSTALLED_NAME) throw new Error('Installed product name is invalid')
     app.setName(names.BRAND_INSTALLED_NAME)
-    const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
-    if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
+    const trustedLocks = channelTrustedLocks(JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8')), releasePolicy.channel)
     const modelPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8'))
     openManagedStores = storeRoot => {
       const directories = managedStoreDirectories(storeRoot)
-      return { processing: new RuntimeManager(directories.processing, expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks: processingPolicy.lockSha256 }),
+      return { processing: new RuntimeManager(directories.processing, expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks }),
         models: new ModelCache(directories.models, modelPolicy, { progress, lockPython, durabilityHelper }) }
     }
     onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
@@ -760,7 +760,7 @@ async function start() {
   }))
   const installBusy = () => processingOperation || operationGate.active || onboardingSetup.storesLocked()
     || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation })
-  setupHandler('setup:install-location', async () => {
+  setupHandler('setup:install-location', setupCheck(async () => {
     // A restored paused checkpoint must be read before the busy check.
     await onboardingSetup.getStatus()
     if (installBusy()) throw new Error('Wait for the current installation to finish or cancel it.')
@@ -792,7 +792,7 @@ async function start() {
       })
     }
     return onboardingSetup.preflight()
-  })
+  }))
   setupHandler('setup:status', () => onboardingSetup.getStatus())
   setupHandler('setup:pause', () => onboardingSetup.pause())
   setupHandler('setup:cancel', () => onboardingSetup.stop())

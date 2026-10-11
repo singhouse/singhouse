@@ -888,13 +888,27 @@ def processing_memory_policy(lock_hash: str) -> str:
         return ""
 
 
+def _processing_lock_policy() -> dict:
+    return json.loads(Path(__file__).with_name("processing-locks.json").read_text())
+
+
+def channel_trusted_locks(policy: dict, release_channel: str | None) -> list[str]:
+    """Locks in privateTestLockSha256 are trusted only by private-test channel builds."""
+    if not isinstance(policy, dict) or policy.get("schema") != 1 or not isinstance(policy.get("lockSha256"), list):
+        raise RuntimeError("Invalid application processing trust policy")
+    locks, private_only = policy["lockSha256"], policy.get("privateTestLockSha256", [])
+    if not isinstance(private_only, list) or any(lock not in locks for lock in private_only):
+        raise RuntimeError("Invalid application processing trust policy")
+    return list(locks) if release_channel == "private-test" else [lock for lock in locks if lock not in private_only]
+
+
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
                            trusted_locks: list[str] | None = None, *,
                            processing_id: str | None = None,
                            models_id: str | None = None,
-                           processing_root: Path | None = None) -> dict[str, str]:
+                           processing_root: Path | None = None, release_channel: str | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
     # Keep inventory access, parent containment, attestation equality, and the
     # interpreter paths inherited by managed workers in one Windows namespace.
@@ -1079,10 +1093,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             # Independently bind positive admission to the app's exact trusted
             # input lock. A selected path or IPC readiness boolean is insufficient.
             if trusted_locks is None:
-                policy = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
-                if policy.get("schema") != 1:
-                    raise RuntimeError("Invalid application processing trust policy")
-                trusted_locks = policy.get("lockSha256", [])
+                trusted_locks = channel_trusted_locks(_processing_lock_policy(), release_channel)
             provenance = manifest.get("provenance", {})
             raw_lock = provenance.get("inputLock", "")
             lock_hash = hashlib.sha256(raw_lock.encode()).hexdigest()
@@ -1375,7 +1386,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
         models_id: str | None = None, lyrics_lookup: bool = False,
-        processing_root: Path | None = None) -> None:
+        processing_root: Path | None = None, release_channel: str | None = None) -> None:
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1416,7 +1427,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
                                                           processing_id=processing_id, models_id=models_id,
-                                                          processing_root=processing_root))
+                                                          processing_root=processing_root, release_channel=release_channel))
             if native and lyrics_lookup:
                 environment["KARAOKE_LRCLIB"] = "1"
             os.environ.clear()
@@ -1599,6 +1610,7 @@ if __name__ == "__main__":
     parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
     parser.add_argument("--lyrics-lookup", action="store_true", help="Enable optional third-party lyrics lookup")
+    parser.add_argument("--release-channel", help="Validated release policy channel; scopes processing lock trust")
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
@@ -1631,7 +1643,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root)
+                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root, args.release_channel)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

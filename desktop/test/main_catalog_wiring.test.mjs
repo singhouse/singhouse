@@ -27,7 +27,19 @@ test('main.mjs validates the shipped catalog with the packaged release channel',
   // releasePolicy is the packaged policy, assigned exactly once at startup.
   assert.equal((source.match(/\breleasePolicy = /g) ?? []).length, 1)
   assert.match(source, /releasePolicy = assertReleasePolicy\(JSON\.parse\(readFileSync\(releasePolicyPath, 'utf8'\)\)\)/)
-  assert.match(source, /^import \{ validateShippedCatalog \} from '\.\/setup_catalog\.mjs'$/m)
+  assert.match(source, /^import \{ channelTrustedLocks, validateShippedCatalog \} from '\.\/setup_catalog\.mjs'$/m)
+})
+
+test('main.mjs scopes runtime lock trust to the packaged release channel before any runtime activates', () => {
+  const trust = source.indexOf("const trustedLocks = channelTrustedLocks(JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8')), releasePolicy.channel)")
+  assert.ok(trust > source.indexOf('releasePolicy = assertReleasePolicy('), 'trust derives from the already validated release policy')
+  const construct = source.indexOf('new RuntimeManager(directories.processing', trust)
+  assert.ok(construct > trust)
+  assert.match(source.slice(construct, source.indexOf('\n', construct)), /, trustedLocks \}\)/)
+  assert.ok(source.indexOf('const active = await processingManager.active({ launch: true })') > construct)
+  // No other runtime manager or unscoped lock list exists.
+  assert.equal((source.match(/new RuntimeManager\(/g) ?? []).length, 1)
+  assert.doesNotMatch(source, /processingPolicy\.lockSha256|trustedLocks: [a-zA-Z.]*lockSha256/)
 })
 
 test('main.mjs never uses the unrestricted catalog validator or private-test local sources', () => {
@@ -54,7 +66,7 @@ test('main.mjs orders the launch self-test after the model check and re-checks p
   for (const site of ["if (consent.response !== 1 || quitting) return\n", "setupHandler('setup:start'", 'quitting = true\n']) {
     const at = source.indexOf(site)
     assert.ok(at > 0, site)
-    assert.match(source.slice(at, at + 300), /packRecheck\?\.abort\(\)/, site)
+    assert.match(source.slice(at, at + 1200), /packRecheck\?\.abort\(\)/, site)
   }
   assert.match(source, /host\?\.webContents\.send\('setup:open'\)/)
   // Damage notices are filtered by each store's state when shown, never
@@ -66,6 +78,7 @@ test('main.mjs orders the launch self-test after the model check and re-checks p
   assert.match(source, /const damageNoticeBlocked = \(\) => Boolean\(processingOperation \|\| updateOperation \|\| installation \|\| heartSetup\?\.operation\n\s+\|\| operationGate\.active \|\| setupChecks > 0\)/)
   assert.match(source, /setupHandler\('setup:preflight', setupCheck\(/)
   assert.match(source, /setupHandler\('setup:model-source', setupCheck\(/)
+  assert.match(source, /setupHandler\('setup:install-location', setupCheck\(/)
   assert.match(source, /setupChecks\+\+\n\s+try \{ return await action\(\.\.\.args\) \} finally \{ setupChecks-- \}/)
   assert.match(source, /readOnlyApplicationRoot\(readOnlyAppImageMount\(\{ applicationRoot \}\), applicationRoot\)/)
 })

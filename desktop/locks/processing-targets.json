@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "Targets marked native-passed were rebuilt after the diffq exclusion and passed their native functional probes; a probe is not release qualification and no target is release-qualified; targets marked rebuild-required still need a build and functional probe",
+  "status": "Targets marked native-passed were rebuilt after the diffq exclusion and passed their native functional probes; a probe is not release qualification and no target is release-qualified; targets marked rebuild-required still need a build and functional probe; targets marked pending-native-hardware are built, and their dependency probe passed on a native host without the target accelerator, but the accelerator functional probe still needs native target hardware",
   "inputLockKind": "processing-input",
   "requirementsLockKind": "processing-requirements",
   "builder": "desktop/build/build_processing.py",
