@@ -371,6 +371,13 @@ test('hardware-test packaging is private-only and records unqualified scope with
   for (const releaseChannel of [undefined, 'stable', 'beta']) {
     assert.throws(() => assertProcessingCatalog({ ...args, releaseChannel }), /accepted only by "private-test"/)
   }
+  // Packaging applies the application's channel-scoped lock trust.
+  const lock = f.catalog.runtime.provenance.lockSha256
+  const scoped = { ...args, locks: { ...f.locks, privateTestLockSha256: [lock] } }
+  assert.equal(assertProcessingCatalog({ ...scoped, releaseChannel: 'private-test' }).runtimeLockSha256, lock)
+  assert.throws(() => assertProcessingCatalog({ ...scoped, releaseChannel: 'stable' }), /not trusted/)
+  assert.throws(() => assertProcessingCatalog({ ...args, locks: { ...f.locks, privateTestLockSha256: ['c'.repeat(64)] }, releaseChannel: 'private-test' }),
+    /private-test locks must also be listed/)
   f.catalog.qualification.passed = true
   assert.throws(() => assertProcessingCatalog({ ...args, catalogBytes: bytes(f.catalog), releaseChannel: 'private-test' }), /qualification evidence/)
 })

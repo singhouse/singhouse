@@ -15,6 +15,9 @@ const bytes = manifest => manifest.files.reduce((sum, file) => sum + file.size, 
 const complete = manifest => ['transcription', 'separation'].every(id => manifest.capabilities?.includes(id))
   && LOCAL_MODEL_IDS.every(id => manifest.models?.includes(id)
     && manifest.modelCapabilities?.[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
+const NVIDIA_REQUIRED = 'Local processing in this build requires an NVIDIA GPU with a current driver, and none was detected on this computer. You can still play your existing karaoke files.'
+// The accelerator of the runtime a plan installs or uses, for wizard wording only.
+const planAccelerator = runtime => ['cpu', 'cuda', 'metal'].includes(runtime?.accelerator) ? runtime.accelerator : null
 const REOPEN_MESSAGE = 'Setup is verified. Reopen singhouse to use local processing.'
 const initial = () => ({ state: 'idle', phase: 'preflight', message: 'Choose local processing or playback.', retryable: false, restartRequired: false })
 
@@ -208,7 +211,7 @@ export class OnboardingSetup {
   }
 
   // releaseChannel is the validated release policy's channel; it decides
-  // whether private-smoke qualification evidence is acceptable.
+  // whether private-smoke or hardware-test qualification is acceptable.
   constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
     hardwarePolicy = null, loadHardwareSelection = async () => null, saveHardwareSelection = async () => {},
     installLocation = null, loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
@@ -443,7 +446,7 @@ export class OnboardingSetup {
       diskFreeBytes: freeBytes }) : null
     const base = { ...memoryFields, hardwareAssessment, hardwareSelection: this.hardwareSelection, available: false, ready: installed.ready && !updating, restartRequired: installed.restartRequired && !updating, hardware, updateAvailable,
       processingEstimate: processingEstimate(null), installLocation: this.installLocation ?? null, freeBytes,
-      qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+      qualificationScope: this.qualificationScope(), accelerator: planAccelerator(installed.installed && !updating ? installed.runtime.manifest : this.catalog?.runtime), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
     if (installed.installed && !updating) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
       || (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     if (this.catalog?.runtime?.schema === 2 && !hardwareAssessment?.selectedVariantId) {
@@ -451,6 +454,11 @@ export class OnboardingSetup {
     }
     try {
       const selected = this.selection(installed.models)
+      // A CUDA pack activates only after its CUDA device check passes, so never
+      // offer its multi-GB download to a computer with no NVIDIA driver inventory.
+      if (selected.runtime.accelerator === 'cuda' && !(Array.isArray(hardware.cudaDevices) && hardware.cudaDevices.length)) {
+        return { ...base, reason: NVIDIA_REQUIRED }
+      }
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
       const runtimeNeeded = (installed.runtime?.recipeId || installed.runtime?.id) !== hash(selected.runtime)
       const modelsNeeded = installed.models?.id !== hash(selected.models)

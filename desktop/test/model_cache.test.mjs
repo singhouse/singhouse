@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -241,4 +241,35 @@ test('launch-time model checks are structural; installation and repair still has
   await rm(record, { force: true })
   assert.equal((await cache.active({ launch: true })).id, installed.id)
   assert.deepEqual(JSON.parse(await readFile(record, 'utf8')), { schema: 1, runtimeManifestId: installed.id })
+})
+
+test('a model verification record that cannot be deleted is withdrawn fail-closed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const { cache, manifest, directory, prefix, bytes } = await fixture(t)
+  const installed = await cache.installFromDirectory(manifest, directory, { prefix })
+  const records = join(cache.root, 'verified'), record = join(records, `${installed.id}.json`)
+  const damaged = join(installed.directory, manifest.files[1].path)
+  await chmod(records, 0o500)
+  try {
+    let enforced = true
+    try { await writeFile(join(records, '.mode-check'), ''); enforced = false } catch { /* Enforced. */ }
+    if (!enforced) { t.skip('directory permissions are not enforced on this filesystem'); return }
+    await writeFile(damaged, Buffer.alloc(bytes.length, 'x'))
+    assert.equal((await cache.active({ launch: true })).id, installed.id)
+    // Invalidated in place when it cannot be removed.
+    await assert.rejects(cache.active(), /verification failed/)
+    assert.equal(await readFile(record, 'utf8'), '')
+    await assert.rejects(new ModelCache(cache.root, cache.policy).active({ launch: true }), /verification failed/)
+    // Kept out of use by this process when it cannot be changed at all.
+    await chmod(records, 0o700)
+    await writeFile(record, JSON.stringify({ schema: 1, runtimeManifestId: installed.id }))
+    await chmod(record, 0o400)
+    await chmod(records, 0o500)
+    await assert.rejects(cache.active(), /verification failed[\s\S]*could not be removed/)
+    assert.deepEqual(JSON.parse(await readFile(record, 'utf8')), { schema: 1, runtimeManifestId: installed.id })
+    await assert.rejects(new ModelCache(cache.root, cache.policy).active({ launch: true }), /verification failed/)
+  } finally {
+    await chmod(records, 0o700).catch(() => {})
+    await chmod(record, 0o600).catch(() => {})
+    await rm(join(records, '.mode-check'), { force: true })
+  }
 })

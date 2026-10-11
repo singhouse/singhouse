@@ -14,6 +14,7 @@ const heading = ref(null)
 const dialog = ref(null)
 let poll
 let unmounted = false
+const hardwareTest = computed(() => plan.value?.qualificationScope === 'hardware-test')
 const compact = computed(() => ['progress', 'checking', 'restart', 'ready', 'error'].includes(step.value))
 const dismissed = ref(false)
 const stage = computed(() => step.value === 'welcome' ? 0 : step.value === 'lyrics' ? 2 : ['consent', 'modal'].includes(step.value) ? 3 : 1)
@@ -267,7 +268,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
               id="local-reason"
               role="status"
             >{{ checkingLocal ? 'Checking your installed processing tools and models. This can take a minute…' : localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
-            <span class="badge">{{ checkingLocal ? 'Checking…' : localAvailable ? 'Recommended' : 'Currently unavailable' }}</span>
+            <span class="badge" :class="{ experimental: !checkingLocal && localAvailable && hardwareTest }">{{ checkingLocal ? 'Checking…' : localAvailable ? (hardwareTest ? 'Experimental' : 'Recommended') : 'Currently unavailable' }}</span>
           </button>
           <button
             class="choice"
@@ -490,7 +491,11 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           v-if="plan?.qualificationScope === 'hardware-test'"
           role="alert"
         >
-          Experimental hardware test: local processing in this build has not passed a real-song test or release qualification. Setup checks the processing runtime on your computer before enabling it. Processing may fail; use this build only for testing.
+          Experimental hardware test: local processing in this build has not passed a real-song test or release qualification.
+          <template v-if="plan?.accelerator === 'cuda'">
+            Requires an NVIDIA GPU and a current driver.
+          </template>
+          Setup checks the processing runtime on your computer before enabling it. Processing may fail; use this build only for testing.
         </p>
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
@@ -931,4 +936,6 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
 .controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding-top:9px;border-top:1px solid #2a303c}.controls button,.mini button{border:0;background:none;display:inline-flex;align-items:center;gap:5px}.controls svg,.mini svg{width:12px;height:12px;flex:none}.control-group{display:inline-flex;align-items:center;gap:14px}.hide,.stop{color:#8992a4;font-size:11px;padding:4px 0}.hide:hover,.stop:hover{color:#bbc3d2}.pause{color:#f7eee2;font-size:12px;font-weight:600;padding:4px 0}.pause:hover{color:#fff}
 .compact.collapsed{width:auto;max-width:calc(100vw - 40px);padding:0;border-radius:8px;box-shadow:0 4px 18px #0006}.mini{display:flex;align-items:center;gap:10px;padding:6px 8px 6px 12px;font-size:12px;color:#f7e7c8}.mini .name{white-space:nowrap}.mini .name small{color:#8f98a8;font-size:11px;margin-left:4px}.mini progress{width:72px;height:5px;margin:0}.mini button{color:#bbc3d2;font-size:11px;padding:4px}.mini button:hover{color:#f7eee2}.mini button:focus-visible{outline-offset:1px}
 .stages progress,.mini progress{-webkit-appearance:none;appearance:none;border:0;border-radius:3px;background:#2a303c;overflow:hidden}.stages progress::-webkit-progress-bar,.mini progress::-webkit-progress-bar{background:#2a303c;border-radius:3px}.stages progress::-webkit-progress-value,.mini progress::-webkit-progress-value{background:#e23e57;border-radius:3px}.stages progress::-moz-progress-bar,.mini progress::-moz-progress-bar{background:#e23e57;border-radius:3px}.paused progress::-webkit-progress-value{background:#6b7487}.paused progress::-moz-progress-bar{background:#6b7487}
+
+.badge.experimental{background:#3d3220;color:#e9d3ad}
 </style>

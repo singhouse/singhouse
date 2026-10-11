@@ -24,6 +24,7 @@ from typing import Optional
 from sqlalchemy import update
 
 from karaoke_backend.jobs import queue
+from karaoke_backend.jobs._progress import make_message_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import (
@@ -242,6 +243,12 @@ async def run_retranscribe(ctx: JobContext) -> Optional[str]:
             cache_write_guard=_make_cache_write_guard(
                 ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
             ),
+            device_notice_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
         )
     except Exception as exc:
         logger.exception("Re-transcribe %s failed", ctx.job_id)
@@ -296,6 +303,9 @@ async def run_realign(ctx: JobContext) -> Optional[str]:
             use_vad=use_vad,
             pipeline_config=pipeline_config,
             vocals_path=payload.get("vocals_path"),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop(),
+            ),
         )
     except Exception as exc:
         logger.exception("Realign %s failed", ctx.job_id)

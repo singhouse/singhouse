@@ -889,7 +889,8 @@ def processing_memory_policy(lock_hash: str) -> str:
 
 
 def verify_processing_recipe(directory: Path, identifier: str, store: Path,
-                             trusted_locks: list[str] | None = None, *, quick: bool = False) -> dict:
+                             trusted_locks: list[str] | None = None, *, quick: bool = False,
+                             release_channel: str | None = None) -> dict:
     """Verify a uv installation against release-pinned payload hashes, not its receipt."""
     def regular(path):
         if _is_link_path(path):
@@ -937,10 +938,7 @@ def verify_processing_recipe(directory: Path, identifier: str, store: Path,
         raise RuntimeError("Processing recipe has no input lock")
     lock_hash = sha(lock_text.encode())
     if trusted_locks is None:
-        policy = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
-        if policy.get("schema") != 1:
-            raise RuntimeError("Invalid application processing trust policy")
-        trusted_locks = policy.get("lockSha256", [])
+        trusted_locks = channel_trusted_locks(_processing_lock_policy(), release_channel)
     if (not isinstance(trusted_locks, list) or lock_hash not in trusted_locks
             or provenance.get("lockSha256") != lock_hash):
         raise RuntimeError("Processing recipe is not trusted by this application release")
@@ -1107,6 +1105,20 @@ def validate_private_measurement_context(native: Path | None, root: Path | None,
         raise RuntimeError("Private resource measurement requires a private-test release policy")
 
 
+def _processing_lock_policy() -> dict:
+    return json.loads(Path(__file__).with_name("processing-locks.json").read_text())
+
+
+def channel_trusted_locks(policy: dict, release_channel: str | None) -> list[str]:
+    """Locks in privateTestLockSha256 are trusted only by private-test channel builds."""
+    if not isinstance(policy, dict) or policy.get("schema") != 1 or not isinstance(policy.get("lockSha256"), list):
+        raise RuntimeError("Invalid application processing trust policy")
+    locks, private_only = policy["lockSha256"], policy.get("privateTestLockSha256", [])
+    if not isinstance(private_only, list) or any(lock not in locks for lock in private_only):
+        raise RuntimeError("Invalid application processing trust policy")
+    return list(locks) if release_channel == "private-test" else [lock for lock in locks if lock not in private_only]
+
+
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
@@ -1155,7 +1167,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         # directory may be named by that digest or by its first 16 characters;
         # either way the manifest is checked against the full digest.
         if kind == "processing" and directory.parent == store_root / store / "envs":
-            return verify_processing_recipe(directory, identifier, store_root / store, trusted_locks, quick=True)
+            return verify_processing_recipe(directory, identifier, store_root / store, trusted_locks,
+                                            quick=True, release_channel=release_channel)
         expected_parent = store_root / store / "packs"
         if (directory.parent != expected_parent or not isinstance(identifier, str)
                 or not re.fullmatch(r"[a-f0-9]{64}", identifier)
@@ -1163,7 +1176,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             raise RuntimeError("Invalid managed processing path")
         for ancestor in (expected_parent.parent, expected_parent, directory):
             if _is_link_path(ancestor):
-                raise RuntimeError("Managed processing directories must not be symbolic links")
+                raise RuntimeError("Managed processing directories must not be symbolic links or junctions")
         # Non-blocking, so a FIFO placed here is rejected instead of waiting.
         descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
                              | getattr(os, "O_NONBLOCK", 0))
@@ -1215,7 +1228,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             records.append((name, record["size"]))
         # A structural check in one walk: entry types come from the listing
         # (links are never followed, special files never opened, so nothing
-        # can block), no level may hold a link, and each listed path must be
+        # can block), no level may hold a link, junction or other reparse
+        # point, and each listed path must be
         # a regular file of its recorded size, read from one lstat. Payload
         # bytes are hashed when the desktop installs or activates a pack,
         # never at each backend start.
@@ -1325,10 +1339,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             # Independently bind positive admission to the app's exact trusted
             # input lock. A selected path or IPC readiness boolean is insufficient.
             if trusted_locks is None:
-                policy = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
-                if policy.get("schema") != 1:
-                    raise RuntimeError("Invalid application processing trust policy")
-                trusted_locks = policy.get("lockSha256", [])
+                trusted_locks = channel_trusted_locks(_processing_lock_policy(), release_channel)
             provenance = manifest.get("provenance", {})
             raw_lock = provenance.get("inputLock", "")
             lock_hash = hashlib.sha256(raw_lock.encode()).hexdigest()
@@ -1623,7 +1634,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
         models_id: str | None = None, lyrics_lookup: bool = False, processing_root: Path | None = None, resource_variant: str | None = None,
-        private_test_resource_measurement: bool = False) -> None:
+        private_test_resource_measurement: bool = False, release_channel: str | None = None) -> None:
     if private_test_resource_measurement:
         validate_private_measurement_context(native, root, demo, runtime_path, processing, models,
                                              processing_probe, processing_id, models_id, resource_variant)
@@ -1667,7 +1678,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
                                                           processing_id=processing_id, models_id=models_id, resource_variant=resource_variant, processing_root=processing_root,
-                                                          release_channel=(json.loads((native.parent / "release.json").read_text()).get("channel", "")
+                                                          release_channel=release_channel or (json.loads((native.parent / "release.json").read_text()).get("channel", "")
                                                                            if resource_variant or private_test_resource_measurement else ""),
                                                           private_test_resource_measurement=private_test_resource_measurement))
             if native and lyrics_lookup:
@@ -1857,6 +1868,7 @@ if __name__ == "__main__":
     parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
     parser.add_argument("--lyrics-lookup", action="store_true", help="Enable optional third-party lyrics lookup")
+    parser.add_argument("--release-channel", help="Validated release policy channel; scopes processing lock trust")
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
@@ -1891,7 +1903,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root, args.processing_variant, args.private_test_resource_measurement)
+                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root, args.processing_variant, args.private_test_resource_measurement, args.release_channel)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

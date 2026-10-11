@@ -16,7 +16,7 @@ export async function prepareSetupCatalog(args) {
     values[flag] = args[++i]
   }
   for (const flag of ['--runtime', '--qualification', '--terms', '--identity', '--output']) {
-    if (!values[flag]) throw new Error(`Missing ${flag}. Supply an explicit runtime manifest, passed qualification evidence, model terms, application identity, and output path; no qualification result is inferred.`)
+    if (!values[flag]) throw new Error(`Missing ${flag}. Supply an explicit runtime manifest, qualification evidence (passed, or an explicitly unqualified hardware-test record), model terms, application identity, and output path; no qualification result is inferred.`)
   }
   async function json(path, label) {
     try { return JSON.parse(await readFile(path, 'utf8')) }

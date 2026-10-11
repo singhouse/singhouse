@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from karaoke_backend.api.auth import require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
-from karaoke_backend import stem_storage
+from karaoke_backend import stem_layout, stem_storage
 from lyricsync import (
     MatchConfig,
     PipelineConfig,
@@ -134,7 +134,9 @@ class VadConfigIn(BaseModel):
     onset_threshold: float = Field(0.03, ge=0, le=1)
     offset_threshold: float = Field(0.02, ge=0, le=1)
     min_silence_duration: float = Field(1.5, ge=0)
-    max_segment_duration: float = Field(30.0, gt=0)
+    # None = auto: the transcriber sizes slices to the device (see
+    # lyricsync VadConfig.max_segment_duration). A number is a fixed cap.
+    max_segment_duration: Optional[float] = Field(None, gt=0)
 
 
 class MatchConfigIn(BaseModel):
@@ -403,7 +405,10 @@ async def _resolve_reference(
 
 def _vocals_path_for(song: Song) -> Path:
     stems_dir = stem_storage.active_stems_dir(song, STEMS_DIR)
-    for name in ("lead_vocals.flac", "lead_vocals.wav", "vocals.wav", "Vocals.wav"):
+    lead = stem_layout.resolve_stem(stems_dir, "lead_vocals")
+    if lead is not None:
+        return lead
+    for name in ("vocals.wav", "Vocals.wav"):
         candidate = stems_dir / name
         if candidate.exists():
             return candidate

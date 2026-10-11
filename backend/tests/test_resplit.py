@@ -55,6 +55,15 @@ def clean_stems_root():
     yield
 
 
+@pytest.fixture(autouse=True)
+def fake_final_encoding(monkeypatch):
+    # Handler fixtures deliberately use sentinel bytes, not decodable audio.
+    async def encode(source, target):
+        shutil.copy2(source, target)
+    monkeypatch.setenv("STEM_FORMAT", "mp3")
+    monkeypatch.setattr("karaoke_backend.stem_encoding.encode_stem", encode)
+
+
 async def _create_song(client: AsyncClient) -> int:
     with patch("karaoke_backend.jobs.ingest.run_ingest", new=AsyncMock()):
         resp = await client.post(
@@ -148,7 +157,7 @@ async def test_a_song_without_separated_vocals_is_409(
     )
     assert resp.status_code == 409
     detail = resp.json()["detail"]
-    assert "lead_vocals.wav" in detail and "backing_vocals.wav" in detail
+    assert "lead" in detail and "backing" in detail
 
 
 @pytest.mark.asyncio
@@ -236,12 +245,17 @@ async def _fake_mix_karaoke(instrumental_path, backing_path, karaoke_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_format", ["wav", "flac", "mp3"])
+@pytest.mark.parametrize("output_format", ["mp3", "flac"])
 async def test_a_successful_resplit_replaces_the_three_stems_and_clears_the_cache(
-    client: AsyncClient, local_separation
+    client: AsyncClient, local_separation, monkeypatch, source_format, output_format
 ):
+    monkeypatch.setenv("STEM_FORMAT", output_format)
     song_id, stems_dir = await _ready_song_with_stems(client)
+    for path in stems_dir.glob("*.wav"):
+        path.rename(path.with_suffix(f".{source_format}"))
     (stems_dir / "vocals.wav").write_bytes(WAV + b"vocals")
-    instrumental_before = (stems_dir / "instrumental.wav").read_bytes()
+    instrumental_before = (stems_dir / f"instrumental.{source_format}").read_bytes()
     (stems_dir / "transcription.heart-vad.json").write_text("{}")
     (stems_dir / "transcription.heart-vad.baseline.json").write_text("{}")
 
@@ -260,18 +274,21 @@ async def test_a_successful_resplit_replaces_the_three_stems_and_clears_the_cach
         song = await db.get(Song, song_id)
         assert song.active_stem_generation == f"resplit-{job_id}"
         published = stems_dir / ".generations" / song.active_stem_generation
-    assert (published / "lead_vocals.wav").read_bytes() == b"NEW-LEAD"
-    assert (published / "backing_vocals.wav").read_bytes() == b"NEW-BACKING"
-    assert (published / "karaoke.wav").read_bytes() == b"NEW-KARAOKE"
+    assert (published / f"lead_vocals.{output_format}").read_bytes() == b"NEW-LEAD"
+    assert (published / f"backing_vocals.{output_format}").read_bytes() == b"NEW-BACKING"
+    assert (published / f"karaoke.{output_format}").read_bytes() == b"NEW-KARAOKE"
+    for base in ("lead_vocals", "backing_vocals", "karaoke"):
+        assert [p.name for p in published.glob(f"{base}.*")] == [f"{base}.{output_format}"]
     # Pass 1's output is not re-run and must not be touched.
-    assert (published / "instrumental.wav").read_bytes() == instrumental_before
-    assert (stems_dir / "lead_vocals.wav").read_bytes() != b"NEW-LEAD"
+    assert (published / f"instrumental.{source_format}").read_bytes() == instrumental_before
+    assert (stems_dir / f"lead_vocals.{source_format}").read_bytes() != b"NEW-LEAD"
 
     # The marker is the queue's proof that separation finished; a re-split
     # rewrites it so it describes the files that are actually there now.
     marker = json.loads((published / ".separation-complete").read_text())
     assert set(marker["artifacts"]) == {
-        "lead_vocals.wav", "instrumental.wav", "karaoke.wav"
+        f"lead_vocals.{output_format}", f"backing_vocals.{output_format}",
+        f"instrumental.{source_format}", f"karaoke.{output_format}"
     }
 
     # The lead stem changed, so every cached transcription describes audio
@@ -479,7 +496,7 @@ async def test_without_a_pass_1_vocals_stem_the_pair_is_summed_back_together(
     assert seen["model"] == "UVR_MDXNET_KARA_2.onnx"
     async with AsyncSessionLocal() as db:
         generation = (await db.get(Song, song_id)).active_stem_generation
-    assert (stems_dir / ".generations" / generation / "lead_vocals.wav").read_bytes() == b"NEW-LEAD"
+    assert (stems_dir / ".generations" / generation / "lead_vocals.mp3").read_bytes() == b"NEW-LEAD"
 
 
 @pytest.mark.asyncio

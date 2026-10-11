@@ -327,3 +327,33 @@ def test_numbered_generics_and_compound_ids_coexist(tmp_path):
         "vocal_7+8.flac",
         "vocal_9.flac",
     }
+
+
+def test_mp3_lanes_and_format_independent_lookup(tmp_path, monkeypatch):
+    monkeypatch.setenv("STEM_FORMAT", "flac")
+    names = {"instrumental.mp3", "instrumental.flac", "lead_vocals.mp3",
+             "lead_vocals_2.mp3", "backing_vocals.mp3", "vocal_7+8.mp3"}
+    _touch(tmp_path, *names)
+    assert stem_layout.resolve_stem(tmp_path, "instrumental").name == "instrumental.mp3"
+    payload = stem_layout.stem_urls_payload(tmp_path, "", 1)
+    assert [v["id"] for v in payload["vocals"]] == ["lead", "lead_2", "backing", "7+8"]
+    assert all(v["url"].endswith(".mp3") for v in payload["vocals"])
+    assert stem_layout.allowed_stem_filenames(tmp_path) == names
+
+
+def test_retained_audio_containers_cover_all_stem_roles(tmp_path):
+    bases = ("instrumental", "karaoke", "lead_vocals", "backing_vocals",
+             "lead_vocals_2", "backing_vocals_3", "vocal_7+8")
+    for extension in ("m4a", "webm"):
+        names = {f"{base}.{extension}" for base in bases}
+        directory = tmp_path / extension
+        directory.mkdir()
+        _touch(directory, *names, "source.webm", "video.webm", "lead_vocals_1.m4a")
+        assert stem_layout.allowed_stem_filenames(directory) == names
+        payload = stem_layout.stem_urls_payload(directory, "", 1)
+        assert payload["instrumental"].endswith(f"instrumental.{extension}")
+        assert payload["karaoke"].endswith(f"karaoke.{extension}")
+        assert len(payload["vocals"]) == 5
+        assert all(v["url"].endswith(f".{extension}") for v in payload["vocals"])
+        _touch(directory, "instrumental.mp3")
+        assert stem_layout.resolve_stem(directory, "instrumental").name == "instrumental.mp3"

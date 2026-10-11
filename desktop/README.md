@@ -121,8 +121,8 @@ sees that. Only the exact flags are accepted; forms such as
   applies at start for the exact target being built. The target is read from
   the native assembly's manifest (`linux-x64`, `linux-arm64`, `darwin-arm64`, or
   `win32-x64`). The catalog is checked against the channel of the release
-  policy being packaged, so a `private-smoke` catalog cannot be packaged into a
-  build whose channel is not `private-test`. The file must also be byte for
+  policy being packaged, so a `private-smoke` or `hardware-test` catalog cannot
+  be packaged into a build whose channel is not `private-test`. The file must also be byte for
   byte the generator's output for the catalog it validates to (two-space
   indented JSON with a trailing newline, keys in generator order): duplicate
   keys, unknown fields, reordered keys, or hand reformatting are refused with
@@ -208,6 +208,13 @@ launch takes file digests from the receipt. This check reads mount evidence
 only, not the outer image; a read-only FUSE view of a writable directory that
 the same user mounts (for example with bindfs or rclone) is indistinguishable
 from an AppImage mount and is within that user's own trust boundary. The
+mount evidence also requires the application root and executable to be on the
+device of the selected mount entry, so a mount stacked later on an ancestor
+directory is not mistaken for it. Read-only protects the mounted files against
+writes, not against corruption: SquashFS data is not content-checksummed, so a
+damaged or bit-rotted `.AppImage` is no longer rejected at launch and may
+instead fail or misbehave later. Replace a damaged AppImage with a fresh copy.
+The
 signed macOS bundle keeps a full content walk, and managed update
 slots keep hashing their native payload, at every launch. Packaging
 also reads the current Git `HEAD` and `git status --porcelain=v1
@@ -570,8 +577,36 @@ whose record was withdrawn), startup verifies every file's hash, runs the
 self-test once and records the result. Any failed full verification or
 self-test withdraws the pack's record, so damage found during a reinstall,
 repair or setup check is verified again in full at the next startup and the
-pack is rejected there. Payload bytes are otherwise hashed at installation,
+pack is rejected there. A self-test result is recorded only when it follows a
+full verification with no withdrawal since, and a record write whose outcome
+cannot be confirmed is withdrawn rather than trusted. Payload bytes are otherwise hashed at installation,
 repair, and activation, not at every startup.
+Because the structural check cannot see a same-size change, once the window is
+shown the application verifies every file of each pack that startup admitted
+from its record again, in the background and one file at a time, when that
+pack's last full verification is more than 7 days old (`RECHECK_INTERVAL_MS`
+in `runtime_manager.mjs`). The time of each full verification (installation,
+a full startup verification, or a successful background check) is kept in the
+store's `verified-at/<identity>.json`; a missing or unreadable time, or one in
+the future, counts as stale. A pack that startup has just verified in full is
+not checked again, and the check stops when an installation starts or the app
+closes. If that check fails, the pack's record
+is withdrawn and the damage is recorded in the processing status at once. The
+application then shows one notice offering **Set up song processing…** once
+no other operation (such as a backup, an update, or a processing installation
+or setup) is running. The notice covers only packs that are still damaged then:
+a pack repaired, or replaced by another, in the meantime is left out. Reinstalling a damaged processing pack or model cache repairs it
+in place; the damaged tree is kept under that store's `quarantine/` directory
+and may be deleted once the repair is complete. Reopen the app afterwards.
+A failed processing job does not itself trigger any verification. If jobs fail
+unexpectedly, open
+**Processing → Set up song processing…**, whose check verifies every file of
+the installed packs and runs a fresh self-test.
+A withdrawal counts only once the removal is flushed to disk (where the
+platform supports flushing directories). If a record cannot be withdrawn
+durably (for example, the application data folder is not writable), the error is reported and the record is ignored until
+the app closes; a later launch could admit the pack from it again, so restore
+write access to that folder.
 The self-test checks exact Python/application versions, native audio operations, selected
 device execution, and small synthetic architecture operations. The process has
 a 120-second default bound to accommodate cold native imports and cannot retrieve
@@ -697,6 +732,12 @@ rejects missing notice files. File hashes establish correspondence
 with a selected manifest; they do not establish publisher identity.
 Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+Locks also listed in its `privateTestLockSha256` (hardware-test candidates) are
+trusted only by `private-test` channel builds: a build on any other channel
+neither installs nor activates such a runtime, including one left on disk by an
+earlier test build of the same application version. The backend's own lock
+check applies the same rule to the channel the application passes it, and
+rejects these locks when no channel is supplied.
 
 For archive-form packs, installation retrieves each part into
 `processing/staging/<name>.archive/`, outside the pack tree. It resumes partial
@@ -1180,20 +1221,58 @@ runtime. The initial CUDA functional probe must still pass before activation.
 Workers check fresh available RAM, the selected CUDA device's free VRAM, and
 audio metadata before loading checkpoints. Missing evidence, unknown memory,
 out-of-envelope audio, or insufficient memory for both routes refuses the job.
-Guarded workers serialize processing and never restart failed inference on a
-different device. The bounded profile uses six-second Demucs segments,
-Roformer segment size 256 with batch size one and CUDA autocast, and HEART's
-30-second chunks with batch size one. Managed HEART VAD runs inside admission.
-These checks cannot reserve memory against other applications or establish
-support for hardware that has not been tested.
+Guarded workers serialize processing, wait a bounded time for another local
+worker to finish, and never restart failed inference on a different device.
+Before Pass 1, a guarded runtime decodes the upload with the bundled ffmpeg to
+a temporary 44.1 kHz stereo float WAV, so every accepted upload format is
+inspected and admitted under the same envelope; the copy is removed after
+Pass 1. Tracks longer than the shortest measured `maxDurationSeconds` are
+refused with a message that states the limit, which applies on the GPU and the
+CPU alike. The decode is bounded by output size rather than by timestamp and
+copies no metadata, so neither timestamp gaps nor large tags can let a file
+pass the check with audio cut off. Without a valid measured policy for every
+workflow model, preparation is refused before decoding. Each guarded worker reports the device it selected and why; the job
+message names CPU fallback (for example, too little free GPU memory, a CUDA
+driver error, or an unsupported GPU) and that it is slower. HEART was measured
+on the GPU only with managed VAD at its default configuration (segments of at
+most 15 seconds) and greedy decoding. Whole-file decoding, temperature-fallback
+decoding, a non-default VAD configuration, and supplied segments that are not
+finite, ordered, inside the audio, and at most 15 seconds long use the CPU
+route. A CUDA runtime without a valid policy for its models reports
+local processing as not ready.
+
+The bounded profile applies only to guarded runtimes: six-second Demucs
+segments, Roformer segment size 256 with batch size one and CUDA autocast, and
+HEART's 30-second chunks with batch size one. Unguarded CPU and Metal runtimes
+keep upstream Demucs and audio-separator settings. Managed HEART VAD runs
+inside admission. The quality effect of the shorter separation segments has not
+been measured. These checks cannot reserve memory against other applications
+or establish support for hardware that has not been tested.
+
+The Linux CUDA runtime pins PyTorch 2.10 built for CUDA 12.8, compiled for
+compute capabilities `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_90`, `sm_100`,
+and `sm_120`. GPUs below compute capability 7.0 (Pascal, including the
+GeForce GTX 10 series, and older) are not supported; workers name the GPU's
+capability and use the CPU route instead. A runtime that reports no compiled
+GPU architectures is treated as unusable for CUDA in the same way, and the
+activation probe refuses both cases with the reason. The CUDA 12.8 libraries need an
+NVIDIA driver from the R525 series or newer through CUDA minor-version
+compatibility, and R570 or newer for Blackwell (RTX 50 series) GPUs. The
+current memory policy rests on measurements from a single 24 GB GPU host.
+Cards with 8 GB or less are untested; on 6 GB cards HEART cannot meet its GPU
+budget and runs on the CPU only when enough RAM is available.
 
 `desktop/qualification/profile_processing.py --help` describes the explicit
 Linux measurement harness. It verifies runtime files, records model/input
 identities, monitors only the owned worker group, and stops the experiment if
 the chosen host RAM reserve is threatened. Its candidate budgets are experiment
 inputs, and its sampled peaks are raw lower bounds, not release qualification
-or automatically generated memory minima. Keep audio and transcription logs
-local; publish only sanitized technical evidence.
+or automatically generated memory minima. For CUDA and CPU runs alike it
+records the worker group's sampled peak RSS, the highest per-process kernel
+RSS high-water mark, and the minimum host available RAM, so a CUDA route's
+`ramBytes` can be derived from its own run. Profile Demucs with the prepared
+44.1 kHz stereo WAV that guarded runtimes pass to Pass 1. Keep audio and
+transcription logs local; publish only sanitized technical evidence.
 
 Desktop Modal setup saves credentials with operating-system encryption and
 performs a bounded, explicit metadata check using the pinned client. No audio
@@ -1236,6 +1315,16 @@ from the renderer or saved preferences. Its schema is:
     activation. CPU fallback within that pack is available only after this
     initial CUDA check succeeds; machines without a working CUDA device need
     a CPU pack. This catalog does not automatically select between packs.
+    For a CUDA catalog, setup is unavailable before any download when no
+    NVIDIA device is detected, and the wizard labels an available
+    hardware-test choice "Experimental" rather than "Recommended". Its runtime
+    lock must also be listed in `privateTestLockSha256` (see above).
+    The committed `win32-x64.json` is currently such a Windows CUDA
+    hardware-test catalog. It replaces the earlier Windows CPU `private-smoke`
+    catalog: because there is one catalog per target, a processing-ready
+    Windows build from this source offers only the CUDA test pack, and Windows
+    computers without an NVIDIA GPU cannot set up local processing with it.
+    See `desktop/qualification/windows-cuda-test.md`.
   - `full`: the complete release qualification passed for this runtime and
     target. Accepted by builds on any release channel.
   - `private-smoke`: only a single-song real-processing smoke test passed. This
@@ -1261,8 +1350,8 @@ replaces an existing file). Commit the file exactly as written: packaging
 accepts only the generator's canonical bytes. Inputs are explicit;
 the tool never manufactures qualification. `--release release.json` names the
 release policy whose channel the catalog is checked against (default
-`desktop/release.json`); the tool refuses to write a `private-smoke` catalog
-for any channel other than `private-test`. Packaging re-checks the catalog
+`desktop/release.json`); the tool refuses to write a `private-smoke` or
+`hardware-test` catalog for any channel other than `private-test`. Packaging re-checks the catalog
 against the release policy actually packaged. `--memory memory.json` adds measured
 memory evidence. Production catalogs reject local runtime URLs. The explicit
 `--private-test-local-sources` option is only for validating private test inputs;

@@ -15,6 +15,10 @@ pip install -e ".[whisper,metaphone]"     # + phonetic matching
 pip install -e ".[all]"                   # everything
 ```
 
+PCM WAV audio uses the built-in reader. Reading MP3, FLAC, AAC/M4A, or Opus/Vorbis WebM audio for VAD
+and alignment also requires `ffmpeg` on `PATH`. Compressed files are decoded in a
+temporary directory without changing the source.
+
 ## Quick start
 
 ```python
@@ -108,6 +112,11 @@ config = PipelineConfig(
 pipeline = SyncPipeline(transcriber=..., config=config)
 ```
 
+`VadConfig.max_segment_duration=None` (the default) means auto: VAD splits at
+a 30 s ceiling and expects a device-aware decoder to re-split longer slices to
+fit the available memory. Callers without such a decoder should pass an
+explicit value, such as `max_segment_duration=15.0`.
+
 ## Alignment methods
 
 | Method | When | Description |
@@ -123,6 +132,43 @@ pipeline = SyncPipeline(transcriber=..., config=config)
 |---------|-------|---------|
 | faster-whisper | `FasterWhisperTranscriber(model="large-v3")` | `lyricsync[whisper]` |
 | HeartTranscriptor | `HeartTranscriber(python_path=..., script_path=...)` | Requires separate torch venv |
+
+## Acoustic re-timing (optional)
+
+An optional final stage re-times every word of the result against the vocal
+audio. It runs several CTC acoustic models in a separate Python environment
+that has `torch` and `torchaudio` (and, for the optional phoneme voter,
+`transformers`, `phonemizer` and the `espeak-ng` program), fuses their word
+times with the existing timing, and rewrites only word `start`/`end` — text,
+word count and line structure never change.
+
+```python
+from lyricsync import CtcFusionAligner, PipelineConfig, SyncPipeline
+
+aligner = CtcFusionAligner(python_path="/path/to/torch-env/bin/python")
+pipeline = SyncPipeline(
+    transcriber=...,
+    config=PipelineConfig(acoustic_alignment=True),
+    acoustic_aligner=aligner,
+)
+# extra_audio_paths (e.g. a backing-vocal stem) are summed with audio_path
+result = pipeline.run("vocals.wav", plain_lyrics=lyrics, extra_audio_paths=["backing.wav"])
+print(result.metadata.extra["acoustic_alignment"])
+```
+
+- Needs CUDA by default; pass `allow_cpu=True` to run on the CPU (slow).
+- Model weights (about 1.3 GB per large model, 3.6 GB for the extra-large
+  one) download on first use into the processing environment's torch hub and
+  Hugging Face caches. Models load one at a time.
+- Any failure (worker error, timeout, cancel, missing models, CUDA absent,
+  fewer than two character models) keeps the existing timing; the reason is
+  recorded in `metadata.extra["acoustic_alignment"]`, alongside the models
+  used and skipped, the boundary parameters and the indices of words whose
+  voters disagree (`flagged_words`: flat word indices across `result.lines` in
+  line order; flagged words are still re-timed, the flag is informational).
+- Boundary parameters: `PipelineConfig.acoustic_start_shift` (-0.02 s),
+  `acoustic_join_gap` (0.0 s), `acoustic_tail_extend` (0.2 s),
+  `acoustic_flag_threshold` (0.2 s).
 
 ## Word matching scoring
 

@@ -36,7 +36,11 @@ def main(argv=None):
     from karaoke_backend.workers.managed_audio_separator import disable_mps_fallback, deny_network
     disable_mps_fallback()
     sys.addaudithook(deny_network)
-    from karaoke_backend.workers.memory_admission import admit, DEMUCS_SEGMENT_SECONDS
+    from karaoke_backend.workers.memory_admission import admit, guarded, DEMUCS_SEGMENT_SECONDS
+    # The bounded profile is part of the measured CUDA policy only. Unguarded
+    # CPU and Metal runtimes keep upstream Demucs segmentation.
+    profile = (["--segment", str(DEMUCS_SEGMENT_SECONDS), "--jobs", "0"]
+               if guarded(args.device) else [])
     with admit("demucs-mdx-extra" if args.name == "mdx_extra" else args.name, args.device, args.tracks) as device:
         import torch
         import demucs.separate
@@ -46,12 +50,10 @@ def main(argv=None):
         original_save = demucs.separate.save_audio
         demucs.separate.save_audio = save_float_wav
         try:
-            demucs.separate.main(["-n", args.name, "--device", device,
-                                  "--segment", str(DEMUCS_SEGMENT_SECONDS), "--jobs", "0",
+            demucs.separate.main(["-n", args.name, "--device", device, *profile,
                                   "--float32", "-o", args.out, *args.tracks])
         finally:
             demucs.separate.save_audio = original_save
-
 
 
 if __name__ == "__main__":

@@ -48,6 +48,52 @@ def onnx_add_graph():
     return integer(1, 8) + blob(7, graph) + blob(8, integer(2, 13))
 
 
+def capability_supported(capability, arch_list):
+    """Whether a compute capability can run kernels compiled for ``arch_list``.
+
+    Mirrors the managed worker's admission check, kept local because this
+    probe runs as standalone source against whichever runtime is selected.
+    SASS (``sm_XY``) runs on the same major architecture with an equal or newer
+    minor version; PTX (``compute_XY``) can be JIT compiled for newer devices.
+    """
+    major, minor = capability
+    for arch in arch_list:
+        kind, _, version = arch.partition("_")
+        digits = version.rstrip("abf")
+        if not digits.isdigit() or len(digits) < 2:
+            continue
+        built = (int(digits[:-1]), int(digits[-1]))
+        if kind == "sm" and not version[len(digits):] and built[0] == major and built[1] <= minor:
+            return True
+        if kind == "compute" and built <= (major, minor):
+            return True
+    return False
+
+
+def minimum_capability(arch_list):
+    versions = []
+    for arch in arch_list:
+        kind, _, version = arch.partition("_")
+        if kind in {"sm", "compute"} and version.isdigit() and len(version) >= 2:
+            versions.append((int(version[:-1]), int(version[-1])))
+    return min(versions) if versions else None
+
+
+def require_supported_cuda(torch):
+    """Refuse a GPU this runtime has no kernels for before running on it."""
+    index = torch.cuda.current_device()
+    capability = tuple(torch.cuda.get_device_capability(index))
+    arch_list = list(torch.cuda.get_arch_list())
+    if not arch_list:
+        # Without the compiled architectures, support cannot be established.
+        raise RuntimeError("The installed CUDA runtime lists no compiled GPU architectures, "
+                           "so this GPU cannot be checked")
+    if not capability_supported(capability, arch_list):
+        minimum = minimum_capability(arch_list)
+        supported = f"; this runtime requires {minimum[0]}.{minimum[1]} or newer" if minimum else ""
+        raise RuntimeError(f"GPU compute capability {capability[0]}.{capability[1]} is not supported{supported}")
+
+
 def run(capabilities, accelerator, modules):
     if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") != "0":
         raise RuntimeError("Runtime smoke requires PYTORCH_ENABLE_MPS_FALLBACK=0")
@@ -71,6 +117,8 @@ def run(capabilities, accelerator, modules):
 
     torch.set_num_threads(1)
     torch.manual_seed(0)
+    if accelerator == "cuda":
+        require_supported_cuda(torch)
     device = {"metal": "mps"}.get(accelerator, accelerator)
     dtype = torch.float32 if accelerator == "cpu" else torch.float16
     matrix = torch.tensor([[1., 2.], [3., 4.]], device=device, dtype=dtype)

@@ -33,7 +33,19 @@ class RecipeAdmissionTests(unittest.TestCase):
                     backend.processing_environment(root / 'default/backend', {}, directory, None,
                                                    trusted_locks=locks, processing_id=identifier,
                                                    processing_root=root / 'custom')
-                verify.assert_called_once_with(directory, identifier, store, locks, quick=True)
+                verify.assert_called_once_with(directory, identifier, store, locks, quick=True, release_channel='')
+
+    def test_private_recipe_lock_is_not_admitted_by_other_release_channels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, identifier, locks = self.fixture(root)
+            policy = dict(schema=1, lockSha256=locks, privateTestLockSha256=locks)
+            with patch.object(backend, '_processing_lock_policy', return_value=policy):
+                for channel in (None, '', 'stable', 'beta'):
+                    with self.subTest(channel=channel), self.assertRaisesRegex(RuntimeError, 'not trusted'):
+                        backend.verify_processing_recipe(directory, identifier, root, quick=True, release_channel=channel)
+                self.assertEqual(backend.verify_processing_recipe(directory, identifier, root,
+                                                                  quick=True, release_channel='private-test')['schema'],2)
 
     def test_structural_recipe_admission_reads_metadata_but_not_payload_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
