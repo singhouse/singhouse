@@ -285,7 +285,9 @@ def _transcribe_vad_segments(pipe, audio, sr, vad_segments, generate_kwargs) -> 
     first_exc = None
 
     for seg_i, (seg_start, seg_end) in enumerate(vad_segments):
-        s_idx, e_idx = int(float(seg_start) * sr), int(float(seg_end) * sr)
+        s_idx = int(float(seg_start) * sr)
+        # Modal retains a fixed 30-second pipeline window, including rounding.
+        e_idx = min(int(float(seg_end) * sr), s_idx + int(30 * sr))
         slice_audio = audio[s_idx:e_idx].astype(np.float32)
         if len(slice_audio) < sr * 0.1:
             continue

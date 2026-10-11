@@ -299,6 +299,12 @@ class ModalHeartTranscriber:
             from lyricsync.audio.vad import rms_vad_segments
 
             samples, sr = read_wav_mono(audio_path)
+            # The remote function has no device-memory probe, so an "auto" cap
+            # (``max_segment_duration=None``) is not re-split there: slices go
+            # out at the VAD's 30 s ceiling. Modal GPUs are data-centre cards
+            # with no desktop on them, so this is the top auto tier. Silent
+            # stems still get the 15 s whole-file window. An explicit cap is
+            # passed through unchanged.
             vad_segments = rms_vad_segments(samples, sr, self.vad_config)
             logger.info(
                 "ModalHeartTranscriber: VAD produced %d segments (%.1fs audio)",

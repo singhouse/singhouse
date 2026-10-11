@@ -331,3 +331,16 @@ def test_overlong_supplied_segment_selects_cpu_through_real_admission(monkeypatc
     record = memory_admission.parse_device_line(line)
     assert record["reason"] == "unmeasured-path"
     assert record["detail"] == SEGMENT_PREFIX + "a segment longer than the measured 15 seconds"
+
+
+def test_measured_managed_limit_does_not_follow_adaptive_library_default(monkeypatch):
+    import soundfile
+    from lyricsync.audio import vad
+    assert VadConfig().max_segment_duration is None
+    observed = []
+    monkeypatch.setattr(soundfile, 'read', lambda *a, **k: (np.zeros((32, 1)), 16000))
+    monkeypatch.setattr(vad, 'rms_vad_segments', lambda samples, rate, config: observed.append(config.max_segment_duration) or [])
+    worker.managed_vad_segments('fixture.wav', '{}')
+    worker.managed_vad_segments('fixture.wav', '{"max_segment_duration": 30}')
+    worker.managed_vad_segments('fixture.wav', '{"max_segment_duration": 8}')
+    assert observed == [15.0, 15.0, 8]

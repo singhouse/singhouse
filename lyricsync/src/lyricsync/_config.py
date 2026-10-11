@@ -10,14 +10,27 @@ class VadConfig:
     onset_threshold: float = 0.03
     offset_threshold: float = 0.02
     min_silence_duration: float = 1.5
-    # Whisper's window is 30 s, but word-level timestamps are extracted by
+    # Longest audio slice handed to the transcriber in one forward pass.
+    # ``None`` (the default) means "auto": the parent splits VAD regions at a
+    # 30 s ceiling (Whisper's window) and the Heart decode subprocess, which
+    # knows the device, re-splits any longer slice into equal parts sized to
+    # the free accelerator memory it measures after loading the model. An
+    # explicit number is a fixed cap applied everywhere, exactly as before.
+    #
+    # Why memory matters: word-level timestamps are extracted by
     # concatenating cross-attention across every decode step, layer and head
-    # (_extract_token_timestamps). That tensor scales with tokens generated, so
-    # a near-30 s segment can cost GiB — enough to OOM an 8 GB card on the
-    # FIRST segment. 15 s halves the token axis at identical audio coverage
-    # (segments are only split, never dropped; word timestamps are offset back
-    # to global time). Raise it on a card with more headroom.
-    max_segment_duration: float = 15.0
+    # (_extract_token_timestamps). That tensor scales with tokens generated,
+    # so a near-30 s segment can cost GiB, enough to exhaust an 8 GB card that
+    # also drives a desktop. A fixed 15 s cap was the earlier default for that
+    # reason; it halves the token axis at identical audio coverage (segments
+    # are split, and word timestamps are offset back to global time), but it
+    # needlessly limits context on cards with more headroom. Auto keeps 15 s
+    # on ~8 GB cards and allows up to 30 s on large ones; CPU decode keeps
+    # 15 s (host RAM is not probed). faster-whisper cannot measure memory and
+    # treats ``None`` as a fixed 15 s. The Modal runner cannot either, but
+    # runs on data-centre GPUs, so it takes the 30 s ceiling as is. The
+    # whole-file window used when VAD finds no usable region is 15 s.
+    max_segment_duration: float | None = None
     # Shortest region worth transcribing. Sub-second RMS blips (breaths,
     # cymbal bleed, stem-separation artifacts) carry no lyric but still get
     # padded to Whisper's 30 s window, where the model has nothing to anchor
