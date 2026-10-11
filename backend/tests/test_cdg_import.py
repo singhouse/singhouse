@@ -348,7 +348,7 @@ async def test_bare_job_builds_playable_artifacts_and_consumes_upload(client, mo
 
     stems = STEMS_DIR / str(body["song_id"])
     assert (stems / "video.mp4").read_bytes() == b"h264 video"
-    assert (stems / "instrumental.flac").read_bytes() == b"16-bit flac"
+    assert (stems / "instrumental.mp3").read_bytes() == b"16-bit flac"
     assert sources == [None]
     song = await get_song(body["song_id"])
     assert (song.status, song.video_filename, song.stems_path) == (
@@ -426,3 +426,28 @@ async def test_lease_loss_at_persist_boundary_does_not_ready_the_song(
 
     assert (await get_song(body["song_id"])).status == "processing"
     assert (UPLOADS_DIR / queue.payload_of(claimed)["upload_name"]).is_file()
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg unavailable")
+@pytest.mark.parametrize("format", ["mp3", "flac"])
+def test_real_cdg_audio_preserves_mp3_or_encodes_16_bit(tmp_path, format):
+    source = tmp_path / "source.mp3"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=0.2", "-c:a", "libmp3lame",
+                    "-q:a", "2", str(source)], check=True, timeout=30)
+    dest = tmp_path / f"instrumental.{format}"
+    _make_audio(source, dest, 0.2)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "stream=codec_name,sample_fmt", "-of", "csv=p=0",
+                            str(dest)], capture_output=True, text=True, check=True, timeout=30)
+    assert probe.stdout.strip() == ("mp3,fltp" if format == "mp3" else "flac,s16")
+    if format == "mp3":
+        # Packet payloads are untouched: no second lossy encoding pass.
+        def packet_hash(path):
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path),
+                                   "-c:a", "copy", "-f", "hash", "-"],
+                                  capture_output=True, check=True, timeout=30).stdout
+        assert packet_hash(source) == packet_hash(dest)
+    silence = tmp_path / f"silence.{format}"
+    _make_audio(None, silence, 0.2)
+    assert _probe_duration(silence) > 0
