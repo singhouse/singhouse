@@ -208,6 +208,13 @@ launch takes file digests from the receipt. This check reads mount evidence
 only, not the outer image; a read-only FUSE view of a writable directory that
 the same user mounts (for example with bindfs or rclone) is indistinguishable
 from an AppImage mount and is within that user's own trust boundary. The
+mount evidence also requires the application root and executable to be on the
+device of the selected mount entry, so a mount stacked later on an ancestor
+directory is not mistaken for it. Read-only protects the mounted files against
+writes, not against corruption: SquashFS data is not content-checksummed, so a
+damaged or bit-rotted `.AppImage` is no longer rejected at launch and may
+instead fail or misbehave later. Replace a damaged AppImage with a fresh copy.
+The
 signed macOS bundle keeps a full content walk, and managed update
 slots keep hashing their native payload, at every launch. Packaging
 also reads the current Git `HEAD` and `git status --porcelain=v1
@@ -570,8 +577,36 @@ whose record was withdrawn), startup verifies every file's hash, runs the
 self-test once and records the result. Any failed full verification or
 self-test withdraws the pack's record, so damage found during a reinstall,
 repair or setup check is verified again in full at the next startup and the
-pack is rejected there. Payload bytes are otherwise hashed at installation,
+pack is rejected there. A self-test result is recorded only when it follows a
+full verification with no withdrawal since, and a record write whose outcome
+cannot be confirmed is withdrawn rather than trusted. Payload bytes are otherwise hashed at installation,
 repair, and activation, not at every startup.
+Because the structural check cannot see a same-size change, once the window is
+shown the application verifies every file of each pack that startup admitted
+from its record again, in the background and one file at a time, when that
+pack's last full verification is more than 7 days old (`RECHECK_INTERVAL_MS`
+in `runtime_manager.mjs`). The time of each full verification (installation,
+a full startup verification, or a successful background check) is kept in the
+store's `verified-at/<identity>.json`; a missing or unreadable time, or one in
+the future, counts as stale. A pack that startup has just verified in full is
+not checked again, and the check stops when an installation starts or the app
+closes. If that check fails, the pack's record
+is withdrawn and the damage is recorded in the processing status at once. The
+application then shows one notice offering **Set up song processing…** once
+no other operation (such as a backup, an update, or a processing installation
+or setup) is running. The notice covers only packs that are still damaged then:
+a pack repaired, or replaced by another, in the meantime is left out. Reinstalling a damaged processing pack or model cache repairs it
+in place; the damaged tree is kept under that store's `quarantine/` directory
+and may be deleted once the repair is complete. Reopen the app afterwards.
+A failed processing job does not itself trigger any verification. If jobs fail
+unexpectedly, open
+**Processing → Set up song processing…**, whose check verifies every file of
+the installed packs and runs a fresh self-test.
+A withdrawal counts only once the removal is flushed to disk (where the
+platform supports flushing directories). If a record cannot be withdrawn
+durably (for example, the application data folder is not writable), the error is reported and the record is ignored until
+the app closes; a later launch could admit the pack from it again, so restore
+write access to that folder.
 The self-test checks exact Python/application versions, native audio operations, selected
 device execution, and small synthetic architecture operations. The process has
 a 120-second default bound to accommodate cold native imports and cannot retrieve
