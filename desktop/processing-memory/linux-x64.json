@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "runtimeLockSha256": "a16ffa5f9c60962d1178b4d87f526705e5c78a246fe420e028bf12fdbf846324",
-  "evidenceReference": "Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/72; release-candidate pack validation pending",
+  "runtimeLockSha256": "02b751306be6c9e63ab296063b5cde5a239e14e0c07d675d602cd5a64952fd79",
+  "evidenceReference": "Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/72; rebound for private acceptance of the integrated uv recipe. Updated runtime resource measurements and release qualification remain pending.",
   "executionProfile": "bounded-v1",
   "models": {
     "demucs-mdx-extra": {
