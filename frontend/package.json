@@ -10,7 +10,7 @@
     "directory": "frontend"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
@@ -29,23 +29,23 @@
   "dependencies": {
     "@fontsource-variable/space-grotesk": "^5.3.0",
     "axios": "^1.6.0",
-    "pinia": "^2.1.7",
-    "vue": "^3.3.8",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.43",
     "vue-router": "^4.2.5",
     "vuedraggable": "^4.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@vitejs/plugin-vue": "^4.5.0",
+    "@vitejs/plugin-vue": "^6.0.10",
     "@vue/test-utils": "^2.4.11",
     "autoprefixer": "^10.4.16",
     "eslint": "^10.8.1",
-    "eslint-plugin-vue": "^10.10.0",
+    "eslint-plugin-vue": "^10.11.1",
     "globals": "^17.11.0",
     "happy-dom": "^20.10.6",
-    "postcss": "^8.4.31",
+    "postcss": "^8.5.28",
     "tailwindcss": "^3.3.5",
-    "vite": "^5.0.2",
+    "vite": "^8.3.1",
     "vitest": "^4.1.10"
   }
 }

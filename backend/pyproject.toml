@@ -36,8 +36,8 @@ classifiers = ["Private :: Do Not Upload"]
 requires-python = ">=3.12"      # CI proves this floor on 3.12 and 3.14
 dependencies = [
   "fastapi==0.115.5", "uvicorn[standard]==0.32.1", "itsdangerous==2.2.0",
-  "python-multipart==0.0.12", "bcrypt==4.2.1", "email-validator==2.2.0",
-  "sqlalchemy==2.0.36", "aiosqlite==0.20.0", "httpx==0.28.0",
+  "python-multipart==0.0.32", "bcrypt==4.2.1", "email-validator==2.3.0",
+  "sqlalchemy==2.1.1", "aiosqlite==0.20.0", "httpx==0.28.0",
   "numpy>=1.24.0",
   "alembic==1.14.0",
   # greenlet is required at runtime by SQLAlchemy's async engine, but
@@ -67,8 +67,8 @@ Homepage = "https://github.com/singhouse/singhouse"
 # Keep the alternate Whisper transcriber explicitly installable for environments
 # that run it; Heart's separate processing environment remains unchanged.
 whisper = ["lyricsync[whisper]>=0.1,<0.2"]
-dev = ["pytest==8.3.3", "pytest-asyncio==0.24.0", "Pillow>=10.0"]
-modal = ["modal>=0.66"]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "Pillow>=10.0"]
+modal = ["modal>=1.6.0"]
 # Text rasterisation for CD+G export. Optional: without it the export routes
 # answer 501 and everything else runs unchanged.
 export = ["Pillow>=10.0"]
