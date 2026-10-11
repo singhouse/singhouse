@@ -16,7 +16,7 @@ import { ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, v
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 import { ModelCache, processingAttestation } from './runtime_manager.mjs'
 import { UvRuntimeManager } from './uv_runtime_manager.mjs'
-import { privateMeasurementLaunch, assertPrivateMeasurementRelease, assertPrivateMeasurementRuntime, assertPrivateMeasurementMarker, privateMeasurementHandshake } from './private_measurement.mjs'
+import { privateMeasurementLaunch, assertPrivateMeasurementRelease, assertPrivateMeasurementRuntime, assertPrivateMeasurementMarker, privateMeasurementHandshake, privateMeasurementRuntimeOptions } from './private_measurement.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, hardwareSelectionPreferences, restartForSetup } from './onboarding_state.mjs'
@@ -204,8 +204,14 @@ async function launchBackend() {
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
   assertPrivateMeasurementRelease(privateMeasurement.enabled, packaged, releasePolicy)
+  if (privateMeasurement.enabled && processingError) throw new Error(`Private resource measurement: ${processingError}`)
   assertPrivateMeasurementRuntime(privateMeasurement.enabled, activeProcessing, activeModels, processingProbe)
-  if (privateMeasurement.enabled) args.push('--private-test-resource-measurement')
+  if (privateMeasurement.enabled) {
+    const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
+    // Snapshot navigation preferences without asserting hardware qualification.
+    loadedHardwareSelection = hardwareSelectionPreferences((await onboardingState.read())?.hardwareSelection, policy)
+    args.push('--private-test-resource-measurement')
+  }
   if (activeProcessing?.manifest.schema === 2 && !privateMeasurement.enabled) {
     try {
       const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
@@ -570,7 +576,7 @@ async function start() {
     app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new UvRuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256, nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv') })
+    processingManager = new UvRuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { ...privateMeasurementRuntimeOptions(privateMeasurement.enabled, packaged, releasePolicy), progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256, nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv') })
     modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
     try {
       activeProcessing = await processingManager.active()

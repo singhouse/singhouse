@@ -880,6 +880,10 @@ if the runtime, models, functional probe, or backend measurement marker is
 missing. It opens the ordinary host, library, and projector, labels the host
 window "Private resource measurement (unqualified)", and keeps processing local.
 It does not enroll an unsupported variant or relax application integrity checks.
+This explicit private lane also accepts trusted recipes whose locally built
+application wheels or notices use `file:` URLs. Their pinned hashes, installed
+inventory, native-tool binding, and probe checks still apply. Ordinary packaged
+launches continue to require HTTPS recipe sources.
 
 ## Playback qualification
 

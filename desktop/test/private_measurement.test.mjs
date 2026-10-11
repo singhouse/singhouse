@@ -5,8 +5,11 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { OnboardingSetup } from '../onboarding_setup.mjs'
+import { hardwareSelectionPreferences } from '../onboarding_state.mjs'
+import { validateHardwarePolicy } from '../hardware_policy.mjs'
 import { privateMeasurementLaunch, assertPrivateMeasurementRelease, assertPrivateMeasurementRuntime,
-  assertPrivateMeasurementMarker, privateMeasurementHandshake } from '../private_measurement.mjs'
+  assertPrivateMeasurementMarker, privateMeasurementHandshake, privateMeasurementRuntimeOptions } from '../private_measurement.mjs'
 
 const flag = '--private-test-resource-measurement'
 const profile = resolve(tmpdir(), 'isolated-measurement-profile')
@@ -86,4 +89,37 @@ test('the packaged Electron application includes its measurement admission helpe
   assert.ok(config.files.includes('main.mjs'))
   assert.ok(config.files.includes('private_measurement.mjs'))
   assert.ok(config.files.includes('policy.mjs'))
+})
+
+
+test('local recipe sources are enabled only by the explicit packaged private-test lane', () => {
+  assert.deepEqual(privateMeasurementRuntimeOptions(true, true, { channel: 'private-test' }), { allowLocalRecipeSources: true })
+  assert.deepEqual(privateMeasurementRuntimeOptions(false, true, { channel: 'private-test' }), { allowLocalRecipeSources: false })
+  assert.deepEqual(privateMeasurementRuntimeOptions(false, true, { channel: 'stable' }), { allowLocalRecipeSources: false })
+  assert.deepEqual(privateMeasurementRuntimeOptions(false, false, null), { allowLocalRecipeSources: false })
+  assert.throws(() => privateMeasurementRuntimeOptions(true, true, { channel: 'stable' }), /private-test/)
+  assert.throws(() => privateMeasurementRuntimeOptions(true, false, { channel: 'private-test' }), /packaged/)
+})
+
+test('the loaded preference snapshot keeps verified private processing ready without qualified variants', async () => {
+  const hardwarePolicy = validateHardwarePolicy(JSON.parse(await readFile(new URL('../hardware-policy.json', import.meta.url))))
+  const [active, models] = runtime()
+  active.directory = profile
+  Object.assign(active.manifest, { python: 'env/bin/python', probe: { schema: 2, modules: [] }, accelerator: 'cpu',
+    pythonVersion: '3.12.14', backendVersion: '1', lyricsyncVersion: '1',
+    modelCapabilities: { 'heart-transcriptor': 'transcription', 'demucs-mdx-extra': 'separation', 'karaoke-roformer': 'separation' } })
+  active.installedFiles = [{ path: active.manifest.python, sha256: 'c'.repeat(64) }]
+  const probe = { schema: 2, accelerator: 'cpu', components: {}, capabilitiesReady: true, hardwareAvailable: true,
+    pythonVersion: '3.12.14', backendVersion: '1', lyricsyncVersion: '1', capabilities: active.manifest.capabilities,
+    verifiedCapabilities: active.manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }
+  const setup = new OnboardingSetup({ runtime: { active: async () => active, probe: async () => probe },
+    cache: { active: async () => models }, policy: {}, hardwarePolicy,
+    hardware: async () => { throw new Error('Navigation must not assess hardware qualification') },
+    loaded: { runtimeId: active.id, modelsId: models.id } })
+  assert.equal((await setup.installed()).restartRequired, true)
+  setup.loaded.hardwareSelection = hardwareSelectionPreferences(null, hardwarePolicy)
+  const result = await setup.installed()
+  assert.equal(result.ready, true)
+  assert.equal(result.restartRequired, false)
 })

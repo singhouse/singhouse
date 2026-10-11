@@ -32,6 +32,13 @@ export function assertPrivateMeasurementRelease(enabled, packaged, policy) {
   }
 }
 
+// File URLs are useful for locally built application wheels and notices. They
+// remain pinned by the release-owned recipe and its installed byte inventory.
+export function privateMeasurementRuntimeOptions(enabled, packaged, policy) {
+  assertPrivateMeasurementRelease(enabled, packaged, policy)
+  return { allowLocalRecipeSources: enabled === true }
+}
+
 export function assertPrivateMeasurementRuntime(enabled, processing, models, probe) {
   if (!enabled) return
   if (processing?.manifest?.schema !== 2 || !fullId(processing.id) || !fullId(models?.id)
