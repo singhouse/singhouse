@@ -9,7 +9,8 @@ registry keyed by a random token. Two kinds exist:
   one is written straight to ffmpeg's stdin; nothing is held beyond the
   request body that carried it.
 * ``remux`` — the song already has its own prepared video. Its picture is
-  kept as it is and paired with the chosen stem (or, for a song with no stems
+  stream-copied when MP4 supports its codec, or encoded as H.264 otherwise,
+  and paired with the chosen stem (or, for a song with no stems
   at all, the file is copied unchanged). This completes on its own.
 
 Every session has a temp directory of its own. A session idle for
@@ -51,6 +52,7 @@ REAP_INTERVAL_SECONDS = 30
 FINISH_TIMEOUT_SECONDS = 10 * 60
 REMUX_TIMEOUT_SECONDS = 10 * 60
 AUDIO_BITRATE = "192k"
+EXPORT_FPS = 30
 
 # Where session temp directories are created; None is the system temp dir.
 TEMP_ROOT: Optional[Path] = None
@@ -257,6 +259,8 @@ async def open_session(
     lyrics_set_id: Optional[int],
     fps: int,
 ) -> dict:
+    if type(fps) is not int or fps != EXPORT_FPS:
+        raise service.ExportConflict("Video export supports only 30 fps")
     song = (
         await db.execute(
             select(Song).where(Song.id == song_id, Song.owner_id == owner_id)
@@ -303,12 +307,14 @@ async def open_session(
 async def _open_frames(
     song: Song, owner_id: int, base: str, stem: Path, duration: float, fps: int
 ) -> dict:
+    if type(fps) is not int or fps != EXPORT_FPS:
+        raise service.ExportConflict("Video export supports only 30 fps")
     workdir = _new_workdir()
     output = workdir / "video.mp4"
     stderr_path = workdir / "ffmpeg.log"
     cmd = [
         "ffmpeg", "-y",
-        "-f", "image2pipe", "-c:v", "mjpeg", "-framerate", str(fps), "-i", "pipe:0",
+        "-f", "image2pipe", "-c:v", "mjpeg", "-framerate", "30", "-i", "pipe:0",
         "-i", str(stem),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", AUDIO_BITRATE,
@@ -390,16 +396,40 @@ def _remux_blocking(session: VideoSession, video: Path, stem: Optional[Path]) ->
         "-shortest", "-movflags", "+faststart",
         str(session.output),
     ]
-    with open(session.stderr_path, "wb") as errors:
-        session.proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors
-        )
-    try:
-        code = session.proc.wait(timeout=REMUX_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        _kill(session)
-        return False
-    return code == 0 and session.output.is_file()
+    deadline = time.monotonic() + REMUX_TIMEOUT_SECONDS
+    for transcode in (False, True):
+        remaining = deadline - time.monotonic()
+        if session.state == CANCELLED or remaining <= 0:
+            return False
+        with open(session.stderr_path, "wb") as errors:
+            session.proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors
+            )
+        # Cancellation can race Popen's return on this worker thread.
+        if session.state == CANCELLED:
+            _kill(session)
+            return False
+        try:
+            code = session.proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _kill(session)
+            return False
+        if code == 0:
+            return session.output.is_file()
+        if transcode or session.state == CANCELLED:
+            return False
+        error = _stderr_tail(session)
+        # Retry only an unsupported MP4 codec. Decoder, I/O and other failures
+        # retain their original outcome, and both attempts share one deadline.
+        if ("Could not find tag for codec" not in error
+                or "codec not currently supported in container" not in error):
+            return False
+        codec_index = cmd.index("-c:v")
+        cmd[codec_index:codec_index + 2] = [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        ]
+    return False
 
 
 async def _run_remux(session: VideoSession, video: Path, stem: Optional[Path]) -> None:

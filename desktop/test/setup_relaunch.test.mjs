@@ -60,14 +60,22 @@ test('relaunch is scheduled before quit and scheduling errors leave the applicat
 })
 
 
-test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and outer image', { skip: process.platform === 'win32' }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'setup-keeper-'))
+test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and outer image', { skip: process.platform !== 'linux' }, t => {
+  // FUSE uses major zero; a disk-backed CI /tmp cannot model that evidence.
+  let root
+  try { root = mkdtempSync('/dev/shm/setup-keeper-') }
+  catch (error) {
+    if (!['ENOENT', 'EACCES', 'EROFS'].includes(error.code)) throw error
+    t.skip('A writable /dev/shm tmpfs is required for the FUSE device fixture')
+    return
+  }
   try {
     const mount = join(root, '.mount_Singho'), procRoot = join(root, 'proc')
     mkdirSync(mount)
     const device = statSync(mount, { bigint: true }).dev
     const major = ((device >> 8n) & 0xfffn) | ((device >> 32n) & 0xfffff000n)
     const minor = (device & 0xffn) | ((device >> 12n) & 0xffffff00n)
+    assert.equal(major, 0n, 'the FUSE fixture requires a major-zero filesystem')
     const executablePath = join(mount, 'Singhouse'), outer = join(root, 'Singhouse.AppImage')
     writeFileSync(executablePath, 'inner')
     const bytes = Buffer.alloc(64); bytes.write('\x7fELF'); bytes.set([0x41, 0x49, 2], 8)

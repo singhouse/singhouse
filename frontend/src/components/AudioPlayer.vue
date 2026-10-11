@@ -472,32 +472,31 @@ function toggleMute(track) {
   engine.setVolume(track.key, track.volume)
 }
 
-// Space is play/pause only when it would otherwise do nothing. On a focused
-// control it presses that control, and inside a dialog or menu it belongs to
-// that surface; a held modifier is left to the browser too.
+// Global playback shortcuts leave focused controls, dialogs and menus to
+// handle their own keys. Handled library navigation must not reach the deck.
 const ACTIVATABLE = [
   'button', 'a[href]', 'input', 'textarea', 'select',
   '[contenteditable]:not([contenteditable="false"])',
   '[role="button"]', '[role="menuitem"]', '[role="menuitemcheckbox"]',
   '[role="menuitemradio"]', '[role="option"]', '[role="switch"]', '[role="tab"]',
 ].join(', ')
-const SPACE_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
+const SHORTCUT_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
 
-function spaceBelongsElsewhere(e) {
-  if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return true
+function shortcutBelongsElsewhere(e) {
   for (const el of [e.target, document.activeElement]) {
     if (!el || typeof el.closest !== 'function') continue
-    if (el.closest(ACTIVATABLE) || el.closest(SPACE_OWNERS)) return true
+    if (el.closest(ACTIVATABLE) || el.closest(SHORTCUT_OWNERS)) return true
   }
   return false
 }
 
 // Keyboard shortcuts
 function handleKeyboard(e) {
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return
+  if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return
+  if (shortcutBelongsElsewhere(e)) return
   switch (e.code) {
     case 'Space':
-      if (spaceBelongsElsewhere(e)) return
+      if (e.shiftKey) return
       e.preventDefault()
       // A stray Space must not stop the song mid-show: pausing asks first,
       // resuming does not. The transport button stays unguarded.

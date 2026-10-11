@@ -484,7 +484,7 @@ async function showUpdateRecovery() {
 // closing the host window or quitting asks the renderer first; it shows its
 // own prompt and answers over a fixed channel. Unarmed, close proceeds at once.
 function createCloseGuard() {
-  let armed = false, pending = null
+  let armed = false, pending = null, revision = 0
   const settle = proceed => {
     const current = pending
     pending = null
@@ -492,7 +492,9 @@ function createCloseGuard() {
   }
   return {
     get armed() { return armed },
+    get revision() { return revision },
     arm(value) {
+      revision++
       armed = value === true
       if (!armed) settle(true)
     },
@@ -514,12 +516,14 @@ function createCloseGuard() {
     },
     // The renderer is gone or cannot answer; nothing is left to ask.
     release() {
+      revision++
       armed = false
       settle(true)
     },
     // The renderer was replaced: its edits and any open prompt are gone, so a
     // pending request is cancelled rather than approved.
     reset() {
+      revision++
       armed = false
       settle(false)
     },
@@ -544,6 +548,40 @@ function gateHostClose(win, guard) {
       win.close()
     })
   })
+}
+
+// Resolve unsaved edits before quiescing. Approval belongs to this renderer
+// state only: a new edit or navigation during asynchronous restart preparation
+// cancels the restart and lets restartForSetup resume the backend.
+async function guardedSetupRestart({ guard, win, app, activity, quiesce, resume, isClosing, relaunch = relaunchForSetup }) {
+  const wasArmed = guard.armed
+  if (!await guard.request(win?.webContents)) return { restarting: false }
+  const revision = guard.revision
+  const assertCurrent = () => {
+    if (guard.armed || guard.revision !== revision || !win || win.isDestroyed()
+        || win.webContents.isDestroyed() || isClosing()) {
+      throw new Error('The application changed while preparing to restart. Review unsaved edits and try again.')
+    }
+  }
+  try {
+    assertCurrent()
+    return await restartForSetup({ activity, quiesce: () => { assertCurrent(); return quiesce() }, resume,
+      restart: () => {
+        assertCurrent()
+        return relaunch({
+          relaunch: options => { assertCurrent(); return app.relaunch(options) },
+          // AppImage preparation awaits its helper before calling quit. Throwing
+          // here cancels that helper as well as resuming the library.
+          quit: () => { assertCurrent(); return app.quit() },
+        })
+      },
+    })
+  } catch (error) {
+    // Discard approves this close; the renderer may still hold those edits if
+    // restart fails. Do not leave that approval active for a later quit.
+    if (wasArmed && guard.revision === revision && !win?.isDestroyed() && !isClosing()) guard.arm(true)
+    throw error
+  }
 }
 
 function installMenu() {
@@ -903,9 +941,9 @@ async function start() {
     }).finally(() => { processingOperation = null; host?.setProgressBar(-1) })
     return accepted
   })
-  setupHandler('setup:restart', () => operationGate.run('setup restart', () => restartForSetup({
+  setupHandler('setup:restart', () => operationGate.run('setup restart', () => guardedSetupRestart({
+    guard: closeGuard, win: host, app, isClosing: () => quitting || handingOff,
     activity: boundaryState, quiesce: quiesceBackend, resume: resumeBackend,
-    restart: () => relaunchForSetup(app),
   })))
   const authorizeHost = event => {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Only available in the host window')

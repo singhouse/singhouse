@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { EventEmitter } from 'node:events'
 import vm from 'node:vm'
+import { restartForSetup } from '../onboarding_state.mjs'
+import { relaunchForSetup } from '../setup_relaunch.mjs'
 
 const source = await readFile(new URL('../main.mjs', import.meta.url), 'utf8')
 const preload = await readFile(new URL('../preload.cjs', import.meta.url), 'utf8')
@@ -20,8 +22,8 @@ assert.ok(quitStart >= 0 && quitEnd > quitStart)
 const quitSource = source.slice(quitStart, quitEnd)
 
 function load() {
-  const context = vm.createContext({})
-  new vm.Script(`${guardSource}\nthis.createCloseGuard = createCloseGuard; this.gateHostClose = gateHostClose; this.watchCloseGuardRenderer = watchCloseGuardRenderer`).runInContext(context)
+  const context = vm.createContext({ restartForSetup, relaunchForSetup })
+  new vm.Script(`${guardSource}\nthis.createCloseGuard = createCloseGuard; this.gateHostClose = gateHostClose; this.watchCloseGuardRenderer = watchCloseGuardRenderer; this.guardedSetupRestart = guardedSetupRestart`).runInContext(context)
   return context
 }
 
@@ -262,3 +264,103 @@ test('the preload exposes only the fixed close-guard channels', () => {
   assert.match(source, /hostHandler\('editor:close-decision',/)
   assert.match(source, /if \(decision !== 'proceed' && decision !== 'cancel'\) throw/)
 })
+
+function setupRestartHarness(armed = true) {
+  const harness = quitHarness(armed)
+  const { guardedSetupRestart } = load()
+  const { app, host, closeGuard, calls, context } = harness
+  let quiesced = false
+  app.relaunch = () => { calls.push('relaunch') }
+  const options = { guard: closeGuard, win: host, app, isClosing: () => context.quitting,
+    activity: async () => ({ backendReady: true, activeJobs: 0, deferredJobs: 0 }),
+    quiesce: async () => {
+      calls.push('quiesce'); quiesced = true
+      return { quiesced: true, activeMutations: 0, jobs: { nonterminal: 0, deferred: 0 } }
+    },
+    resume: async () => { calls.push('resume'); quiesced = false },
+    relaunch: target => relaunchForSetup(target, { platform: 'win32', executablePath: '/application', args: [] }),
+  }
+  return { ...harness, options, restart: () => guardedSetupRestart(options), isQuiesced: () => quiesced }
+}
+
+test('cancelling setup restart never quiesces or schedules a relaunch', async () => {
+  const h = setupRestartHarness()
+  const pending = h.restart()
+  await tick()
+  assert.deepEqual(h.sent, ['window:close-requested'])
+  assert.deepEqual(h.calls, [])
+  h.closeGuard.decide('cancel')
+  assert.equal((await pending).restarting, false)
+  assert.equal(h.isQuiesced(), false)
+  assert.deepEqual(h.calls, [])
+  assert.equal(h.host.destroyed, false)
+})
+
+test('approved setup restart quiesces then relaunches without a second prompt', async () => {
+  const h = setupRestartHarness()
+  const pending = h.restart()
+  h.closeGuard.decide('proceed')
+  assert.equal((await pending).restarting, true)
+  await tick()
+  assert.deepEqual(h.sent, ['window:close-requested'])
+  assert.deepEqual(h.calls, ['quiesce', 'relaunch', 'quit', 'backend-stop', 'quit', 'exit'])
+  assert.equal(h.host.destroyed, true)
+})
+
+for (const change of ['new edit', 'renderer replaced', 'edit then saved']) {
+  test(`setup restart resumes the backend if ${change} invalidates approval during quiesce`, async () => {
+    const h = setupRestartHarness()
+    const quiesce = h.options.quiesce
+    h.options.quiesce = async () => {
+      const result = await quiesce()
+      if (change === 'renderer replaced') h.closeGuard.reset()
+      else { h.closeGuard.arm(true); if (change === 'edit then saved') h.closeGuard.arm(false) }
+      return result
+    }
+    const pending = h.restart()
+    h.closeGuard.decide('proceed')
+    await assert.rejects(pending, /application changed/)
+    assert.deepEqual(h.calls, ['quiesce', 'resume'])
+    assert.equal(h.isQuiesced(), false)
+    assert.equal(h.host.destroyed, false)
+  })
+}
+
+test('setup restart cancels an asynchronous prepared handoff when new edits arrive', async () => {
+  const h = setupRestartHarness(false)
+  let handoffCancelled = false
+  h.options.relaunch = async target => {
+    await tick()
+    h.closeGuard.arm(true)
+    // Mirrors the prepared AppImage handoff's quit/cancel boundary.
+    try { target.quit() } catch (error) { handoffCancelled = true; throw error }
+  }
+  await assert.rejects(h.restart(), /application changed/)
+  assert.equal(handoffCancelled, true)
+  assert.deepEqual(h.calls, ['quiesce', 'resume'])
+  assert.equal(h.isQuiesced(), false)
+})
+
+test('reloading during the initial setup close prompt cancels without touching the backend', async () => {
+  const h = setupRestartHarness()
+  const pending = h.restart()
+  h.closeGuard.reset()
+  assert.equal((await pending).restarting, false)
+  assert.deepEqual(h.calls, [])
+})
+
+for (const stage of ['activity', 'quiesce', 'relaunch']) {
+  test(`failed ${stage} restores the close guard instead of retaining discard permission`, async () => {
+    const h = setupRestartHarness()
+    h.options[stage] = async () => { throw new Error('restart failed') }
+    const pending = h.restart()
+    h.closeGuard.decide('proceed')
+    await assert.rejects(pending, /restart failed/)
+    assert.equal(h.closeGuard.armed, true)
+    h.app.quit()
+    assert.deepEqual(h.sent, ['window:close-requested', 'window:close-requested'])
+    assert.equal(h.host.destroyed, false)
+    h.closeGuard.decide('cancel')
+    await tick()
+  })
+}

@@ -243,9 +243,10 @@ async def test_unknown_and_foreign_songs_are_404(client, tmp_path, fake_ffmpeg):
 
 
 @pytest.mark.asyncio
-async def test_only_the_720p_30fps_shape_is_accepted(client, tmp_path, fake_ffmpeg):
+@pytest.mark.parametrize("fps", [60, "30 -i extra", "-help", None])
+async def test_only_the_720p_30fps_shape_is_accepted(client, tmp_path, fake_ffmpeg, fps):
     song_id = await _seed(tmp_path)
-    resp = await client.post(f"/api/export/songs/{song_id}/video", json={"fps": 60})
+    resp = await client.post(f"/api/export/songs/{song_id}/video", json={"fps": fps})
     assert resp.status_code == 422
 
 
@@ -511,3 +512,62 @@ async def test_real_ffmpeg_encodes_jpeg_frames_with_audio(client, tmp_path):
     assert codecs == {"h264", "aac"}
     picture = next(s for s in streams if s["codec_name"] == "h264")
     assert (picture["width"], picture["height"]) == (1280, 720)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fps", [60, "30", "30 -i extra", True])
+async def test_service_rejects_unsupported_fps_before_work(fps):
+    with pytest.raises(service.ExportConflict, match="only 30 fps"):
+        await video.open_session(
+            None, song_id=1, owner_id=1, audio="instrumental",
+            lyrics_set_id=None, fps=fps,
+        )
+    with pytest.raises(service.ExportConflict, match="only 30 fps"):
+        await video._open_frames(None, 1, "test", Path("unused"), 1.0, fps)
+
+
+@pytest.mark.asyncio
+async def test_remux_generic_failure_is_not_retried(client, tmp_path, fake_ffmpeg):
+    song_id = await _seed(tmp_path, video_name="video.mp4", word_sync=None)
+    fake_ffmpeg.exit_code = 1
+    response = await client.post(
+        f"/api/export/songs/{song_id}/video", json={"audio": "karaoke"},
+    )
+    session = video._sessions[response.json()["session"]]
+    await session.task
+    assert session.state == video.FAILED
+    assert len(fake_ffmpeg.instances) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _HAVE_FFMPEG, reason="ffmpeg not installed")
+async def test_real_vp8_webm_exports_as_h264_mp4(client, tmp_path):
+    song_id = await _seed(tmp_path, video_name="video.webm", word_sync=None)
+    source = tmp_path / "stems" / "video.webm"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "color=size=64x64:rate=10:duration=0.2", "-f", "lavfi",
+         "-i", "anullsrc=r=44100:cl=mono", "-t", "0.2",
+         "-c:v", "libvpx", "-c:a", "libopus", str(source)],
+        capture_output=True, check=True, timeout=30,
+    )
+    response = await client.post(
+        f"/api/export/songs/{song_id}/video", json={"audio": "karaoke"},
+    )
+    assert response.status_code == 200, response.text
+    token = response.json()["session"]
+    session = video._sessions[token]
+    await session.task
+    assert session.state == video.READY
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height",
+         "-of", "json", str(session.output)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    assert {stream["codec_name"] for stream in streams} == {"h264", "aac"}
+    picture = next(stream for stream in streams if stream["codec_name"] == "h264")
+    assert (picture["width"], picture["height"]) == (64, 64)
+    response = await client.get(f"/api/export/video/{token}/file")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"

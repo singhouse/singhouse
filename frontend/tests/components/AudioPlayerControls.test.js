@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { h } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 const engine = vi.hoisted(() => ({
@@ -45,6 +46,7 @@ vi.mock('@/stores/features', () => ({
 }))
 
 import AudioPlayer from '@/components/AudioPlayer.vue'
+import PopoverMenu from '@/components/ui/PopoverMenu.vue'
 import { usePlayerStore } from '@/stores/player'
 import { usePlayGuard } from '@/composables/usePlayGuard'
 
@@ -71,6 +73,7 @@ const LYRICS_ONLY = {
 }
 
 let wrapper = null
+let menuWrapper = null
 
 async function settle(w) {
   await new Promise(r => setTimeout(r))
@@ -107,6 +110,8 @@ beforeEach(() => {
 
 afterEach(() => {
   usePlayGuard().cancel()
+  menuWrapper?.unmount()
+  menuWrapper = null
   wrapper?.unmount()
   wrapper = null
   document.body.innerHTML = ''
@@ -274,5 +279,77 @@ describe('Lyrics offset row', () => {
 
     await openMixer(wrapper)
     expect(wrapper.find('.offset-value').text()).toBe('0ms')
+  })
+})
+
+
+describe('Navigation shortcuts with the player mounted', () => {
+  function pressKey(target, code, init = {}) {
+    const event = new KeyboardEvent('keydown', {
+      code, key: code, bubbles: true, cancelable: true, ...init,
+    })
+    target.dispatchEvent(event)
+    return event
+  }
+
+  it('lets a real popover navigate Home without stopping the song and own arrow keys without seeking', async () => {
+    wrapper = await mountPlayer()
+    engine.stub.playerState.value = 'playing'
+    usePlayerStore().setPlayState('playing')
+    menuWrapper = mount(PopoverMenu, {
+      attachTo: document.body,
+      props: { role: 'menu', label: 'Library actions' },
+      slots: {
+        trigger: ({ toggle, attrs }) => h('button', { ...attrs, onClick: toggle }, 'Actions'),
+        default: () => [
+          h('button', { role: 'menuitem' }, 'Refresh'),
+          h('button', { role: 'menuitem' }, 'Columns'),
+        ],
+      },
+    })
+    await menuWrapper.find('button').trigger('click')
+    const [first, last] = document.querySelectorAll('[role="menuitem"]')
+    last.focus()
+    const home = pressKey(last, 'Home')
+    expect(document.activeElement).toBe(first)
+    expect(home.defaultPrevented).toBe(true)
+    pressKey(first, 'ArrowLeft')
+    pressKey(first, 'ArrowRight')
+    expect(engine.stub.stop).not.toHaveBeenCalled()
+    expect(engine.stub.seek).not.toHaveBeenCalled()
+    expect(usePlayGuard().pending.value).toBeNull()
+  })
+
+  it('does not repeat a navigation key already handled by a library surface', async () => {
+    wrapper = await mountPlayer()
+    const row = document.createElement('div')
+    row.tabIndex = 0
+    row.addEventListener('keydown', event => event.preventDefault())
+    document.body.appendChild(row)
+    row.focus()
+    for (const key of ['Home', 'ArrowLeft', 'ArrowRight']) pressKey(row, key)
+    expect(engine.stub.stop).not.toHaveBeenCalled()
+    expect(engine.stub.seek).not.toHaveBeenCalled()
+  })
+
+  it('preserves body seek, shifted seek, and stop shortcuts', async () => {
+    wrapper = await mountPlayer()
+    document.activeElement?.blur?.()
+    engine.stub.currentTime.value = 60
+    pressKey(document.body, 'ArrowLeft')
+    pressKey(document.body, 'ArrowRight')
+    pressKey(document.body, 'ArrowLeft', { shiftKey: true })
+    pressKey(document.body, 'ArrowRight', { shiftKey: true })
+    expect(engine.stub.seek.mock.calls).toEqual([[55], [65], [30], [90]])
+    pressKey(document.body, 'Home')
+    expect(engine.stub.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['ctrlKey', 'altKey', 'metaKey'])('leaves modified navigation to the browser (%s)', async modifier => {
+    wrapper = await mountPlayer()
+    document.activeElement?.blur?.()
+    for (const key of ['Home', 'ArrowLeft', 'ArrowRight']) pressKey(document.body, key, { [modifier]: true })
+    expect(engine.stub.stop).not.toHaveBeenCalled()
+    expect(engine.stub.seek).not.toHaveBeenCalled()
   })
 })
