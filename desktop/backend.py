@@ -899,7 +899,7 @@ def verify_processing_recipe(directory: Path, identifier: str, store: Path,
     installed = []
     for record in records:
         name = record.get("path")
-        if (not isinstance(name, str) or not name or any(
+        if (not isinstance(name, str) or not name or len(name) >= 512 or any(
                 not re.fullmatch(r"[A-Za-z0-9._+() -]+", part) or part.strip() != part
                 or part in {".", ".."} or part.endswith(".")
                 or re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { UvRuntimeManager,normalizedPythonConfig,finalizeEnvironment } from '../uv_runtime_manager.mjs'
-import { validateProcessingRecipe,recipeDigest } from '../processing_recipe.mjs'
+import { validateProcessingRecipe,recipeDigest,recipePath } from '../processing_recipe.mjs'
 const sha = value => createHash('sha256').update(value).digest('hex')
 const identity = { appVersion:'1',backendVersion:'1',lyricsyncVersion:'1',platform:'linux',arch:'x64' }
 function fixtureManifest() {
@@ -178,4 +178,9 @@ test('runtime admission requires matching installed native-tool provenance',asyn
   assert.throws(()=>f.manager.validate(f.manifest),/native tools do not match/)
   f.manager.nativeLockSha256=undefined
   assert.throws(()=>f.manager.validate(f.manifest),/provenance is unavailable/)
+})
+
+test('inventory paths admit upstream wheel spaces and parentheses without unsafe syntax', () => {
+  for (const path of ['env/lib/scipy/Transparent Busy.ani','env/lib/setuptools/script (dev).tmpl']) assert.equal(recipePath(path),true)
+  for (const path of ['', '/absolute', '../escape','a/../b','a\\b','a/ leading','a/trailing ','a/end.','a/CON','a/aux.txt','a/line\nfeed','a/'+'x'.repeat(510)]) assert.equal(recipePath(path),false,path)
 })

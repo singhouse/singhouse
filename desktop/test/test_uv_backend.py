@@ -22,13 +22,15 @@ def digest(value):
 
 
 class RecipeAdmissionTests(unittest.TestCase):
-    def fixture(self, root, directory_alias=False):
+    def fixture(self, root, directory_alias=False, extra_path=None, write_extra=True):
         body = {'schema': 2, 'kind': 'processing', 'platform': 'linux',
                 'python': 'env/bin/python', 'recipe': {'files': [
                     {'path': 'env/bin/python', 'size': 6, 'sha256': digest(b'python'), 'executable': True},
                     {'path': 'env/pyvenv.cfg', 'size': len(b'home = @SINGHOUSE_RUNTIME_ROOT@/python/bin\n'),
                      'sha256': digest(b'home = @SINGHOUSE_RUNTIME_ROOT@/python/bin\n'),
                      'kind': 'uv-path-text', 'executable': False}]}}
+        if extra_path is not None:
+            body['recipe']['files'].append(dict(path=extra_path, size=4, sha256=digest(b'data'), executable=False))
         if directory_alias:
             body['recipe']['files'].append({'path': 'env/lib64', 'target': 'bin'})
         lock = {**body, 'schema': 2, 'kind': 'processing-input', 'sourceCommit': 'a' * 40, 'packages': []}
@@ -43,6 +45,10 @@ class RecipeAdmissionTests(unittest.TestCase):
         (directory / 'env/bin').mkdir(parents=True)
         if directory_alias:
             (directory / 'env/lib64').symlink_to('bin', target_is_directory=True)
+        if extra_path is not None and write_extra:
+            (directory / extra_path).parent.mkdir(parents=True, exist_ok=True)
+            (directory / extra_path).write_bytes(b'data')
+            (directory / extra_path).chmod(0o600)
         (directory / 'env/bin/python').write_bytes(b'python')
         (directory / 'env/bin/python').chmod(0o700)
         (directory / 'env/pyvenv.cfg').write_text(f'home = {directory}/python/bin\n')
@@ -52,6 +58,19 @@ class RecipeAdmissionTests(unittest.TestCase):
                    'recipeId': recipe_id, 'nonce': nonce, 'directory': str(directory)}
         (directory / 'receipt.json').write_bytes(encoded(receipt))
         return directory, instance, [lock_id]
+
+    def test_upstream_wheel_names_and_unsafe_inventory_paths(self):
+        for name in ['env/lib/Transparent Busy.ani', 'env/lib/script (dev).tmpl']:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory, identifier, locks = self.fixture(root, extra_path=name)
+                self.assertEqual(len(backend.verify_processing_recipe(directory, identifier, root, locks)['files']), 3)
+        for name in ['', '/absolute', '../escape', 'a/../b', 'a\\b', 'a/ leading', 'a/trailing ', 'a/end.', 'a/CON', 'a/aux.txt', 'a/line\nfeed', 'a/' + 'x' * 510]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory, identifier, locks = self.fixture(root, extra_path=name, write_extra=False)
+                with self.assertRaisesRegex(RuntimeError, 'file path'):
+                    backend.verify_processing_recipe(directory, identifier, root, locks)
 
     @unittest.skipIf(os.name == 'nt', 'native Windows fixture exercises target symlinks')
     def test_trusted_contained_directory_alias_is_not_recursively_inventoried(self):

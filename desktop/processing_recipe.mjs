@@ -4,7 +4,7 @@ export const recipeDigest = value => createHash('sha256').update(JSON.stringify(
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key,canonical(value[key])])) : value
 const hash = value => /^[a-f0-9]{64}$/.test(value || '')
 const token = value => typeof value === 'string' && /^[A-Za-z0-9._+-]{1,128}$/.test(value)
-export const recipePath = value => typeof value === 'string' && value.length < 512 && value.split('/').every(part => token(part) && !['.', '..'].includes(part) && !part.endsWith('.') && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
+export const recipePath = value => typeof value === 'string' && value.length < 512 && value.split('/').every(part => /^[A-Za-z0-9._+() -]+$/.test(part) && part.trim() === part && !['.', '..'].includes(part) && !part.endsWith('.') && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))
 const keys = (value, names) => value && typeof value === 'object' && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...names].sort())
 function artifact(value, names, { local = false } = {}) {
   if (!keys(value, names) || !hash(value.sha256) || !Number.isSafeInteger(value.size) || value.size < 1) throw new Error('Invalid processing recipe artifact')
