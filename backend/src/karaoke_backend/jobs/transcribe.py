@@ -246,6 +246,9 @@ async def run_retranscribe(ctx: JobContext) -> Optional[str]:
             device_notice_fn=make_message_callback(
                 ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
             ),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
         )
     except Exception as exc:
         logger.exception("Re-transcribe %s failed", ctx.job_id)
@@ -300,6 +303,9 @@ async def run_realign(ctx: JobContext) -> Optional[str]:
             use_vad=use_vad,
             pipeline_config=pipeline_config,
             vocals_path=payload.get("vocals_path"),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop(),
+            ),
         )
     except Exception as exc:
         logger.exception("Realign %s failed", ctx.job_id)

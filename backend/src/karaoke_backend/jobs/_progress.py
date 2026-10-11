@@ -26,7 +26,8 @@ def make_message_callback(job_id: str, worker_id: str, loop: asyncio.AbstractEve
             queue.update_progress(job_id, worker_id, message=message), loop
         )
         try:
-            future.result(timeout=_MESSAGE_TIMEOUT_SECONDS)
+            if not future.result(timeout=_MESSAGE_TIMEOUT_SECONDS):
+                logger.warning("Could not publish job message for %s: job claim is no longer held", job_id)
         # A lost claim is detected by the handler's own next progress write;
         # an informational notice must not unwind the transcription thread.
         except Exception as exc:  # noqa: BLE001

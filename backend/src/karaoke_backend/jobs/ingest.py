@@ -369,6 +369,9 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
             device_notice_fn=make_message_callback(
                 ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
             ),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
         )
         if word_data is None:
             raise IngestError("Transcription returned no result")
