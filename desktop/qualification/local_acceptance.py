@@ -52,7 +52,7 @@ def verify_native(native):
         raise ValueError('Invalid native inventory')
     for name, expected in files.items():
         if (not isinstance(name, str) or not name or len(name) >= 512
-                or any(not re.fullmatch(r'[A-Za-z0-9._+() -]+', part)
+                or any(not re.fullmatch(r'[A-Za-z0-9._+() @-]+', part)
                        or part != part.strip() or part in ('.', '..')
                        for part in name.split('/'))
                 or not isinstance(expected, str) or not re.fullmatch(r'[a-f0-9]{64}', expected)):
@@ -106,6 +106,21 @@ def job_counts(value):
     if any(type(v) is not int or v < 0 for v in result.values()):
         raise ValueError('Invalid aggregate job counts')
     return result
+
+
+def processing_readiness(value, processing_id, accelerator):
+    runtime = value.get('runtime')
+    facts = {name: value.get(name, {}).get('ready') for name in ('playback', 'transcription', 'separation')}
+    if (any(ready is not True for ready in facts.values()) or not isinstance(runtime, dict)
+            or runtime.get('id') != processing_id or accelerator not in ('cpu', 'cuda', 'metal')
+            or runtime.get('accelerator') != accelerator):
+        raise ValueError('Selected processing runtime is not ready')
+    capabilities = runtime.get('capabilities')
+    if (not isinstance(capabilities, list) or any(item not in ('transcription', 'separation') for item in capabilities)
+            or not {'transcription', 'separation'}.issubset(capabilities)):
+        raise ValueError('Selected processing capabilities are not ready')
+    return {**facts, 'runtime': {'id': processing_id, 'accelerator': accelerator,
+                               'capabilities': sorted(set(capabilities))}}
 
 
 def browser_handoff(origin, cookies):
@@ -209,6 +224,9 @@ def run(args):
         me, _ = request('/api/auth/me')
         if me.get('id') != 1 or me.get('gate_enabled') is not True or not cookies:
             raise ValueError('Backend gate authentication failed')
+        features, _ = request('/api/features/processing')
+        evidence['processingReadiness'] = processing_readiness(features, args.processing_id, probe.get('accelerator'))
+        save()
         handoff, url = browser_handoff(origin, cookies)
         if args.open_browser:
             if not webbrowser.open(url):

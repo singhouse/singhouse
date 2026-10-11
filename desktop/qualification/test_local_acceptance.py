@@ -9,10 +9,30 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.error
 import urllib.request
-from local_acceptance import NoRedirect, browser_handoff, job_counts, origin_checked, verify_native, run
+from local_acceptance import NoRedirect, browser_handoff, job_counts, origin_checked, verify_native, run, processing_readiness
 
 
 class LocalAcceptanceTests(unittest.TestCase):
+    def test_processing_readiness_requires_exact_ready_selection(self):
+        value = {name: {'ready': True} for name in ('playback', 'transcription', 'separation')}
+        value.update(runtime={'id': 'a' * 64, 'accelerator': 'cpu',
+                              'capabilities': ['separation', 'transcription'], 'privatePath': 'excluded'},
+                     heart_model={'privatePath': 'excluded'})
+        result = processing_readiness(value, 'a' * 64, 'cpu')
+        self.assertNotIn('privatePath', json.dumps(result))
+        self.assertNotIn('heart_model', result)
+        for identifier, accelerator in [('b' * 64, 'cpu'), ('a' * 64, 'cuda')]:
+            with self.assertRaises(ValueError):
+                processing_readiness(value, identifier, accelerator)
+        for name in ('playback', 'transcription', 'separation'):
+            value[name]['ready'] = False
+            with self.assertRaises(ValueError):
+                processing_readiness(value, 'a' * 64, 'cpu')
+            value[name]['ready'] = True
+        value['runtime']['capabilities'] = ['separation']
+        with self.assertRaises(ValueError):
+            processing_readiness(value, 'a' * 64, 'cpu')
+
     def test_native_inventory_blocks_tampering_before_launch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -23,8 +43,11 @@ class LocalAcceptanceTests(unittest.TestCase):
                 (interpreter.parent / 'python3').symlink_to('python3.12')
             (root / 'backend.py').write_text('fixture backend')
             (root / 'provenance.json').write_text('{}')
+            scoped_notice = root / 'notices/frontend/@babel_helper-string-parser/LICENSE'
+            scoped_notice.parent.mkdir(parents=True)
+            scoped_notice.write_text('fixture notice')
             files = {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                     for p in (interpreter, root / 'backend.py', root / 'provenance.json')}
+                     for p in (interpreter, root / 'backend.py', root / 'provenance.json', scoped_notice)}
             inventory = json.dumps(files).encode()
             (root / 'files.json').write_bytes(inventory)
             (root / 'manifest.json').write_text(json.dumps({'runtimeId': hashlib.sha256(inventory).hexdigest()}))
