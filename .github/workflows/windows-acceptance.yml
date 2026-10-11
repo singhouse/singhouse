@@ -4,17 +4,34 @@ name: Windows acceptance builds
 # Recipe hashes are reviewed and committed before a separate application build.
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Build recipes, or package independently trusted recipe artifacts
+        type: choice
+        options: [recipes, package]
+        default: recipes
+      recipe_run_id:
+        description: Exact successful recipe workflow run ID (package only)
+        type: string
+      cpu_artifact_id:
+        description: Exact CPU recipe artifact ID (package only)
+        type: string
+      cuda_artifact_id:
+        description: Exact CUDA recipe artifact ID (package only)
+        type: string
   pull_request:
     paths:
       - '.github/workflows/windows-acceptance.yml'
       - 'desktop/build/windows_acceptance.py'
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: windows-acceptance-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   recipes:
+    if: github.event_name == 'pull_request' || inputs.phase == 'recipes'
     name: Windows ${{ matrix.accelerator }} recipe
     runs-on: windows-2022
     timeout-minutes: 90
@@ -31,16 +48,68 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      # These HTTPS URLs are stable identities for bundled local transport.
+      # No processing-pack release is created or published by this workflow.
       - name: Build exact native dependency inventory
         run: >-
           python desktop/build/windows_acceptance.py recipe
           --work "${{ runner.temp }}/acceptance-${{ matrix.accelerator }}"
           --accelerator "${{ matrix.accelerator }}"
-          --artifact-base-url "https://github.com/singhouse/processing-packs/releases/download/windows-acceptance-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.accelerator }}/"
+          --artifact-base-url "https://github.com/${{ github.repository }}/releases/download/windows-acceptance-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.accelerator }}/"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-recipe-${{ matrix.accelerator }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/acceptance-${{ matrix.accelerator }}/build/recipe/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  package:
+    name: Windows ${{ matrix.accelerator }} application
+    if: github.event_name == 'workflow_dispatch' && inputs.phase == 'package'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        accelerator: [cpu, cuda]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Require exact artifact selection
+        shell: pwsh
+        env:
+          RECIPE_RUN_ID: ${{ inputs.recipe_run_id }}
+          RECIPE_ARTIFACT_ID: ${{ matrix.accelerator == 'cpu' && inputs.cpu_artifact_id || inputs.cuda_artifact_id }}
+        run: |
+          if ($env:RECIPE_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:RECIPE_ARTIFACT_ID -notmatch '^[1-9][0-9]*$') {
+            throw 'Package builds require exact numeric recipe run and artifact IDs'
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recipe_run_id }}
+          artifact-ids: ${{ matrix.accelerator == 'cpu' && inputs.cpu_artifact_id || inputs.cuda_artifact_id }}
+          path: ${{ runner.temp }}/selected-recipe
+          merge-multiple: true
+      - name: Assemble and validate the private test application
+        run: >-
+          python desktop/build/windows_acceptance.py package
+          --work "${{ runner.temp }}/application-${{ matrix.accelerator }}"
+          --accelerator "${{ matrix.accelerator }}"
+          --recipe "${{ runner.temp }}/selected-recipe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-${{ matrix.accelerator }}-${{ github.sha }}
+          path: ${{ runner.temp }}/application-${{ matrix.accelerator }}/bundle/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
