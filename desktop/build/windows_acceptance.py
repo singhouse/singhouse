@@ -85,7 +85,7 @@ def package(args):
     subprocess.run(['npm.cmd', 'ci'], cwd=ROOT / 'desktop', env=env, check=True)
     env['KARAOKE_NATIVE_PAYLOAD'] = str(native)
     subprocess.run(['node', str(ROOT / 'desktop/build/package.mjs'), '--playback-only'],
-                   cwd=ROOT, env=env, check=True)
+                   cwd=ROOT / 'desktop', env=env, check=True)
     output = ROOT / 'desktop/artifacts'
     receipts = list(output.glob('*.shapp.receipt.json'))
     if len(receipts) != 1:
