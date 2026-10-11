@@ -115,34 +115,40 @@ class NativeInstallerTests(unittest.TestCase):
             root = Path(temporary).resolve()
             uv = root / ('uv.exe' if sys.platform == 'win32' else 'uv')
             unpack_uv(assets / 'uv.archive', inputs['uv'], uv)
-            wheel = root / 'fixture_113-1.0-py3-none-any.whl'
-            with zipfile.ZipFile(wheel, 'w') as archive:
-                entries = {
-                    'fixture_113.py': 'VALUE = 113\n',
-                    'fixture_113-1.0.dist-info/METADATA': 'Metadata-Version: 2.1\nName: fixture-113\nVersion: 1.0\nLicense: MIT\n',
-                    'fixture_113-1.0.dist-info/WHEEL': 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n',
-                }
-                for name, text in entries.items():
-                    archive.writestr(name, text)
-                record = 'fixture_113-1.0.dist-info/RECORD'
-                archive.writestr(record, ''.join(f'{name},,\n' for name in [*entries, record]))
+            wheels = []
+            for version in ('1.0', '1.1'):
+                wheel = root / f'fixture_113-{version}-py3-none-any.whl'
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    entries = {
+                        'fixture_113.py': f'VALUE = 113\nVERSION = "{version}"\n',
+                        f'fixture_113-{version}.dist-info/METADATA': f'Metadata-Version: 2.1\nName: fixture-113\nVersion: {version}\nLicense: MIT\n',
+                        f'fixture_113-{version}.dist-info/WHEEL': 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n',
+                    }
+                    for name, text in entries.items():
+                        archive.writestr(name, text)
+                    record = f'fixture_113-{version}.dist-info/RECORD'
+                    archive.writestr(record, ''.join(f'{name},,\n' for name in [*entries, record]))
+                wheels.append(wheel)
             payload = root / 'payload'
             notice = payload / 'notices/fixture-113/000.txt'
             notice.parent.mkdir(parents=True)
             notice.write_text('MIT fixture notice\n')
             inventories = []
-            for name in ('baseline-one', 'baseline-two-with-a-longer-path'):
+            for name, version, wheel in [('baseline-one', '1.0', wheels[0]),
+                                         ('baseline-two-with-a-longer-path', '1.0', wheels[0]),
+                                         ('baseline-update', '1.1', wheels[1])]:
                 work = root / (name + '-work')
                 work.mkdir()
                 env = {key: value for key, value in os.environ.items() if key.upper() in {'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR'}}
                 env.update(PATH=str(uv.parent), UV_NO_CONFIG='1', UV_PYTHON_DOWNLOADS='never',
                            UV_CACHE_DIR=str(work / 'uv-cache'), PYTHONDONTWRITEBYTECODE='1')
                 inventories.append(install_baseline(root / name, assets / 'python.archive', uv,
-                                    [(wheel, dict(name='fixture-113', version='1.0'))], payload, work, env, target()))
+                                    [(wheel, dict(name='fixture-113', version=version))], payload, work, env, target()))
             self.assertEqual(inventories[0], inventories[1], 'Only pyvenv.cfg roots may differ between equivalent installations')
             shutil.copyfile(assets / 'python.archive', root / 'runtime-python.archive')
             config = dict(root=str(root), uv=str(uv), pythonArchive=str(root / 'runtime-python.archive'),
-                          wheel=str(wheel), notice=str(notice), files=inventories[0],
+                          wheel=str(wheels[0]), updatedWheel=str(wheels[1]), updatedFiles=inventories[2],
+                          notice=str(notice), files=inventories[0],
                           uvVersion=native['uvVersion'], pythonVersion=native['pythonVersion'],
                           nativeLockSha256=digest(ROOT / 'desktop/locks/native.json'), ffmpegRelease=native['ffmpegRelease'],
                           lockPython=sys.executable, target=target())

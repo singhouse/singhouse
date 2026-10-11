@@ -1368,6 +1368,10 @@ Full builds use the locked Python, uv, wheel, and native audio inputs, install
 into an empty isolated store, run the real functional probe, and independently
 perform backend inventory verification through `desktop/backend.py`. A second installation of
 the same recipe must reuse the active environment with source retrieval disabled.
+The tiny fixture also installs a changed synthetic dependency wheel, measures its
+transfer and sampled disk peak with rollback retained, and checks fresh-process
+selection, corruption fallback, and in-flight lease preservation. This is not a
+full dependency-release update or model qualification.
 Only compact evidence is uploaded; models and user media are never retrieved.
 
 Run the same full check locally with Python 3.12 or newer and Node 22:

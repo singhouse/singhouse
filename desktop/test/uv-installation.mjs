@@ -21,14 +21,20 @@ const base = { schema:2, kind:'processing', ...identity, pythonVersion:config.py
     uv:{version:config.uvVersion,sha256:sha(await readFile(config.uv))},
     wheels:[{...await artifact(config.wheel),name:'fixture-113',version:'1.0',filename:'fixture_113-1.0-py3-none-any.whl',sourceUrl:'https://example.org/fixture',sourceSha256:'b'.repeat(64),license:'MIT',notices:[{...await artifact(config.notice),filename:'000.txt'}]}],
     files:config.files, installedSize:config.files.reduce((sum,file)=>sum+(file.size||0),0)} }
-function manifest(commit, corrupt = false) {
+function manifest(commit, corrupt = false, updated = false) {
   const sourceCommit=commit.repeat(40),packages=[{name:'fixture-113'}], body=structuredClone(base)
+  if(updated) {
+    body.recipe.wheels[0]={...body.recipe.wheels[0],...updatedArtifact,version:'1.1',filename:'fixture_113-1.1-py3-none-any.whl'}
+    body.recipe.files=config.updatedFiles
+    body.recipe.installedSize=config.updatedFiles.reduce((sum,file)=>sum+(file.size||0),0)
+  }
   if(corrupt) body.recipe.wheels[0].sha256='0'.repeat(64)
   const inputLock=JSON.stringify({...body,kind:'processing-input',sourceCommit,packages})
   return {...body,provenance:{sourceCommit,packages,inputLock,lockSha256:sha(inputLock)}}
 }
+const updatedArtifact=await artifact(config.updatedWheel)
 const variants=['a','b','c','d','e'].map(commit=>manifest(commit))
-variants.push(manifest('f',true),manifest('0'))
+variants.push(manifest('f',true),manifest('0'),manifest('1',false,true))
 const evidence={schema:1,qualification:'native-installer-fixture-only',target:config.target,uvVersion:config.uvVersion,pythonVersion:config.pythonVersion,
   installedFiles:config.files.length,installedBytes:base.recipe.installedSize,runs:[],modelDownloads:0}
 function manager(root) {
@@ -59,6 +65,17 @@ function manager(root) {
     assert.equal(await instance.command(join(verified.directory,base.python),['-B','-c','import fixture_113; print(fixture_113.VALUE)']), '113')
   }
   return instance
+}
+// Restart checks execute this file in a fresh Node process with the same trusted inputs.
+if(process.argv[3]==='--restart-check') {
+  const restarted=manager(join(config.root,'runtime-first'))
+  const selected=await restarted.active()
+  assert.equal(selected.id,process.argv[4])
+  await restarted.probe(selected)
+  const version=await restarted.command(join(selected.directory,base.python),['-B','-c','import fixture_113; from importlib.metadata import version; assert fixture_113.VERSION == version("fixture-113"); print(fixture_113.VERSION)'])
+  assert.equal(version,process.argv[5])
+  console.log(JSON.stringify({id:selected.id,version}))
+  process.exit(0)
 }
 // Logical totals include each retained generation. Allocated totals count each
 // inode once when the platform exposes block allocation; neither is an estimate
@@ -103,7 +120,7 @@ async function timed(instance, recipe, name, options) {
     [fileURLToPath(new URL('./test_uv_installation.py',import.meta.url)), '--verify-installed',
       active.directory,active.id,instance.root,recipe.provenance.lockSha256])).stdout)
   assert.equal(inventoryVerification.backendInventoryVerification,true)
-  assert.equal(inventoryVerification.files,config.files.length)
+  assert.equal(inventoryVerification.files,recipe.recipe.files.length)
   const elapsedMs=Math.round(performance.now()-start)
   const row={name,elapsedMs,id:active.id,backendInventoryVerification:inventoryVerification.backendInventoryVerification,transferredSourceBytes:instance.transferredSourceBytes-transferBefore,
     installedUsage:await usage(active.directory),cacheUsage:await usage(join(instance.root,'uv-cache')),
@@ -123,6 +140,19 @@ evidence.sharedCacheWorksWithoutWheelOrPythonSources=true
 assert.notEqual(evidence.runs[0].id,warm.id)
 const independent=manager(join(config.root,'runtime-second-longer-root'))
 await timed(independent,variants[0],'independent-empty-cache')
+const originalDiskFree=first.diskFree
+const transferBeforeLowSpace=first.transferredSourceBytes
+let lowSpaceActivation=false
+first.diskFree=async()=>0
+first.activationHook=async()=>{lowSpaceActivation=true}
+try {
+  await assert.rejects(first.install(variants[2]),/Not enough disk space/)
+  assert.equal(first.transferredSourceBytes,transferBeforeLowSpace)
+  assert.equal(lowSpaceActivation,false)
+  assert.equal((await first.active()).id,warm.id)
+  evidence.simulatedAvailableSpacePreflight={rejectedBeforeTransfer:true,previousActiveVerified:true,
+    physicalEnospcQualified:false}
+} finally {first.diskFree=originalDiskFree;first.activationHook=async()=>{}}
 const aborted=new AbortController()
 first.activationHook=async phase=>{if(phase==='pack-durable')aborted.abort()}
 await assert.rejects(first.install(variants[2],{signal:aborted.signal}))
@@ -158,8 +188,34 @@ for(const path of missing) await rm(path)
 await timed(first,variants[6],'automatic-missing-cache-member-repair')
 await first.verify(repaired.id)
 evidence.missingCacheMemberRepairPassed=true
+const previous=await first.active()
+// Keep an older generation leased even after both rollback slots move past it.
+const lease=await first.acquireUsage(repaired.id)
+try {
+  for(const path of [config.wheel,config.pythonArchive,config.notice]) await rename(path,path+'.unavailable')
+  let updated
+  try { updated=await timed(first,variants[7],'synthetic-dependency-update-1.0-to-1.1') }
+  finally {for(const path of [config.wheel,config.pythonArchive,config.notice]) await rename(path+'.unavailable',path)}
+  const row=evidence.runs.at(-1)
+  assert.equal(row.transferredSourceBytes,updatedArtifact.size)
+  assert.ok(row.transferredSourceBytes>0)
+  await first.verify(previous.id)
+  const restart=async(id,version)=>JSON.parse((await promisify(execFile)(process.execPath,
+    [fileURLToPath(import.meta.url),process.argv[2],'--restart-check',id,version])).stdout)
+  evidence.updatedRestart=await restart(updated.id,'1.1')
+  await first.prune()
+  await first.verify(repaired.id)
+  evidence.inFlightLeasePreserved=true
+  const installedFixture=(await fixtureFiles(updated.directory))[0]
+  assert.ok(installedFixture)
+  await writeFile(installedFixture,'VALUE = 999\n')
+  evidence.corruptUpdateRestartFallback=await restart(previous.id,'1.0')
+  evidence.syntheticDependencyUpdate={from:'1.0',to:'1.1',changedWheelBytes:updatedArtifact.size,
+    unchangedPythonAndNoticeSourcesUnavailable:true,previousGenerationVerified:true}
+} finally {await lease.release()}
 evidence.initialTransferBytes=evidence.runs.find(row=>row.name==='cold-empty-cache').transferredSourceBytes
-evidence.incrementalTransferBytes=evidence.runs.find(row=>row.name==='new-recipe-shared-cache').transferredSourceBytes
+evidence.sameDependencyRecipeTransferBytes=evidence.runs.find(row=>row.name==='new-recipe-shared-cache').transferredSourceBytes
+evidence.incrementalTransferBytes=evidence.runs.find(row=>row.name==='synthetic-dependency-update-1.0-to-1.1').transferredSourceBytes
 assert.ok(evidence.incrementalTransferBytes<evidence.initialTransferBytes)
 evidence.finalRetainedUsage=await usage(first.root)
 evidence.measurementScope='Tiny synthetic wheel only; source bytes are streamed bytes written, allocation counts regular-file stat blocks when available (excluding directories and symlinks; shared reflink extents are not measured), peak is sampled and elapsed includes measurement overhead.'
