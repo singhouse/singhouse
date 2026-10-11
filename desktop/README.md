@@ -843,6 +843,27 @@ original timed test words. Use copies of your media. On Windows, use the venv's
 `Scripts/python.exe` and set `KARAOKE_DESKTOP_PYTHON` to its absolute path in your
 shell. Linux graphical smoke tests can run under `xvfb-run -a`.
 
+### Isolated resource measurement before qualification
+
+The native backend's explicit `--private-test-resource-measurement` flag allows
+local acceptance runs before measured hardware recommendations exist. It requires
+a native payload whose adjacent `release.json` has channel `private-test`, a
+separate persistent `--runtime` library, a schema-2 managed runtime, all three
+pinned model sets, their full `--processing-id` and `--models-id`, and the actual
+successful `--processing-probe` attestation. Source mode, demo mode, and
+`--processing-variant` cannot be combined with this flag. A parent launcher must
+keep the backend's stdin heartbeat open, as for any native launch.
+
+This mode skips only the qualified resource-threshold recommendation. Runtime,
+interpreter, native-tool, model, and functional-probe verification still apply.
+The backend remains loopback-only, uses its normal password gate, and preserves
+the isolated library across restarts. Its launch handshake and `/desktop-ready`
+response explicitly report `resourceMeasurement` with `qualified: false` and
+`recommendationsEnabled: false`. Use those markers to label the local test UI and
+capture observations externally. Runs in this mode do not establish release
+qualification, memory recommendations, or a supported hardware variant; no
+thresholds are invented and normal application admission remains unchanged.
+
 ## Playback qualification
 
 Use the host's projector button to open the display; the Projector menu controls

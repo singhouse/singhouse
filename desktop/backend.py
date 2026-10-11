@@ -996,6 +996,30 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
                              "workingDiskBytes": measured("workingDiskBytes")}, "settings": {}}
 
 
+def private_measurement_marker(enabled: bool) -> dict:
+    return ({"resourceMeasurement": {"mode": "private-test", "qualified": False,
+                                      "recommendationsEnabled": False}}
+            if enabled else {})
+
+
+def validate_private_measurement_context(native: Path | None, root: Path | None,
+                                         demo: bool, runtime: Path | None,
+                                         processing: Path | None, models: Path | None,
+                                         probe: dict | None, processing_id: str | None,
+                                         models_id: str | None, resource_variant: str | None) -> None:
+    """An explicit native-only measurement lane, never a release recommendation."""
+    if (native is None or root is not None or demo or runtime is None or processing is None
+            or models is None or not isinstance(probe, dict) or resource_variant is not None
+            or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                   for value in (processing_id, models_id))):
+        raise RuntimeError("Private resource measurement requires native mode, persistent test data, full runtime/model identities and a probe; source, demo and qualified variants are excluded")
+    release_path = native.parent / "release.json"
+    release = json.loads(_safe_regular_file(release_path).read_text(encoding="utf-8"))
+    if (not isinstance(release, dict) or type(release.get("schema")) is not int
+            or release["schema"] != 1 or release.get("channel") != "private-test"):
+        raise RuntimeError("Private resource measurement requires a private-test release policy")
+
+
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
@@ -1003,8 +1027,15 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                            processing_id: str | None = None,
                            models_id: str | None = None, resource_variant: str | None = None,
                            hardware_policy: dict | None = None, release_channel: str = "",
-                           native_lock_sha256: str | None = None) -> dict[str, str]:
+                           native_lock_sha256: str | None = None,
+                           private_test_resource_measurement: bool = False) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
+    if private_test_resource_measurement:
+        if (release_channel != "private-test" or resource_variant is not None or processing is None
+                or models is None or not isinstance(probe, dict)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                       for value in (processing_id, models_id))):
+            raise RuntimeError("Private resource measurement requires explicit private-test runtime, models and probe identities")
     # Keep inventory access, parent containment, attestation equality, and the
     # interpreter paths inherited by managed workers in one Windows namespace.
     # Do not resolve here: that would hide symbolic links from verification.
@@ -1139,10 +1170,18 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             if (not isinstance(native_lock_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", native_lock_sha256)
                     or manifest["recipe"].get("nativeTools", {}).get("nativeLockSha256") != native_lock_sha256):
                 raise RuntimeError("Processing recipe native tools do not match this application")
-            if hardware_policy is None:
-                hardware_policy = json.loads(Path(__file__).with_name("hardware-policy.json").read_text())
-            env["KARAOKE_DESKTOP_RESOURCE_POLICY_JSON"] = json.dumps(processing_resource_policy(
-                manifest, processing_id, resource_variant, hardware_policy, release_channel))
+            if not private_test_resource_measurement:
+                if hardware_policy is None:
+                    hardware_policy = json.loads(Path(__file__).with_name("hardware-policy.json").read_text())
+                env["KARAOKE_DESKTOP_RESOURCE_POLICY_JSON"] = json.dumps(processing_resource_policy(
+                    manifest, processing_id, resource_variant, hardware_policy, release_channel))
+        if private_test_resource_measurement:
+            required_models = {"heart-transcriptor", "demucs-mdx-extra", "karaoke-roformer"}
+            if (manifest.get("schema") != 2 or manifest.get("probe", {}).get("schema") != 2
+                    or not {"transcription", "separation"}.issubset(manifest.get("capabilities", []))
+                    or not required_models.issubset(manifest.get("models", []))
+                    or model_manifest is None or not required_models.issubset(model_manifest["models"])):
+                raise RuntimeError("Private resource measurement requires the complete verified uv runtime and model inventory")
         for key in ("appVersion", "backendVersion", "lyricsyncVersion", "platform", "arch"):
             if manifest.get(key) != identity[key]:
                 raise RuntimeError("Processing runtime is incompatible with this app")
@@ -1209,6 +1248,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                         and isinstance(probe["components"], dict)
                         and set(probe["components"]) == expected_component_keys
                         and all(isinstance(value, str) and value for value in probe["components"].values()))
+        if private_test_resource_measurement and not probe_passed:
+            raise RuntimeError("Private resource measurement requires the actual successful functional probe attestation")
         capabilities_ready = probe_passed and functional
         env["KARAOKE_PROCESSING_PYTHON"] = python_path if capabilities_ready else ""
         env["KARAOKE_DEMUCS_PYTHON"] = env["KARAOKE_PROCESSING_PYTHON"]
@@ -1428,7 +1469,11 @@ def runtime_directory(supplied: Path | None = None):
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
-        models_id: str | None = None, resource_variant: str | None = None) -> None:
+        models_id: str | None = None, resource_variant: str | None = None,
+        private_test_resource_measurement: bool = False) -> None:
+    if private_test_resource_measurement:
+        validate_private_measurement_context(native, root, demo, runtime_path, processing, models,
+                                             processing_probe, processing_id, models_id, resource_variant)
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1470,7 +1515,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
                                                           processing_id=processing_id, models_id=models_id, resource_variant=resource_variant,
                                                           release_channel=(json.loads((native.parent / "release.json").read_text()).get("channel", "")
-                                                                           if resource_variant else "")))
+                                                                           if resource_variant or private_test_resource_measurement else ""),
+                                                          private_test_resource_measurement=private_test_resource_measurement))
             os.environ.clear()
             os.environ.update(environment)
             if native:
@@ -1537,7 +1583,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                                 "nonterminal": row.nonterminal}
 
                     async def ready(request):
-                        return JSONResponse({"nonce": nonce, **({"identity": identity} if identity else {})}, headers={"Cache-Control": "no-store"})
+                        return JSONResponse({"nonce": nonce, **({"identity": identity} if identity else {}),
+                                             **private_measurement_marker(private_test_resource_measurement)}, headers={"Cache-Control": "no-store"})
 
                     app.router.routes.insert(0, Route("/desktop-ready", ready, methods=["GET"]))
                     mutation_barrier = DesktopMutationBarrier(app, durable_job_counts)
@@ -1586,7 +1633,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                         mutation_barrier.bind_job_worker(app.state.job_worker)
                         print(json.dumps({"origin": origin, "password": password, "nonce": nonce,
                                           "controlToken": control_token,
-                                          **({"identity": identity} if identity else {})}),
+                                          **({"identity": identity} if identity else {}),
+                                          **private_measurement_marker(private_test_resource_measurement)}),
                               file=protocol_stdout, flush=True)
 
                     app.state.lifespan_startup_hooks.append(announce)
@@ -1640,6 +1688,8 @@ if __name__ == "__main__":
     parser.add_argument("--runtime", type=Path, help="Empty private directory created by the parent")
     parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
     parser.add_argument("--processing-variant", help="Selected qualified hardware variant")
+    parser.add_argument("--private-test-resource-measurement", action="store_true",
+                        help="Explicit native private-test measurement only; no qualified resource recommendation")
     parser.add_argument("--processing-id", help="Full manifest identity of the selected processing pack")
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
     parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
@@ -1647,6 +1697,8 @@ if __name__ == "__main__":
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
+        if args.private_test_resource_measurement and args.native is None:
+            raise RuntimeError("Private resource measurement is available only with --native")
         if args.durable_replace:
             print(json.dumps(durable_replace(*args.durable_replace)), flush=True)
         elif args.durable_application_replace:
@@ -1676,7 +1728,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id, args.processing_variant)
+                args.processing_id, args.models_id, args.processing_variant, args.private_test_resource_measurement)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
