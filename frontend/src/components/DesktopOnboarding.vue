@@ -7,7 +7,7 @@ import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 
 const emit = defineEmits(['close', 'add-song', 'modal-settings'])
 const setup = useDesktopOnboarding()
-const { step, choice, plan, status, busy, error, localAvailable, canStart } = setup
+const { step, choice, plan, status, busy, checkingLocal, error, localAvailable, canStart } = setup
 const heading = ref(null)
 const dialog = ref(null)
 let poll
@@ -177,8 +177,8 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             >▣</span>
             <strong>On this computer</strong>
             <span>Your audio stays here. No cloud processing charges.</span>
-            <small id="local-reason">{{ localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
-            <span class="badge">{{ localAvailable ? 'Recommended' : 'Currently unavailable' }}</span>
+            <small id="local-reason" role="status">{{ checkingLocal ? 'Checking your installed processing tools and models. This can take a minute…' : localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
+            <span class="badge">{{ checkingLocal ? 'Checking…' : localAvailable ? 'Recommended' : 'Currently unavailable' }}</span>
           </button>
           <button
             class="choice"

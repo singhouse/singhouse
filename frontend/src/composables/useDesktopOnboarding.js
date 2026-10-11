@@ -9,6 +9,7 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   const plan = ref(null)
   const status = ref(null)
   const busy = ref(false)
+  const checkingLocal = ref(false)
   const error = ref('')
   let navigationGeneration = 0
   let pendingCheck = null
@@ -56,7 +57,9 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function preflight() {
     // A failed refresh must not leave an earlier consent plan actionable.
     plan.value = null
-    return bridge.preflightSetup()
+    checkingLocal.value = true
+    try { return await bridge.preflightSetup() }
+    finally { checkingLocal.value = false }
   }
   async function applyModalStatus() {
     if (choice.value !== 'modal' || !bridge.getModalStatus
@@ -193,6 +196,6 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
   async function restart() { return guarded(() => bridge.restartApp()) }
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
-  return { step, choice, plan, status, busy, error, localAvailable, canStart,
+  return { step, choice, plan, status, busy, checkingLocal, error, localAvailable, canStart,
     initialize, refresh, chooseProcessing, continueChoice, start, cancel, restart, skip, complete, openHelp, chooseModelSource, setHardwareSelection, reviewProcessingUpdate }
 }

@@ -212,6 +212,28 @@ describe('desktop setup consent and recovery', () => {
 })
 
 describe('desktop setup screens', () => {
+  it('shows pending verification without declaring local processing unavailable or switching to Modal', async () => {
+    let finish
+    const pending = new Promise(resolve => { finish = resolve })
+    const desktop = bridge({ preflightSetup: vi.fn(() => pending) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Checking your installed processing tools and models')
+    expect(wrapper.text()).not.toContain('Currently unavailable')
+    expect(wrapper.text()).not.toContain('Recommended')
+    expect(wrapper.find('.choice').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('.choice').attributes('disabled')).toBeDefined()
+    expect(desktop.setOnboardingState).not.toHaveBeenCalled()
+    finish({ available: true, ready: true, planId: 'verified', components: [] })
+    await flushPromises()
+    expect(wrapper.find('.choice').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('.choice').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.text()).not.toContain('Checking your installed processing tools and models')
+    wrapper.unmount()
+  })
   it('offers a retry after failed preflight without recommending local setup', async () => {
     const desktop = bridge({ preflightSetup: vi.fn().mockRejectedValueOnce(new Error('Hardware check failed'))
       .mockResolvedValue({ available: true, planId: 'retry' }) })
