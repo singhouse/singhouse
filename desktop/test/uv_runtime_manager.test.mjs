@@ -85,6 +85,86 @@ test('schema2 launch reuses the bound probe and structural verification; full da
   await restarted.probe(repaired)
   assert.equal(await restarted.recordedProbe(repaired),null,'a late probe must not undo a newer withdrawal')
 })
+function countLaunchChecks(manager) {
+  const counts = { full:0, structural:0 }
+  manager.durableReplace = rename
+  manager.directorySync = async () => {}
+  const verifyFiles = manager.verifyFiles.bind(manager)
+  manager.verifyFiles = async (...args) => {
+    counts[args[2]?.quick ? 'structural' : 'full']++
+    return verifyFiles(...args)
+  }
+  return counts
+}
+test('cold launch lease repeats structure but consumes the earlier full verification once',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  f.manager.lockPython = process.platform === 'win32' ? 'python.exe' : 'python3'
+  await f.manager.launchVerify(f.id)
+  const lease = await f.manager.acquireUsage(f.id,{launch:true})
+  try { assert.deepEqual(counts,{full:1,structural:2}) }
+  finally { await lease.release() }
+  assert.equal(await f.manager.recordedProbe(await f.manager.verify(f.id,{quick:true})),null,
+    'lease proof must not fabricate a functional result')
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,2,'the lease proof is single-use')
+})
+test('launch lease proof is private to a manager and bound to native identity',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  await f.manager.launchVerify(f.id)
+  const other = new UvRuntimeManager(f.root,identity,{trustedLocks:[f.manifest.provenance.lockSha256],nativeLockSha256:'c'.repeat(64)})
+  const otherCounts = countLaunchChecks(other)
+  await other.launchVerify(f.id,{reuseFull:true})
+  assert.equal(otherCounts.full,1,'another manager must establish its own proof')
+  f.manager.nativeRuntimeId = 'd'.repeat(64)
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,2,'a different native runtime cannot reuse the proof')
+})
+test('another manager revocation invalidates a pending lease proof',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  await f.manager.launchVerify(f.id)
+  const other = new UvRuntimeManager(f.root,identity,{trustedLocks:[f.manifest.provenance.lockSha256],nativeLockSha256:'c'.repeat(64)})
+  countLaunchChecks(other)
+  await other.forgetVerified(f.id)
+  await writeFile(join(f.directory,'python/bin/python3'),'x'.repeat('fixture executable'.length))
+  await assert.rejects(f.manager.launchVerify(f.id,{reuseFull:true}),/file changed/)
+  assert.equal(counts.full,2,'same-size damage must be hashed after revocation')
+})
+test('revocation during a full launch check cannot create a reusable lease proof',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  const verifyTree = f.manager.verifyTree.bind(f.manager)
+  let revoke = true
+  f.manager.verifyTree = async (...args) => {
+    const result = await verifyTree(...args)
+    if (!args[1] && revoke) { revoke = false; await f.manager.forgetVerified(f.id) }
+    return result
+  }
+  await f.manager.launchVerify(f.id)
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,2)
+})
+test('cancellation after hashing cannot publish a lease verification proof',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  const controller = new AbortController()
+  const markVerifiedAt = f.manager.markVerifiedAt.bind(f.manager)
+  f.manager.markVerifiedAt = async (...args) => { await markVerifiedAt(...args); controller.abort() }
+  await assert.rejects(f.manager.launchVerify(f.id,{signal:controller.signal}),{name:'AbortError'})
+  f.manager.markVerifiedAt = markVerifiedAt
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,2)
+})
+test('cancelled and structurally failed lease checks discard their one-use proof',async t => {
+  const f = await instance(t), counts = countLaunchChecks(f.manager)
+  await f.manager.launchVerify(f.id)
+  const controller = new AbortController(); controller.abort()
+  await assert.rejects(f.manager.launchVerify(f.id,{reuseFull:true,signal:controller.signal}),{name:'AbortError'})
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,2)
+  await writeFile(join(f.directory,'unexpected'),'extra')
+  await assert.rejects(f.manager.launchVerify(f.id,{reuseFull:true}),/inventory/)
+  await rm(join(f.directory,'unexpected'))
+  await f.manager.launchVerify(f.id,{reuseFull:true})
+  assert.equal(counts.full,3)
+})
 test('rewriting local receipt cannot authorize changed executable bytes',async t => {
   const f = await instance(t)
   await writeFile(join(f.directory,'python/bin/python3'),'compromised')

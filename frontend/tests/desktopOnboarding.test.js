@@ -217,6 +217,56 @@ describe('desktop setup consent and recovery', () => {
 })
 
 describe('desktop setup screens', () => {
+  it.each([{ leaves: false, reopening: false }, { leaves: true, reopening: false }, { leaves: false, reopening: true }])('keeps an explicit check open through the parent background handler ($leaves, $reopening)', async ({ leaves, reopening }) => {
+    let finish
+    globalThis.window.karaokeDesktop = bridge({
+      preflightSetup: vi.fn(() => new Promise(resolve => { finish = resolve })),
+      ...(reopening ? { getSetupStatus: vi.fn().mockResolvedValue({ state: 'ready' }) } : {}),
+    })
+    const open = ref(!reopening)
+    const background = vi.fn(() => { open.value = false })
+    const Parent = defineComponent({
+      setup: () => () => h(DesktopOnboarding, {
+        open: open.value,
+        onBackground: background,
+        onClose: () => { open.value = false },
+        onOpen: () => { open.value = true },
+      }),
+    })
+    const wrapper = mount(Parent)
+    await flushPromises()
+    const child = wrapper.findComponent(DesktopOnboarding)
+    if (reopening) {
+      background.mockClear()
+      open.value = true
+    } else await child.get('[data-testid="onboarding-get-started"]').trigger('click')
+    await flushPromises()
+    const dialog = () => child.get('[data-testid="onboarding-dialog"]')
+    expect(dialog().attributes('data-step')).toBe('checking')
+    expect(dialog().classes()).not.toContain('compact')
+    expect(dialog().element.open).toBe(true)
+    expect(open.value).toBe(true)
+    expect(background).not.toHaveBeenCalled()
+    if (leaves) {
+      await child.get('.library').trigger('click')
+      await flushPromises()
+      expect(open.value).toBe(false)
+    }
+    finish({ available: true, ready: false, planId: 'checked', components: [] })
+    await flushPromises()
+    if (leaves) {
+      expect(open.value).toBe(false)
+      expect(dialog().element.open).toBe(false)
+    } else {
+      expect(open.value).toBe(true)
+      expect(dialog().attributes('data-step')).toBe('choose')
+      expect(dialog().element.open).toBe(true)
+      expect(child.get('[data-testid="onboarding-choice-local"]').isVisible()).toBe(true)
+      expect(background).not.toHaveBeenCalled()
+    }
+    wrapper.unmount()
+  })
+
   it('still navigates to ready when Modal connection setup completes', async () => {
     globalThis.window.karaokeDesktop = bridge({
       getOnboardingState: vi.fn().mockResolvedValue({ step: 'modal', choice: 'modal' }),

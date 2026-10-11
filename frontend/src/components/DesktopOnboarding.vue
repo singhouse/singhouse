@@ -15,7 +15,9 @@ const dialog = ref(null)
 let poll
 let unmounted = false
 const hardwareTest = computed(() => plan.value?.qualificationScope === 'hardware-test')
-const compact = computed(() => ['progress', 'checking', 'restart', 'ready', 'error'].includes(step.value))
+// An explicitly opened check owns its screen until the choice is ready.
+// Background checks remain compact without closing the parent's setup request.
+const compact = computed(() => step.value === 'checking' ? !props.open : ['progress', 'restart', 'ready', 'error'].includes(step.value))
 const dismissed = ref(false)
 const stage = computed(() => step.value === 'welcome' ? 0 : step.value === 'lyrics' ? 2 : ['consent', 'modal'].includes(step.value) ? 3 : 1)
 async function display() {

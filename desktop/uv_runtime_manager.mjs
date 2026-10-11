@@ -348,7 +348,7 @@ export class UvRuntimeManager extends RuntimeManager {
     if (!/^[a-f0-9]{64}$/.test(id || '')) throw new Error('Invalid processing installation identity')
     await directory(join(this.root,'leases'))
     const lease = await acquireInstallLock(join(this.root,'leases',`${id}.lock`),this.lockPython)
-    try { await (launch ? this.launchVerify(id) : this.verify(id)); return lease } catch (error) { await lease.release(); throw error }
+    try { await (launch ? this.launchVerify(id, { reuseFull: true }) : this.verify(id)); return lease } catch (error) { await lease.release(); throw error }
   }
   // Explicit maintenance, never part of a running install. Retain both rollback
   // slots, caller-declared workers and every installation with a live lease.

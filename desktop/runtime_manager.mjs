@@ -450,6 +450,9 @@ const releaseWithdrawn = path => { if (!recordWriters.has(path)) withdrawnRecord
 // self-test records its result only under such a proof, so a withdrawal after
 // the full verification always requires another one.
 const fullVerifications = new WeakMap()
+// A single-use, manager-local proof for the structural check after acquiring
+// a usage lease. It never substitutes for a recorded functional probe.
+const pendingLeaseVerifications = new WeakMap()
 // How long a pack's last full verification counts as fresh for the
 // background re-check after launch (see recheckPacks()).
 export const RECHECK_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
@@ -1418,13 +1421,30 @@ export class RuntimeManager {
   // verification is on record, otherwise (first launch after an upgrade, a
   // withdrawn or unreadable record) a full verification, which is recorded.
   // `fullyVerifiedAtLaunch` names the packs this launch verified in full.
-  async launchVerify(id) {
+  async launchVerify(id, { reuseFull = false, signal } = {}) {
+    const pending = pendingLeaseVerifications.get(this)
+    const previous = reuseFull ? pending?.get(id) : null
+    pending?.delete(id)
     const generation = this.recordGeneration(id)
-    const structural = await this.verify(id, { quick: true })
+    const structural = await this.verify(id, { quick: true, signal })
+    signal?.throwIfAborted()
+    if (previous && previous.generation === generation && this.recordGeneration(id) === generation
+        && previous.nativeRuntimeId === this.nativeRuntimeId && previous.directory === structural.directory
+        && previous.manifest === digest(JSON.stringify(structural.manifest))) {
+      fullVerifications.set(structural, { path: this.recordPath(id), generation })
+      return structural
+    }
     if (await this.verifiedOnRecord(structural)) return structural
-    const verified = await this.verify(id)
+    const verified = await this.verify(id, { signal })
     await this.markVerified(verified, generation)
     await this.markVerifiedAt(id, generation)
+    signal?.throwIfAborted()
+    if (this.recordGeneration(id) === generation) {
+      const proofs = pendingLeaseVerifications.get(this) ?? new Map()
+      proofs.set(id, { generation, nativeRuntimeId: this.nativeRuntimeId,
+        directory: verified.directory, manifest: digest(JSON.stringify(verified.manifest)) })
+      pendingLeaseVerifications.set(this, proofs)
+    }
     this.fullyVerifiedAtLaunch.add(id)
     return verified
   }
