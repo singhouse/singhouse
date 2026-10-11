@@ -21,6 +21,60 @@ finally:
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_application_inventory_requires_modules_migrations_and_declared_data(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(assemble, "ROOT", Path(temporary)):
+            root = Path(temporary)
+            required = ["karaoke_backend/__init__.py", "karaoke_backend/migrations/versions/example.py",
+                        "karaoke_backend/migrations/script.py.mako", "karaoke_backend/export/fonts/LICENSE",
+                        "lyricsync/__init__.py"]
+            ignored = ["karaoke_backend/api/providers/local/__init__.py",
+                       "karaoke_backend/api/providers/local_generated/provider.py",
+                       "karaoke_backend/__pycache__/ignored.py"]
+            for member in required + ignored:
+                source = root / ("lyricsync/src" if member.startswith("lyricsync/") else "backend/src") / member
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(b"fixture\n")
+            artifact = root / "application.whl"
+            for omitted in required + ["all"]:
+                with self.subTest(omitted=omitted):
+                    with zipfile.ZipFile(artifact, "w") as wheel:
+                        wheel.writestr("example.dist-info/METADATA", b"fixture metadata")
+                        for member in required:
+                            if omitted not in (member, "all"):
+                                wheel.writestr(member, b"fixture\n")
+                    with self.assertRaisesRegex(ValueError, "inventory is incomplete"):
+                        assemble.verify_application_wheels([artifact])
+            with zipfile.ZipFile(artifact, "w") as wheel:
+                for member in required:
+                    wheel.writestr(member, b"fixture\n")
+            assemble.verify_application_wheels([artifact])
+
+    def test_application_integrity_rejects_stale_staging_and_corrupt_installer_cache(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(assemble, "ROOT", Path(temporary)):
+            root = Path(temporary)
+            member = "karaoke_backend/migrations/versions/example.py"
+            source = root / "backend/src" / member
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"revision = 'fixture'\n")
+            artifact = root / "backend.whl"
+            installed = root / "installed" / member
+            installed.parent.mkdir(parents=True)
+            for data in (b"", b"revision = 'stale'\n"):
+                with zipfile.ZipFile(artifact, "w") as wheel:
+                    wheel.writestr(member, data)
+                with self.assertRaisesRegex(ValueError, "differs from source"):
+                    assemble.verify_application_wheels([artifact])
+            with zipfile.ZipFile(artifact, "w") as wheel:
+                wheel.writestr(member, source.read_bytes())
+            assemble.verify_application_wheels([artifact])
+            for data in (None, b"", b"revision = 'stale'\n"):
+                if data is not None:
+                    installed.write_bytes(data)
+                with self.assertRaisesRegex(ValueError, "differs from wheel"):
+                    assemble.verify_application_wheels([artifact], root / "installed")
+            installed.write_bytes(source.read_bytes())
+            assemble.verify_application_wheels([artifact], root / "installed")
+
     def test_generic_assembly_descriptor_binds_opaque_payload_and_pairing(self):
         files = {"backend.py": "a" * 64, "static/index.html": "b" * 64}
         core = assemble.assembly_descriptor(files)

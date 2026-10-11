@@ -155,6 +155,48 @@ def assembly_environment(cache):
                 PYTHONDONTWRITEBYTECODE="1")
 
 
+def verify_application_wheels(artifacts, destination=None):
+    """Reject stale build staging and damaged installer cache before attestation."""
+    roots = {"karaoke_backend": ROOT / "backend/src", "lyricsync": ROOT / "lyricsync/src"}
+    expected = set()
+    for package, root in roots.items():
+        for source in (root / package).rglob("*.py"):
+            relative = source.relative_to(root)
+            # Match the package exclusion in backend/pyproject.toml; generated
+            # bytecode/cache directories are never source package inventory.
+            if "__pycache__" in relative.parts:
+                continue
+            if package == "karaoke_backend" and relative.parts[1:3] == ("api", "providers") and len(relative.parts) > 4 and relative.parts[3].startswith("local"):
+                continue
+            expected.add(relative.as_posix())
+    # Explicit package-data declarations in backend/pyproject.toml.
+    for pattern in ("migrations/*.mako", "migrations/*.py", "migrations/versions/*.py", "export/fonts/*"):
+        expected.update(source.relative_to(roots["karaoke_backend"]).as_posix()
+                        for source in (roots["karaoke_backend"] / "karaoke_backend").glob(pattern) if source.is_file())
+    seen = set()
+    for artifact in artifacts:
+        with zipfile.ZipFile(artifact) as wheel:
+            for member in wheel.infolist():
+                path = Path(member.filename)
+                if member.is_dir() or path.parts[0] not in roots:
+                    continue
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("Unsafe application wheel path")
+                if member.filename not in expected or member.filename in seen:
+                    raise ValueError(f"Unexpected or duplicate application wheel member: {member.filename}")
+                seen.add(member.filename)
+                source = roots[path.parts[0]] / path
+                content = wheel.read(member)
+                if not source.is_file() or source.read_bytes() != content:
+                    raise ValueError(f"Application wheel differs from source: {member.filename}; rebuild from clean staging")
+                if destination is not None:
+                    installed = destination / path
+                    if not installed.is_file() or installed.read_bytes() != content:
+                        raise ValueError(f"Installed application differs from wheel: {member.filename}; rebuild with a fresh installer cache")
+    if seen != expected:
+        raise ValueError(f"Application wheel inventory is incomplete: {', '.join(sorted(expected - seen))}; rebuild from clean staging")
+
+
 def install_dependencies(output, cache, lock, target, env, upstream_omissions):
     host = host_target()
     host_input = lock["targets"][host]["python"]
@@ -176,6 +218,7 @@ def install_dependencies(output, cache, lock, target, env, upstream_omissions):
             with zipfile.ZipFile(artifact) as wheel:
                 if any("/remote_runtime/" in name or name.endswith("/workers/remote.py") for name in wheel.namelist()):
                     raise SystemExit("Application wheel contains an excluded compute dispatcher")
+        verify_application_wheels(artifacts)
         destination = site_packages(output, target, lock["pythonVersion"])
         # Source builds (MetaPhone is pure Python) use only the pinned host
         # toolchain. Platform-specific dependencies resolve as target wheels.
@@ -184,6 +227,7 @@ def install_dependencies(output, cache, lock, target, env, upstream_omissions):
         run("uv", "pip", "install", *selection, "--require-hashes", "--no-build-isolation",
             "-r", LOCKS / "base.txt", env=env)
         run("uv", "pip", "install", *selection, "--no-deps", *artifacts, env=env)
+        verify_application_wheels(artifacts, destination)
         launcher_base = fetch(lock["targets"][target]["consoleLauncher"], cache) if target == "win32-x64" else None
         normalization = normalize_installation(output, destination, host_python, target, artifacts,
                                               upstream_omissions, windows_launcher_base=launcher_base)
