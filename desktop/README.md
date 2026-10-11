@@ -864,6 +864,23 @@ capture observations externally. Runs in this mode do not establish release
 qualification, memory recommendations, or a supported hardware variant; no
 thresholds are invented and normal application admission remains unchanged.
 
+The existing packaged Electron application can use that same verified test
+profile directly:
+
+```sh
+/path/to/singhouse --private-test-resource-measurement \
+  --user-data-dir=/absolute/isolated-test-profile
+```
+
+Stop the previous test backend after its jobs finish before opening the profile.
+The profile directory must already exist and contain the verified active uv
+runtime and complete model cache; environments must stay at their original
+absolute paths. This launch requires a `private-test` package and fails closed
+if the runtime, models, functional probe, or backend measurement marker is
+missing. It opens the ordinary host, library, and projector, labels the host
+window "Private resource measurement (unqualified)", and keeps processing local.
+It does not enroll an unsupported variant or relax application integrity checks.
+
 ## Playback qualification
 
 Use the host's projector button to open the display; the Projector menu controls

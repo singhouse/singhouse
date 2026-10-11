@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, lstatSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
 import { validateHardwarePolicy, assessHardwarePolicy } from './hardware_policy.mjs'
@@ -12,10 +12,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
+import { ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
 import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
 import { ModelCache, processingAttestation } from './runtime_manager.mjs'
 import { UvRuntimeManager } from './uv_runtime_manager.mjs'
+import { privateMeasurementLaunch, assertPrivateMeasurementRelease, assertPrivateMeasurementRuntime, assertPrivateMeasurementMarker, privateMeasurementHandshake } from './private_measurement.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, hardwareSelectionPreferences, restartForSetup } from './onboarding_state.mjs'
@@ -33,6 +34,12 @@ const physicalFs = createRequire(import.meta.url)('original-fs')
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
 const packaged = app.isPackaged
+const privateMeasurement = privateMeasurementLaunch(process.argv, packaged)
+if (privateMeasurement.enabled) {
+  const info = lstatSync(privateMeasurement.profile)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Private resource measurement requires an existing plain test profile directory')
+  app.setPath('userData', privateMeasurement.profile)
+}
 const nativeDir = resolve(process.resourcesPath, 'native')
 const releasePolicyPath = packaged ? resolve(process.resourcesPath, 'release.json') : resolve(desktopDir, 'release.json')
 let brand = 'singhouse'
@@ -196,7 +203,10 @@ async function launchBackend() {
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
-  if (activeProcessing?.manifest.schema === 2) {
+  assertPrivateMeasurementRelease(privateMeasurement.enabled, packaged, releasePolicy)
+  assertPrivateMeasurementRuntime(privateMeasurement.enabled, activeProcessing, activeModels, processingProbe)
+  if (privateMeasurement.enabled) args.push('--private-test-resource-measurement')
+  if (activeProcessing?.manifest.schema === 2 && !privateMeasurement.enabled) {
     try {
       const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
       const selection = hardwareSelectionPreferences((await onboardingState.read())?.hardwareSelection, policy)
@@ -224,7 +234,7 @@ async function launchBackend() {
   if (packaged) {
     args.push('--desktop-config-stdin')
     const preferences = onboardingPreferences((await onboardingState.read())?.preferences)
-    if (preferences.choice === 'modal') {
+    if (!privateMeasurement.enabled && preferences.choice === 'modal') {
       try { privateModal = await modalCredentials.readForBackend() } catch { /* Playback still starts when a keyring is unavailable. */ }
     }
     modalLoadedFingerprint = privateModal ? createHash('sha256').update(JSON.stringify(privateModal)).digest('hex') : null
@@ -265,7 +275,7 @@ async function launchBackend() {
       if (buffer.length > 4096) return finish(new Error('Invalid backend launch handshake'))
       const end = buffer.indexOf('\n')
       if (end < 0) return
-      try { finish(null, parseLaunch(buffer.slice(0, end), expectedIdentity)) }
+      try { finish(null, privateMeasurementHandshake(buffer.slice(0, end), expectedIdentity, privateMeasurement.enabled)) }
       catch { finish(new Error('Invalid backend launch handshake')) }
       buffer = ''
     }
@@ -509,6 +519,7 @@ async function start() {
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
     releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
+    assertPrivateMeasurementRelease(privateMeasurement.enabled, packaged, releasePolicy)
     productRelease = await installedReleaseIdentity()
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')
@@ -595,11 +606,12 @@ async function start() {
   for (let attempt = 0; attempt < 40; attempt++) {
     try {
       const identity = await fetchJSON('/desktop-ready')
+      assertPrivateMeasurementMarker(identity, privateMeasurement.enabled)
       if (identity.nonce !== launch.nonce || (packaged && !sameIdentity(identity.identity, expectedIdentity))) throw new Error('Backend identity mismatch')
       ready = true
       break
     } catch (error) {
-      if (error.message === 'Backend identity mismatch') throw error
+      if (error.message === 'Backend identity mismatch' || error.code === 'PRIVATE_MEASUREMENT_MARKER') throw error
       if (backend.exitCode !== null || backend.signalCode !== null) throw new Error('Backend stopped during launch')
       await new Promise(resolveWait => setTimeout(resolveWait, 250))
     }
@@ -617,12 +629,14 @@ async function start() {
     quiesceBackend = () => fetchJSON('/desktop-quiesce', { method: 'POST', headers: control() })
     resumeBackend = () => fetchJSON('/desktop-release', { method: 'POST', headers: control() })
   }
-  host = new BrowserWindow({ title: brand, width: 1440, height: 960, show: false,
+  const hostTitle = privateMeasurement.enabled ? `${brand} — Private resource measurement (unqualified)` : brand
+  host = new BrowserWindow({ title: hostTitle, width: 1440, height: 960, show: false,
     webPreferences: { session: ses, preload: resolve(desktopDir, 'preload.cjs'),
       additionalArguments: packaged ? ['--singhouse-managed-setup'] : [],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false, webviewTag: false, spellcheck: false } })
   secureContents(host.webContents, launch.origin, true)
+  if (privateMeasurement.enabled) host.on('page-title-updated', event => { event.preventDefault(); host?.setTitle(hostTitle) })
   if (packaged) {
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
