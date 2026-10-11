@@ -143,7 +143,7 @@ test('actual builder Linux resource copying places notice bytes in receipt inven
   await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: pkg.version }))
   await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core' }))
   await writeFile(resolve(native, 'backend.py'), '# fixture\n')
-  for (const name of ['models.json', 'processing-locks.json']) await copyFile(resolve(desktop, name), resolve(native, name))
+  for (const name of ['models.json', 'processing-locks.json', 'hardware-policy.json']) await copyFile(resolve(desktop, name), resolve(native, name))
   const previous = process.env.KARAOKE_NATIVE_PAYLOAD
   process.env.KARAOKE_NATIVE_PAYLOAD = native
   let config
