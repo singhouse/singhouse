@@ -2,7 +2,12 @@
 param([ValidateSet('cpu','cuda')][string]$Accelerator, [switch]$Repair, [switch]$DependenciesOnly)
 $ErrorActionPreference = 'Stop'
 $TranscriptStarted = $false
+# A Windows PowerShell child can inherit PowerShell 7's module search path.
+# Load only this host's built-in modules; never change the user's stored path.
+$PreviousModulePath = $env:PSModulePath
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 try {
+    Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1')) -ErrorAction Stop
     $Bundle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
     $App = Join-Path $Bundle 'app\Singhouse.exe'
     $Native = Get-Content -LiteralPath (Join-Path $Bundle 'app\resources\native\manifest.json') -Raw | ConvertFrom-Json
@@ -80,10 +85,11 @@ try {
     # runtime/model identities and their bound probe using its normal fast path.
     Start-Process -FilePath $App -ArgumentList @('--private-test-resource-measurement', ('--user-data-dir="' + $Profile + '"'))
 } catch {
-    Write-Host $_ -ForegroundColor Red
+    Write-Host ($_.Exception.ToString()) -ForegroundColor Red
     if (-not $DependenciesOnly) { Read-Host 'Press Enter to close' }
     exit 1
 } finally {
     Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
     if ($TranscriptStarted) { Stop-Transcript | Out-Null }
+    $env:PSModulePath = $PreviousModulePath
 }
