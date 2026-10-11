@@ -1358,3 +1358,35 @@ lists every owned descendant still running after shutdown. Linux zombie
 processes (exited, not yet reaped) are not counted as running; they are listed
 separately as `zombies`. The harness signals only the application process it
 launched, and only after a failed shutdown.
+
+### Native dependency-runtime validation
+
+`Native processing installer fixtures` runs both tiny recovery fixtures and full
+CPU dependency-runtime builds on hosted Linux x64, Windows x64, and macOS arm64
+runners for relevant pull requests. Manual dispatch can request the full builds.
+Full builds use the locked Python, uv, wheel, and native audio inputs, install
+into an empty isolated store, run the real functional probe, and independently
+perform backend inventory verification through `desktop/backend.py`. A second installation of
+the same recipe must reuse the active environment with source retrieval disabled.
+Only compact evidence is uploaded; models and user media are never retrieved.
+
+Run the same full check locally with Python 3.12 or newer and Node 22:
+
+```sh
+python desktop/test/test_uv_installation.py --prefetch /path/to/native-inputs
+python desktop/test/test_uv_installation.py --full-runtime \
+  --assets /path/to/native-inputs --work-root /path/to/fresh-validation \
+  --evidence /path/to/runtime-evidence.json --accelerator cpu
+```
+
+The work directory must be fresh and outside the clean source checkout. To
+validate an already-built recipe, add `--recipe /path/to/recipe/manifest.json`;
+`--runtime-root /path/to/existing-isolated-store` explicitly permits existing
+store revalidation and is recorded separately from a cold installation. Keep
+that evidence distinct from an incremental dependency update or a benchmark
+against a legacy pack.
+
+These checks prove dependency installation, native operations, and inventory integrity,
+not complete song processing or model quality. CUDA and Metal runs require
+separate evidence on capable physical hardware using the corresponding locked
+recipe and `--accelerator`; the hosted CPU jobs make no accelerator claim.

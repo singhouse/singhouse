@@ -15,13 +15,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'desktop/build'))
-from assemble import unpack_uv
+from assemble import unpack_uv, unpack_executable, fetch
 from processing_recipe import install_baseline
 
 
@@ -49,6 +50,57 @@ def prefetch(directory):
             temporary.unlink()
             raise ValueError(f'Pinned {name} artifact hash mismatch')
         temporary.replace(destination)
+
+
+def full_runtime(args):
+    """Build and qualify a complete native runtime without retrieving models."""
+    work = args.work_root.resolve()
+    if work.exists():
+        raise ValueError('Full runtime work directory must be fresh')
+    work.mkdir(parents=True)
+    assets = args.assets.resolve()
+    native = json.loads((ROOT / 'desktop/locks/native.json').read_text())
+    inputs = native['targets'][target()]
+    for name in ('python', 'uv'):
+        if digest(assets / f'{name}.archive') != inputs[name]['sha256']:
+            raise ValueError(f'Pinned {name} artifact hash mismatch')
+    tools = work / 'tools'
+    uv = tools / ('uv.exe' if os.name == 'nt' else 'uv')
+    unpack_uv(assets / 'uv.archive', inputs['uv'], uv)
+    bootstrap = work / 'bootstrap'
+    bootstrap.mkdir()
+    with tarfile.open(assets / 'python.archive', 'r:gz') as archive:
+        archive.extractall(bootstrap, filter='data')
+    python = bootstrap / ('python/python.exe' if os.name == 'nt' else 'python/bin/python3')
+    cache = work / 'build-cache'
+    cache.mkdir()
+    native_bin = work / 'native-bin'
+    native_bin.mkdir()
+    for name in ('ffmpeg', 'ffprobe'):
+        executable = native_bin / (name + ('.exe' if os.name == 'nt' else ''))
+        unpack_executable(fetch(inputs[name], cache), inputs[name], executable)
+    env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get('PATH', ''),
+               UV_CACHE_DIR=str(cache / 'uv'), UV_PYTHON_DOWNLOADS='never', UV_NO_CONFIG='1',
+               PYTHONDONTWRITEBYTECODE='1')
+    if args.recipe:
+        manifest = args.recipe.resolve()
+    else:
+        subprocess.run([str(uv), 'pip', 'install', '--python', str(python), '--require-hashes',
+                        '--no-deps', '--only-binary', ':all:', '-r', str(ROOT / 'desktop/locks/build.txt')],
+                       cwd=ROOT, env=env, check=True)
+        subprocess.run([str(python), str(ROOT / 'desktop/build/build_processing.py'),
+                        '--requirements', str(ROOT / f'desktop/locks/processing-{target()}-{args.accelerator}.json'),
+                        '--build-requirements', str(ROOT / 'desktop/locks/processing-build.txt'),
+                        '--target', target(), '--accelerator', args.accelerator,
+                        '--cache', str(cache), '--output', str(work / 'build')], cwd=ROOT, env=env, check=True)
+        manifest = work / 'build/recipe/manifest.json'
+    if json.loads(manifest.read_text())['accelerator'] != args.accelerator:
+        raise ValueError('Recipe accelerator differs from requested validation')
+    config = dict(manifest=str(manifest), runtimeRoot=str((args.runtime_root or work / 'runtime').resolve()),
+                  uv=str(uv), lockPython=str(python), nativeBin=str(native_bin), evidence=str(args.evidence.resolve()))
+    path = work / 'full-config.json'
+    path.write_text(json.dumps(config))
+    subprocess.run(['node', str(ROOT / 'desktop/test/full-recipe-installation.mjs'), str(path)], cwd=ROOT, check=True)
 
 
 @unittest.skipUnless(os.environ.get('UV_INSTALLER_TEST_ASSETS'), 'requires separately prefetched pinned uv/Python archives')
@@ -105,7 +157,17 @@ class NativeInstallerTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if '--verify-installed' in sys.argv:
+    if '--full-runtime' in sys.argv:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--full-runtime', action='store_true')
+        parser.add_argument('--assets', type=Path, required=True)
+        parser.add_argument('--work-root', type=Path, required=True)
+        parser.add_argument('--evidence', type=Path, required=True)
+        parser.add_argument('--accelerator', choices=['cpu', 'metal', 'cuda'], default='cpu')
+        parser.add_argument('--recipe', type=Path, help='Validate an existing built recipe instead of building')
+        parser.add_argument('--runtime-root', type=Path, help='Reuse an existing isolated runtime store when explicitly requested')
+        full_runtime(parser.parse_args())
+    elif '--verify-installed' in sys.argv:
         parser = argparse.ArgumentParser()
         parser.add_argument('--verify-installed', nargs=4, metavar=('DIRECTORY', 'ID', 'STORE', 'TRUSTED_LOCK'))
         directory, identifier, store, trusted_lock = parser.parse_args().verify_installed
@@ -116,7 +178,7 @@ if __name__ == '__main__':
         if os.name == 'nt':
             directory, store = backend._windows_extended_path(directory), backend._windows_extended_path(store)
         verified = backend.verify_processing_recipe(directory, identifier, store, [trusted_lock])
-        print(json.dumps(dict(backendAdmission=True, files=len(verified['files']))))
+        print(json.dumps(dict(backendInventoryVerification=True, files=len(verified['files']))))
     elif '--prefetch' in sys.argv:
         parser = argparse.ArgumentParser()
         parser.add_argument('--prefetch', type=Path, required=True)

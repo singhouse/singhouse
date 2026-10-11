@@ -99,13 +99,13 @@ async function timed(instance, recipe, name, options) {
   let active
   try {active=await instance.install(recipe,options)} finally {done=true;await sampler}
   await sample()
-  const admission = JSON.parse((await promisify(execFile)(config.lockPython,
+  const inventoryVerification = JSON.parse((await promisify(execFile)(config.lockPython,
     [fileURLToPath(new URL('./test_uv_installation.py',import.meta.url)), '--verify-installed',
       active.directory,active.id,instance.root,recipe.provenance.lockSha256])).stdout)
-  assert.equal(admission.backendAdmission,true)
-  assert.equal(admission.files,config.files.length)
+  assert.equal(inventoryVerification.backendInventoryVerification,true)
+  assert.equal(inventoryVerification.files,config.files.length)
   const elapsedMs=Math.round(performance.now()-start)
-  const row={name,elapsedMs,id:active.id,backendAdmission:admission.backendAdmission,transferredSourceBytes:instance.transferredSourceBytes-transferBefore,
+  const row={name,elapsedMs,id:active.id,backendInventoryVerification:inventoryVerification.backendInventoryVerification,transferredSourceBytes:instance.transferredSourceBytes-transferBefore,
     installedUsage:await usage(active.directory),cacheUsage:await usage(join(instance.root,'uv-cache')),
     artifactCacheUsage:await usage(join(instance.root,'artifacts')),retainedUsage:await usage(instance.root),
     sampledPeak:{logicalBytes:peakLogicalBytes,allocatedBytes:peakAllocatedBytes,samples,minimumIntervalMs:250}}

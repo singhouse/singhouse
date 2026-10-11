@@ -1,9 +1,14 @@
 name: Native processing installer fixtures
 
-# These hosted-runner checks qualify installer mechanics only. Synthetic wheels
-# exercise real pinned uv and Python without acquiring any processing models.
+# These hosted-runner checks qualify installer mechanics only. Tiny wheels exercise installer recovery; full jobs test dependency runtimes.
+# Neither acquires processing models or qualifies song processing.
 on:
   workflow_dispatch:
+    inputs:
+      full_runtime:
+        description: Build and validate the complete CPU dependency runtimes (no models)
+        type: boolean
+        default: false
   pull_request:
     paths:
       - '.github/workflows/processing-recipes.yml'
@@ -17,6 +22,11 @@ on:
       - 'desktop/locks/native.json'
       - 'desktop/test/test_uv_installation.py'
       - 'desktop/test/uv-installation.mjs'
+      - 'desktop/test/full-recipe-installation.mjs'
+      - 'desktop/build/build_processing.py'
+      - 'desktop/locks/processing-*.json'
+      - 'desktop/locks/processing*.txt'
+      - 'desktop/locks/build.txt'
 permissions:
   contents: read
 concurrency:
@@ -59,4 +69,46 @@ jobs:
         with:
           name: native-installer-${{ matrix.target }}
           path: ${{ runner.temp }}/native-installer-evidence.json
+          if-no-files-found: error
+
+  full-runtime:
+    name: Full dependency runtime / ${{ matrix.target }} CPU
+    # PRs run required validation; manual callers explicitly request the full build.
+    if: github.event_name == 'pull_request' || inputs.full_runtime
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: windows-2022
+            target: win32-x64
+          - runner: macos-15
+            target: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify native runner architecture
+        shell: bash
+        run: node -e 'if (`${process.platform}-${process.arch}` !== "${{ matrix.target }}") process.exit(1)'
+      - name: Prefetch exact hash-locked tools
+        run: python desktop/test/test_uv_installation.py --prefetch "${{ runner.temp }}/full-native-inputs"
+      - name: Build, install, probe, verify backend inventory, and reuse offline
+        run: >-
+          python desktop/test/test_uv_installation.py --full-runtime
+          --assets "${{ runner.temp }}/full-native-inputs"
+          --work-root "${{ runner.temp }}/full-processing-runtime"
+          --evidence "${{ runner.temp }}/full-runtime-evidence.json"
+          --accelerator cpu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-runtime-${{ matrix.target }}-cpu
+          path: ${{ runner.temp }}/full-runtime-evidence.json
           if-no-files-found: error
