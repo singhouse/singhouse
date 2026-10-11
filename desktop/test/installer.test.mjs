@@ -127,7 +127,7 @@ test('installer rejects stale native admission policy instead of overlaying it',
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
-    for (const policy of ['models.json', 'processing-locks.json']) {
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) {
       await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     }
     const { default: valid, releasePolicyPath } = await import(`${installer}?valid=${Date.now()}`)
@@ -196,7 +196,7 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
-    for (const policy of ['models.json', 'processing-locks.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     const { default: config, stageProcessingCatalog, withStagedCatalog } = await import(`${installer}?catalog=${Date.now()}`)
     // Neither a stray legacy catalog nor the per-target sources are in the static file list.
     assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))

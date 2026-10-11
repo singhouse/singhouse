@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   setLyricsLookup: enabled => ipcRenderer.invoke('setup:lyrics-lookup-save', enabled),
   getOnboardingState: () => ipcRenderer.invoke('setup:preferences'),
   setOnboardingState: state => ipcRenderer.invoke('setup:save-preferences', state),
+  setHardwareSelection: value => ipcRenderer.invoke('setup:hardware-selection', value),
+  reviewProcessingUpdate: () => ipcRenderer.invoke('setup:runtime-update'),
   preflightSetup: () => ipcRenderer.invoke('setup:preflight'),
   chooseModelSource: mode => ipcRenderer.invoke('setup:model-source', mode),
   chooseInstallLocation: () => ipcRenderer.invoke('setup:install-location'),

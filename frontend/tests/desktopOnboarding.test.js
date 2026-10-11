@@ -7,6 +7,7 @@ import { useDesktopOnboarding } from '../src/composables/useDesktopOnboarding'
 import DesktopOnboarding from '../src/components/DesktopOnboarding.vue'
 import onboardingSource from '../src/components/DesktopOnboarding.vue?raw'
 import modalSetupSource from '../src/components/DesktopModalSetup.vue?raw'
+import DesktopModalSetup from '../src/components/DesktopModalSetup.vue'
 
 function bridge(overrides = {}) {
   return {
@@ -216,6 +217,105 @@ describe('desktop setup consent and recovery', () => {
 })
 
 describe('desktop setup screens', () => {
+  it('still navigates to ready when Modal connection setup completes', async () => {
+    globalThis.window.karaokeDesktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'modal', choice: 'modal' }),
+    })
+    const wrapper = mount(DesktopOnboarding, { global: { stubs: { DesktopModalSetup: true } } })
+    await flushPromises()
+    wrapper.findComponent(DesktopModalSetup).vm.$emit('ready')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('ready')
+    wrapper.unmount()
+  })
+  it('can close the check screen without a late result overwriting the saved exit', async () => {
+    let finish, save
+    const desktop = bridge({
+      preflightSetup: vi.fn(() => new Promise(resolve => { finish = resolve })),
+      setOnboardingState: vi.fn(() => new Promise(resolve => { save = resolve })),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    await wrapper.find('.library').trigger('click')
+    finish({ available: false })
+    await flushPromises()
+    expect(desktop.setOnboardingState).toHaveBeenCalledTimes(1)
+    save({})
+    await flushPromises()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+    await flushPromises()
+    expect(desktop.setOnboardingState).toHaveBeenCalledExactlyOnceWith({ step: 'choose', choice: 'local', skipped: true })
+  })
+  for (const outcome of ['resolve', 'reject']) {
+    it(`allows leaving a pending check and ignores its late ${outcome}`, async () => {
+      let finish, fail
+      const pending = new Promise((resolve, reject) => { finish = resolve; fail = reject })
+      const desktop = bridge({ preflightSetup: vi.fn(() => pending) })
+      const setup = useDesktopOnboarding(desktop)
+      await setup.initialize()
+      const check = setup.chooseProcessing()
+      await flushPromises()
+      expect(setup.checkingLocal.value).toBe(true)
+      expect(desktop.cancelSetup).not.toHaveBeenCalled()
+      await setup.refresh()
+      expect(setup.checkingLocal.value).toBe(true)
+      expect(await setup.skip()).toBe(true)
+      expect(desktop.setOnboardingState).toHaveBeenCalledExactlyOnceWith({ step: 'choose', choice: 'local', skipped: true })
+      if (outcome === 'resolve') finish({ available: false, reason: 'Unavailable' })
+      else fail(new Error('Late check failure'))
+      await check
+      expect(setup.choice.value).toBe('local')
+      expect(setup.plan.value).toBeNull()
+      expect(setup.error.value).toBe('')
+      expect(setup.checkingLocal.value).toBe(false)
+      expect(desktop.setOnboardingState).toHaveBeenCalledTimes(1)
+    })
+  }
+  it('leaves the dedicated check screen on failure and offers a retry', async () => {
+    let fail
+    const desktop = bridge({ preflightSetup: vi.fn(() => new Promise((resolve, reject) => { fail = reject })) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('checking')
+    expect(wrapper.find('.choices').exists()).toBe(false)
+    fail(new Error('Check failed'))
+    await flushPromises()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('choose')
+    expect(wrapper.find('.choices').exists()).toBe(true)
+    expect(wrapper.find('.alert').text()).toContain('Check failed')
+    wrapper.unmount()
+  })
+  it('shows pending verification without declaring local processing unavailable or switching to Modal', async () => {
+    let finish
+    const pending = new Promise(resolve => { finish = resolve })
+    const desktop = bridge({ preflightSetup: vi.fn(() => pending) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('h1').text()).toBe('Checking this computer.')
+    expect(wrapper.text()).toContain('checking your installed processing tools and models')
+    expect(wrapper.find('[role="status"] progress').attributes('value')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('Currently unavailable')
+    expect(wrapper.text()).not.toContain('Recommended')
+    expect(wrapper.find('.choices').exists()).toBe(false)
+    expect(wrapper.find('.library').attributes('disabled')).toBeUndefined()
+    expect(desktop.setOnboardingState).not.toHaveBeenCalled()
+    finish({ available: true, ready: true, planId: 'verified', components: [] })
+    await flushPromises()
+    expect(wrapper.find('.choice').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('.choice').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.text()).not.toContain('checking your installed processing tools and models')
+    wrapper.unmount()
+  })
   it('offers a retry after failed preflight without recommending local setup', async () => {
     const desktop = bridge({ preflightSetup: vi.fn().mockRejectedValueOnce(new Error('Hardware check failed'))
       .mockResolvedValue({ available: true, planId: 'retry' }) })
@@ -989,7 +1089,9 @@ describe('responsive setup planning', () => {
     await flushPromises()
     expect(wrapper.find('[role="status"]').text()).toContain('Checking your local processing setup')
     expect(wrapper.find('.library').attributes('disabled')).toBeUndefined()
-    expect(wrapper.find('[data-testid="onboarding-continue"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="onboarding-dialog"]').attributes('data-step')).toBe('checking')
+    expect(wrapper.find('.choices').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="onboarding-continue"]').exists()).toBe(false)
     await wrapper.find('.library').trigger('click')
     await flushPromises()
     expect(wrapper.emitted('close')).toHaveLength(1)
@@ -1109,4 +1211,37 @@ it.each(['ready', 'restart', 'progress'])('retains availability when %s restores
   expect(setup.localAvailable.value).toBe(true)
   expect(setup.choice.value).toBe('modal')
   expect(setup.step.value).toBe('choose')
+})
+
+it('changing hardware selection refreshes consent without starting downloads', async () => {
+  const desktop = bridge({ setHardwareSelection: vi.fn().mockResolvedValue({ available: true, planId: 'new-variant' }) })
+  const setup = useDesktopOnboarding(desktop)
+  await setup.chooseProcessing()
+  await setup.setHardwareSelection('qualified-cpu')
+  expect(desktop.setHardwareSelection).toHaveBeenCalledWith({ mode: 'manual', variantId: 'qualified-cpu' })
+  expect(setup.plan.value.planId).toBe('new-variant')
+  expect(desktop.startSetup).not.toHaveBeenCalled()
+  desktop.setHardwareSelection.mockRejectedValue(new Error('Variant is no longer supported'))
+  expect(await setup.setHardwareSelection('qualified-cpu')).toBe(false)
+  expect(setup.plan.value).toBe(null)
+  expect(setup.canStart.value).toBe(false)
+})
+
+it('automatic hardware selection uses a fixed host request', async () => {
+  const desktop = bridge({ setHardwareSelection: vi.fn().mockResolvedValue({ available: false }) })
+  const setup = useDesktopOnboarding(desktop)
+  await setup.setHardwareSelection('')
+  expect(desktop.setHardwareSelection).toHaveBeenCalledWith({ mode: 'automatic' })
+})
+
+it('reviewing an update from a working setup requires fresh explicit download consent', async () => {
+  const desktop = bridge({ reviewProcessingUpdate: vi.fn().mockResolvedValue({ available: true, ready: false, planId: 'update-plan' }) })
+  const setup = useDesktopOnboarding(desktop)
+  setup.step.value = 'ready'
+  await setup.reviewProcessingUpdate()
+  expect(setup.step.value).toBe('consent')
+  expect(setup.plan.value.planId).toBe('update-plan')
+  expect(desktop.startSetup).not.toHaveBeenCalled()
+  await setup.start()
+  expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'update-plan' })
 })

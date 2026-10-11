@@ -171,8 +171,8 @@ export function modelsManifestFromPolicy(policy) {
 // planId as onboarding_setup.mjs preflight() derives it for a plan that still
 // needs installation: the identity of [runtime, models manifest, offered
 // components, model source mode, offline folder, memory requirements].
-export function derivePlanId({ runtime, modelsManifest, components, modelSource, offlineDirectory = null, memoryRequirements }) {
-  return jsonIdentity([runtime, modelsManifest, components, modelSource, offlineDirectory, memoryRequirements])
+export function derivePlanId({ runtime, modelsManifest, components, modelSource, offlineDirectory = null, memoryRequirements, hardwareSelection }) {
+  return jsonIdentity([runtime, modelsManifest, components, modelSource, offlineDirectory, memoryRequirements, ...(hardwareSelection ? [hardwareSelection] : [])])
 }
 
 // Binds the consented plan to the shipped catalog runtime and the packaged
@@ -182,7 +182,7 @@ export function assertPlanIdentity(plan, { catalogRuntime, policy }) {
   const modelsManifest = modelsManifestFromPolicy(policy)
   assert.equal(plan.modelSource, 'upstream', 'Plan identity check requires upstream model sources')
   const expected = derivePlanId({ runtime: catalogRuntime, modelsManifest, components: plan.components, modelSource: plan.modelSource,
-    offlineDirectory: null, memoryRequirements: plan.memoryRequirements })
+    offlineDirectory: null, memoryRequirements: plan.memoryRequirements, hardwareSelection: plan.hardwareSelection })
   assert.equal(plan.planId, expected, 'Plan identity does not match the packaged catalog runtime and model policy')
   return { verified: true, planId: expected, runtimeId: jsonIdentity(catalogRuntime), modelsManifestId: jsonIdentity(modelsManifest),
     takenFromPlan: ['components', 'memoryRequirements'] }

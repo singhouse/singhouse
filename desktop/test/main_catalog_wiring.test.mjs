@@ -34,3 +34,21 @@ test('main.mjs never uses the unrestricted catalog validator or private-test loc
   assert.doesNotMatch(source, /validateSetupCatalog/)
   assert.doesNotMatch(source, /privateTestLocalSources/)
 })
+
+test('custom stores retain uv policy and cached launch verification with a usage lease', () => {
+  const start = source.indexOf('openManagedStores = storeRoot =>')
+  const end = source.indexOf("await startupSurface.update('Starting your library…')", start)
+  const block = source.slice(start, end)
+  assert.match(block, /managedStoreDirectories\(storeRoot\)/)
+  assert.match(block, /new UvRuntimeManager\(directories\.processing/)
+  for (const option of ['nativeRuntimeId', 'nativeLockSha256', 'uvPath', 'privateMeasurementRuntimeOptions']) {
+    assert.ok(block.includes(option), `uv stores preserve ${option}`)
+  }
+  assert.match(block, /launchSelection\(\.\.\.await Promise\.allSettled/)
+  assert.match(block, /processingManager\.active\(\{ launch: true \}\)/)
+  assert.match(block, /modelCache\.active\(\{ launch: true \}\)/)
+  const lease = block.indexOf('processingManager.acquireUsage(active.id, { launch: true })')
+  const probe = block.indexOf('processingManager.launchProbe(active)')
+  assert.ok(lease > 0 && probe > lease, 'the cached probe is protected by the schema2 usage lease')
+  assert.match(block, /if \(!activeProcessing\) \{ await processingUsage\?\.release\(\)/)
+})

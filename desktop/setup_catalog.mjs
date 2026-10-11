@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { validateProcessingManifest, validateModelManifest } from './runtime_manager.mjs'
+import { validateProcessingRecipe, recipeTransfers } from './processing_recipe.mjs'
 
 export const SETUP_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 const targetKeys = ['platform', 'arch', 'accelerator']
@@ -77,7 +78,9 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
     throw new Error('Processing setup catalog is missing; prepare it with an explicit runtime manifest, qualification evidence, and model terms')
   }
   if (!identity) throw new Error('Setup catalog validation requires the application target identity')
-  const runtime = validateProcessingManifest(catalog.runtime, identity, trustedLocks)
+  const runtime = catalog.runtime.schema === 2
+    ? validateProcessingRecipe(catalog.runtime, identity, trustedLocks, { local: privateTestLocalSources })
+    : validateProcessingManifest(catalog.runtime, identity, trustedLocks)
   const q = catalog.qualification
   if (runtime.probe.schema !== 2 || !['transcription', 'separation'].every(id => runtime.capabilities.includes(id))
       || !SETUP_MODEL_IDS.every(id => runtime.models.includes(id)
@@ -88,7 +91,7 @@ export function validateSetupCatalog(catalog, { identity, trustedLocks, modelPol
   }
   const scopeError = qualificationScopeError(q.scope, releaseChannel)
   if (scopeError) throw new Error(scopeError)
-  for (const file of runtime.files) if (file.url !== undefined) source(file.url, privateTestLocalSources)
+  for (const file of runtime.schema === 2 ? recipeTransfers(runtime) : runtime.files) if (file.url !== undefined) source(file.url, privateTestLocalSources)
   for (const part of runtime.archive?.parts || []) source(part.url, privateTestLocalSources)
   for (const entry of runtime.provenance.packages) source(entry.sourceUrl)
   if (!Array.isArray(catalog.models) || catalog.models.length !== SETUP_MODEL_IDS.length

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "recipes": [
+    {
+      "id": "standard-karaoke",
+      "label": "Karaoke separation and lyrics",
+      "modelIds": ["heart-transcriptor", "demucs-mdx-extra", "karaoke-roformer"]
+    }
+  ],
+  "variants": []
+}

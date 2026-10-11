@@ -40,20 +40,21 @@ test('NVIDIA probe uses bounded fixed execFile arguments on Windows and Linux', 
       getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'NVIDIA Test GPU' }] }),
       runCommand: async (file, args, options) => {
         assert.equal(file, 'nvidia-smi')
-        assert.deepEqual(args, ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'])
+        assert.deepEqual(args, ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'])
         assert.equal(options.shell, false)
         assert.equal(options.timeout, 1500)
         assert.equal(options.maxBuffer, 65536)
         assert.equal(options.killSignal, 'SIGKILL')
-        return 'NVIDIA Test GPU, 8192\n'
+        return 'NVIDIA Test GPU, 8192, 2048\n'
       } })
     assert.equal(result.videoMemoryBytes, 8 * 1024 ** 3)
     assert.equal(result.gpuDevices.length, 1)
+    assert.equal(result.cudaDevices[0].availableMemoryBytes, 2 * 1024 ** 3)
   }
 })
 
 test('multiple adapters never add their VRAM into a fictional single GPU', async () => {
-  const result = await collectHardware({ ...base, runCommand: async () => 'NVIDIA Test GPU, 8192\nNVIDIA Test GPU, 8192\n' })
+  const result = await collectHardware({ ...base, runCommand: async () => 'NVIDIA Test GPU, 8192, 2048\nNVIDIA Test GPU, 8192, 2048\n' })
   assert.equal(result.gpuDevices.length, 2)
   assert.equal(result.videoMemoryBytes, null)
   assert.equal(result.gpuDevices[0].dedicatedMemoryBytes, 8 * 1024 ** 3)
@@ -87,15 +88,24 @@ test('CUDA inventory comes from NVIDIA driver results, not generic display names
   const getGPUInfo = async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA Test GPU' }] })
   const noDriver = await collectHardware({ ...base, getGPUInfo })
   assert.deepEqual(noDriver.cudaDevices, [])
-  const detected = await collectHardware({ ...base, getGPUInfo, runCommand: async () => 'NVIDIA Test GPU, 4096\n' })
+  const detected = await collectHardware({ ...base, getGPUInfo, runCommand: async () => 'NVIDIA Test GPU, 4096, 1024\n' })
   assert.equal(detected.gpuDevices.length, 2)
-  assert.deepEqual(detected.cudaDevices, [{ name: 'NVIDIA Test GPU', dedicatedMemoryBytes: 4 * 1024 ** 3 }])
+  assert.deepEqual(detected.cudaDevices, [{ name: 'NVIDIA Test GPU', dedicatedMemoryBytes: 4 * 1024 ** 3, availableMemoryBytes: 1024 ** 3 }])
   assert.equal(detected.videoMemoryBytes, null)
 })
 
 test('multiple NVIDIA cards remain distinct CUDA observations with no chosen adapter', async () => {
   const result = await collectHardware({ ...base,
-    runCommand: async () => 'NVIDIA Small, 4096\nNVIDIA Large, 24576\n' })
+    runCommand: async () => 'NVIDIA Small, 4096, 1024\nNVIDIA Large, 24576, 8192\n' })
   assert.deepEqual(result.cudaDevices.map(device => device.dedicatedMemoryBytes), [4 * 1024 ** 3, 24 * 1024 ** 3])
   assert.equal(result.videoMemoryBytes, null)
+})
+
+test('available VRAM is observed independently and impossible driver values stay unknown', async () => {
+  for (const output of ['GPU, 8192, 8193', 'GPU, 8192, N/A', 'GPU, 8192', 'GPU, 8192, -1']) {
+    assert.deepEqual((await collectHardware({ ...base, runCommand: async () => output })).cudaDevices, [])
+  }
+  const result = await collectHardware({ ...base, runCommand: async () => 'GPU, 8192, 0' })
+  assert.equal(result.cudaDevices[0].availableMemoryBytes, 0)
+  assert.equal(result.cudaDevices[0].dedicatedMemoryBytes, 8 * 1024 ** 3)
 })

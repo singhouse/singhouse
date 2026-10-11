@@ -60,7 +60,7 @@ export function packagedCatalogIdentity(nativeManifest, appVersion) {
 // desktop/models.json. releaseChannel is the channel of the release policy
 // being packaged: the installed application validates the catalog against that
 // channel, so a private-smoke catalog cannot be packaged under any other.
-export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, modelPolicy, releaseChannel }) {
+export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, modelPolicy, releaseChannel, nativeLockSha256 }) {
   if (![PROCESSING_READY, PLAYBACK_ONLY].includes(mode)) throw new Error('Invalid processing packaging mode')
   const target = `${identity?.platform}-${identity?.arch}`
   const source = `desktop/${catalogSourceName(identity)}`
@@ -83,6 +83,10 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
     }
     // The exact validation the installed application applies at start.
     catalog = validateShippedCatalog(text, { identity, trustedLocks: locks.lockSha256, modelPolicy, releaseChannel })
+    if (catalog.runtime.schema === 2 && (!/^[a-f0-9]{64}$/.test(nativeLockSha256 || '')
+        || catalog.runtime.recipe.nativeTools.nativeLockSha256 !== nativeLockSha256)) {
+      throw new Error('Processing recipe native tools differ from the assembled application')
+    }
     // The shipped bytes must be exactly what desktop/build/setup_catalog.mjs
     // writes for the validated result, so duplicate keys (JSON.parse keeps the
     // last), unknown fields, or reordered keys cannot ride along unreviewed.
@@ -107,11 +111,11 @@ export async function readProcessingCatalogInputs(desktopDirectory, target) {
 // Decides what this packaging run ships, before electron-builder runs. Returns
 // the record facts, the exact validated bytes to package (processing-ready
 // only), and operator notices.
-export async function prepareProcessingGate({ desktopDir, nativeManifest, appVersion, releaseChannel, argv, env }) {
+export async function prepareProcessingGate({ desktopDir, nativeManifest, appVersion, releaseChannel, argv, env, nativeLockSha256 }) {
   const mode = processingModeFromArgs(argv, env)
   const identity = packagedCatalogIdentity(nativeManifest, appVersion)
   const inputs = await readProcessingCatalogInputs(desktopDir, identity)
-  const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, ...inputs })
+  const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256, ...inputs })
   const notices = notice ? [notice] : []
   try {
     await lstat(resolve(desktopDir, PACKAGED_CATALOG_NAME))

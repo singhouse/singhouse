@@ -29,7 +29,7 @@ function electronDevices(info) {
   if (!Array.isArray(info?.gpuDevice)) return []
   return info.gpuDevice.slice(0, 32).filter(device => device && typeof device === 'object').map(device => ({
     name: label(device.deviceString) || label(device.vendorString) || 'Unidentified GPU',
-    dedicatedMemoryBytes: null,
+    dedicatedMemoryBytes: null, availableMemoryBytes: null,
   }))
 }
 
@@ -40,11 +40,12 @@ function nvidiaDevices(output) {
   const result = []
   for (const line of lines) {
     // Reject malformed/unsupported data instead of guessing units or memory.
-    const match = /^([^,]+),\s*(\d+)\s*$/.exec(line)
+    const match = /^([^,]+),\s*(\d+),\s*(\d+)\s*$/.exec(line)
     if (!match) return []
     const memory = bytes(Number(match[2]) * 1024 * 1024)
-    if (!memory || !label(match[1])) return []
-    result.push({ name: label(match[1]), dedicatedMemoryBytes: memory })
+    const available = bytes(Number(match[3]) * 1024 * 1024)
+    if (!memory || available === null || available > memory || !label(match[1])) return []
+    result.push({ name: label(match[1]), dedicatedMemoryBytes: memory, availableMemoryBytes: available })
   }
   return result
 }
@@ -63,7 +64,7 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
   const [gpuInfo, nvidiaOutput] = await Promise.all([
     bounded(getGPUInfo),
     ['linux', 'win32'].includes(platform) ? bounded(() => runCommand('nvidia-smi',
-      ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
+      ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'],
       { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT, shell: false, windowsHide: true, killSignal: 'SIGKILL' })) : null,
   ])
   const gpuDevices = electronDevices(gpuInfo)
@@ -74,7 +75,7 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
     // A model name alone cannot identify repeated physical devices; consume each
     // unmatched Electron record once and keep distinct adapters distinct.
     const existing = gpuDevices.find(device => device.dedicatedMemoryBytes === null && device.name.toLowerCase() === detected.name.toLowerCase())
-    if (existing) existing.dedicatedMemoryBytes = detected.dedicatedMemoryBytes
+    if (existing) Object.assign(existing, detected)
     else gpuDevices.push({ ...detected })
   }
   return {

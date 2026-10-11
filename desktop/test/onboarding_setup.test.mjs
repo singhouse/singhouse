@@ -421,12 +421,12 @@ test('CUDA memory uses its single observed NVIDIA device, never a larger mixed d
     getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA GPU' }] }),
     runCommand: async () => output,
   })
-  const observed = await inventory('NVIDIA GPU, 4096\n')
+  const observed = await inventory('NVIDIA GPU, 4096, 4096\n')
   observed.gpuDevices[0].dedicatedMemoryBytes = 24 * GiB
   observed.videoMemoryBytes = 24 * GiB
   setup.hardware = async () => observed
   assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
-  setup.hardware = async () => inventory('NVIDIA GPU, 8192\n')
+  setup.hardware = async () => inventory('NVIDIA GPU, 8192, 8192\n')
   assert.equal((await setup.preflight()).memoryQualification.status, 'meets-measured-requirements')
 })
 
@@ -1159,8 +1159,11 @@ test('installed runtimes matching the catalog keep their CUDA and Metal tiers', 
   const drifted = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
   drifted.setup.catalog.runtime = { ...drifted.setup.catalog.runtime, id: `${drifted.setup.catalog.runtime.id}-other` }
   plan = await drifted.setup.preflight()
+  assert.equal(plan.updateAvailable, true)
+  assert.equal(plan.runtimeTransferRequired, false, 'catalog drift preserves the working runtime until review')
+  plan = await drifted.setup.requestRuntimeUpdate()
   assert.equal(plan.available, true)
-  assert.equal(plan.runtimeTransferRequired, true, 'catalog drift requires the selected runtime to replace the installed runtime')
+  assert.equal(plan.runtimeTransferRequired, true, 'reviewed catalog update replaces the selected runtime')
   assert.equal(plan.components[0].label, 'Local processing runtime')
   assert.equal(plan.components.length, 4)
   assert.deepEqual(plan.processingEstimate.minutes, [1, 3], 'the replacement plan estimates the selected qualified runtime')
@@ -1252,7 +1255,7 @@ test('a usable CPU installation offers the selected CUDA upgrade and reuses mode
   const probe = runtime.probe
   runtime.probe = async active => ({ ...await probe(), accelerator: active.manifest.accelerator })
   calls.length = 0
-  const plan = await setup.preflight()
+  const plan = await setup.requestRuntimeUpdate()
   assert.equal(plan.ready, false)
   assert.equal(plan.restartRequired, false)
   assert.equal(plan.runtimeTransferRequired, true)
@@ -1274,6 +1277,83 @@ test('falling back to CPU after a CUDA installation never completes the upgrade'
   setup.catalog.runtime.accelerator = 'cuda'
   setup.catalog.qualification.accelerator = 'cuda'
   runtime.install = async () => {} // The manager returned the older usable pointer.
-  assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
+  assert.equal((await start(setup, (await setup.requestRuntimeUpdate()).planId)).state, 'error')
   assert.equal((await setup.preflight()).ready, false)
+})
+
+test('hardware selection restores automatic for stale versions and rejects unknown overrides', async () => {
+  const hardwarePolicy = { schema: 1, version: '1.0.0', recipes: [{ id: 'standard', label: 'Standard', modelIds: LOCAL_MODEL_IDS }], variants: [] }
+  const saved = []
+  const { setup } = fixture({ hardwarePolicy, loadHardwareSelection: async () => ({ mode: 'manual', policyVersion: 'old', variantId: 'old' }),
+    saveHardwareSelection: async value => saved.push(value) })
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+  assert.deepEqual(plan.hardwareSelection, { mode: 'automatic', variantId: null, policyVersion: '1.0.0' })
+  await assert.rejects(() => setup.setHardwareSelection({ mode: 'manual', variantId: 'unknown' }), /Unknown processing/)
+  await setup.setHardwareSelection({ mode: 'automatic' })
+  assert.deepEqual(saved, [{ mode: 'automatic', variantId: null, policyVersion: '1.0.0' }])
+})
+
+test('new processing recipes require matching qualified hardware selection before any transfer', async () => {
+  const { setup, calls } = fixture()
+  setup.catalog.runtime.schema = 2
+  const plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.match(plan.reason, /qualified hardware policy/)
+  await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
+})
+
+test('working runtime stays selected until the user reviews and consents to a catalog update', async () => {
+  const { setup, runtime, cache, calls, saved } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.pythonVersion = '3-next'
+  // Keep the fixture functional probe aligned with the new runtime after install.
+  const probe = runtime.probe
+  runtime.probe = async (...args) => ({ ...await probe(...args), pythonVersion: runtime.value.manifest.pythonVersion })
+  const before = await setup.preflight()
+  assert.equal(before.ready, true)
+  assert.equal(before.updateAvailable, true)
+  assert.equal(before.runtimeTransferRequired, false)
+  assert.equal(runtime.value, previous)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.ready, false)
+  assert.equal(update.runtimeTransferRequired, true)
+  assert.equal(runtime.value, previous)
+  assert.equal(saved.at(-1).runtimeUpdateRequested, true)
+  await setup.start({ planId: update.planId })
+  assert.equal(runtime.value, previous)
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'models', 'runtime'])
+  assert.notEqual(runtime.value.id, previous.id)
+})
+
+test('unqualified recipe cannot replace a working legacy runtime or block its ordinary setup', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.schema = 2
+  assert.equal((await setup.preflight()).ready, true)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.available, false)
+  assert.match(update.reason, /qualified hardware policy/)
+  assert.equal(runtime.value, previous)
+})
+
+test('instance identity differs from recipe identity without scheduling an unchanged runtime transfer', async () => {
+  const { setup, runtime, cache, calls } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  runtime.value.recipeId = runtime.value.id
+  runtime.value.id = 'a-local-instance-identity'
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  calls.length = 0
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, true)
+  assert.equal(plan.updateAvailable, false)
+  assert.equal(plan.runtimeTransferRequired, false)
+  assert.deepEqual(calls, [])
 })

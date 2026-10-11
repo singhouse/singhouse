@@ -44,6 +44,8 @@ jobs:
       - name: Locked processing pack fixtures
         run: |
           python -m unittest discover -s desktop/test -p test_processing_pack.py
+          python -m unittest discover -s desktop/test -p test_processing_recipe.py
+          python -m unittest discover -s desktop/test -p test_uv_backend.py
           python -m unittest discover -s desktop/test -p test_notices.py
       - name: Desktop backend isolation and readiness attestation
         run: python -m unittest discover -s desktop -p test_backend.py

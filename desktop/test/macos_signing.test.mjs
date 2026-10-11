@@ -173,7 +173,7 @@ test('electron-builder file allowlist includes runtime macOS verifier', async ()
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture\n')
-    for (const name of ['models.json', 'processing-locks.json']) await writeFile(resolve(native, name), await readFile(resolve(desktop, name)))
+    for (const name of ['models.json', 'processing-locks.json', 'hardware-policy.json']) await writeFile(resolve(native, name), await readFile(resolve(desktop, name)))
     const config = (await import(`../build/installer.mjs?macos-allowlist=${Date.now()}`)).default
     assert.ok(config.files.includes('macos_signing.mjs'))
   } finally {

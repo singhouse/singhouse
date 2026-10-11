@@ -581,7 +581,7 @@ prevents activation; a failed startup check leaves playback available. Legacy
 only, and never grant a runnable capability. Functional runtime readiness is separate from installed model sets,
 model quality, and physical platform qualification.
 
-The pack assembler consumes an already-built target environment and a complete
+Legacy archive migration uses an already-built target environment and a complete
 input lock. The lock identifies application/Python versions, target, accelerator,
 managed Python path, capabilities, each model's capability, required model IDs,
 source commit, upstream package artifact hashes, licenses, retained notice paths,
@@ -590,7 +590,7 @@ SHA-256, and executable flag. Unlisted files, modified inputs, and symlinks fail
 assembly. Linux preserves case-distinct names; Windows and macOS reject names
 that collide without case sensitivity. Model weights are never part of a runtime.
 
-`build_processing.py` constructs this input from the exact artifact recipes in
+`build_processing.py` constructs a uv installation recipe from the exact artifact recipes in
 `desktop/locks/processing-*.json`, the pinned standalone Python archive, and
 application wheels built from a clean source commit. Source distributions use
 the locked build dependencies. Native extensions additionally require a verified
@@ -609,17 +609,48 @@ python3 desktop/build/build_processing.py \
 
 Build native source extensions on their target runner. Dependency locks for
 other targets describe build inputs, not successful hardware qualification.
-The build writes its pack to `<output>/pack` through the assembler below and
-accepts the same delivery options (`--archive-base-url`, `--archive-part-size`,
-`--archive-name`, `--blobs`, `--base-url`), validated the same way before any
-build work starts. To package a separately constructed locked payload:
+The default output is a schema 2 recipe and the small set of source-built and
+application wheels plus license notices. Upstream wheels keep their pinned
+upstream URLs; use `--artifact-base-url` to name the immutable HTTPS publication
+directory for built wheels and notices. There is no dependency resolution or
+source compilation on installed desktops. Model downloads and native audio
+tools remain separate.
+
+The release bundles the exact uv executable pinned in `locks/native.json`.
+The installer keeps verified artifacts and uv's cache under the chosen
+processing root, creates an environment at its final versioned path, verifies
+the release-pinned file inventory, and runs functional checks before selecting
+it with durable activation pointers. Repair creates a new environment and keeps
+the previous working runtime. Existing archive installations remain usable
+without a forced download. Cache repair can rebuild from retained verified
+artifacts; missing artifacts require an explicit online retry.
+
+uv's clone mode can reuse filesystem storage when supported. Any fallback
+hardlinks are detached before activation so damaged cache entries cannot change
+an active environment. Copy fallback costs must be measured on each filesystem;
+no universal deduplication saving is promised. The immutable recipe also binds
+Python, native tool versions, exclusions, licenses and application compatibility.
+
+Hardware recommendations come from the separately versioned
+`hardware-policy.json`. Automatic and supported manual selection use measured
+end-to-end evidence, available resources and configurable headroom. The shipped
+policy currently has no qualified variants; new recipe choices stay unavailable
+until target-specific qualification supplies them. A startup check and fresh
+checks before local worker execution enforce the selected resource limits.
+Playback remains available, and changing models requires reviewing setup and
+consenting to their download and terms.
+
+`--legacy-pack` retains the previous archive builder for migration and comparison
+while the replacement is being qualified. Its retirement requires the native
+qualification results; it is not a second supported release delivery route.
+For legacy maintenance only, package a separately constructed locked payload:
 
 ```sh
 python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
   --lock /path/to/processing-input-lock.json --output /path/to/new-pack
 ```
 
-By default the output is archive form: `manifest.json`, `input-lock.json`, and
+The legacy assembler defaults to archive form: `manifest.json`, `input-lock.json`, and
 `archive/<name>.001`, `.002`, … The archive format (`concat-gzip-v1`) has no
 internal paths or headers. Its uncompressed stream is every locked file's bytes
 concatenated in manifest order. That stream is gzip-compressed deterministically
@@ -841,6 +872,48 @@ on normal exit, including imported media. `--demo` adds quiet synthetic tones an
 original timed test words. Use copies of your media. On Windows, use the venv's
 `Scripts/python.exe` and set `KARAOKE_DESKTOP_PYTHON` to its absolute path in your
 shell. Linux graphical smoke tests can run under `xvfb-run -a`.
+
+### Isolated resource measurement before qualification
+
+The native backend's explicit `--private-test-resource-measurement` flag allows
+local acceptance runs before measured hardware recommendations exist. It requires
+a native payload whose adjacent `release.json` has channel `private-test`, a
+separate persistent `--runtime` library, a schema-2 managed runtime, all three
+pinned model sets, their full `--processing-id` and `--models-id`, and the actual
+successful `--processing-probe` attestation. Source mode, demo mode, and
+`--processing-variant` cannot be combined with this flag. A parent launcher must
+keep the backend's stdin heartbeat open, as for any native launch.
+
+This mode skips only the qualified resource-threshold recommendation. Runtime,
+interpreter, native-tool, model, and functional-probe verification still apply.
+The backend remains loopback-only, uses its normal password gate, and preserves
+the isolated library across restarts. Its launch handshake and `/desktop-ready`
+response explicitly report `resourceMeasurement` with `qualified: false` and
+`recommendationsEnabled: false`. Use those markers to label the local test UI and
+capture observations externally. Runs in this mode do not establish release
+qualification, memory recommendations, or a supported hardware variant; no
+thresholds are invented and normal application admission remains unchanged.
+
+The existing packaged Electron application can use that same verified test
+profile directly:
+
+```sh
+/path/to/singhouse --private-test-resource-measurement \
+  --user-data-dir=/absolute/isolated-test-profile
+```
+
+Stop the previous test backend after its jobs finish before opening the profile.
+The profile directory must already exist and contain the verified active uv
+runtime and complete model cache; environments must stay at their original
+absolute paths. This launch requires a `private-test` package and fails closed
+if the runtime, models, functional probe, or backend measurement marker is
+missing. It opens the ordinary host, library, and projector, labels the host
+window "Private resource measurement (unqualified)", and keeps processing local.
+It does not enroll an unsupported variant or relax application integrity checks.
+This explicit private lane also accepts trusted recipes whose locally built
+application wheels or notices use `file:` URLs. Their pinned hashes, installed
+inventory, native-tool binding, and probe checks still apply. Ordinary packaged
+launches continue to require HTTPS recipe sources.
 
 ## Playback qualification
 
@@ -1547,3 +1620,39 @@ lists every owned descendant still running after shutdown. Linux zombie
 processes (exited, not yet reaped) are not counted as running; they are listed
 separately as `zombies`. The harness signals only the application process it
 launched, and only after a failed shutdown.
+
+### Native dependency-runtime validation
+
+`Native processing installer fixtures` runs both tiny recovery fixtures and full
+CPU dependency-runtime builds on hosted Linux x64, Windows x64, and macOS arm64
+runners for relevant pull requests. Manual dispatch can request the full builds.
+Full builds use the locked Python, uv, wheel, and native audio inputs, install
+into an empty isolated store, run the real functional probe, and independently
+perform backend inventory verification through `desktop/backend.py`. A second installation of
+the same recipe must reuse the active environment with source retrieval disabled.
+The tiny fixture also installs a changed synthetic dependency wheel, measures its
+transfer and sampled disk peak with rollback retained, and checks fresh-process
+selection, corruption fallback, and in-flight lease preservation. This is not a
+full dependency-release update or model qualification.
+Only compact evidence is uploaded; models and user media are never retrieved.
+
+Run the same full check locally with Python 3.12 or newer and Node 22:
+
+```sh
+python desktop/test/test_uv_installation.py --prefetch /path/to/native-inputs
+python desktop/test/test_uv_installation.py --full-runtime \
+  --assets /path/to/native-inputs --work-root /path/to/fresh-validation \
+  --evidence /path/to/runtime-evidence.json --accelerator cpu
+```
+
+The work directory must be fresh and outside the clean source checkout. To
+validate an already-built recipe, add `--recipe /path/to/recipe/manifest.json`;
+`--runtime-root /path/to/existing-isolated-store` explicitly permits existing
+store revalidation and is recorded separately from a cold installation. Keep
+that evidence distinct from an incremental dependency update or a benchmark
+against a legacy pack.
+
+These checks prove dependency installation, native operations, and inventory integrity,
+not complete song processing or model quality. CUDA and Metal runs require
+separate evidence on capable physical hardware using the corresponding locked
+recipe and `--accelerator`; the hosted CPU jobs make no accelerator claim.

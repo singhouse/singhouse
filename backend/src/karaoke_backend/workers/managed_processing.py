@@ -196,6 +196,8 @@ def accelerator_device(*, capability: str | None = None) -> str | None:
         raise InvalidAttestation("Managed accelerator does not match attestation")
     if os.getenv("KARAOKE_PROCESSING_PYTHON", "").strip() != value["pythonPath"]:
         raise InvalidAttestation("Managed Python path does not match attestation")
+    from .processing_resources import enforce_resources
+    enforce_resources(value)
     return {"cpu": "cpu", "metal": "mps", "mps": "mps", "cuda": "cuda"}[
         value["accelerator"]
     ]

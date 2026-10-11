@@ -36,6 +36,40 @@ BACKEND_PARENT_WATCHDOG_SECONDS = 15
 RECOVERY_OWNER_LOCK_WAIT_SECONDS = 45
 
 
+def _is_link_entry(entry: os.DirEntry, *, windows: bool = os.name == "nt") -> bool:
+    """A directory entry that is a symbolic link, a junction, or (on Windows)
+    any other reparse point. A junction is not a symbolic link to
+    ``DirEntry.is_symlink()`` and is a directory to ``is_dir(follow_symlinks=False)``,
+    so it is checked separately."""
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _is_link_path(path: Path, *, windows: bool = os.name == "nt") -> bool:
+    """The same check as ``_is_link_entry`` for a named path: a symbolic
+    link, a junction, or (on Windows) any other reparse point. A missing path
+    is not a link; opening it fails later."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if windows:
+        try:
+            attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        except OSError:
+            return False
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
 def _safe_regular_file(path: Path, *, required: bool = True) -> Path | None:
     """Validate the path as named, before resolving it.
 
@@ -854,14 +888,241 @@ def processing_memory_policy(lock_hash: str) -> str:
         return ""
 
 
+def verify_processing_recipe(directory: Path, identifier: str, store: Path,
+                             trusted_locks: list[str] | None = None, *, quick: bool = False) -> dict:
+    """Verify a uv installation against release-pinned payload hashes, not its receipt."""
+    def regular(path):
+        if _is_link_path(path):
+            raise RuntimeError("Processing metadata must not be a symbolic link or reparse point")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise RuntimeError("Processing metadata must be a regular file")
+            return stream.read()
+
+    def sha(raw):
+        return hashlib.sha256(raw).hexdigest()
+
+    def canonical(value):
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+
+    if (not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{64}", identifier)
+            or directory.parent != store / "envs" or directory.name != identifier[:16]):
+        raise RuntimeError("Invalid managed recipe installation path")
+    for ancestor in (store, directory.parent, directory):
+        if _is_link_path(ancestor) or not ancestor.is_dir():
+            raise RuntimeError("Invalid managed recipe directory")
+    raw = regular(directory / "manifest.json")
+    recipe_id = sha(raw)
+    manifest = json.loads(raw)
+    receipt = json.loads(regular(directory / "receipt.json"))
+    configuration_root = receipt.get("directory")
+    if not isinstance(configuration_root, str) or not Path(configuration_root).is_absolute():
+        raise RuntimeError("Invalid processing installation configuration root")
+    receipt_path = Path(configuration_root)
+    if os.name == "nt":
+        receipt_path = _windows_extended_path(receipt_path)
+    if (set(receipt) != {"schema", "kind", "id", "recipeId", "nonce", "directory"}
+            or receipt["schema"] != 1 or receipt["kind"] != "processing-installation"
+            or receipt["id"] != identifier or receipt["recipeId"] != recipe_id
+            or receipt_path != directory
+            or not isinstance(receipt["nonce"], str) or not re.fullmatch(r"[a-f0-9]{32}", receipt["nonce"])
+            or sha(canonical({"recipeId": recipe_id, "nonce": receipt["nonce"]})) != identifier):
+        raise RuntimeError("Processing installation receipt does not match its stable path")
+    if manifest.get("schema") != 2 or manifest.get("kind") != "processing":
+        raise RuntimeError("Invalid processing recipe")
+    provenance = manifest.get("provenance", {})
+    lock_text = provenance.get("inputLock")
+    if not isinstance(lock_text, str):
+        raise RuntimeError("Processing recipe has no input lock")
+    lock_hash = sha(lock_text.encode())
+    if trusted_locks is None:
+        policy = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
+        if policy.get("schema") != 1:
+            raise RuntimeError("Invalid application processing trust policy")
+        trusted_locks = policy.get("lockSha256", [])
+    if (not isinstance(trusted_locks, list) or lock_hash not in trusted_locks
+            or provenance.get("lockSha256") != lock_hash):
+        raise RuntimeError("Processing recipe is not trusted by this application release")
+    expected = {key: value for key, value in manifest.items() if key != "provenance"}
+    expected.update(schema=2, kind="processing-input", sourceCommit=provenance.get("sourceCommit"),
+                    packages=provenance.get("packages"))
+    if json.loads(lock_text) != expected:
+        raise RuntimeError("Processing recipe differs from its trusted input lock")
+    records = manifest.get("recipe", {}).get("files")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("Processing recipe has no trusted installed inventory")
+    # Observe each entry once without descending through a link or reparse point.
+    observed, directories = {}, {""}
+    pending = [(directory, "")]
+    while pending:
+        current, prefix = pending.pop()
+        with os.scandir(current) as listing:
+            for entry in listing:
+                name = prefix + entry.name
+                info = entry.stat(follow_symlinks=False)
+                if _is_link_entry(entry):
+                    if not entry.is_symlink():
+                        raise RuntimeError("Unexpected processing recipe reparse point")
+                    observed[name] = info
+                elif stat.S_ISDIR(info.st_mode):
+                    directories.add(name)
+                    pending.append((Path(entry.path), name + "/"))
+                elif stat.S_ISREG(info.st_mode):
+                    observed[name] = info
+                else:
+                    raise RuntimeError("Unexpected processing recipe file type")
+    records_by_name = {record.get("path"): record for record in records}
+    allowed = {"manifest.json", "receipt.json"}
+    path_keys = {name.casefold() for name in allowed}
+    installed = []
+    for record in records:
+        name = record.get("path")
+        if (not isinstance(name, str) or not name or len(name) >= 512 or any(
+                not re.fullmatch(r"[A-Za-z0-9._+() -]+", part) or part.strip() != part
+                or part in {".", ".."} or part.endswith(".")
+                or re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)
+                for part in name.split("/"))):
+            raise RuntimeError("Invalid processing recipe file path")
+        key = name if manifest.get("platform") == "linux" else name.casefold()
+        if key in path_keys:
+            raise RuntimeError("Duplicate processing recipe file path")
+        path_keys.add(key)
+        allowed.add(name)
+        path = directory / name
+        for parent in Path(name).parents:
+            if parent == Path("."):
+                break
+            if parent.as_posix() not in directories:
+                raise RuntimeError("Invalid processing recipe file ancestor")
+        info = observed.get(name)
+        if info is None:
+            raise RuntimeError("Processing recipe file verification failed")
+        if "target" in record:
+            target = record["target"]
+            if (set(record) != {"path", "target"} or not isinstance(target, str)
+                    or Path(target).is_absolute() or not path.is_symlink()
+                    or os.readlink(path).replace(os.sep, "/") != target or not path.resolve().is_relative_to(directory)
+                    or not (path.resolve().is_file() or path.resolve().is_dir())):
+                raise RuntimeError("Invalid processing recipe symbolic link")
+            resolved = path.resolve()
+            if resolved.is_file():
+                target_record = records_by_name.get(resolved.relative_to(directory).as_posix())
+                if not target_record or "target" in target_record or "kind" in target_record:
+                    raise RuntimeError("Processing link lacks a trusted file record")
+                installed.append({**target_record, "path": name})
+            else:
+                installed.append(record)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("Unexpected processing recipe symbolic link or file type")
+        if quick and "kind" not in record:
+            if (type(record.get("size")) is not int or record["size"] != info.st_size
+                    or not isinstance(record.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", record["sha256"])
+                    or type(record.get("executable")) is not bool
+                    or (os.name != "nt" and bool(info.st_mode & 0o111) != record["executable"])):
+                raise RuntimeError("Processing recipe file verification failed")
+            installed.append(record)
+            continue
+        data = regular(path)
+        if record.get("kind") == "uv-path-text":
+            if name != "env/pyvenv.cfg":
+                raise RuntimeError("Unsupported processing path normalization")
+            text = data.decode("utf-8")
+            if (len(text) > 16384 or "@SINGHOUSE_RUNTIME_ROOT@" in text or "\0" in text
+                    or any(not re.fullmatch(r"[a-z][a-z0-9_-]* = [^\r\n]*", line)
+                           for line in text.splitlines() if line)):
+                raise RuntimeError("Invalid managed environment configuration")
+            data = text.replace(configuration_root, "@SINGHOUSE_RUNTIME_ROOT@").encode()
+        elif "kind" in record:
+            raise RuntimeError("Unsupported processing inventory type")
+        if (type(record.get("size")) is not int or record["size"] != len(data)
+                or sha(data) != record.get("sha256") or type(record.get("executable")) is not bool
+                or (os.name != "nt" and bool(path.stat().st_mode & 0o111) != record["executable"])):
+            raise RuntimeError("Processing recipe file verification failed")
+        installed.append(record)
+    if set(observed) != allowed:
+        raise RuntimeError("Processing recipe inventory does not match installed files")
+    # Preserve the recipe separately: installed inventory is used only to bind
+    # the worker interpreter attestation, never as a source of trusted hashes.
+    return {**manifest, "files": installed}
+
+
+def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
+                               policy: dict, release_channel: str = "") -> dict:
+    """Bind worker resource limits to a qualified variant from the shipped policy."""
+    variants = [v for v in policy.get("variants", []) if v.get("id") == variant_id]
+    if policy.get("schema") != 1 or len(variants) != 1:
+        raise RuntimeError("Choose a qualified processing option in setup")
+    variant = variants[0]
+    evidence = variant.get("evidence", {})
+    if (variant.get("status") != "qualified" or variant.get("settings") != {}
+            or any(variant.get(key) != manifest.get(key) for key in ("platform", "arch", "accelerator"))
+            or evidence.get("runtimeLockSha256") != manifest["provenance"]["lockSha256"]
+            or evidence.get("scope") not in ({"full", "private-smoke"} if release_channel == "private-test" else {"full"})
+            or any(evidence.get("pipeline", {}).get(key) is not True for key in ("separation", "transcription", "alignment"))
+            or not evidence.get("qualityComparison")):
+        raise RuntimeError("Selected processing option is not qualified for this runtime")
+    headroom = evidence.get("headroomFraction")
+    if type(headroom) not in (int, float) or not math.isfinite(headroom) or not 0 <= headroom <= 10:
+        raise RuntimeError("Invalid qualified processing headroom")
+    def measured(key):
+        value = evidence.get(key)
+        if type(value) is not int or not 0 < value <= 2**53 - 1:
+            raise RuntimeError("Missing measured processing resources")
+        return value
+    ram = math.ceil(measured("peakRamBytes") * (1 + headroom))
+    vram = math.ceil(measured("peakVramBytes") * (1 + headroom)) if manifest["accelerator"] == "cuda" else None
+    if ram > 2**53 - 1 or (vram is not None and vram > 2**53 - 1):
+        raise RuntimeError("Qualified processing resources exceed supported limits")
+    unified = manifest["platform"] == "darwin" and manifest["arch"] == "arm64"
+    if evidence.get("unifiedMemory") is not unified:
+        raise RuntimeError("Qualified processing memory architecture differs")
+    return {"schema": 1, "runtimeManifestId": runtime_id, "variantId": variant_id,
+            "requirements": {"ramBytes": ram, "vramBytes": vram, "unifiedMemory": unified,
+                             "workingDiskBytes": measured("workingDiskBytes")}, "settings": {}}
+
+
+def private_measurement_marker(enabled: bool) -> dict:
+    return ({"resourceMeasurement": {"mode": "private-test", "qualified": False,
+                                      "recommendationsEnabled": False}}
+            if enabled else {})
+
+
+def validate_private_measurement_context(native: Path | None, root: Path | None,
+                                         demo: bool, runtime: Path | None,
+                                         processing: Path | None, models: Path | None,
+                                         probe: dict | None, processing_id: str | None,
+                                         models_id: str | None, resource_variant: str | None) -> None:
+    """An explicit native-only measurement lane, never a release recommendation."""
+    if (native is None or root is not None or demo or runtime is None or processing is None
+            or models is None or not isinstance(probe, dict) or resource_variant is not None
+            or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                   for value in (processing_id, models_id))):
+        raise RuntimeError("Private resource measurement requires native mode, persistent test data, full runtime/model identities and a probe; source, demo and qualified variants are excluded")
+    release_path = native.parent / "release.json"
+    release = json.loads(_safe_regular_file(release_path).read_text(encoding="utf-8"))
+    if (not isinstance(release, dict) or type(release.get("schema")) is not int
+            or release["schema"] != 1 or release.get("channel") != "private-test"):
+        raise RuntimeError("Private resource measurement requires a private-test release policy")
+
+
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
                            models: Path | None, probe: dict | None = None,
                            model_policy: dict | None = None,
                            trusted_locks: list[str] | None = None, *,
                            processing_id: str | None = None,
-                           models_id: str | None = None,
-                           processing_root: Path | None = None) -> dict[str, str]:
+                           models_id: str | None = None, processing_root: Path | None = None, resource_variant: str | None = None,
+                           hardware_policy: dict | None = None, release_channel: str = "",
+                           native_lock_sha256: str | None = None,
+                           private_test_resource_measurement: bool = False) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
+    if private_test_resource_measurement:
+        if (release_channel != "private-test" or resource_variant is not None or processing is None
+                or models is None or not isinstance(probe, dict)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                       for value in (processing_id, models_id))):
+            raise RuntimeError("Private resource measurement requires explicit private-test runtime, models and probe identities")
     # Keep inventory access, parent containment, attestation equality, and the
     # interpreter paths inherited by managed workers in one Windows namespace.
     # Do not resolve here: that would hide symbolic links from verification.
@@ -893,13 +1154,15 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         # The parent passes the full manifest digest as the identity. The
         # directory may be named by that digest or by its first 16 characters;
         # either way the manifest is checked against the full digest.
+        if kind == "processing" and directory.parent == store_root / store / "envs":
+            return verify_processing_recipe(directory, identifier, store_root / store, trusted_locks, quick=True)
         expected_parent = store_root / store / "packs"
         if (directory.parent != expected_parent or not isinstance(identifier, str)
                 or not re.fullmatch(r"[a-f0-9]{64}", identifier)
                 or directory.name not in (identifier, identifier[:16])):
             raise RuntimeError("Invalid managed processing path")
         for ancestor in (expected_parent.parent, expected_parent, directory):
-            if ancestor.is_symlink():
+            if _is_link_path(ancestor):
                 raise RuntimeError("Managed processing directories must not be symbolic links")
         # Non-blocking, so a FIFO placed here is rejected instead of waiting.
         descriptor = os.open(directory / "manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -963,8 +1226,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             with os.scandir(current) as entries:
                 for entry in entries:
                     relative_name = prefix + entry.name
-                    if entry.is_symlink():
-                        raise RuntimeError("Managed processing files must not be symbolic links")
+                    if _is_link_entry(entry):
+                        raise RuntimeError("Managed processing files must not be symbolic links or junctions")
                     if entry.is_dir(follow_symlinks=False):
                         pending.append((entry.path, relative_name + "/"))
                     elif entry.is_file(follow_symlinks=False):
@@ -1029,6 +1292,24 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
             })
     if processing:
         manifest = verify(processing, processing_id, "processing", "processing")
+        if manifest["schema"] == 2:
+            if native_lock_sha256 is None:
+                native_lock_sha256 = json.loads(Path(__file__).with_name("provenance.json").read_text()).get("locks", {}).get("native.json")
+            if (not isinstance(native_lock_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", native_lock_sha256)
+                    or manifest["recipe"].get("nativeTools", {}).get("nativeLockSha256") != native_lock_sha256):
+                raise RuntimeError("Processing recipe native tools do not match this application")
+            if not private_test_resource_measurement:
+                if hardware_policy is None:
+                    hardware_policy = json.loads(Path(__file__).with_name("hardware-policy.json").read_text())
+                env["KARAOKE_DESKTOP_RESOURCE_POLICY_JSON"] = json.dumps(processing_resource_policy(
+                    manifest, processing_id, resource_variant, hardware_policy, release_channel))
+        if private_test_resource_measurement:
+            required_models = {"heart-transcriptor", "demucs-mdx-extra", "karaoke-roformer"}
+            if (manifest.get("schema") != 2 or manifest.get("probe", {}).get("schema") != 2
+                    or not {"transcription", "separation"}.issubset(manifest.get("capabilities", []))
+                    or not required_models.issubset(manifest.get("models", []))
+                    or model_manifest is None or not required_models.issubset(model_manifest["models"])):
+                raise RuntimeError("Private resource measurement requires the complete verified uv runtime and model inventory")
         for key in ("appVersion", "backendVersion", "lyricsyncVersion", "platform", "arch"):
             if manifest.get(key) != identity[key]:
                 raise RuntimeError("Processing runtime is incompatible with this app")
@@ -1055,14 +1336,14 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                     or provenance.get("lockSha256") != lock_hash):
                 raise RuntimeError("Processing input lock is not trusted by this application release")
             input_lock = json.loads(raw_lock)
-            if input_lock.get("schema") != 1 or input_lock.get("kind") != "processing-input":
+            if input_lock.get("schema") != manifest["schema"] or input_lock.get("kind") != "processing-input":
                 raise RuntimeError("Invalid processing input lock")
             for key in ("appVersion", "backendVersion", "lyricsyncVersion", "pythonVersion", "platform", "arch",
                         "accelerator", "python", "capabilities", "models", "modelCapabilities", "probe", "files", "packages", "sourceCommit"):
                 actual = (provenance.get(key) if key in {"packages", "sourceCommit"} else
                           [{name: value for name, value in record.items() if name != "url"} for record in manifest["files"]]
                           if key == "files" else manifest.get(key))
-                if actual != input_lock.get(key):
+                if manifest["schema"] == 1 and actual != input_lock.get(key):
                     raise RuntimeError("Processing manifest differs from its input lock")
             required = {"transcription": ["faster_whisper", "lyricsync.transcription.heart", "karaoke_backend.workers.heart_transcriptor"],
                         "separation": ["demucs.separate", "audio_separator.separator"]}
@@ -1095,6 +1376,8 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                         and isinstance(probe["components"], dict)
                         and set(probe["components"]) == expected_component_keys
                         and all(isinstance(value, str) and value for value in probe["components"].values()))
+        if private_test_resource_measurement and not probe_passed:
+            raise RuntimeError("Private resource measurement requires the actual successful functional probe attestation")
         capabilities_ready = probe_passed and functional
         if capabilities_ready:
             env["KARAOKE_PROCESSING_MEMORY_JSON"] = processing_memory_policy(lock_hash)
@@ -1339,8 +1622,11 @@ def desktop_lyrics_lookup_endpoint(control_token):
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
-        models_id: str | None = None, lyrics_lookup: bool = False,
-        processing_root: Path | None = None) -> None:
+        models_id: str | None = None, lyrics_lookup: bool = False, processing_root: Path | None = None, resource_variant: str | None = None,
+        private_test_resource_measurement: bool = False) -> None:
+    if private_test_resource_measurement:
+        validate_private_measurement_context(native, root, demo, runtime_path, processing, models,
+                                             processing_probe, processing_id, models_id, resource_variant)
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1380,8 +1666,10 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             environment = persistent_environment(runtime, origin, password, native) if native else isolated_environment(runtime, origin, password)
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
-                                                          processing_id=processing_id, models_id=models_id,
-                                                          processing_root=processing_root))
+                                                          processing_id=processing_id, models_id=models_id, resource_variant=resource_variant, processing_root=processing_root,
+                                                          release_channel=(json.loads((native.parent / "release.json").read_text()).get("channel", "")
+                                                                           if resource_variant or private_test_resource_measurement else ""),
+                                                          private_test_resource_measurement=private_test_resource_measurement))
             if native and lyrics_lookup:
                 environment["KARAOKE_LRCLIB"] = "1"
             os.environ.clear()
@@ -1453,7 +1741,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                                 "nonterminal": row.nonterminal, "deferred": row.deferred}
 
                     async def ready(request):
-                        return JSONResponse({"nonce": nonce, **({"identity": identity} if identity else {})}, headers={"Cache-Control": "no-store"})
+                        return JSONResponse({"nonce": nonce, **({"identity": identity} if identity else {}),
+                                             **private_measurement_marker(private_test_resource_measurement)}, headers={"Cache-Control": "no-store"})
 
                     app.router.routes.insert(0, Route("/desktop-ready", ready, methods=["GET"]))
                     mutation_barrier = DesktopMutationBarrier(app, durable_job_counts)
@@ -1505,7 +1794,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                         mutation_barrier.bind_job_worker(app.state.job_worker)
                         print(json.dumps({"origin": origin, "password": password, "nonce": nonce,
                                           "controlToken": control_token,
-                                          **({"identity": identity} if identity else {})}),
+                                          **({"identity": identity} if identity else {}),
+                                          **private_measurement_marker(private_test_resource_measurement)}),
                               file=protocol_stdout, flush=True)
 
                     app.state.lifespan_startup_hooks.append(announce)
@@ -1558,6 +1848,9 @@ if __name__ == "__main__":
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--runtime", type=Path, help="Empty private directory created by the parent")
     parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
+    parser.add_argument("--processing-variant", help="Selected qualified hardware variant")
+    parser.add_argument("--private-test-resource-measurement", action="store_true",
+                        help="Explicit native private-test measurement only; no qualified resource recommendation")
     parser.add_argument("--processing-id", help="Full manifest identity of the selected processing pack")
     parser.add_argument("--processing-root", type=Path, help="Install root holding the processing and model stores (default: the runtime's parent)")
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
@@ -1567,6 +1860,8 @@ if __name__ == "__main__":
     parser.add_argument("--desktop-config-stdin", action="store_true", help="Read private setup configuration from the parent pipe")
     args = parser.parse_args()
     try:
+        if args.private_test_resource_measurement and args.native is None:
+            raise RuntimeError("Private resource measurement is available only with --native")
         if args.durable_replace:
             print(json.dumps(durable_replace(*args.durable_replace)), flush=True)
         elif args.durable_application_replace:
@@ -1596,7 +1891,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root)
+                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root, args.processing_variant, args.private_test_resource_measurement)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

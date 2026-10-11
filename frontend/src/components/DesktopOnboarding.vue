@@ -8,7 +8,8 @@ import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 const props = defineProps({ open: { type: Boolean, default: true } })
 const emit = defineEmits(['close', 'open', 'add-song', 'modal-settings', 'lyrics-saved', 'background'])
 const setup = useDesktopOnboarding()
-const { step, choice, plan, status, busy, planning, error, localAvailable, canStart, lyricsEnabled } = setup
+const { step: navigationStep, choice, plan, status, busy, planning, lyricsEnabled, checkingLocal, error, localAvailable, canStart } = setup
+const step = computed(() => checkingLocal.value ? 'checking' : navigationStep.value)
 const heading = ref(null)
 const dialog = ref(null)
 let poll
@@ -262,8 +263,11 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             >▣</span>
             <strong>On this computer</strong>
             <span>Your audio stays here. No cloud processing charges.</span>
-            <small id="local-reason">{{ localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
-            <span class="badge">{{ localAvailable ? 'Recommended' : 'Currently unavailable' }}</span>
+            <small
+              id="local-reason"
+              role="status"
+            >{{ checkingLocal ? 'Checking your installed processing tools and models. This can take a minute…' : localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
+            <span class="badge">{{ checkingLocal ? 'Checking…' : localAvailable ? 'Recommended' : 'Currently unavailable' }}</span>
           </button>
           <button
             class="choice"
@@ -371,6 +375,44 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             Check local setup again
           </button>
         </div>
+        <details v-if="plan?.hardwareAssessment">
+          <summary>Processing quality and hardware selection</summary>
+          <label for="hardware-variant">Processing option</label>
+          <select
+            id="hardware-variant"
+            :value="plan.hardwareSelection?.variantId || ''"
+            :disabled="busy"
+            @change="setup.setHardwareSelection($event.target.value)"
+          >
+            <option value="">
+              Automatic (recommended)
+            </option>
+            <option
+              v-for="variant in plan.hardwareAssessment.variants"
+              :key="variant.id"
+              :value="variant.id"
+              :disabled="!variant.supported"
+            >
+              {{ variant.label }} — {{ variant.supported ? 'Supported' : variant.status }}
+            </option>
+          </select>
+          <p>{{ plan.hardwareAssessment.reason }}</p>
+          <p v-if="!plan.hardwareAssessment.variants.length">
+            No measured processing variants are published for this release. The existing setup remains available when its own release checks pass.
+          </p>
+          <div
+            v-for="variant in plan.hardwareAssessment.variants"
+            :key="variant.id"
+          >
+            <p><strong>{{ variant.label }}</strong>: {{ variant.qualityTradeoff }} {{ variant.reason }}</p>
+            <p v-if="variant.requirements">
+              Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              <span v-if="variant.requirements.vramBytes"> · Dedicated graphics memory: {{ size(variant.requirements.vramBytes) }}</span>.
+              Model transfer: {{ size(variant.requirements.transferBytes) }} · Installed: {{ size(variant.requirements.installedBytes) }}.
+            </p>
+          </div>
+          <p>Available memory is checked again before processing. Changes to quality and additional model transfers require your choice.</p>
+        </details>
         <button
           class="text-button"
           :disabled="busy"
@@ -560,7 +602,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           Modal processing uses cloud resources in your own account. Audio needed for processing leaves this computer for your deployment.
         </p>
         <DesktopModalSetup
-          @ready="step = 'ready'"
+          @ready="navigationStep = 'ready'"
           @restart="setup.restart"
         />
         <div class="actions">
@@ -582,10 +624,10 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           ref="heading"
           tabindex="-1"
         >
-          Checking your setup.
+          Checking this computer.
         </h1>
         <p class="lead">
-          You can use your library while this check finishes.
+          We’re checking your installed processing tools and models. This can take a minute. You can use your library while the check finishes.
         </p>
         <div
           class="panel"
@@ -839,10 +881,17 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           >
             Change setup preferences
           </button>
+          <button
+            v-if="choice === 'local' && plan?.updateAvailable"
+            :disabled="busy"
+            @click="setup.reviewProcessingUpdate"
+          >
+            Review processing update
+          </button>
         </div>
       </template>
       <p
-        v-if="planning"
+        v-if="planning && !checkingLocal"
         role="status"
       >
         Checking your local processing setup… You can continue in your library while this finishes.
@@ -857,7 +906,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
       <button
         v-if="step !== 'welcome' && step !== 'progress'"
         class="text-button library"
-        :disabled="busy"
+        :disabled="busy && !checkingLocal"
         @click="leave()"
       >
         {{ compact ? (['checking', 'restart'].includes(step) ? 'Continue in library →' : 'Dismiss') : 'Skip setup and open my library' }}
