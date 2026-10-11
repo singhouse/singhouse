@@ -7,7 +7,8 @@ import { useDesktopOnboarding } from '../composables/useDesktopOnboarding'
 
 const emit = defineEmits(['close', 'add-song', 'modal-settings'])
 const setup = useDesktopOnboarding()
-const { step, choice, plan, status, busy, checkingLocal, error, localAvailable, canStart } = setup
+const { step: navigationStep, choice, plan, status, busy, checkingLocal, error, localAvailable, canStart } = setup
+const step = computed(() => checkingLocal.value ? 'checking' : navigationStep.value)
 const heading = ref(null)
 const dialog = ref(null)
 let poll
@@ -398,7 +399,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
         <p class="lead">
           Modal processing uses cloud resources in your own account. Audio needed for processing leaves this computer for your deployment.
         </p>
-        <DesktopModalSetup @ready="step = 'ready'" @restart="setup.restart" />
+        <DesktopModalSetup @ready="navigationStep = 'ready'" @restart="setup.restart" />
         <div class="actions">
           <button
             class="text-button"
@@ -418,10 +419,10 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           ref="heading"
           tabindex="-1"
         >
-          Checking your setup.
+          Checking this computer.
         </h1>
         <p class="lead">
-          You can use your library while this check finishes.
+          We’re checking your installed processing tools and models. This can take a minute. You can use your library while the check finishes.
         </p>
         <div
           class="panel"
@@ -568,7 +569,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
       <button
         v-if="step !== 'welcome'"
         class="text-button library"
-        :disabled="busy"
+        :disabled="busy && !checkingLocal"
         @click="leave()"
       >
         {{ ['ready', 'progress', 'checking'].includes(step) ? 'Open my library →' : 'Skip setup and open my library' }}
