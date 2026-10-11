@@ -180,6 +180,7 @@ function quitHarness(armed) {
     app, host, closeGuard, ownsInstance: true, shutdownComplete: false, quitting: false,
     updateOperation: null, handingOff: false, installation: null, heartSetup: null, onboardingSetup: null,
     modalCheckController: null, startupSurface: null, projector: null, processingOperation: null,
+    packRecheck: new AbortController(),
     startupVerification: new AbortController(), blocker: { stop() {} }, backend: null, runtime: null,
     stopRuntime: async () => { calls.push('backend-stop') }, console,
   })

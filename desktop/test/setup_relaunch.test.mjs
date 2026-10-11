@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
@@ -65,6 +65,9 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
   try {
     const mount = join(root, '.mount_Singho'), procRoot = join(root, 'proc')
     mkdirSync(mount)
+    const device = statSync(mount, { bigint: true }).dev
+    const major = ((device >> 8n) & 0xfffn) | ((device >> 32n) & 0xfffff000n)
+    const minor = (device & 0xffn) | ((device >> 12n) & 0xffffff00n)
     const executablePath = join(mount, 'Singhouse'), outer = join(root, 'Singhouse.AppImage')
     writeFileSync(executablePath, 'inner')
     const bytes = Buffer.alloc(64); bytes.write('\x7fELF'); bytes.set([0x41, 0x49, 2], 8)
@@ -76,7 +79,7 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
     }
     symlinkSync(executablePath, join(procRoot, 'self', 'exe'))
     symlinkSync(outer, join(procRoot, '17', 'exe'))
-    writeFileSync(join(procRoot, 'self', 'mountinfo'), `2339 53 0:136 / ${mount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro\n`)
+    writeFileSync(join(procRoot, 'self', 'mountinfo'), `2339 53 ${major}:${minor} / ${mount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro\n`)
     const fd = (pid, name, target, info) => {
       const path = join(procRoot, pid, 'fd', name)
       rmSync(path, { force: true }); symlinkSync(target, path)
@@ -86,7 +89,7 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
     fd('self', '3', 'pipe:[1234]', 'flags: 00\nmnt_id: 18\n')
     fd('17', '3', outer, 'flags: 0100000\nmnt_id: 53\n')
     fd('17', '4', 'pipe:[1234]', 'flags: 01\nmnt_id: 18\n')
-    fd('17', '5', '/dev/fuse', 'flags: 0100002\nfuse_connection: 136\n')
+    fd('17', '5', '/dev/fuse', `flags: 0100002\nfuse_connection: ${minor}\n`)
     // An enclosing launcher can itself be an AppImage without serving our
     // mount. Its ancestry and header must never outrank the exact keeper.
     const enclosing = join(root, 'terminal.AppImage')
@@ -99,9 +102,9 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
     assert.equal(check().outerPath, outer)
     assert.equal(check().outerSha256, createHash('sha256').update(bytes).digest('hex'))
     assert.notEqual(check().outerPath, enclosing)
-    fd('17', '5', '/dev/fuse', 'flags: 0100002\nfuse_connection: 137\n')
+    fd('17', '5', '/dev/fuse', `flags: 0100002\nfuse_connection: ${minor + 1n}\n`)
     assert.throws(check, /no authenticated runtime keeper/)
-    fd('17', '5', '/dev/fuse', 'flags: 0100002\nfuse_connection: 136\n')
+    fd('17', '5', '/dev/fuse', `flags: 0100002\nfuse_connection: ${minor}\n`)
     fd('17', '4', 'pipe:[5678]', 'flags: 01\nmnt_id: 18\n')
     assert.throws(check, /no authenticated runtime keeper/)
     fd('17', '4', 'pipe:[1234]', 'flags: 01\nmnt_id: 18\n')

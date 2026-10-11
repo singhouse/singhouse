@@ -198,7 +198,7 @@ test('installer requires the native memory policy to match the target platform s
       JSON.stringify({ appVersion: pkg.version, platform, arch }))
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
-    for (const policy of ['models.json', 'processing-locks.json']) {
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) {
       await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     }
     const source = await readFile(resolve(desktop, 'processing-memory', 'linux-x64.json'))

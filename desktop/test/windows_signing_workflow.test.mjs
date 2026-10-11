@@ -85,10 +85,10 @@ test('Windows signing documentation binds Azure values to environment secrets', 
 
 test('Windows signing workflow locks project tool versions and does not persist checkout credentials', async () => {
   const workflow = await readFile(workflowUrl, 'utf8')
-  assert.match(workflow, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683/)
-  assert.match(workflow, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/)
-  assert.match(workflow, /actions\/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065/)
-  assert.match(workflow, /azure\/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6/)
+  assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/)
+  assert.match(workflow, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/)
+  assert.match(workflow, /actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/)
+  assert.match(workflow, /azure\/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906/)
   assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/)
   assert.match(workflow, /persist-credentials: false/)
   assert.match(workflow, /node-version: '22'/)

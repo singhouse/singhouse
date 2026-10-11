@@ -96,7 +96,7 @@ export const EVIDENCE_SCHEMA = 2
 export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
   'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs',
   // The driver takes the runtime store's directory naming from the store itself.
-  'runtime_manager.mjs', 'processing_probe.py', 'setup_catalog.mjs', 'release.mjs'])
+  'runtime_manager.mjs', 'processing_probe.py', 'processing_recipe.mjs', 'setup_catalog.mjs', 'release.mjs'])
 // The packaged release policy, cross-checked against the build's release
 // receipt. A consistency check only, not receipt verification: policyId hashes
 // the complete release policy, so equality ties the packaged channel to the
