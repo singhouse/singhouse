@@ -651,6 +651,23 @@ directory for built wheels and notices. There is no dependency resolution or
 source compilation on installed desktops. Model downloads and native audio
 tools remain separate.
 
+For a release host with flat asset names, add `--artifact-layout flat` and use
+its immutable HTTPS download directory as `--artifact-base-url`. Upload the
+files directly inside the generated `recipe/artifacts/` directory: their names
+are `<full-sha256>-<original-filename>`, and the manifest uses those exact URLs.
+Wheel and notice metadata retain their original filenames. The default layout
+continues to export `recipe/artifacts/<full-sha256>/<original-filename>`.
+The builder exports files only; publication and download verification are
+separate release steps.
+
+The Windows acceptance workflow's manual recipes phase accepts
+`release_assets: true` to export CPU and CUDA recipes in this flat layout.
+Their publication directories are fixed to
+`https://github.com/singhouse/processing-packs/releases/download/rc-<full-source-commit>-win-<accelerator>/`.
+The default remains bundled acceptance transport. Neither mode publishes
+assets or establishes song or hardware qualification; packaging still requires
+the exact recipe lock to be independently committed to the trust policy.
+
 The release bundles the exact uv executable pinned in `locks/native.json`.
 The installer keeps verified artifacts and uv's cache under the chosen
 processing root, creates an environment at its final versioned path, verifies

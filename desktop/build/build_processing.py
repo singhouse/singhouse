@@ -31,7 +31,7 @@ from packaging.version import Version
 from assemble import (ROOT, LOCKS, PLATFORMS, digest, fetch, host_target,
                       python_path, site_packages, run, metadata, source_provenance, unpack_uv)
 from assemble_processing import DEFAULT_PART_SIZE, assemble, delivery, relative
-from processing_recipe import generate as generate_recipe, wheel_records, install_baseline
+from processing_recipe import generate as generate_recipe, wheel_records, install_baseline, validate_publication
 
 MODULES = {
     'transcription': ['faster_whisper', 'lyricsync.transcription.heart', 'karaoke_backend.workers.heart_transcriptor'],
@@ -352,9 +352,12 @@ def build_wheel(source, destination, host_python, env, toolchain=None):
 DELIVERY_OPTIONS = ('base_url', 'blobs', 'archive_base_url', 'archive_part_size', 'archive_name')
 
 
-def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None, *, delivery_options=None, legacy_pack=False, artifact_base_url=None):
+def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None, *, delivery_options=None, legacy_pack=False, artifact_base_url=None, artifact_layout='directory'):
     # Pack delivery options pass through to the assembler unchanged. Validate
     # them before any build work so a bad option fails fast, exactly as there.
+    validate_publication(artifact_base_url, artifact_layout)
+    if legacy_pack and artifact_layout != 'directory':
+        raise ValueError('Recipe artifact layout is unavailable for legacy packs')
     delivery_options = dict(delivery_options or {})
     if set(delivery_options) - set(DELIVERY_OPTIONS):
         raise ValueError('Unknown pack delivery option')
@@ -457,7 +460,7 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
             packages.append(dict(name=record['name'], version=record['version'], license=license_name,
                                  sourceUrl=record['url'], sha256=record['sha256'], wheelSha256=digest(wheel),
                                  notices=retain_notices(wheel, record, payload, cache)))
-        recipe_wheels = None if legacy_pack else wheel_records(records, packages, payload, output / 'recipe', artifact_base_url)
+        recipe_wheels = None if legacy_pack else wheel_records(records, packages, payload, output / 'recipe', artifact_base_url, artifact_layout)
         recipe_files = None
         if not legacy_pack:
             uv = work / ('uv.exe' if target.startswith('win32-') else 'uv')
@@ -539,6 +542,8 @@ def main(argv=None):
     parser.add_argument('--native-toolchain', type=Path, help='Exact host compiler executable/version and supporting input identity lock')
     parser.add_argument('--legacy-pack', action='store_true', help='Migration only: emit the old preassembled processing pack')
     parser.add_argument('--artifact-base-url', help='HTTPS publication directory for built wheels and notices, ending in /; upstream wheel URLs remain unchanged')
+    parser.add_argument('--artifact-layout', choices=['directory', 'flat'], default='directory',
+                        help='Recipe artifact export: directory uses SHA256/filename; flat uses SHA256-filename for release assets')
     # Pack delivery, passed through to assemble_processing (same names, same validation).
     parser.add_argument('--blobs', action='store_true', help='Write the per-file blob form instead of an archive')
     parser.add_argument('--base-url', help='Blob form: explicit blob publication directory URL (implies --blobs)')
@@ -553,7 +558,8 @@ def main(argv=None):
     except ValueError as error:
         parser.error(str(error))
     build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements, args.native_toolchain,
-          delivery_options=options, legacy_pack=args.legacy_pack, artifact_base_url=args.artifact_base_url)
+          delivery_options=options, legacy_pack=args.legacy_pack, artifact_base_url=args.artifact_base_url,
+          artifact_layout=args.artifact_layout)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,10 @@ on:
         type: choice
         options: [recipes, package]
         default: recipes
+      release_assets:
+        description: Export flat assets for an immutable processing-packs RC release (recipes only; does not publish)
+        type: boolean
+        default: false
       recipe_run_id:
         description: Exact successful recipe workflow run ID (package only)
         type: string
@@ -57,11 +61,25 @@ jobs:
       # These HTTPS URLs are stable identities for bundled local transport.
       # No processing-pack release is created or published by this workflow.
       - name: Build exact native dependency inventory
-        run: >-
-          python desktop/build/windows_acceptance.py recipe
-          --work "${{ runner.temp }}/acceptance-${{ matrix.accelerator }}"
-          --accelerator "${{ matrix.accelerator }}"
-          --artifact-base-url "https://github.com/${{ github.repository }}/releases/download/windows-acceptance-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.accelerator }}/"
+        shell: pwsh
+        env:
+          RELEASE_ASSETS: ${{ github.event_name == 'workflow_dispatch' && inputs.release_assets || false }}
+          ACCELERATOR: ${{ matrix.accelerator }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arguments = @('desktop/build/windows_acceptance.py', 'recipe',
+            '--work', (Join-Path $env:RUNNER_TEMP "acceptance-$env:ACCELERATOR"),
+            '--accelerator', $env:ACCELERATOR)
+          switch -Exact -CaseSensitive ($env:RELEASE_ASSETS) {
+            'true' { $arguments += '--release-assets' }
+            'false' { $arguments += @('--artifact-base-url', "https://github.com/$env:SOURCE_REPOSITORY/releases/download/windows-acceptance-$env:SOURCE_SHA-$env:ACCELERATOR/") }
+            default { throw 'Unknown recipe publication mode' }
+          }
+          # No processing-pack release is created or published by this workflow.
+          python @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Recipe build failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-recipe-${{ matrix.accelerator }}-${{ github.event.pull_request.head.sha || github.sha }}

@@ -59,6 +59,23 @@ class ProcessingBuildTests(unittest.TestCase):
         source = Path(builder.__file__).read_text()
         self.assertIn("assemble(payload, lock_path, output / 'pack', **delivery_options)", source)
 
+    def test_recipe_asset_layout_cli_and_early_validation(self):
+        common = ['--requirements', 'req.json', '--target', 'linux-x64', '--accelerator', 'cpu',
+                  '--output', 'out', '--cache', 'cache']
+        for layout in ('directory', 'flat'):
+            with self.subTest(layout=layout), patch.object(builder, 'build') as build:
+                builder.main(common + ['--artifact-layout', layout, '--artifact-base-url', 'https://example.test/release/'])
+                self.assertEqual(build.call_args.kwargs['artifact_layout'], layout)
+                self.assertEqual(build.call_args.kwargs['artifact_base_url'], 'https://example.test/release/')
+        with patch.object(builder, 'build') as build:
+            builder.main(common)
+            self.assertEqual(build.call_args.kwargs['artifact_layout'], 'directory')
+        for options in (dict(artifact_layout='unknown'), dict(artifact_layout='flat', legacy_pack=True),
+                        dict(artifact_base_url='https://secret@example.test/')):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                builder.build(self.root / 'missing.json', 'linux-x64', 'cpu', self.root / 'out', self.root / 'cache', **options)
+        self.assertFalse((self.root / 'out').exists())
+
     def test_materializes_internal_file_alias_and_rejects_escape(self):
         payload = self.root / 'payload'
         payload.mkdir()

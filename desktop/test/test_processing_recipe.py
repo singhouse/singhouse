@@ -56,9 +56,58 @@ class RecipeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'a.whl'
             path.write_bytes(b'wheel')
-            for url in ('http://example.test/', 'https://example.test/no-slash', 'https://example.test/?x=1'):
+            for url in ('http://example.test/', 'https://example.test/no-slash', 'https://example.test/?x=1',
+                        'https://user:secret@example.test/', 'https://user@example.test/', 'https:///',
+                        'https://example.test/#fragment', 'https://example.test/a b/',
+                        'https://example.test/a\\b/'):
                 with self.subTest(url=url), self.assertRaises(ValueError):
                     artifact(path, path.parent / 'out', url)
+
+    def test_release_asset_layout_preserves_wheel_names_and_exports_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / 'demo-1-py3-none-any.whl'
+            wheel.write_bytes(b'built wheel')
+            upstream = root / 'upstream-1-py3-none-any.whl'
+            upstream.write_bytes(b'upstream wheel')
+            notice_paths = ['notices/first/LICENSE.txt', 'notices/second/LICENSE.txt']
+            for name, data in zip(notice_paths, [b'first license', b'second license']):
+                notice = root / name
+                notice.parent.mkdir(parents=True)
+                notice.write_bytes(data)
+            records = [(wheel, dict(url='https://example.test/demo.tar.gz', sha256='b' * 64)),
+                       (upstream, dict(url='https://example.test/upstream.whl', sha256=hashlib.sha256(upstream.read_bytes()).hexdigest()))]
+            packages = [dict(name=name, version='1', license='MIT', notices=notice_paths) for name in ('demo', 'upstream')]
+            for layout in ('directory', 'flat'):
+                with self.subTest(layout=layout):
+                    directory = root / layout
+                    result = wheel_records(records, packages, root, directory, 'https://example.test/release/', layout)
+                    self.assertEqual(result[0]['filename'], wheel.name)
+                    self.assertEqual(result[1]['url'], records[1][1]['url'])
+                    self.assertEqual(result[0]['sourceSha256'], 'b' * 64)
+                    transfers = [result[0], *result[0]['notices']]
+                    self.assertEqual(len(list((directory / 'artifacts').rglob('*.whl'))), 1)
+                    for transfer in transfers:
+                        separator = '-' if layout == 'flat' else '/'
+                        exported = transfer['sha256'] + separator + transfer['filename']
+                        self.assertEqual(transfer['url'], 'https://example.test/release/' + exported)
+                        data = (directory / 'artifacts' / exported).read_bytes()
+                        self.assertEqual(transfer['size'], len(data))
+                        self.assertEqual(transfer['sha256'], hashlib.sha256(data).hexdigest())
+                    self.assertNotEqual(result[0]['notices'][0]['url'], result[0]['notices'][1]['url'])
+                    if layout == 'flat':
+                        self.assertTrue(all(path.is_file() for path in (directory / 'artifacts').iterdir()))
+
+    def test_flat_layout_without_publication_retains_local_delivery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'notice with space.txt'
+            path.write_bytes(b'license')
+            record = artifact(path, root / 'recipe', layout='flat')
+            self.assertEqual(record['filename'], path.name)
+            exported = root / 'recipe/artifacts' / (record['sha256'] + '-' + path.name)
+            self.assertEqual(record['url'], exported.resolve().as_uri())
+            self.assertEqual(exported.read_bytes(), b'license')
 
     def test_inventory_normalizes_only_cfg_and_contained_links(self):
         with tempfile.TemporaryDirectory() as temporary:
