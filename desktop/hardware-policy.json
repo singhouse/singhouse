@@ -25,7 +25,7 @@
       "settings": {},
       "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
       "admission": {
-        "runtimeLockSha256": "b090ee67cc75becf224afd000a3bc6edadc0ebefe8a8001852aaec4eff68959b",
+        "runtimeLockSha256": "647235dc2d101accf5326421f1ee6cc89cca5430d4b19bc304184ddf793267a8",
         "reference": "rc-0.1.1-final-platform-acceptance-pending",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
@@ -34,9 +34,9 @@
         ],
         "ramBytes": 17179869184,
         "vramBytes": null,
-        "workingDiskBytes": 6068872442,
-        "downloadBytes": 5174219199,
-        "installedBytes": 6416530061,
+        "workingDiskBytes": 6068874349,
+        "downloadBytes": 5174219571,
+        "installedBytes": 6416531968,
         "unifiedMemory": false
       }
     },
@@ -52,7 +52,7 @@
       "settings": {},
       "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
       "admission": {
-        "runtimeLockSha256": "d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d",
+        "runtimeLockSha256": "6fe8d6ceb88c7c17ecc47dccbf37ddb4e36d745387be6290d1802258f3523c52",
         "reference": "rc-0.1.1-final-platform-acceptance-pending",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
@@ -61,9 +61,9 @@
         ],
         "ramBytes": 17179869184,
         "vramBytes": 9663676416,
-        "workingDiskBytes": 12529963560,
-        "downloadBytes": 9112919068,
-        "installedBytes": 12877621179,
+        "workingDiskBytes": 12529965467,
+        "downloadBytes": 9112919440,
+        "installedBytes": 12877623086,
         "unifiedMemory": false
       }
     },
@@ -79,7 +79,7 @@
       "settings": {},
       "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
       "admission": {
-        "runtimeLockSha256": "8ab05bf36a222e3f6a3576b1252042d74067741b357ff41a9f87221f589a2475",
+        "runtimeLockSha256": "3a639910342376f34ef5b0847bb34c1ef3f3bf1f8c56f30faa6b93e0896c9ef6",
         "reference": "rc-0.1.1-final-platform-acceptance-pending",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/116#issuecomment-6115411344",
@@ -88,9 +88,9 @@
         "ramBytes": 4294967296,
         "totalRamBytes": 17179869184,
         "vramBytes": null,
-        "workingDiskBytes": 5324498022,
-        "downloadBytes": 4940399294,
-        "installedBytes": 5672155641,
+        "workingDiskBytes": 5324499929,
+        "downloadBytes": 4940399666,
+        "installedBytes": 5672157548,
         "unifiedMemory": true
       }
     },
@@ -106,7 +106,7 @@
       "settings": {},
       "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
       "admission": {
-        "runtimeLockSha256": "f1eb1e27187082d1bb6b13615660109ba23ba7e672331c820ef7a052b5e68022",
+        "runtimeLockSha256": "2a5229022f65b22fcd66ca234bba9ef204bf03a52812134bcd6e7a1d76ec65fe",
         "reference": "rc-0.1.1-final-platform-acceptance-pending",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
@@ -115,9 +115,9 @@
         ],
         "ramBytes": 17179869184,
         "vramBytes": null,
-        "workingDiskBytes": 5502383643,
-        "downloadBytes": 5019543252,
-        "installedBytes": 5850041262,
+        "workingDiskBytes": 5502385586,
+        "downloadBytes": 5019543631,
+        "installedBytes": 5850043205,
         "unifiedMemory": false
       }
     },
@@ -133,7 +133,7 @@
       "settings": {},
       "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
       "admission": {
-        "runtimeLockSha256": "a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18",
+        "runtimeLockSha256": "b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280",
         "reference": "rc-0.1.1-final-platform-acceptance-pending",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
@@ -142,9 +142,9 @@
         ],
         "ramBytes": 17179869184,
         "vramBytes": 9663676416,
-        "workingDiskBytes": 9626112243,
-        "downloadBytes": 7780091928,
-        "installedBytes": 9973769862,
+        "workingDiskBytes": 9626114186,
+        "downloadBytes": 7780092307,
+        "installedBytes": 9973771805,
         "unifiedMemory": false
       }
     }

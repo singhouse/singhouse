@@ -15,10 +15,17 @@ on:
         type: choice
         options: [cpu, cuda]
         default: cuda
+      recipe_run_id:
+        description: Exact successful Windows recipe build run (processing-ready only)
+        type: string
+      recipe_artifact_id:
+        description: Exact selected CPU or CUDA recipe artifact ID (processing-ready only)
+        type: string
 
 permissions:
   contents: read
   id-token: write
+  actions: read
 
 jobs:
   sign-windows:
@@ -127,11 +134,31 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Install-Module -Name TrustedSigning -RequiredVersion 0.5.3 -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
           & ./desktop/build/sign_windows.ps1 -ValidateOnly
+      - name: Validate recipe artifact selection
+        if: inputs.processing_mode == 'processing-ready'
+        shell: pwsh
+        env:
+          RECIPE_RUN_ID: ${{ inputs.recipe_run_id }}
+          RECIPE_ARTIFACT_ID: ${{ inputs.recipe_artifact_id }}
+        run: |
+          if ($env:RECIPE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:RECIPE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw 'Processing-ready signing requires exact numeric recipe run and artifact IDs.'
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.processing_mode == 'processing-ready'
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recipe_run_id }}
+          artifact-ids: ${{ inputs.recipe_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/selected-recipe
       - name: Assemble signed Windows application and first installer
         shell: pwsh
         env:
           PROCESSING_MODE: ${{ inputs.processing_mode }}
           PROCESSING_ACCELERATOR: ${{ inputs.processing_accelerator }}
+          KARAOKE_PROCESSING_ARTIFACTS: ${{ runner.temp }}/selected-recipe/artifacts
         run: |
           $ErrorActionPreference = 'Stop'
           # The dispatch choice reaches the shell only as data; a fixed mapping

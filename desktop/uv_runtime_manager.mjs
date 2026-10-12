@@ -10,6 +10,7 @@ import { watchOwnedGroup, forceChild } from './lifecycle.mjs'
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const inside = (root, path) => path !== root && path.startsWith(root + sep)
 const marker = '@SINGHOUSE_RUNTIME_ROOT@'
+const bundledAssetMatch = url => /^https:\/\/github\.com\/singhouse\/processing-packs\/releases\/download\/[A-Za-z0-9._-]+\/([a-f0-9]{64})-([A-Za-z0-9._+-]+)$/.exec(url)
 async function fileDigest(file, signal) {
   const hash = createHash('sha256')
   for await (const bytes of file.createReadStream({ autoClose:false, signal })) hash.update(bytes)
@@ -125,11 +126,32 @@ export class UvRuntimeManager extends RuntimeManager {
     this.uvPath = options.uvPath
     this.nativeLockSha256 = options.nativeLockSha256
     this.allowLocalRecipeSources = options.allowLocalRecipeSources === true
+    this.bundledArtifactsDirectory = options.bundledArtifactsDirectory
+    if (this.bundledArtifactsDirectory !== undefined && !isAbsolute(this.bundledArtifactsDirectory)) throw new Error('Bundled processing artifacts require an absolute resources directory')
   }
   validate(manifest) {
     if (manifest?.schema !== 2) return super.validate(manifest)
     if (!/^[a-f0-9]{64}$/.test(this.nativeLockSha256 || '')) throw new Error('Bundled native tool provenance is unavailable')
     return validateProcessingRecipe(manifest, this.identity, this.trustedLocks, { local:this.allowLocalRecipeSources,nativeLockSha256:this.nativeLockSha256 })
+  }
+  async transfer(record, destination, signal, offlineSource, details = {}) {
+    if (!this.bundledArtifactsDirectory) return super.transfer(record, destination, signal, offlineSource, details)
+    signal?.throwIfAborted()
+    const url = new URL(record.url)
+    const match = bundledAssetMatch(record.url)
+    if (!match) return super.transfer(record, destination, signal, offlineSource, details)
+    if (url.href !== record.url || match[1] !== record.sha256 || (record.filename !== undefined && match[2] !== record.filename)) throw new Error('Bundled processing artifact identity does not match the recipe')
+    const root = this.bundledArtifactsDirectory
+    const info = await lstat(root)
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(root) !== resolve(root)) throw new Error('Unsafe bundled processing artifacts directory')
+    const source = await checkedFile(join(root, `${match[1]}-${match[2]}`), constants.O_RDONLY)
+    try {
+      if ((await source.stat()).size !== record.size || await fileDigest(source, signal) !== record.sha256) throw new Error('Bundled processing artifact checksum or size mismatch')
+      signal?.throwIfAborted()
+      // Reuse the normal descriptor-held transfer, cache checks and progress.
+      // A missing or damaged expected bundle never falls back to the network.
+      return await super.transfer(record, destination, signal, source, details)
+    } finally { await source.close() }
   }
   async command(executable, args, { cwd, signal, cache, timeout = 600000 } = {}) {
     signal?.throwIfAborted()
@@ -263,7 +285,10 @@ export class UvRuntimeManager extends RuntimeManager {
         if (offline) {
           let valid = false, file
           try { file = await checkedFile(path,constants.O_RDONLY); valid = (await file.stat()).size === record.size && await fileDigest(file) === record.sha256 } catch {} finally { await file?.close() }
-          if (!valid) throw new Error('Offline processing repair needs a missing or damaged installer file. Reconnect and retry setup to retrieve the verified inputs.')
+          if (!valid) {
+            if (this.bundledArtifactsDirectory && bundledAssetMatch(record.url)) await this.transfer(record,path,signal)
+            else throw new Error('Offline processing repair needs a missing or damaged installer file. Reconnect and retry setup to retrieve the verified inputs.')
+          }
           return
         }
         await this.transfer(record,path,signal)

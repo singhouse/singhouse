@@ -6,6 +6,21 @@ import { WINDOWS_SIGNING } from '../windows_signing.mjs'
 
 const workflowUrl = new URL('../../.github/workflows/desktop-windows-signing.yml', import.meta.url)
 
+test('processing-ready signing downloads exact recipe assets before packaging', async () => {
+  const workflow = await readFile(workflowUrl, 'utf8')
+  assert.match(workflow, /actions: read/)
+  assert.match(workflow, /recipe_run_id:\r?\n\s+description: [^\r\n]+\r?\n\s+type: string/)
+  assert.match(workflow, /recipe_artifact_id:\r?\n\s+description: [^\r\n]+\r?\n\s+type: string/)
+  assert.match(workflow, /uses: actions\/download-artifact@[a-f0-9]{40}/)
+  assert.match(workflow, /run-id: \$\{\{ inputs.recipe_run_id \}\}/)
+  assert.match(workflow, /artifact-ids: \$\{\{ inputs.recipe_artifact_id \}\}/)
+  assert.match(workflow, /merge-multiple: true/)
+  assert.match(workflow, /KARAOKE_PROCESSING_ARTIFACTS: \$\{\{ runner.temp \}\}\/selected-recipe\/artifacts/)
+  assert.match(workflow, /RECIPE_RUN_ID -cnotmatch '\^\[1-9\]\[0-9\]\*\$'/)
+  assert.match(workflow, /RECIPE_ARTIFACT_ID -cnotmatch '\^\[1-9\]\[0-9\]\*\$'/)
+  assert.ok(workflow.indexOf('actions/download-artifact') < workflow.indexOf('python desktop/build/assemble.py'))
+})
+
 test('Windows signing workflow is manual, private, OIDC-only, and verifies before upload', async () => {
   const workflow = await readFile(workflowUrl, 'utf8')
   assert.match(workflow, /^on:\r?\n  workflow_dispatch:/m)
@@ -46,7 +61,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /\[regex\]::Escape\(\$env:PRODUCT_NAME\)/)
   assert.match(workflow, /Join-Path 'desktop\/artifacts\/win-unpacked' "\$env:PRODUCT_NAME\.exe"/)
   assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath \$path/)
-  assert.doesNotMatch(workflow, new RegExp(`${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile}`, 'i'))
+  assert.doesNotMatch(workflow, new RegExp(`\\b(?:${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile})\\b`, 'i'))
   assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
   assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc @processingFlags\r?\n/)
 })
@@ -72,7 +87,7 @@ test('Windows signing workflow takes the processing mode as a fixed choice passe
   assert.match(workflow, /\[regex\]::Escape\(\$env:INSTALLER_SUFFIX\)/)
   assert.match(workflow, /^          name: windows-signed-\$\{\{ inputs\.processing_mode \}\}-\$\{\{ inputs\.processing_accelerator \}\}-\$\{\{ github\.sha \}\}$/m)
   const expressionLines = workflow.split(/\r?\n/).filter(line => /\$\{\{/.test(line))
-  for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.processing_mode|inputs\.processing_accelerator|github\.sha) \}\}$/, line)
+  for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name|github-token|run-id|artifact-ids|path): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.(?:processing_mode|processing_accelerator|recipe_run_id|recipe_artifact_id)|github\.(?:sha|token)|runner\.temp) \}\}(?:\/selected-recipe(?:\/artifacts)?)?$/, line)
   assert.doesNotMatch(workflow, /npm[^\r\n]*\$\{\{/)
 })
 

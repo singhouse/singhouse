@@ -13,7 +13,7 @@ import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
-import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix } from './processing_catalog_gate.mjs'
+import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, PROCESSING_ARTIFACTS_DIRECTORY, verifyPackagedProcessingArtifacts } from './processing_catalog_gate.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -30,7 +30,9 @@ export function packagedApplicationArchivePath(applicationDirectory, platform) {
 // The produced application must carry exactly the gate's validated catalog
 // (processing-ready) or none at all (playback-only). Fails closed.
 export async function verifyPackagedProcessingCatalog({ applicationDirectory, platform, gate }) {
-  return assertPackagedProcessingCatalog(gate, await packagedCatalogSha256(packagedApplicationArchivePath(applicationDirectory, platform)))
+  assertPackagedProcessingCatalog(gate, await packagedCatalogSha256(packagedApplicationArchivePath(applicationDirectory, platform)))
+  await verifyPackagedProcessingArtifacts(gate, resolve(dirname(packagedReleasePolicyPath(applicationDirectory, platform)), PROCESSING_ARTIFACTS_DIRECTORY))
+  return gate
 }
 
 export function prepackagedInstallerPath(applicationDirectory, platform) {
@@ -147,8 +149,10 @@ async function main() {
       throw new Error('Linux first-installer packaging requires a fresh unpacked output directory; preserve or remove the prior build explicitly')
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
-  const stagedCatalog = await stageProcessingCatalog({ mode: processing.mode, catalogBytes: processingGate.catalogBytes, catalogSha256: processing.catalogSha256 })
-  await withStagedCatalog(stagedCatalog, () => build({ config: { ...config, files: [...config.files, ...stagedCatalog.files], publish: null }, publish: 'never',
+  const stagedCatalog = await stageProcessingCatalog({ mode: processing.mode, catalogBytes: processingGate.catalogBytes, catalogSha256: processing.catalogSha256,
+    artifactsDirectory: processingGate.artifactsDirectory, processingArtifacts: processing.processingArtifacts })
+  await withStagedCatalog(stagedCatalog, () => build({ config: { ...config, files: [...config.files, ...stagedCatalog.files],
+    extraResources: [...config.extraResources, ...stagedCatalog.extraResources], publish: null }, publish: 'never',
     targets: platform.createTarget('dir', Arch[nativeManifest.arch]) }))
   async function applicationRoot() {
     const name = nativeManifest.platform === 'darwin' ? 'mac-arm64'

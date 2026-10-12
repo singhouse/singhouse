@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { createHash } from 'node:crypto'
-import { lstat, readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { lstat, readFile, open, readdir, mkdtemp, rm } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { resolve, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { validateManifest } from '../policy.mjs'
 import { channelTrustedLocks, validateShippedCatalog } from '../setup_catalog.mjs'
 
@@ -11,11 +13,90 @@ export const PLAYBACK_ONLY = 'playback-only'
 // under CATALOG_DIRECTORY and are mapped onto this name only when packaged.
 export const PACKAGED_CATALOG_NAME = 'processing-catalog.json'
 export const CATALOG_DIRECTORY = 'processing-catalogs'
+export const PROCESSING_ARTIFACTS_DIRECTORY = 'processing-artifacts'
 const MODE_FLAGS = [`--${PROCESSING_READY}`, `--${PLAYBACK_ONLY}`]
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 // The exact serialization desktop/build/setup_catalog.mjs writes.
 export const canonicalCatalogText = catalog => `${JSON.stringify(catalog, null, 2)}\n`
 const regenerate = target => `Regenerate it with desktop/build/setup_catalog.mjs from the runtime, qualification, and terms evidence for ${target}, or package with --${PLAYBACK_ONLY}.`
+
+// Publication URLs remain the recipe's identity. Only exact flat release
+// assets from this repository are installer inputs; upstream inputs stay online.
+export function processingArtifactInventory(catalog) {
+  const assets = new Map()
+  const visit = value => {
+    if (!value || typeof value !== 'object') return
+    const match = typeof value.url === 'string' && value.url.match(/^https:\/\/github\.com\/singhouse\/processing-packs\/releases\/download\/[A-Za-z0-9._-]+\/([a-f0-9]{64})-([A-Za-z0-9._+-]+)$/)
+    if (match) {
+      if (value.sha256 !== match[1] || (value.filename !== undefined && value.filename !== match[2])
+          || !Number.isSafeInteger(value.size) || value.size < 0) throw new Error('Processing release asset identity is invalid')
+      const name = `${match[1]}-${match[2]}`
+      const asset = { name, sha256: value.sha256, size: value.size }
+      if (assets.has(name) && assets.get(name).size !== asset.size) throw new Error(`Conflicting processing release asset: ${name}`)
+      assets.set(name, asset)
+    }
+    for (const child of Object.values(value)) visit(child)
+  }
+  visit(catalog)
+  return [...assets.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+async function assertArtifactDirectory(directory) {
+  const info = await lstat(directory)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Processing artifacts directory must be a real directory')
+}
+
+// Open without following links, compare the opened inode, and check it again
+// after streaming. Staging copies from the verified descriptor, never a glob.
+export async function verifyProcessingArtifact(directory, asset, destination) {
+  if (!/^[a-f0-9]{64}-[A-Za-z0-9._+-]+$/.test(asset?.name ?? '')
+      || !asset.name.startsWith(`${asset.sha256}-`) || !Number.isSafeInteger(asset.size) || asset.size < 0) throw new Error('Invalid processing artifact inventory')
+  await assertArtifactDirectory(directory)
+  const path = join(directory, asset.name)
+  const initial = await lstat(path)
+  if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 1) throw new Error(`Processing artifact must be a regular unlinked file: ${asset.name}`)
+  const source = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0))
+  let target
+  try {
+    const opened = await source.stat()
+    if (!opened.isFile() || opened.nlink !== 1 || opened.ino !== initial.ino || opened.dev !== initial.dev
+        || opened.size !== asset.size) throw new Error(`Processing artifact size or file identity differs: ${asset.name}`)
+    if (destination) target = await open(destination, 'wx', 0o600)
+    const digest = createHash('sha256')
+    let size = 0
+    for await (const chunk of source.createReadStream({ autoClose: false })) {
+      digest.update(chunk); size += chunk.length
+      if (target) await target.writeFile(chunk)
+    }
+    const final = await source.stat()
+    const entry = await lstat(path)
+    if (size !== asset.size || digest.digest('hex') !== asset.sha256) throw new Error(`Processing artifact hash or size differs: ${asset.name}`)
+    if (final.nlink !== 1 || final.size !== opened.size || final.mtimeMs !== opened.mtimeMs || final.ctimeMs !== opened.ctimeMs
+        || entry.isSymbolicLink() || entry.ino !== opened.ino || entry.dev !== opened.dev) throw new Error(`Processing artifact changed during verification: ${asset.name}`)
+  } finally { await target?.close(); await source.close() }
+}
+
+export async function stageProcessingArtifacts({ mode, directory, inventory = [] }) {
+  if (mode === PLAYBACK_ONLY && inventory.length) throw new Error('Playback-only packaging cannot stage processing artifacts')
+  if (![PLAYBACK_ONLY, PROCESSING_READY].includes(mode)) throw new Error('Invalid processing artifact packaging mode')
+  if (!inventory.length) return { extraResources: [], cleanup: async () => {}, label: null }
+  const staged = await mkdtemp(join(tmpdir(), 'singhouse-processing-artifacts-'))
+  const cleanup = () => rm(staged, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  try {
+    for (const asset of inventory) await verifyProcessingArtifact(directory, asset, join(staged, asset.name))
+  } catch (error) { await cleanup(); throw error }
+  return { extraResources: [{ from: staged, to: PROCESSING_ARTIFACTS_DIRECTORY, filter: inventory.map(asset => asset.name) }], cleanup, label: staged }
+}
+
+export async function verifyPackagedProcessingArtifacts({ mode, processingArtifacts = [] }, directory) {
+  if (![PLAYBACK_ONLY, PROCESSING_READY].includes(mode)) throw new Error('Packaged processing artifacts check requires a gate result')
+  let entries
+  try { await assertArtifactDirectory(directory); entries = await readdir(directory) }
+  catch (error) { if (error.code === 'ENOENT' && !processingArtifacts.length) return; throw error }
+  if (mode === PLAYBACK_ONLY) throw new Error('Playback-only packaging produced processing artifacts')
+  if (JSON.stringify(entries.sort()) !== JSON.stringify(processingArtifacts.map(asset => asset.name).sort())) throw new Error('Packaged processing artifact inventory differs from the validated catalog')
+  for (const asset of processingArtifacts) await verifyProcessingArtifact(directory, asset)
+}
 
 // Every packaging run states what it ships: exactly one of the two exact flags.
 // npm consumes `npm run package --playback-only` (without `--`) as its own
@@ -143,13 +224,17 @@ export async function prepareProcessingGate({ desktopDir, nativeManifest, appVer
   const identity = packagedCatalogIdentity(nativeManifest, appVersion)
   const inputs = await readProcessingCatalogInputs(desktopDir, identity, accelerator)
   const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256, accelerator, ...inputs })
+  const processingArtifacts = mode === PROCESSING_READY ? processingArtifactInventory(JSON.parse(inputs.catalogBytes)) : []
+  const artifactsDirectory = processingArtifacts.length ? env?.KARAOKE_PROCESSING_ARTIFACTS : undefined
+  if (processingArtifacts.length && (typeof artifactsDirectory !== 'string' || !artifactsDirectory.trim())) throw new Error('Processing-ready packaging requires KARAOKE_PROCESSING_ARTIFACTS for the catalog release assets')
+  for (const asset of processingArtifacts) await verifyProcessingArtifact(resolve(artifactsDirectory), asset)
   const notices = notice ? [notice] : []
   try {
     await lstat(resolve(desktopDir, PACKAGED_CATALOG_NAME))
     notices.push(`desktop/${PACKAGED_CATALOG_NAME} is not a catalog source and is never packaged; catalogs are read only from desktop/${CATALOG_DIRECTORY}/<platform>-<arch>.json.`)
   } catch (error) { if (error.code !== 'ENOENT') throw error }
-  return { result: { ...facts, target: { platform: identity.platform, arch: identity.arch } },
-    catalogBytes: mode === PROCESSING_READY ? inputs.catalogBytes : null, notices }
+  return { result: { ...facts, target: { platform: identity.platform, arch: identity.arch }, ...(processingArtifacts.length ? { processingArtifacts } : {}) },
+    ...(artifactsDirectory ? { artifactsDirectory } : {}), catalogBytes: mode === PROCESSING_READY ? inputs.catalogBytes : null, notices }
 }
 
 // The digest of processing-catalog.json at the root of a packaged app.asar, or
@@ -185,7 +270,7 @@ export function assertPackagedProcessingCatalog(gate, packagedSha256) {
 // part of the receipt schema; releaseId and electronAppDigest bind it to the
 // derived identity of the application it describes (the digest is that of the
 // app.asar carrying the catalog), and releaseChannel is the packaged policy's.
-export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target, accelerator }) {
+export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target, accelerator, processingArtifacts }) {
   if (accelerator !== undefined) {
     if (mode !== PROCESSING_READY) throw new Error('Processing accelerator record requires processing-ready mode')
     catalogSourceName(target, accelerator)
@@ -193,5 +278,6 @@ export function processingModeRecord({ mode, releaseId, releaseChannel, electron
   if (!/^[0-9a-f]{64}$/.test(releaseId ?? '') || !/^[0-9a-f]{64}$/.test(electronAppDigest ?? '')
       || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel ?? '')) throw new Error('Processing mode record requires the derived release identity and packaged release channel')
   return { schema: 1, mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope,
-    target: { platform: target.platform, arch: target.arch }, ...(accelerator === undefined ? {} : { accelerator }) }
+    target: { platform: target.platform, arch: target.arch }, ...(accelerator === undefined ? {} : { accelerator }),
+    ...(processingArtifacts?.length ? { processingArtifacts } : {}) }
 }

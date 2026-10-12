@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
-import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName } from './processing_catalog_gate.mjs'
+import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName, stageProcessingArtifacts } from './processing_catalog_gate.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const icons = resolve(desktop, 'build/icons')
@@ -51,10 +51,11 @@ if (existsSync(resolve(native, memoryName)) !== existsSync(memorySource)
 // directory (never the tracked source tree, which packaging requires clean) and
 // added as one FileSet to the application build. Packaging then re-reads the
 // produced app.asar and compares digests.
-export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256 } = {}) {
+export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256, artifactsDirectory, processingArtifacts = [] } = {}) {
   if (mode === PLAYBACK_ONLY) {
     if (catalogBytes !== null && catalogBytes !== undefined) throw new Error('Playback-only packaging cannot stage a processing catalog')
-    return { files: [], cleanup: async () => {}, label: null }
+    if (processingArtifacts.length) throw new Error('Playback-only packaging cannot stage processing artifacts')
+    return { files: [], extraResources: [], cleanup: async () => {}, label: null }
   }
   if (mode !== PROCESSING_READY || !Buffer.isBuffer(catalogBytes)) throw new Error('Processing-ready packaging requires the validated catalog bytes')
   const digest = createHash('sha256').update(catalogBytes).digest('hex')
@@ -67,14 +68,22 @@ export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256
     try { await cleanup() } catch (cleanupError) { warnStagingCleanup(label, cleanupError, true) }
     throw error
   }
-  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], cleanup, label }
+  let artifacts
+  try { artifacts = await stageProcessingArtifacts({ mode, directory: artifactsDirectory, inventory: processingArtifacts }) }
+  catch (error) { await cleanup(); throw error }
+  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], extraResources: artifacts.extraResources,
+    cleanup: async () => {
+      const results = await Promise.allSettled([cleanup(), artifacts.cleanup()])
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+    }, label }
 }
 
 // The staged copy holds only the already-validated catalog, so a directory
 // that cannot be removed (for example, briefly locked on Windows) is reported
 // rather than failing a build. Only the temporary directory's name is logged.
 function warnStagingCleanup(label, error, afterFailure, warn = console.warn) {
-  warn(`Could not remove the temporary processing catalog staging directory ${label}${afterFailure ? ' after a failed build' : ''} (${error?.code || 'error'}); it holds only the packaged catalog and may be deleted manually.`)
+  warn(`Could not remove the temporary processing catalog staging directory ${label}${afterFailure ? ' after a failed build' : ''} (${error?.code || 'error'}); temporary processing catalog or artifact inputs may be deleted manually.`)
 }
 
 // Runs the application build with the staged catalog, then always removes the

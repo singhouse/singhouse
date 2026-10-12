@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "runtimeLockSha256": "a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18",
-  "evidenceReference": "Prior bound recipe: 63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3. Original basis: Private Windows CUDA recipe built by https://github.com/singhouse/singhouse/actions/runs/38172656012; experimental bounded-v1 budgets remain unqualified. Native Windows CUDA inference and measured memory qualification pending; see issue #117. Current candidate: a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18; final installer acceptance remains pending. HEART CUDA reservation raised to 9 GiB after the 6,964 MiB peak reported in issue #117; these transferred reservations are not new measurement or qualification evidence.",
+  "runtimeLockSha256": "b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280",
+  "evidenceReference": "Prior bound recipe: 63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3. Original basis: Private Windows CUDA recipe built by https://github.com/singhouse/singhouse/actions/runs/38172656012; experimental bounded-v1 budgets remain unqualified. Native Windows CUDA inference and measured memory qualification pending; see issue #117. Current candidate: b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280; final installer acceptance remains pending. HEART CUDA reservation raised to 9 GiB after the 6,964 MiB peak reported in issue #117; these transferred reservations are not new measurement or qualification evidence.",
   "executionProfile": "bounded-v1",
   "models": {
     "demucs-mdx-extra": {

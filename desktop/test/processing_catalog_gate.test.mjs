@@ -2,27 +2,32 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, symlink, link, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createSetupCatalog, SETUP_MODEL_IDS, validateShippedCatalog } from '../setup_catalog.mjs'
 import { prepareSetupCatalog } from '../build/setup_catalog.mjs'
+import { inspectApplicationInventory } from '../build/release_receipt.mjs'
 import { assertPackagingMode, packagedApplicationArchivePath, verifyPackagedProcessingCatalog } from '../build/package.mjs'
 import { assertPackagedProcessingCatalog, assertProcessingCatalog, catalogSourceName, packagedCatalogIdentity, packagedCatalogSha256,
-  prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, readProcessingCatalogInputs } from '../build/processing_catalog_gate.mjs'
+  prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, readProcessingCatalogInputs,
+  processingArtifactInventory, stageProcessingArtifacts, verifyPackagedProcessingArtifacts } from '../build/processing_catalog_gate.mjs'
 
 const sha = value => createHash('sha256').update(value).digest('hex')
 const nativeManifest = { schema: 1, appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', pythonVersion: '3.12.0', platform: 'linux', arch: 'x64', runtimeId: 'f'.repeat(64) }
 
 // Test-only fixture: qualification here is synthetic and never leaves this file.
-function fixture({ platform = 'linux', arch = 'x64', scope = 'full', accelerator = 'cpu' } = {}) {
+function fixture({ platform = 'linux', arch = 'x64', scope = 'full', accelerator = 'cpu', releaseAssets = false } = {}) {
   const target = { appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', platform, arch }
   const runtime = { schema: 1, kind: 'processing', ...target, accelerator, python: 'python', pythonVersion: '3.12',
     capabilities: ['transcription', 'separation'], models: [...SETUP_MODEL_IDS],
     modelCapabilities: Object.fromEntries(SETUP_MODEL_IDS.map(id => [id, id === 'heart-transcriptor' ? 'transcription' : 'separation'])),
     probe: { schema: 2, type: 'python-functional-v1', modules: ['audio_separator.separator', 'demucs.separate', 'faster_whisper', 'karaoke_backend.workers.heart_transcriptor', 'lyricsync.transcription.heart'] },
-    files: ['python', 'NOTICE'].map(path => ({ path, url: `https://example.org/${path}`, sha256: sha(path), size: 1, executable: path === 'python' })) }
+    files: ['python', 'NOTICE'].map(path => ({ path,
+      url: releaseAssets ? `https://github.com/singhouse/processing-packs/releases/download/fixture/${sha(path)}-${path}` : `https://example.org/${path}`,
+      sha256: sha(path), size: releaseAssets ? Buffer.byteLength(path) : 1, executable: path === 'python' })) }
   const lock = { schema: 1, kind: 'processing-input', ...Object.fromEntries(
     ['appVersion', 'backendVersion', 'lyricsyncVersion', 'platform', 'arch', 'accelerator', 'python', 'pythonVersion', 'capabilities', 'models', 'modelCapabilities', 'probe'].map(key => [key, runtime[key]])),
     sourceCommit: 'a'.repeat(40), packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/package', sha256: sha('package'), notices: ['NOTICE'] }],
@@ -37,6 +42,89 @@ function fixture({ platform = 'linux', arch = 'x64', scope = 'full', accelerator
 }
 const bytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
 const source = 'desktop/processing-catalogs/linux-x64.json'
+
+test('release asset inventory accepts exact source identities and deduplicates notices', () => {
+  const contents = 'notice', hash = sha(contents)
+  const asset = { filename: '000.txt', url: `https://github.com/singhouse/processing-packs/releases/download/rc-1/${hash}-000.txt`, sha256: hash, size: contents.length }
+  assert.deepEqual(processingArtifactInventory({ recipe: { wheels: [{ notices: [asset, asset] }] } }), [{ name: `${hash}-000.txt`, sha256: hash, size: contents.length }])
+  for (const url of [asset.url + '?download=1', asset.url.replace('https:', 'http:'), asset.url.replace('github.com', 'example.org'), asset.url.replace('/singhouse/', '/other/'), asset.url.replace('-000.txt', '-../000.txt')]) {
+    assert.deepEqual(processingArtifactInventory({ ...asset, url }), [])
+  }
+  for (const bad of [{ ...asset, sha256: 'f'.repeat(64) }, { ...asset, filename: 'different.txt' }, { ...asset, size: -1 }]) {
+    assert.throws(() => processingArtifactInventory(bad), /identity is invalid/)
+  }
+  assert.throws(() => processingArtifactInventory([asset, { ...asset, size: 123 }]), /Conflicting/)
+})
+
+test('processing-ready verifies required build-only assets and playback-only omits them', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'catalog-assets-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const f = fixture({ releaseAssets: true })
+  const directory = join(root, 'inputs')
+  await mkdir(directory)
+  await mkdir(join(root, 'processing-catalogs'))
+  await writeFile(join(root, 'processing-locks.json'), JSON.stringify(f.locks))
+  await writeFile(join(root, 'models.json'), JSON.stringify(f.modelPolicy))
+  await writeFile(join(root, 'processing-catalogs/linux-x64.json'), bytes(f.catalog))
+  const prepare = (mode, env = {}) => prepareProcessingGate({ desktopDir: root, nativeManifest, appVersion: '1', argv: [`--${mode}`], env })
+  await assert.rejects(prepare('processing-ready'), /requires KARAOKE_PROCESSING_ARTIFACTS/)
+  const env = { KARAOKE_PROCESSING_ARTIFACTS: directory }
+  await assert.rejects(prepare('processing-ready', env), /ENOENT/)
+  const inventory = processingArtifactInventory(f.catalog)
+  for (const record of f.catalog.runtime.files) await writeFile(join(directory, `${record.sha256}-${record.path}`), record.path)
+  await writeFile(join(directory, 'unrelated-secret.txt'), 'never packaged')
+  const gate = await prepare('processing-ready', env)
+  assert.deepEqual(gate.result.processingArtifacts, inventory)
+  assert.deepEqual(processingModeRecord({ ...gate.result, releaseId: 'a'.repeat(64), electronAppDigest: 'b'.repeat(64), releaseChannel: 'stable' }).processingArtifacts, inventory)
+  const staged = await stageProcessingArtifacts({ mode: gate.result.mode, directory, inventory })
+  t.after(staged.cleanup)
+  assert.deepEqual(await readdir(staged.extraResources[0].from), inventory.map(asset => asset.name).sort())
+  assert.equal(staged.extraResources[0].to, 'processing-artifacts')
+  assert.deepEqual(staged.extraResources[0].filter, inventory.map(asset => asset.name))
+  const first = inventory[0], file = join(directory, first.name)
+  await writeFile(file, 'x'.repeat(first.size))
+  await assert.rejects(prepare('processing-ready', env), /hash or size differs/)
+  await assert.rejects(stageProcessingArtifacts({ mode: 'processing-ready', directory, inventory }), /hash or size differs/)
+  // Staged snapshots survive later changes to the operator input directory.
+  await verifyPackagedProcessingArtifacts(gate.result, staged.extraResources[0].from)
+  const playback = await prepare('playback-only', env)
+  assert.equal(playback.result.processingArtifacts, undefined)
+  assert.equal(playback.artifactsDirectory, undefined)
+  assert.deepEqual((await stageProcessingArtifacts({ mode: 'playback-only' })).extraResources, [])
+  await assert.rejects(stageProcessingArtifacts({ mode: 'playback-only', directory, inventory }), /cannot stage/)
+})
+
+test('artifact inputs and packaged resources reject links, directories, missing, corrupt, and extra files', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'catalog-artifact-safety-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const directory = join(root, 'inputs'); await mkdir(directory)
+  const content = 'wheel', asset = { name: `${sha(content)}-fixture.whl`, size: content.length, sha256: sha(content) }
+  const path = join(directory, asset.name)
+  const gate = { mode: 'processing-ready', processingArtifacts: [asset] }
+  const verify = () => verifyPackagedProcessingArtifacts(gate, directory)
+  await assert.rejects(verify(), /inventory differs/)
+  await mkdir(path)
+  await assert.rejects(verify(), /regular unlinked file/)
+  await rm(path, { recursive: true })
+  if (process.platform !== 'win32') {
+    execFileSync('mkfifo', [path])
+    await assert.rejects(verify(), /regular unlinked file/)
+    await rm(path)
+  }
+  await writeFile(join(root, 'source'), content)
+  await symlink(join(root, 'source'), path)
+  await assert.rejects(verify(), /regular unlinked file/)
+  await rm(path); await link(join(root, 'source'), path)
+  await assert.rejects(verify(), /regular unlinked file/)
+  await rm(path); await writeFile(path, content + 'x')
+  await assert.rejects(verify(), /size or file identity differs/)
+  await writeFile(path, 'wrong')
+  await assert.rejects(verify(), /hash or size differs/)
+  await writeFile(path, content); await verify()
+  await writeFile(join(directory, 'extra'), 'not in recipe')
+  await assert.rejects(verify(), /inventory differs/)
+  await assert.rejects(verifyPackagedProcessingArtifacts({ mode: 'playback-only' }, directory), /Playback-only/)
+  await symlink(directory, join(root, 'linked-directory'))
+  await assert.rejects(stageProcessingArtifacts({ mode: 'processing-ready', directory: join(root, 'linked-directory'), inventory: [asset] }), /real directory/)
+})
 
 test('accelerator selector is explicit, compatible, and preserved in artifact suffixes', () => {
   assert.equal(processingAcceleratorFromArgs(['--processing-ready']), undefined)
@@ -335,6 +423,20 @@ test('post-package verification reads the produced app.asar on every platform la
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: altered[platform], platform, gate: ready }), /differs from the validated source/)
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: directory[platform], platform, gate: playback }), /not a regular file/)
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: join(root, 'missing', platform), platform, gate: playback }), /ENOENT/)
+    const content = 'bundled wheel', asset = { name: `${sha(content)}-fixture.whl`, sha256: sha(content), size: content.length }
+    const bundledGate = { ...ready, processingArtifacts: [asset] }
+    const artifacts = join(packagedApplicationArchivePath(withCatalog[platform], platform), '..', 'processing-artifacts')
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: withCatalog[platform], platform, gate: bundledGate }), /ENOENT/)
+    await mkdir(artifacts)
+    await writeFile(join(artifacts, asset.name), content)
+    assert.equal(await verifyPackagedProcessingCatalog({ applicationDirectory: withCatalog[platform], platform, gate: bundledGate }), bundledGate)
+    const observed = await inspectApplicationInventory(withCatalog[platform])
+    const record = observed.records.find(record => record.path.endsWith(`processing-artifacts/${asset.name}`))
+    assert.equal(record.type, 'file')
+    assert.equal(record.sha256, asset.sha256)
+    await writeFile(join(artifacts, asset.name), 'tampered')
+    assert.notEqual((await inspectApplicationInventory(withCatalog[platform])).inventoryDigest, observed.inventoryDigest, 'bundled assets are bound into the receipt application inventory')
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: withCatalog[platform], platform, gate: bundledGate }), /size or file identity differs/)
   }
 })
 
@@ -346,6 +448,7 @@ test('package.mjs validates before electron-builder runs and verifies app.asar b
   assert.ok(at('prepareProcessingGate(') < at('stageProcessingCatalog('))
   assert.ok(at('stageProcessingCatalog(') < at("platform.createTarget('dir'"))
   assert.match(main, /files: \[\.\.\.config\.files, \.\.\.stagedCatalog\.files\]/)
+  assert.match(main, /extraResources: \[\.\.\.config\.extraResources, \.\.\.stagedCatalog\.extraResources\]/)
   assert.ok(at("platform.createTarget('dir'") < at('verifyPackagedProcessingCatalog('))
   assert.ok(at('verifyPackagedProcessingCatalog(') < at('deriveIdentityFromApplication('))
   assert.ok(at('verifyPackagedProcessingCatalog(') < at('createReleaseReceipt('))

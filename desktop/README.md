@@ -138,6 +138,20 @@ Electron packaging and before identity derivation or the receipt, packaging
 reads the produced `app.asar` back and fails unless it contains exactly the
 validated catalog bytes (processing-ready) or no catalog (playback-only).
 
+When the selected catalog names flat assets at
+`https://github.com/singhouse/processing-packs/releases/download/<tag>/<sha256>-<filename>`,
+set the build-only `KARAOKE_PROCESSING_ARTIFACTS` environment variable to the
+generated `recipe/artifacts/` directory. Packaging requires every referenced
+wheel and notice at its exact release asset basename, with the catalog's size
+and SHA-256. Missing or corrupt inputs, symlinks, hard links, and nonregular
+files stop the build. Unreferenced input files are excluded. The verified inputs
+are staged into the normal installer as `resources/processing-artifacts/`,
+outside `app.asar`; recipe URLs and source identities stay unchanged. Packaging
+verifies the complete bundled inventory and bytes before deriving the release
+identity or writing receipts, whose application inventory binds these assets.
+`processing-mode.json` also records the expected asset names, sizes, and hashes
+as `processingArtifacts`. Playback-only builds include no processing assets.
+
 For separate CPU and accelerator installers from the same committed source,
 add `--processing-accelerator cpu`, `cuda`, or `metal` after npm's `--` together
 with `--processing-ready`. This selects the committed
@@ -317,9 +331,15 @@ than assuming they exist. Do not add access-token or OIDC-token output to
 workflow diagnostics.
 
 The dispatch form's `processing_mode` choice selects `playback-only` (the
-default) or `processing-ready`; the latter requires a committed
-`desktop/processing-catalogs/win32-x64.json`, and the workflow stops before
-native assembly when that file is absent. The uploaded artifact is named
+default) or `processing-ready`; the latter requires the committed Windows
+catalog for the selected `processing_accelerator` (`cpu` or `cuda`), and the
+workflow stops before native assembly when that file is absent. Processing-ready
+signing also requires the exact successful native recipe `recipe_run_id` and
+`recipe_artifact_id`. The workflow retrieves that recipe artifact into its
+build inputs and passes its `artifacts/` directory through
+`KARAOKE_PROCESSING_ARTIFACTS`. Packaging checks each required asset's size and
+hash against the committed catalog before including it in the installer.
+The uploaded artifact is named
 `windows-signed-<mode>-<commit>`. The choice reaches the build
 script only as an environment variable mapped through a fixed list of flags.
 The workflow only uploads a private Actions artifact. It does not publish a

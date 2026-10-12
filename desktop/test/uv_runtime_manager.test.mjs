@@ -301,3 +301,77 @@ test('inventory paths admit upstream wheel spaces and parentheses without unsafe
   for (const path of ['env/lib/scipy/Transparent Busy.ani','env/lib/setuptools/script (dev).tmpl']) assert.equal(recipePath(path),true)
   for (const path of ['', '/absolute', '../escape','a/../b','a\\b','a/ leading','a/trailing ','a/end.','a/CON','a/aux.txt','a/line\nfeed','a/'+'x'.repeat(510)]) assert.equal(recipePath(path),false,path)
 })
+
+async function bundledTransferFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'uv-bundled-artifact-'))
+  t.after(() => rm(root, { recursive:true, force:true }))
+  const bundle = join(root, 'processing-artifacts'), cache = join(root, 'cache')
+  await mkdir(bundle); await mkdir(cache)
+  const contents = Buffer.from('release wheel or notice bytes')
+  const record = { filename:'test-1-py3-none-any.whl', size:contents.length, sha256:sha(contents) }
+  record.url = `https://github.com/singhouse/processing-packs/releases/download/rc-0.1.1/${record.sha256}-${record.filename}`
+  const source = join(bundle, `${record.sha256}-${record.filename}`), destination = join(cache, record.filename)
+  await writeFile(source, contents)
+  const fetched = [], progress = []
+  const manager = new UvRuntimeManager(root, identity, { bundledArtifactsDirectory:bundle,
+    fetchImpl:async url => { fetched.push(String(url)); return new Response(contents) }, progress:value => progress.push(value) })
+  return { manager, source, destination, record, contents, fetched, progress, bundle }
+}
+
+test('release artifacts are verified from bundled resources without a host fetch and preserve cache progress', async t => {
+  const f = await bundledTransferFixture(t)
+  await f.manager.transfer(f.record, f.destination)
+  assert.deepEqual(await readFile(f.destination), f.contents)
+  assert.deepEqual(f.fetched, [])
+  assert.equal(f.progress.at(-1).received, f.record.size)
+  // Normal safe cache reuse is retained, with the expected source still verified.
+  await f.manager.transfer(f.record, f.destination)
+  assert.deepEqual(f.fetched, [])
+  assert.deepEqual(await readFile(f.destination), f.contents)
+})
+
+test('missing, corrupt, linked and mismatched expected bundle artifacts never fall back to HTTP', async t => {
+  for (const damage of ['missing', 'checksum', 'size', 'link', 'identity']) {
+    const f = await bundledTransferFixture(t)
+    if (damage === 'missing') await rm(f.source)
+    if (damage === 'checksum') await writeFile(f.source, Buffer.alloc(f.contents.length))
+    if (damage === 'size') await writeFile(f.source, 'short')
+    if (damage === 'link') { await rm(f.source); await writeFile(f.source + '.real', f.contents); await symlink(f.source + '.real', f.source) }
+    if (damage === 'identity') f.record.sha256 = 'b'.repeat(64)
+    await assert.rejects(f.manager.transfer(f.record, f.destination))
+    assert.deepEqual(f.fetched, [], damage)
+    await assert.rejects(stat(f.destination), { code:'ENOENT' })
+  }
+})
+
+test('bundle retrieval keeps upstream HTTPS transfers unchanged and honors cancellation', async t => {
+  const f = await bundledTransferFixture(t)
+  const upstream = { ...f.record, url:'https://example.org/test-1-py3-none-any.whl' }
+  await f.manager.transfer(upstream, f.destination)
+  assert.deepEqual(f.fetched, [upstream.url])
+  assert.deepEqual(await readFile(f.destination), f.contents)
+  const abort = new AbortController(); abort.abort()
+  await assert.rejects(f.manager.transfer(f.record, f.destination, abort.signal), { name:'AbortError' })
+  assert.deepEqual(f.fetched, [upstream.url])
+})
+
+test('only the exact release asset path can select a bundled artifact', async t => {
+  const f = await bundledTransferFixture(t)
+  for (const url of [f.record.url.replace('github.com/', 'github.com.evil.invalid/'),
+    f.record.url.replace('/singhouse/', '/other/'), f.record.url + '?download=1']) {
+    await rm(f.destination, { force:true })
+    await f.manager.transfer({ ...f.record, url }, f.destination)
+    assert.equal(f.fetched.at(-1), url)
+  }
+  assert.throws(() => new UvRuntimeManager('/tmp/test', identity, { bundledArtifactsDirectory:'relative' }), /absolute resources/)
+})
+
+
+test('an expected damaged bundle is not hidden by an existing valid cache entry', async t => {
+  const f = await bundledTransferFixture(t)
+  await f.manager.transfer(f.record, f.destination)
+  await rm(f.source)
+  await assert.rejects(f.manager.transfer(f.record, f.destination), { code:'ENOENT' })
+  assert.deepEqual(f.fetched, [])
+  assert.deepEqual(await readFile(f.destination), f.contents)
+})
