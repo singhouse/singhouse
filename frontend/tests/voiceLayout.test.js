@@ -430,6 +430,16 @@ describe('rosterIds', () => {
 })
 
 describe('colorForVoiceId', () => {
+  it('keeps the first voice and mixer lead on the readable solo stage palette', () => {
+    const solo = normalizeWordSync(docFrom([{ voice: 'a', in: 0.5, out: 2.5 }], ['a']))
+    expect(solo.pages[0].activeColor).toBe('#ff9b91')
+    expect(solo.pages[0].activeBorder).toBe('#351016')
+    expect(colorForVoiceId('a', ['a', 'b'])).toEqual({
+      activeColor: solo.pages[0].activeColor, activeBorder: solo.pages[0].activeBorder,
+    })
+    expect(colorForVoiceId('lead', [])).toEqual(colorForVoiceId('a', ['a', 'b']))
+  })
+
   it('keys a roster id to the stage color the layout stamps for its index', () => {
     // Voice 'b' is roster index 1; the DUET pages it sings are 1 and 3.
     const model = laidOut(docFrom(DUET))

@@ -59,6 +59,11 @@ describe('exportApi.exportSong', () => {
     expect(lastConfig.params).toEqual({ format: 'mp3g', audio: 'instrumental', card: false })
   })
 
+  it('sends the attribution card request the export dialog always makes', async () => {
+    await exportApi.exportSong(7, { format: 'mp3g', audio: 'karaoke', card: true })
+    expect(lastConfig.params).toEqual({ format: 'mp3g', audio: 'karaoke', card: true })
+  })
+
   it('decodes a JSON detail wrapped in a Blob error body', async () => {
     client.defaults.adapter = blobErrorAdapter(501, 'Export capability is not installed')
     await expect(exportApi.exportSong(7, { format: 'mp3g', audio: 'karaoke' }))

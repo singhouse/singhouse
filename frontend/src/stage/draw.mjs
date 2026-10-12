@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { ACTIVE_COLOR, ACTIVE_BORDER } from './colors.mjs'
 // Canvas drawing for the karaoke stage.
 //
 // Draws exclusively from a FrameDescriptor produced by describeFrame plus the
@@ -71,7 +72,7 @@ function drawLine(ctx, page, line, lineState) {
     const pad = line.height * 2
     ctx.rect(layout.startX - pad, line.y - pad, edge - (layout.startX - pad), line.height + 2 * pad)
     ctx.clip()
-    drawSyllableRun(ctx, layout, line, page.activeColor || '#ffdd66', page.activeBorder || '#000000')
+    drawSyllableRun(ctx, layout, line, page.activeColor || ACTIVE_COLOR, page.activeBorder || ACTIVE_BORDER)
     ctx.restore()
   }
 
@@ -81,7 +82,7 @@ function drawLine(ctx, page, line, lineState) {
     const y = line.y - LEAD_IN_GAP - LEAD_IN_HEIGHT
     ctx.fillStyle = 'rgba(255,255,255,0.25)'
     ctx.fillRect(x, y, LEAD_IN_WIDTH, LEAD_IN_HEIGHT)
-    ctx.fillStyle = page.activeColor || '#ffdd66'
+    ctx.fillStyle = page.activeColor || ACTIVE_COLOR
     ctx.fillRect(x, y, LEAD_IN_WIDTH * lineState.leadIn.progress, LEAD_IN_HEIGHT)
   }
 }

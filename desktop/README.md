@@ -121,8 +121,8 @@ sees that. Only the exact flags are accepted; forms such as
   applies at start for the exact target being built. The target is read from
   the native assembly's manifest (`linux-x64`, `linux-arm64`, `darwin-arm64`, or
   `win32-x64`). The catalog is checked against the channel of the release
-  policy being packaged, so a `private-smoke` catalog cannot be packaged into a
-  build whose channel is not `private-test`. The file must also be byte for
+  policy being packaged, so a `private-smoke` or `hardware-test` catalog cannot
+  be packaged into a build whose channel is not `private-test`. The file must also be byte for
   byte the generator's output for the catalog it validates to (two-space
   indented JSON with a trailing newline, keys in generator order): duplicate
   keys, unknown fields, reordered keys, or hand reformatting are refused with
@@ -131,12 +131,47 @@ sees that. Only the exact flags are accepted; forms such as
   (the build output says it is deliberately excluded). Such builds offer
   playback and report local song processing unavailable during setup.
 
-Only the selected target's catalog is ever packaged, as `processing-catalog.json`
-inside `app.asar`; catalogs for other targets, the `processing-catalogs/`
-directory itself, and any stray `desktop/processing-catalog.json` are not. After
-Electron packaging and before identity derivation or the receipt, packaging
+The selected target's default catalog is packaged as `processing-catalog.json`
+inside `app.asar`. Normal Windows and Linux CUDA recipe builds require
+`desktop/processing-catalogs/<platform>-<arch>-cpu.json`, also validated and
+packaged as `processing-catalog-cpu.json`. Both catalogs must match the same
+application, native tools, model policy, and channel trust; a missing, malformed,
+or incompatible CPU alternative stops the build. An alternative cannot
+be paired with a CPU primary catalog. The installed application chooses
+the CPU or CUDA recipe for the detected hardware within the normal setup wizard.
+macOS keeps its single Metal catalog. Catalogs for other targets, the
+`processing-catalogs/` directory itself, and stray desktop-root catalogs are
+excluded. After Electron packaging and before identity derivation or the receipt, packaging
 reads the produced `app.asar` back and fails unless it contains exactly the
-validated catalog bytes (processing-ready) or no catalog (playback-only).
+validated primary and optional CPU catalog bytes (processing-ready) or neither
+catalog (playback-only).
+
+When the selected catalog names flat assets at
+`https://github.com/singhouse/processing-packs/releases/download/<tag>/<sha256>-<filename>`,
+set the build-only `KARAOKE_PROCESSING_ARTIFACTS` environment variable to the
+generated `recipe/artifacts/` directory, or a directory containing the union of
+the selected CPU and CUDA recipes' exported assets. Packaging requires every referenced
+wheel and notice at its exact release asset basename, with the catalog's size
+and SHA-256. Missing or corrupt inputs, symlinks, hard links, and nonregular
+files stop the build. Unreferenced input files are excluded. The verified inputs
+are staged into the normal installer as `resources/processing-artifacts/`,
+outside `app.asar`; recipe URLs and source identities stay unchanged. Packaging
+verifies the complete bundled inventory and bytes before deriving the release
+identity or writing receipts, whose application inventory binds these assets.
+`processing-mode.json` also records the expected asset names, sizes, and hashes
+as `processingArtifacts`. Playback-only builds include no processing assets.
+
+For an internal build restricted to one processing recipe,
+add `--processing-accelerator cpu`, `cuda`, or `metal` after npm's `--` together
+with `--processing-ready`. This selects the committed
+`desktop/processing-catalogs/<platform>-<arch>-<accelerator>.json` and verifies
+that its runtime matches the selection. Selected builds add the accelerator to
+installer and portable payload filenames. Without this option, the original
+target catalog and normal installer filenames remain the default, with the
+validated CPU alternative required for Windows and Linux CUDA primary catalogs. The
+selector is a build option and is not needed for normal installation. Windows
+signing creates one installer that includes both recipe choices.
+
 Packaging writes `desktop/artifacts/processing-mode.json` next to the receipt
 (created exclusively; an output directory that already holds one is refused
 before building). It records `schema`, `mode`, `releaseId` and
@@ -144,6 +179,8 @@ before building). It records `schema`, `mode`, `releaseId` and
 the latter being the digest of the `app.asar` that carries the catalog),
 `releaseChannel` (the packaged release policy's channel), `catalogSha256`,
 `runtimeLockSha256`, `qualificationScope`, and `target` (`platform`, `arch`);
+when included, `alternativeCatalogs` records the CPU catalog name, hash, runtime
+lock, scope, and accelerator.
 the catalog digests and scope are `null` for playback-only builds. The file is not part
 of the receipt schema, so it sits under any checksum listing of
 `desktop/artifacts/` rather than inside the receipt.
@@ -191,9 +228,32 @@ Missing, changed, or malformed entries fail packaging; rebuild the assembly
 from clean inputs instead of regenerating its expected hashes. The receipt re-inspects that payload instead of trusting neighboring
 build files and records the modeled application subtree. `npm --prefix desktop
 run package:first-installers` embeds that receipt in the native first-install
-app. On first launch, every modeled file, directory, and internal link is
-checked. Any injected entry is rejected; the only non-modeled entries are the
-canonical receipt itself and the exact Windows uninstaller wrapper. Packaging
+app. At every launch, every modeled file, directory, and internal link is
+checked against the receipt by type and link target. Any missing, retyped or
+injected entry is rejected; the only non-modeled entries are the canonical
+receipt itself and the exact Windows uninstaller wrapper. File contents are
+hashed at packaging and wherever the installed files could change underneath
+the receipt: a writable installation (Windows, the Linux archive, an unsigned
+macOS bundle) is hashed in full on its first launch, and again whenever its
+launch inventory (each file's size, modification and change times, inode and
+device, taken from the descriptor that was hashed, kept in the
+application-data directory and bound to the receipt and canonical installation
+path) is missing or no longer matches. An AppImage whose application root lies
+in a kernel-reported read-only FUSE mount, with no other mount stacked on or
+nested beneath it, carries its receipt in the same immutable image, so its
+launch takes file digests from the receipt. This check reads mount evidence
+only, not the outer image; a read-only FUSE view of a writable directory that
+the same user mounts (for example with bindfs or rclone) is indistinguishable
+from an AppImage mount and is within that user's own trust boundary. The
+mount evidence also requires the application root and executable to be on the
+device of the selected mount entry, so a mount stacked later on an ancestor
+directory is not mistaken for it. Read-only protects the mounted files against
+writes, not against corruption: SquashFS data is not content-checksummed, so a
+damaged or bit-rotted `.AppImage` is no longer rejected at launch and may
+instead fail or misbehave later. Replace a damaged AppImage with a fresh copy.
+The
+signed macOS bundle keeps a full content walk, and managed update
+slots keep hashing their native payload, at every launch. Packaging
 also reads the current Git `HEAD` and `git status --porcelain=v1
 --untracked-files=all`: the checkout must be clean and must exactly match the
 native provenance both before the build and again immediately before publishing
@@ -282,9 +342,17 @@ than assuming they exist. Do not add access-token or OIDC-token output to
 workflow diagnostics.
 
 The dispatch form's `processing_mode` choice selects `playback-only` (the
-default) or `processing-ready`; the latter requires a committed
-`desktop/processing-catalogs/win32-x64.json`, and the workflow stops before
-native assembly when that file is absent. The uploaded artifact is named
+default) or `processing-ready`; the latter requires both committed Windows
+default and CPU catalogs, and the workflow stops before native assembly when
+either is absent. Processing-ready signing also requires the exact successful
+native recipe `recipe_run_id` and `recipe_artifact_ids`, a comma-separated pair
+of distinct CPU and CUDA artifact IDs from that run. The workflow retrieves both
+recipe artifacts into a shared build-input directory and passes the combined
+`artifacts/` directory through
+`KARAOKE_PROCESSING_ARTIFACTS`. Packaging checks each required asset's size and
+hash against the committed catalogs before including it in the single normal
+installer. Setup selects the appropriate recipe after detecting the hardware.
+The uploaded artifact is named
 `windows-signed-<mode>-<commit>`. The choice reaches the build
 script only as an environment variable mapped through a fixed list of flags.
 The workflow only uploads a private Actions artifact. It does not publish a
@@ -433,8 +501,8 @@ additionally checks current-user ownership and private permission bits. The
 native-verified stable installer owns that anchor and atomically repairs a
 corrupt anchor or rotates one whose installed executable/helper digests have
 changed during a verified reinstall; managed update targets can only read and
-verify it. A bundled release receipt authenticates modeled inner files but
-cannot authenticate the wrapper that supplied it. Linux and Windows anchor
+verify it. A bundled release receipt describes the modeled inner files (see
+the launch checks above) but cannot authenticate the wrapper that supplied it. Linux and Windows anchor
 rotation remain disabled unless their qualified platform trust hooks are
 enabled; macOS additionally requires its enabled `codesign` gate. An explicitly
 update-disabled build leaves anchor state untouched, so
@@ -524,12 +592,12 @@ packages, and licenses. Preserve these with the artifact.
 
 ## Optional processing packs and offline models
 
-The packaged application's Processing menu reports playback, transcription,
-separation, and user-owned Modal readiness separately. Choose “Install processing
-runtime or model cache…” to select an explicit local JSON manifest. Runtime
-manifests authorize executable code: obtain them from a source you trust and
-review the displayed size before installation. No production download catalog,
-publication service, or signing trust root is configured by this prototype.
+Open Settings → Song processing… in the packaged application to review and
+set up local processing or user-owned Modal. The setup flow shows download sizes
+and installation notices before consent. Settings also provides library database
+backup and restore; these backups do not include audio files. Update staging,
+recovery diagnostics, and arbitrary manifest installation are not everyday menu
+actions.
 
 Processing uses a separate relocatable Python environment. CPU, CUDA, and Metal
 are separate pack variants; platform, architecture, and application package
@@ -539,8 +607,52 @@ that its drivers or hardware work. Installing a pack never changes the small
 playback environment or installs packages into it.
 
 After hash verification, the application runs its fixed `python-functional-v1`
-self-test through the selected interpreter before activation and on startup.
-It checks exact Python/application versions, native audio operations, selected
+self-test through the selected interpreter before activation. The accepted
+result is recorded beside the packs, in `processing/probe-results/<identity>.json`,
+bound to the full pack identity, the bundled native runtime and the
+application's self-test source. The record also marks that the pack passed a
+full hash verification when it was installed or activated (model caches, which
+run no self-test, keep an equivalent record in `model-cache/verified/`). Startup
+reuses that record only after applying the same acceptance checks a fresh result
+must pass. With a usable record, startup checks the pack structurally: the
+manifest still matches the full identity, the file inventory is exact with no
+links or special files, and every file is a regular file of its recorded size.
+Without one (for example, for a pack installed by an earlier version, or one
+whose record was withdrawn), startup verifies every file's hash, runs the
+self-test once and records the result. Any failed full verification or
+self-test withdraws the pack's record, so damage found during a reinstall,
+repair or setup check is verified again in full at the next startup and the
+pack is rejected there. A self-test result is recorded only when it follows a
+full verification with no withdrawal since, and a record write whose outcome
+cannot be confirmed is withdrawn rather than trusted. Payload bytes are otherwise hashed at installation,
+repair, and activation, not at every startup.
+Because the structural check cannot see a same-size change, once the window is
+shown the application verifies every file of each pack that startup admitted
+from its record again, in the background and one file at a time, when that
+pack's last full verification is more than 7 days old (`RECHECK_INTERVAL_MS`
+in `runtime_manager.mjs`). The time of each full verification (installation,
+a full startup verification, or a successful background check) is kept in the
+store's `verified-at/<identity>.json`; a missing or unreadable time, or one in
+the future, counts as stale. A pack that startup has just verified in full is
+not checked again, and the check stops when an installation starts or the app
+closes. If that check fails, the pack's record
+is withdrawn and the damage is recorded in the processing status at once. The
+application then shows one notice offering **Set up song processing…** once
+no other operation (such as a backup, an update, or a processing installation
+or setup) is running. The notice covers only packs that are still damaged then:
+a pack repaired, or replaced by another, in the meantime is left out. Reinstalling a damaged processing pack or model cache repairs it
+in place; the damaged tree is kept under that store's `quarantine/` directory
+and may be deleted once the repair is complete. Reopen the app afterwards.
+A failed processing job does not itself trigger any verification. If jobs fail
+unexpectedly, open
+**Processing → Set up song processing…**, whose check verifies every file of
+the installed packs and runs a fresh self-test.
+A withdrawal counts only once the removal is flushed to disk (where the
+platform supports flushing directories). If a record cannot be withdrawn
+durably (for example, the application data folder is not writable), the error is reported and the record is ignored until
+the app closes; a later launch could admit the pack from it again, so restore
+write access to that folder.
+The self-test checks exact Python/application versions, native audio operations, selected
 device execution, and small synthetic architecture operations. The process has
 a 120-second default bound to accommodate cold native imports and cannot retrieve
 models. Explicit caller timeouts remain honored. Failure, invalid output, or timeout
@@ -549,7 +661,7 @@ prevents activation; a failed startup check leaves playback available. Legacy
 only, and never grant a runnable capability. Functional runtime readiness is separate from installed model sets,
 model quality, and physical platform qualification.
 
-The pack assembler consumes an already-built target environment and a complete
+Legacy archive migration uses an already-built target environment and a complete
 input lock. The lock identifies application/Python versions, target, accelerator,
 managed Python path, capabilities, each model's capability, required model IDs,
 source commit, upstream package artifact hashes, licenses, retained notice paths,
@@ -558,7 +670,7 @@ SHA-256, and executable flag. Unlisted files, modified inputs, and symlinks fail
 assembly. Linux preserves case-distinct names; Windows and macOS reject names
 that collide without case sensitivity. Model weights are never part of a runtime.
 
-`build_processing.py` constructs this input from the exact artifact recipes in
+`build_processing.py` constructs a uv installation recipe from the exact artifact recipes in
 `desktop/locks/processing-*.json`, the pinned standalone Python archive, and
 application wheels built from a clean source commit. Source distributions use
 the locked build dependencies. Native extensions additionally require a verified
@@ -577,17 +689,73 @@ python3 desktop/build/build_processing.py \
 
 Build native source extensions on their target runner. Dependency locks for
 other targets describe build inputs, not successful hardware qualification.
-The build writes its pack to `<output>/pack` through the assembler below and
-accepts the same delivery options (`--archive-base-url`, `--archive-part-size`,
-`--archive-name`, `--blobs`, `--base-url`), validated the same way before any
-build work starts. To package a separately constructed locked payload:
+The default output is a schema 2 recipe and the small set of source-built and
+application wheels plus license notices. Upstream wheels keep their pinned
+upstream URLs; use `--artifact-base-url` to name the immutable HTTPS publication
+directory for built wheels and notices. There is no dependency resolution or
+source compilation on installed desktops. Model downloads and native audio
+tools remain separate.
+
+For a release host with flat asset names, add `--artifact-layout flat` and use
+its immutable HTTPS download directory as `--artifact-base-url`. Upload the
+files directly inside the generated `recipe/artifacts/` directory: their names
+are `<full-sha256>-<original-filename>`, and the manifest uses those exact URLs.
+Wheel and notice metadata retain their original filenames. The default layout
+continues to export `recipe/artifacts/<full-sha256>/<original-filename>`.
+The builder exports files only; publication and download verification are
+separate release steps.
+
+The Windows acceptance workflow's manual recipes phase accepts
+`release_assets: true` to export CPU and CUDA recipes in this flat layout.
+Their publication directories are fixed to
+`https://github.com/singhouse/processing-packs/releases/download/rc-<full-source-commit>-win-<accelerator>/`.
+The default remains bundled acceptance transport. Neither mode publishes
+assets or establishes song or hardware qualification; packaging still requires
+the exact recipe lock to be independently committed to the trust policy.
+
+The release bundles the exact uv executable pinned in `locks/native.json`.
+The installer keeps verified artifacts and uv's cache under the chosen
+processing root, creates an environment at its final versioned path, verifies
+the release-pinned file inventory, and runs functional checks before selecting
+it with durable activation pointers. Repair creates a new environment and keeps
+the previous working runtime. Existing archive installations remain usable
+without a forced download. Cache repair can rebuild from retained verified
+artifacts; missing artifacts require an explicit online retry.
+
+uv's clone mode can reuse filesystem storage when supported. Any fallback
+hardlinks are detached before activation so damaged cache entries cannot change
+an active environment. Copy fallback costs must be measured on each filesystem;
+no universal deduplication saving is promised. The immutable recipe also binds
+Python, native tool versions, exclusions, licenses and application compatibility.
+
+Hardware recommendations come from the separately versioned
+`hardware-policy.json`. Automatic and supported manual selection use measured
+end-to-end evidence, available resources and configurable headroom. The shipped
+policy can also carry `candidate` variants for the `private-test` channel only.
+Their separate `admission` block binds direct conservative RAM, VRAM and storage
+budgets to the exact runtime lock and target, with a reference and original
+budget `basisReferences`. Optional `totalRamBytes` sets a physical RAM minimum
+separately from the fresh available-memory floor in `ramBytes`; it must be at
+least that floor. Without it, both checks use `ramBytes`. These budgets do not
+claim new measurements or passed
+qualification; final acceptance remains pending. Candidate variants use the
+ordinary setup wizard, consent and functional verification. Other release
+channels reject them. A startup check and fresh checks before local worker
+execution enforce the selected resource limits.
+Playback remains available, and changing models requires reviewing setup and
+consenting to their download and terms.
+
+`--legacy-pack` retains the previous archive builder for migration and comparison
+while the replacement is being qualified. Its retirement requires the native
+qualification results; it is not a second supported release delivery route.
+For legacy maintenance only, package a separately constructed locked payload:
 
 ```sh
 python3 desktop/build/assemble_processing.py --payload /path/to/locked-payload \
   --lock /path/to/processing-input-lock.json --output /path/to/new-pack
 ```
 
-By default the output is archive form: `manifest.json`, `input-lock.json`, and
+The legacy assembler defaults to archive form: `manifest.json`, `input-lock.json`, and
 `archive/<name>.001`, `.002`, … The archive format (`concat-gzip-v1`) has no
 internal paths or headers. Its uncompressed stream is every locked file's bytes
 concatenated in manifest order. That stream is gzip-compressed deterministically
@@ -634,6 +802,12 @@ rejects missing notice files. File hashes establish correspondence
 with a selected manifest; they do not establish publisher identity.
 Installation additionally requires the input-lock hash to appear in the
 application-shipped `processing-locks.json`; a manifest cannot trust its own lock.
+Locks also listed in its `privateTestLockSha256` (hardware-test candidates) are
+trusted only by `private-test` channel builds: a build on any other channel
+neither installs nor activates such a runtime, including one left on disk by an
+earlier test build of the same application version. The backend's own lock
+check applies the same rule to the channel the application passes it, and
+rejects these locks when no channel is supplied.
 
 For archive-form packs, installation retrieves each part into
 `processing/staging/<name>.archive/`, outside the pack tree. It resumes partial
@@ -706,22 +880,20 @@ mean an installation is running. Never delete or replace a lock file to bypass a
 running owner: the next attempt acquires the same inode only after its prior
 kernel lock has been released.
 
-Runtime file access uses no-follow descriptors where the platform supports them,
-with descriptor-based type, size, hash, write, and mode checks. This rejects
+During installation, runtime file access uses no-follow descriptors where the
+platform supports them, with descriptor-based type, size, hash, write, and mode
+checks (startup's structural check uses no-follow metadata only). This rejects
 symbolic-link files and avoids redirecting writes when a leaf path is replaced.
 The installation store remains inside the user's local trust boundary: Node does
 not provide a portable directory-descriptor-relative `openat` traversal, so the
 app does not claim protection from a malicious process running as the same user
 that concurrently replaces ancestor directories or installed binaries.
 
-The first explicit Heart transcription or audio-upload action opens Heart setup.
-You can also open Processing → Set up Heart transcription. The dialog shows the
-exact size and upstream source before you choose to retrieve files or select an
-existing complete Heart model folder. Cancel keeps the operation unsubmitted.
-Progress appears in the application taskbar/dock; Processing → Cancel installation
-interrupts setup, and retry resumes verified partial transfers. Insufficient disk
-space, interrupted transfers and checksum failures preserve the prior cache.
-After installation, reopen the application and retry the original action.
+Open Settings → Song processing… to install the processing pack. The setup flow
+shows download sizes and upstream sources before consent. Installation progress
+includes a cancel action, and retry resumes verified partial transfers.
+Insufficient disk space, interrupted transfers, and checksum failures preserve
+the prior cache. Queued songs wait for the processing pack to become available.
 Prepared playback remains available while setting up models.
 
 `models.json` defines the upstream allowlist and offline cache contract.
@@ -812,10 +984,51 @@ original timed test words. Use copies of your media. On Windows, use the venv's
 `Scripts/python.exe` and set `KARAOKE_DESKTOP_PYTHON` to its absolute path in your
 shell. Linux graphical smoke tests can run under `xvfb-run -a`.
 
+### Isolated resource measurement before qualification
+
+The native backend's explicit `--private-test-resource-measurement` flag allows
+local acceptance runs before measured hardware recommendations exist. It requires
+a native payload whose adjacent `release.json` has channel `private-test`, a
+separate persistent `--runtime` library, a schema-2 managed runtime, all three
+pinned model sets, their full `--processing-id` and `--models-id`, and the actual
+successful `--processing-probe` attestation. Source mode, demo mode, and
+`--processing-variant` cannot be combined with this flag. A parent launcher must
+keep the backend's stdin heartbeat open, as for any native launch.
+
+This mode skips only the qualified resource-threshold recommendation. Runtime,
+interpreter, native-tool, model, and functional-probe verification still apply.
+The backend remains loopback-only, uses its normal password gate, and preserves
+the isolated library across restarts. Its launch handshake and `/desktop-ready`
+response explicitly report `resourceMeasurement` with `qualified: false` and
+`recommendationsEnabled: false`. Use those markers to label the local test UI and
+capture observations externally. Runs in this mode do not establish release
+qualification, memory recommendations, or a supported hardware variant; no
+thresholds are invented and normal application admission remains unchanged.
+
+The existing packaged Electron application can use that same verified test
+profile directly:
+
+```sh
+/path/to/singhouse --private-test-resource-measurement \
+  --user-data-dir=/absolute/isolated-test-profile
+```
+
+Stop the previous test backend after its jobs finish before opening the profile.
+The profile directory must already exist and contain the verified active uv
+runtime and complete model cache; environments must stay at their original
+absolute paths. This launch requires a `private-test` package and fails closed
+if the runtime, models, functional probe, or backend measurement marker is
+missing. It opens the ordinary host, library, and projector, labels the host
+window "Private resource measurement (unqualified)", and keeps processing local.
+It does not enroll an unsupported variant or relax application integrity checks.
+This explicit private lane also accepts trusted recipes whose locally built
+application wheels or notices use `file:` URLs. Their pinned hashes, installed
+inventory, native-tool binding, and probe checks still apply. Ordinary packaged
+launches continue to require HTTPS recipe sources.
+
 ## Playback qualification
 
-Use the host's projector button to open the display; the Projector menu controls
-fullscreen and display placement. Opening the projector requests prevention of
+Use the host's lyrics-display controls to open and manage the display. Opening the projector requests prevention of
 display sleep. Closing the host closes its projector and backend.
 
 The output selector routes the show player's audio and reapplies the selection
@@ -871,13 +1084,24 @@ bytes or establish remote weight equality by metadata alone.
 # Song processing setup
 
 The installed desktop opens a welcome flow with an option to go straight to
-the library. “Set up song processing” reopens it from the library or Processing
-menu. Download consent is separate from choosing local processing. Setup must
+the library. “Set up song processing” reopens it from the library; the menu entry
+is Settings → Song processing…. Download consent is separate from choosing local processing. Setup must
 verify a compatible processing runtime, both separation models, and Heart
 together before reporting local processing ready. A saved wizard step is never
 readiness evidence. Verified model files are reused when expanding a cache.
-Cancellation preserves resumable files. Restart is refused while processing,
-installation, playback, or a projector window is active.
+The optional lyrics step keeps LRCLIB off until explicitly enabled. It explains
+that lookups send track metadata to LRCLIB, never audio; the choice can be changed
+by reopening setup. Installation notices start collapsed with a summary, while
+component sources, terms, and exact sizes remain available before the install action.
+Back navigation returns to the welcome screen.
+
+Installation, verification, restart prompts, and completion appear as a compact
+nonmodal status panel over the library. Queued processing songs remain durable
+and unclaimed until the backend verifies the required runtime and models. This
+includes waiting across an application restart; saved wizard navigation cannot
+release jobs. Cancellation preserves resumable installation files and queued songs.
+Restart is refused while processing, installation, playback, or a projector window
+is active; queued jobs held by the readiness gate are safe to retain across restart.
 
 Release artifacts must supply a qualified runtime catalog before automatic
 local setup becomes available. Playback remains usable without it. The advanced
@@ -887,6 +1111,164 @@ its contents are verified during cancellable installation. Missing or changed
 files never trigger a silent model download. The separate processing runtime
 may still require downloading; this is shown in the installation plan.
 
+### Advisory processing speed estimate
+
+The wizard shows a deliberately broad **planning range**, not a benchmark or
+qualification result, for preparing one three-minute track with the full default
+workflow after setup and queue wait. Ranges are tiered by the selected,
+validated pack's execution device and a few observed hardware facts.
+
+Historical timing assumptions for retained qualified processing profiles:
+
+- Demucs `mdx_extra` (a bag of four HDemucs checkpoints) on the full mix with
+  CLI defaults (shifts 1, overlap 0.25).
+- Karaoke Mel-Band RoFormer
+  (`mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956`) via audio-separator
+  0.41.1 on the Demucs vocal stem. The shipped
+  [model configuration](https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml)
+  sets `dim_t` 801 and hop 441 (`chunk_size` 352800), which gives 8 s chunks.
+  audio-separator's default overlap value 8 is interpreted as an 8 s step for
+  RoFormer, so chunks do not overlap (roughly a quarter of the work of the
+  common UVR setting of four overlaps).
+- HeartTranscriptor (a full fine-tune of Whisper-medium, about 764M parameters)
+  via transformers: fp32 on CPU, fp16 on CUDA and MPS, greedy decoding. RMS-VAD
+  produces 1–15 s segments with one call per segment; word timing uses
+  cross-attention DTW. Transcription time scales with voiced audio, not track
+  length.
+- Each stage runs in its own process, and one job runs at a time, so each stage
+  pays its own model-load overhead.
+
+The CUDA `bounded-v1` profile uses six-second Demucs segments and RoFormer
+segment size 256, as described below. Its estimates reuse the broad CUDA ranges
+as extrapolations; they are not measurements of that execution profile. Allowed
+experimental catalogs also show estimates without changing their qualification
+status. The wizard labels the range “Estimated processing time*” with the note
+“*Actual processing time varies by hardware and song.”
+
+Planning ranges (minutes for one three-minute track):
+
+| Pack | Observed hardware | Range | Bar | Evidence |
+|---|---|---|---|---|
+| CPU | 16 or more logical processors | 9–16 | Moderate | Measured (one run, 16-core CPU) |
+| CPU | 12–15 logical processors | 12–20 | Moderate | Extrapolated |
+| CPU | 8–11 logical processors | 15–28 | Moderate | Extrapolated |
+| CPU | fewer than 8 logical processors | 25–45 | Slower | Extrapolated |
+| Apple Metal | M-series Pro/Max/Ultra, or generation 4 or newer | 5–12 | Faster | Extrapolated |
+| Apple Metal | base M1/M2/M3, or an unrecognized Apple chip name | 8–20 | Moderate | Extrapolated |
+| Apple Metal | any Apple chip with less than 15 GiB memory | 15–35 | Slower | Extrapolated |
+| CUDA | RTX 3080/3090 (incl. Ti), RTX 4070 (incl. Super/Ti) and above, RTX 5070 and above | 1–3 | Faster | Extrapolated |
+| CUDA | RTX 2060–2080 Ti (incl. Super), RTX 3060–3070 Ti, RTX 4060/4060 Ti, RTX 5060/5060 Ti, Tesla T4 | 2–5 | Faster | Extrapolated |
+| CUDA | GTX 16xx, RTX 2050/3050/4050/5050 | 5–12 | Faster | Extrapolated |
+
+The CUDA rows list name tiers before the video-memory rules below. Most of the
+entry-row cards ship with less than 7.5 GiB and therefore get no range, and
+most 8 GB mainstream cards display the entry range after the memory demotion.
+
+CPU packs with less than 15 GiB total RAM use the next slower CPU row (the
+slowest row stays 25–45). The low-memory cutoff is 15 GiB rather than 16 GiB
+because Linux and Windows report a nominal 16 GB machine as slightly less than
+16 GiB. The bar shows Faster when the upper end is at most 12 minutes,
+Moderate when it is at most 30, and Slower otherwise.
+
+The measured CPU row comes from a 16-physical-core processor. A computer that
+reports 16 logical processors with fewer physical cores (for example 8 cores
+with SMT) is shown the same row but may be slower.
+
+CUDA ranges appear for a validated CUDA catalog allowed on the release channel,
+including experimental hardware-test catalogs, on a Linux or Windows x64 target with exactly
+one CUDA device and no unified memory. The tier comes from that device's name
+and reported dedicated memory:
+
+- Cards with 6 GB or less, or less than 7.5 GiB reported, get no range. CUDA
+  packs that apply per-stage memory admission budget at least 6 GiB of free
+  video memory for transcription (a test budget, not a measured requirement),
+  so those cards would run it on the CPU or refuse it. Unknown video memory also
+  gets no range.
+- GTX 10-series cards get no range; current CUDA PyTorch builds are unlikely to
+  support them.
+- Cards reporting at least 7.5 GiB but less than 9.5 GiB (8 GB cards), where
+  transcription fits only narrowly, and laptop or Max-Q parts are shown one tier
+  slower; both demotions stack, and the entry row is the floor. Some laptop
+  parts report desktop names and cannot be recognized as laptops.
+- Other names, including workstation, datacenter, and MX parts, non-NVIDIA
+  adapters, and catalogs not allowed on the release channel get no range.
+  Missing measured memory evidence does not suppress advisory timing; existing
+  setup memory checks and per-stage processing admission remain independent.
+- In CUDA packs that apply per-stage memory admission, a stage can still move
+  to the CPU when a job runs; the estimate does not reflect that. Older cards may also be much slower with
+  fp16.
+
+**Measured.**
+
+- CPU: one run on a 16-core/32-thread Zen 3 desktop CPU with 62 GiB RAM and the
+  Linux CPU pack (torch 2.10.0+cpu, with system ffmpeg) processed a 180 s track in 673 s (about
+  11.2 minutes): Demucs 160 s, RoFormer 289 s, and Heart 224 s for 11 VAD
+  segments with 127 s of voiced audio. Each stage spent roughly 5–10 s loading;
+  peak resident memory was 4.6, 2.7, and 9.9 GiB respectively. The run used a
+  separate harness that invokes the same stage workers, not the application
+  queue, with a warm file cache. The final mixdown and lyric alignment were not
+  timed. Other load was present, so this likely overstates stage time slightly.
+- CUDA: a cloud Tesla T4 run (a 261 s song) took about 260 s warm and about
+  397 s cold wall time, including per-call container start and model reloads.
+  It used the user-owned Modal processing path with a different software stack (newer
+  torch, Demucs, and audio-separator, with Demucs in-process), not the desktop
+  pack, so it is an order-of-magnitude reference only.
+- Apple and small CPUs: short-clip runs on an Apple M2 (16 GiB) Metal pack and a
+  6-vCPU virtual machine exist, but load overhead dominates them. The M2 runs
+  slowed under memory pressure, and the device actually used for inference was
+  not proven.
+
+**Inferred.**
+
+- CPU tier scaling uses published UVR community Demucs timings. On the
+  spreadsheet's Batch tab, a Ryzen 7 1700X takes about 1.5 times as long as
+  a Ryzen 7 5800X for `mdx_extra` (608 s versus 411 s). Older 2–4-core CPUs appear
+  only on its Chunks-Auto tab, at about 2–2.5 times the 5800X for `htdemucs` and
+  3–7 times for the v3 HDemucs `mdx` bag. These are cross-tab comparisons with
+  different settings, so they guide the tier spacing only. Thread scaling is
+  non-linear, and SMT or oversubscription can slow PyTorch.
+- Apple ranges come from the short M2 measurements and published MPS reports,
+  including RoFormer timings on an M4 Pro and reports that HDemucs (the
+  `mdx_extra` architecture) can run slower on MPS than on CPU.
+- CUDA ranges come from published T4 RoFormer timings, published Demucs GPU
+  timings, published Whisper-medium PyTorch GPU timings, and the T4 reference
+  above.
+- Optimized engines (faster-whisper, whisper.cpp, MLX, ONNX/TensorRT) are not
+  used as transferable timings for this pack.
+
+Sources checked 2026-10-02:
+
+- [UVR community Demucs separation-time spreadsheet](https://docs.google.com/spreadsheets/d/1R_pOURv8z9GmVkCt-x1wwApgAnplM9SHiPO_ViHWl1Q)
+  (CPU and GPU rows; uses shifts 2, so roughly double the CLI default)
+- [python-audio-separator PR #298](https://github.com/nomadkaraoke/python-audio-separator/pull/298)
+  (M4 Pro MPS and Tesla T4 timings)
+- [Demucs-GUI usage notes](https://github.com/CarlGao4/Demucs-Gui/blob/main/usage.md)
+  (HDemucs on MPS versus CPU)
+- [openai/whisper discussion #918](https://github.com/openai/whisper/discussions/918)
+  (Whisper-medium PyTorch CPU and GPU timings)
+- [Tom's Hardware Whisper GPU benchmark](https://www.tomshardware.com/news/whisper-audio-transcription-gpus-benchmarked)
+- [openai/whisper PR #382 comment](https://github.com/openai/whisper/pull/382#issuecomment-1475975663)
+  (MPS slower than CPU in one report)
+- [openai/whisper discussion #1551](https://github.com/openai/whisper/discussions/1551)
+  and [whisper.cpp issue #89](https://github.com/ggml-org/whisper.cpp/issues/89)
+  (thread-count scaling)
+- [HeartTranscriptor model card](https://huggingface.co/HeartMuLa/HeartTranscriptor-oss)
+
+**Caveats.** Ranges are planning guidance, not qualification results or upper
+bounds. Dense vocals, retries, thermal throttling, memory pressure or swap,
+competing applications, and slow storage can push times outside them. More RAM
+and more logical processors do not guarantee faster inference, and the bar is
+never raised merely because a graphics adapter is present. The selected,
+validated pack supplies the execution device, so Windows/Linux CPU packs remain
+CPU estimates even on NVIDIA-equipped machines. Unknown accelerators, missing
+hardware observations, mismatched targets, incomplete or extended model sets,
+and blocked installation plans display no numeric range. The estimate applies
+only to the default three-model workflow from the selected validated catalog.
+If the installed runtime differs from that catalog, setup plans a replacement
+and any estimate describes the selected runtime. Existing measured
+memory checks and runtime attestation remain
+authoritative and independent of this UI.
+
 Hardware details report observations rather than inferred processing support.
 Unknown graphics memory remains unknown, and Apple silicon unified memory is
 not labeled dedicated VRAM. Optional release-owned memory evidence supplies
@@ -894,6 +1276,73 @@ separate RAM/VRAM recommendations, measured peaks plus 25% headroom. Fresh
 installation is blocked when required capacity cannot be verified or is too
 small. Low currently available RAM produces a warning; prepared-media playback
 remains available.
+
+CUDA processing additionally requires a runtime-bound worker memory policy in
+`desktop/processing-memory/<platform>-<arch>.json`. Native assembly includes
+only the selected target's policy as `processing-memory.json`. Its schema is
+`1`, with `runtimeLockSha256`, `evidenceReference`, `executionProfile` set to
+`bounded-v1`, and `models` keyed by the three installed model IDs. Each model
+declares `maxDurationSeconds`, `maxSampleRate`, `maxChannels`, and `devices`:
+`cuda` needs `ramBytes` and `vramBytes`; an optional `cpu` entry needs its own
+`ramBytes`. Requirements include headroom and must be supported by recorded
+measurements; a CPU entry explicitly permits slower CPU execution in the same
+runtime. The initial CUDA functional probe must still pass before activation.
+
+Workers check fresh available RAM, the selected CUDA device's free VRAM, and
+audio metadata before loading checkpoints. Missing evidence, unknown memory,
+out-of-envelope audio, or insufficient memory for both routes refuses the job.
+Guarded workers serialize processing, wait a bounded time for another local
+worker to finish, and never restart failed inference on a different device.
+Before Pass 1, a guarded runtime decodes the upload with the bundled ffmpeg to
+a temporary 44.1 kHz stereo float WAV, so every accepted upload format is
+inspected and admitted under the same envelope; the copy is removed after
+Pass 1. Tracks longer than the shortest measured `maxDurationSeconds` are
+refused with a message that states the limit, which applies on the GPU and the
+CPU alike. The decode is bounded by output size rather than by timestamp and
+copies no metadata, so neither timestamp gaps nor large tags can let a file
+pass the check with audio cut off. Without a valid measured policy for every
+workflow model, preparation is refused before decoding. Each guarded worker reports the device it selected and why; the job
+message names CPU fallback (for example, too little free GPU memory, a CUDA
+driver error, or an unsupported GPU) and that it is slower. HEART was measured
+on the GPU only with managed VAD at its default configuration (segments of at
+most 15 seconds) and greedy decoding. Whole-file decoding, temperature-fallback
+decoding, a non-default VAD configuration, and supplied segments that are not
+finite, ordered, inside the audio, and at most 15 seconds long use the CPU
+route. A CUDA runtime without a valid policy for its models reports
+local processing as not ready.
+
+The bounded profile applies only to guarded runtimes: six-second Demucs
+segments, Roformer segment size 256 with batch size one and CUDA autocast, and
+HEART's 30-second chunks with batch size one. Unguarded CPU and Metal runtimes
+keep upstream Demucs and audio-separator settings. Managed HEART VAD runs
+inside admission. The quality effect of the shorter separation segments has not
+been measured. These checks cannot reserve memory against other applications
+or establish support for hardware that has not been tested.
+
+The Linux CUDA runtime pins PyTorch 2.10 built for CUDA 12.8, compiled for
+compute capabilities `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_90`, `sm_100`,
+and `sm_120`. GPUs below compute capability 7.0 (Pascal, including the
+GeForce GTX 10 series, and older) are not supported; workers name the GPU's
+capability and use the CPU route instead. A runtime that reports no compiled
+GPU architectures is treated as unusable for CUDA in the same way, and the
+activation probe refuses both cases with the reason. The CUDA 12.8 libraries need an
+NVIDIA driver from the R525 series or newer through CUDA minor-version
+compatibility, and R570 or newer for Blackwell (RTX 50 series) GPUs. The
+current memory policy rests on measurements from a single 24 GB GPU host.
+Cards with 8 GB or less are untested; on 6 GB cards HEART cannot meet its GPU
+budget and runs on the CPU only when enough RAM is available.
+
+`desktop/qualification/profile_processing.py --help` describes the explicit
+Linux measurement harness. It verifies runtime files, records model/input
+identities, monitors only the owned worker group, and stops the experiment if
+the chosen host RAM reserve is threatened. Its candidate budgets are experiment
+inputs, and its sampled peaks are raw lower bounds, not release qualification
+or automatically generated memory minima. For CUDA and CPU runs alike it
+records the worker group's sampled peak RSS, the highest per-process kernel
+RSS high-water mark, and the minimum host available RAM, so a CUDA route's
+`ramBytes` can be derived from its own run. Profile Demucs with the prepared
+44.1 kHz stereo WAV that guarded runtimes pass to Pass 1. Keep audio and
+transcription logs local; publish only sanitized technical evidence.
 
 Desktop Modal setup saves credentials with operating-system encryption and
 performs a bounded, explicit metadata check using the pinned client. No audio
@@ -908,12 +1357,14 @@ or environment variables. Linux requires a supported system keyring; no
 plaintext fallback exists. Forgetting local credentials works even when the
 keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
-Release builds may supply one catalog per target,
+Release builds supply a primary catalog per target,
 `desktop/processing-catalogs/<platform>-<arch>.json` (for example
 `win32-x64.json` or `darwin-arm64.json`), as part of the application's verified
-inventory; package them with `--processing-ready`, which places only that
-target's file in the application as `processing-catalog.json`. Commit the
-catalog before native assembly: all packaging requires a clean checkout whose
+inventory; package them with `--processing-ready`, which places that
+target's file in the application as `processing-catalog.json`. Normal Windows
+and Linux CUDA recipe builds also require the target's `-cpu.json` catalog,
+packaged as `processing-catalog-cpu.json`, for hardware-based setup selection.
+Commit both catalogs before native assembly: all packaging requires a clean checkout whose
 `HEAD` matches the commit recorded in the native provenance, so a catalog added
 after assembly cannot be packaged. The setup engine never accepts a catalog
 from the renderer or saved preferences. Its schema is:
@@ -923,7 +1374,29 @@ from the renderer or saved preferences. Its schema is:
 - `qualification`: `passed`, `scope`, `runtimeLockSha256`, `platform`, `arch`,
   `evidenceReference`, and `accelerator`, matching that exact runtime. Populate
   only from actual evidence. `scope` is required and states what `passed`
-  covers:
+  covers (`passed: true` for `full` and `private-smoke`):
+  - `hardware-test`: an experimental candidate awaiting real-song testing;
+    `passed` must be exactly `false`. Accepted only on the `private-test`
+    channel. The evidence reference identifies its build/inventory evidence,
+    never a claimed inference result. Setup displays an explicit experimental
+    warning before consent. Hash trust, download consent, and the mandatory
+    on-device functional probe before runtime activation remain required.
+    This scope is suitable for sending a CUDA candidate to a hardware tester;
+    it does not establish memory suitability or release qualification.
+    CUDA candidates still require a successful CUDA functional probe before
+    activation. CPU fallback within that pack is available only after this
+    initial CUDA check succeeds; machines without a working CUDA device need
+    a CPU pack. This catalog does not automatically select between packs.
+    For a CUDA catalog, setup is unavailable before any download when no
+    NVIDIA device is detected, and the wizard labels an available
+    hardware-test choice "Experimental" rather than "Recommended". Its runtime
+    lock must also be listed in `privateTestLockSha256` (see above).
+    The committed `win32-x64.json` is currently such a Windows CUDA
+    hardware-test catalog. It replaces the earlier Windows CPU `private-smoke`
+    catalog: because there is one catalog per target, a processing-ready
+    Windows build from this source offers only the CUDA test pack, and Windows
+    computers without an NVIDIA GPU cannot set up local processing with it.
+    See `desktop/qualification/windows-cuda-test.md`.
   - `full`: the complete release qualification passed for this runtime and
     target. Accepted by builds on any release channel.
   - `private-smoke`: only a single-song real-processing smoke test passed. This
@@ -949,8 +1422,8 @@ replaces an existing file). Commit the file exactly as written: packaging
 accepts only the generator's canonical bytes. Inputs are explicit;
 the tool never manufactures qualification. `--release release.json` names the
 release policy whose channel the catalog is checked against (default
-`desktop/release.json`); the tool refuses to write a `private-smoke` catalog
-for any channel other than `private-test`. Packaging re-checks the catalog
+`desktop/release.json`); the tool refuses to write a `private-smoke` or
+`hardware-test` catalog for any channel other than `private-test`. Packaging re-checks the catalog
 against the release policy actually packaged. `--memory memory.json` adds measured
 memory evidence. Production catalogs reject local runtime URLs. The explicit
 `--private-test-local-sources` option is only for validating private test inputs;
@@ -1039,21 +1512,20 @@ certificate verification; fix the host instead.
 
 | Mode | Selected by | Installs | Model retrieval consent |
 |---|---|---|---|
-| Fresh install | `--runtime-manifest` and `--download-models` | Through the advanced manifest installer | `--download-models` |
-| Resume | Fresh install options plus `--resume`, same `--output` | Continues the interrupted attempt | `--download-models` |
 | Retained setup | `--runtime-manifest`, `--retained-profile`, `--expected-source-commit` | Nothing | Not applicable |
 | Wizard | `--wizard` and `--expected-runtime-lock-sha256` | Through the first-launch setup screens | The application's own consent screen |
 
-Fresh install, resume and wizard modes use a new profile inside the evidence
-directory. For example, on Linux:
+Wizard mode uses a new profile inside the evidence directory. Legacy manifest
+installation and resume modes are retired; use the catalog shipped in the
+candidate and the wizard. For example, on Linux:
 
 ```sh
 xvfb-run -a node desktop/test/packaged-processing-smoke.mjs \
   --executable desktop/artifacts/linux-unpacked/Singhouse \
-  --runtime-manifest /verified-pack/manifest.json \
+  --wizard \
+  --expected-runtime-lock-sha256 FULL_64_HEX_RUNTIME_LOCK \
   --audio /licensed-excerpt.wav \
-  --output /evidence/new-attempt \
-  --download-models
+  --output /evidence/new-attempt
 ```
 
 #### Candidate identity
@@ -1069,28 +1541,9 @@ architecture is authoritative; if it differs from the Node architecture running
 the harness (for example an x64 Node under translation on Apple silicon), the
 run fails before processing.
 
-#### Resume and upgrades
-
-`--resume` continues an interrupted fresh-install attempt in the same evidence
-directory. Earlier evidence is hash linked and never modified. Resume refuses
-evidence from another platform or architecture, evidence recorded in retained
-or wizard mode, and any change to the candidate tuple. Profile paths are
-compared case-insensitively on macOS and Windows and exactly on Linux.
-
-To continue with a different candidate, add
-`--upgrade-from-executable-sha256 <full original executable hash>`. The
-candidate tuple must then change, and the evidence binds the original and
-current tuples as the upgrade lineage; every later attempt must carry the same
-lineage. On Linux the stock executable hash is shared by every build, so this
-flag selects nothing there: it only confirms the original evidence, and the
-recorded tuples bind the lineage. Evidence written before candidate tuples were
-recorded resumes only on Windows, where it is compared by executable hash alone
-and marked as legacy. Once any later attempt in such a chain records a tuple,
-every other attempt and every non-upgrade resume must match that tuple. On
-Linux and macOS such evidence is refused; start a new attempt.
-
 The candidate tuple is hashed again after every relaunch and after the final
-shutdown; any change fails the run.
+shutdown; any change fails the run. Existing resume and upgrade evidence remains
+preserved, but new attempts must use wizard or retained-setup mode.
 
 #### Retained setup
 
@@ -1235,9 +1688,10 @@ consent screen is accepted; `harnessUsedAdvancedRoute` is always `false`; and
 
 Two recovery exercises are available; choose at most one:
 
-- `--interrupt-runtime-retrieval` cancels setup from the wizard's own controls
+- `--interrupt-runtime-retrieval` pauses setup from the wizard's own controls
   once at least 5% of the runtime has transferred, records the partial bytes
-  kept on disk, and retries with "Review setup and retry". Start the pack server
+  kept on disk, checks the paused state, and resumes through the same control.
+  Start the pack server
   with `--throttle-bytes-per-second` so the 5% point is observable.
 - `--expect-retrieval-failure-then-retry` expects the pack server's
   `--fail-after-bytes` failure: setup reaches its error screen during runtime
@@ -1317,7 +1771,7 @@ disabled.
 #### Limits
 
 The runner requires Electron's host window; it is not a headless backend test.
-Modal, external lyric lookup and external correction remain disabled. None of
+Modal, external lyric lookup and external paging remain disabled. None of
 these modes is clean-machine, corpus accuracy, representative memory or
 physical-output qualification. Process ownership is traced by parent lineage
 from the first observation at close time: the application process and every
@@ -1327,3 +1781,39 @@ lists every owned descendant still running after shutdown. Linux zombie
 processes (exited, not yet reaped) are not counted as running; they are listed
 separately as `zombies`. The harness signals only the application process it
 launched, and only after a failed shutdown.
+
+### Native dependency-runtime validation
+
+`Native processing installer fixtures` runs both tiny recovery fixtures and full
+CPU dependency-runtime builds on hosted Linux x64, Windows x64, and macOS arm64
+runners for relevant pull requests. Manual dispatch can request the full builds.
+Full builds use the locked Python, uv, wheel, and native audio inputs, install
+into an empty isolated store, run the real functional probe, and independently
+perform backend inventory verification through `desktop/backend.py`. A second installation of
+the same recipe must reuse the active environment with source retrieval disabled.
+The tiny fixture also installs a changed synthetic dependency wheel, measures its
+transfer and sampled disk peak with rollback retained, and checks fresh-process
+selection, corruption fallback, and in-flight lease preservation. This is not a
+full dependency-release update or model qualification.
+Only compact evidence is uploaded; models and user media are never retrieved.
+
+Run the same full check locally with Python 3.12 or newer and Node 22:
+
+```sh
+python desktop/test/test_uv_installation.py --prefetch /path/to/native-inputs
+python desktop/test/test_uv_installation.py --full-runtime \
+  --assets /path/to/native-inputs --work-root /path/to/fresh-validation \
+  --evidence /path/to/runtime-evidence.json --accelerator cpu
+```
+
+The work directory must be fresh and outside the clean source checkout. To
+validate an already-built recipe, add `--recipe /path/to/recipe/manifest.json`;
+`--runtime-root /path/to/existing-isolated-store` explicitly permits existing
+store revalidation and is recorded separately from a cold installation. Keep
+that evidence distinct from an incremental dependency update or a benchmark
+against a legacy pack.
+
+These checks prove dependency installation, native operations, and inventory integrity,
+not complete song processing or model quality. CUDA and Metal runs require
+separate evidence on capable physical hardware using the corresponding locked
+recipe and `--accelerator`; the hosted CPU jobs make no accelerator claim.

@@ -9,13 +9,13 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { parseArguments, reusableRuntime, validateResume, validateRetainedCandidate, validateRetainedProfile, validateFreshSubmission, retainedDatabaseSnapshot, auditRetainedDatabase,
   applicationEnvironment, shutdownStrategy, validateResumedApplication, candidateIdentity, executableIdentityLimitation, harnessIdentity, HARNESS_FILES,
-  extraCaCertificate, copyExtraCaCertificate, readPackServerLog, playwrightVersion, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
+  extraCaCertificate, copyExtraCaCertificate, readPackServerLog, playwrightVersion, validateHarnessArchitecture, assertPhysicalOutputParent, recordedCandidate, packagedReleasePolicy, CANDIDATE_KEYS, EVIDENCE_SCHEMA } from './packaged-processing-smoke.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const args = ['--executable', 'app.exe', '--runtime-manifest', 'manifest.json', '--audio', 'audio.wav', '--output', 'evidence', '--download-models']
-test('resume is explicit and retains model retrieval consent requirement', () => {
-  assert.equal(parseArguments(args).resume, false)
-  assert.equal(parseArguments([...args, '--resume']).resume, true)
+test('legacy fresh and resume qualification direct operators to wizard setup', () => {
+  assert.throws(() => parseArguments(args), /retired.*--wizard/)
+  assert.throws(() => parseArguments([...args, '--resume']), /retired.*--wizard/)
   assert.throws(() => parseArguments([...args, '--resume', '--resume']), /Duplicate/)
   assert.throws(() => parseArguments([...args.slice(0, -1), '--resume']), /consent/)
 })
@@ -118,7 +118,7 @@ test('executable upgrade requires explicit resume and a full original hash', () 
   const flag = '--upgrade-from-executable-sha256', digest = 'a'.repeat(64)
   assert.throws(() => parseArguments([...args, flag, digest]), /requires --resume/)
   assert.throws(() => parseArguments([...args, '--resume', flag, 'abc']), /64 hex/)
-  assert.equal(parseArguments([...args, '--resume', flag, digest.toUpperCase()]).upgradeFromExecutableSha256, digest)
+  assert.throws(() => parseArguments([...args, '--resume', flag, digest.toUpperCase()]), /retired.*--wizard/)
 })
 
 test('explicit upgrade preserves original evidence and binds original and current candidate tuples', t => {
@@ -440,7 +440,7 @@ test('wizard mode is exclusive, fresh-profile only, and requires the expected ru
   assert.throws(() => parseArguments([...args, '--interrupt-runtime-retrieval']), /requires --wizard/)
   assert.throws(() => parseArguments([...args, '--expected-runtime-lock-sha256', 'a'.repeat(64)]), /requires --wizard/)
   assert.throws(() => parseArguments(args.filter((_, i) => i !== 2 && i !== 3)), /Missing --runtime-manifest/)
-  assert.equal(parseArguments(args).mode, 'advanced')
+  assert.throws(() => parseArguments(args), /retired.*--wizard/)
   assert.equal(parseArguments([...args.slice(0, -1), '--retained-profile', 'p', '--expected-source-commit', 'a'.repeat(40)]).mode, 'retained')
 })
 
@@ -594,4 +594,17 @@ test('retained candidate identity reads macOS bundle resources', t => {
   writeFileSync(join(contents, 'Resources', 'release-receipt.json'), JSON.stringify({ identity: { sourceCommit: expected, nativeRuntimeId: runtimeId } }))
   assert.equal(validateRetainedCandidate(executable, expected, 'darwin').applicationArchiveSha256, hash('bundle archive'))
   assert.throws(() => validateRetainedCandidate(join(root, 'Singhouse'), expected, 'darwin'), /MacOS/)
+})
+
+test('the packaged release channel is cross-checked against the receipt, with a clear message when the receipt is absent', t => {
+  const resources = mkdtempSync(join(tmpdir(), 'release-policy-'))
+  t.after(() => rmSync(resources, { recursive: true, force: true }))
+  const policyBytes = readFileSync(new URL('../release.json', import.meta.url))
+  const policy = JSON.parse(policyBytes)
+  writeFileSync(join(resources, 'release.json'), policyBytes)
+  assert.throws(() => packagedReleasePolicy(resources), /no resources\/release-receipt\.json \(signed macOS builds keep it outside the sealed bundle\)/)
+  writeFileSync(join(resources, 'release-receipt.json'), JSON.stringify({ identity: { policyId: 'f'.repeat(64) } }))
+  assert.throws(() => packagedReleasePolicy(resources), /differs from its receipt identity/)
+  writeFileSync(join(resources, 'release-receipt.json'), JSON.stringify({ identity: { policyId: policy.policyId } }))
+  assert.deepEqual(packagedReleasePolicy(resources), { channel: policy.channel, policyId: policy.policyId, sha256: hash(policyBytes) })
 })

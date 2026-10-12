@@ -30,7 +30,6 @@ from karaoke_backend.database import AsyncSessionLocal
 from karaoke_backend.db import bootstrap
 from karaoke_backend.db.sqlite import install_sqlite_pragmas
 from karaoke_backend.jobs import queue as job_queue
-from karaoke_backend.jobs._llm import make_correction_progress_callback
 from karaoke_backend.jobs.queue import (
     RESTART_INTERRUPTION_MESSAGE,
     requeue_expired,
@@ -85,100 +84,10 @@ async def test_in_memory_sqlite_skips_wal_but_sets_busy_timeout():
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_correction_progress_callback_writes_from_worker_thread():
-    async with AsyncSessionLocal() as db:
-        db.add(
-            Job(
-                id="correction-worker",
-                kind=JobKind.INGEST.value,
-                status="running",
-                phase="transcribing",
-                progress=80,
-                claimed_by="worker-1",
-            )
-        )
-        await db.commit()
-
-    event_loop_thread = threading.get_ident()
-    callback = make_correction_progress_callback(
-        "correction-worker",
-        "worker-1",
-        asyncio.get_running_loop(),
-    )
-
-    callback_thread = await asyncio.to_thread(
-        lambda: (callback(1, 4), threading.get_ident())[1]
-    )
-
-    assert callback_thread != event_loop_thread
-    async with AsyncSessionLocal() as db:
-        job = await db.get(Job, "correction-worker")
-        assert job is not None
-        assert job.message == "LLM correction: region 2/4"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_status", ["done", "failed"])
-async def test_correction_progress_callback_does_not_overwrite_terminal_message(
-    terminal_status: str,
-):
-    terminal_message = f"{terminal_status} terminal message"
-    async with AsyncSessionLocal() as db:
-        db.add(
-            Job(
-                id=f"correction-{terminal_status}",
-                kind=JobKind.INGEST.value,
-                status=terminal_status,
-                progress=100,
-                message=terminal_message,
-                claimed_by="worker-1",
-            )
-        )
-        await db.commit()
-
-    callback = make_correction_progress_callback(
-        f"correction-{terminal_status}",
-        "worker-1",
-        asyncio.get_running_loop(),
-    )
-    await asyncio.to_thread(callback, 0, 2)
-
-    async with AsyncSessionLocal() as db:
-        job = await db.get(Job, f"correction-{terminal_status}")
-        assert job is not None
-        assert job.message == terminal_message
 
 
-@pytest.mark.asyncio
-async def test_correction_progress_callback_is_refused_from_a_stale_worker():
-    """The claim guard, from the callback that most easily outlives its job.
-
-    A worker wedged behind a hung subprocess keeps firing correction callbacks
-    long after its lease lapsed. By then another worker may hold the job; the
-    stale write must not land.
-    """
-    async with AsyncSessionLocal() as db:
-        db.add(
-            Job(
-                id="correction-stale",
-                kind=JobKind.INGEST.value,
-                status="running",
-                progress=50,
-                message="held by the new owner",
-                claimed_by="worker-2",
-            )
-        )
-        await db.commit()
-
-    callback = make_correction_progress_callback(
-        "correction-stale", "worker-1", asyncio.get_running_loop()
-    )
-    await asyncio.to_thread(callback, 0, 2)
-
-    async with AsyncSessionLocal() as db:
-        job = await db.get(Job, "correction-stale")
-        assert job.message == "held by the new owner"
 
 
 @pytest.mark.asyncio

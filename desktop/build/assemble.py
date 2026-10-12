@@ -26,6 +26,13 @@ DESKTOP = ROOT / "desktop"
 LOCKS = DESKTOP / "locks"
 
 
+def copy_processing_memory_policy(target, output):
+    """Select only this native target's release-owned measurements."""
+    memory_policy = DESKTOP / "processing-memory" / f"{target}.json"
+    if memory_policy.is_file():
+        shutil.copyfile(memory_policy, output / "processing-memory.json")
+
+
 def run(*args, cwd=ROOT, env=None):
     subprocess.run([str(a) for a in args], cwd=cwd, env=env, check=True)
 
@@ -99,6 +106,28 @@ def unpack_executable(archive_path, record, executable):
     executable.chmod(0o755)
 
 
+def unpack_uv(archive_path, record, executable):
+    """Extract only the pinned uv member, then verify its executable bytes."""
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    if record.get("archive") == "zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            with archive.open(record["member"]) as source, executable.open("wb") as target:
+                shutil.copyfileobj(source, target)
+    elif record.get("archive") == "tar.gz":
+        with tarfile.open(archive_path, "r:gz") as archive:
+            member = archive.getmember(record["member"])
+            if not member.isfile():
+                raise ValueError("Pinned uv member must be a regular file")
+            with archive.extractfile(member) as source, executable.open("wb") as target:
+                shutil.copyfileobj(source, target)
+    else:
+        raise ValueError("Unsupported uv archive format")
+    if digest(executable) != record.get("executableSha256"):
+        executable.unlink()
+        raise ValueError("Bundled uv executable digest mismatch")
+    executable.chmod(0o755)
+
+
 def host_target():
     arch = {"x86_64": "x64", "AMD64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine()]
     return f"{sys.platform}-{arch}"
@@ -133,6 +162,48 @@ def assembly_environment(cache):
                 PYTHONDONTWRITEBYTECODE="1")
 
 
+def verify_application_wheels(artifacts, destination=None):
+    """Reject stale build staging and damaged installer cache before attestation."""
+    roots = {"karaoke_backend": ROOT / "backend/src", "lyricsync": ROOT / "lyricsync/src"}
+    expected = set()
+    for package, root in roots.items():
+        for source in (root / package).rglob("*.py"):
+            relative = source.relative_to(root)
+            # Match the package exclusion in backend/pyproject.toml; generated
+            # bytecode/cache directories are never source package inventory.
+            if "__pycache__" in relative.parts:
+                continue
+            if package == "karaoke_backend" and relative.parts[1:3] == ("api", "providers") and len(relative.parts) > 4 and relative.parts[3].startswith("local"):
+                continue
+            expected.add(relative.as_posix())
+    # Explicit package-data declarations in backend/pyproject.toml.
+    for pattern in ("migrations/*.mako", "migrations/*.py", "migrations/versions/*.py", "export/fonts/*"):
+        expected.update(source.relative_to(roots["karaoke_backend"]).as_posix()
+                        for source in (roots["karaoke_backend"] / "karaoke_backend").glob(pattern) if source.is_file())
+    seen = set()
+    for artifact in artifacts:
+        with zipfile.ZipFile(artifact) as wheel:
+            for member in wheel.infolist():
+                path = Path(member.filename)
+                if member.is_dir() or path.parts[0] not in roots:
+                    continue
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("Unsafe application wheel path")
+                if member.filename not in expected or member.filename in seen:
+                    raise ValueError(f"Unexpected or duplicate application wheel member: {member.filename}")
+                seen.add(member.filename)
+                source = roots[path.parts[0]] / path
+                content = wheel.read(member)
+                if not source.is_file() or source.read_bytes() != content:
+                    raise ValueError(f"Application wheel differs from source: {member.filename}; rebuild from clean staging")
+                if destination is not None:
+                    installed = destination / path
+                    if not installed.is_file() or installed.read_bytes() != content:
+                        raise ValueError(f"Installed application differs from wheel: {member.filename}; rebuild with a fresh installer cache")
+    if seen != expected:
+        raise ValueError(f"Application wheel inventory is incomplete: {', '.join(sorted(expected - seen))}; rebuild from clean staging")
+
+
 def install_dependencies(output, cache, lock, target, env, upstream_omissions):
     host = host_target()
     host_input = lock["targets"][host]["python"]
@@ -154,6 +225,7 @@ def install_dependencies(output, cache, lock, target, env, upstream_omissions):
             with zipfile.ZipFile(artifact) as wheel:
                 if any("/remote_runtime/" in name or name.endswith("/workers/remote.py") for name in wheel.namelist()):
                     raise SystemExit("Application wheel contains an excluded compute dispatcher")
+        verify_application_wheels(artifacts)
         destination = site_packages(output, target, lock["pythonVersion"])
         # Source builds (MetaPhone is pure Python) use only the pinned host
         # toolchain. Platform-specific dependencies resolve as target wheels.
@@ -162,6 +234,7 @@ def install_dependencies(output, cache, lock, target, env, upstream_omissions):
         run("uv", "pip", "install", *selection, "--require-hashes", "--no-build-isolation",
             "-r", LOCKS / "base.txt", env=env)
         run("uv", "pip", "install", *selection, "--no-deps", *artifacts, env=env)
+        verify_application_wheels(artifacts, destination)
         launcher_base = fetch(lock["targets"][target]["consoleLauncher"], cache) if target == "win32-x64" else None
         normalization = normalize_installation(output, destination, host_python, target, artifacts,
                                               upstream_omissions, windows_launcher_base=launcher_base)
@@ -266,6 +339,10 @@ def main():
     notices = output / "notices"
     notices.mkdir()
     copy_launcher_notices(inputs, notices)
+    bundled_uv = output / "uv" / ("uv.exe" if target.startswith("win32-") else "uv")
+    unpack_uv(fetch(inputs["uv"], cache), inputs["uv"], bundled_uv)
+    for index, notice in enumerate(lock["uvNotices"]):
+        shutil.copyfile(fetch(notice, cache), notices / f"uv-{index:03d}.txt")
     versions = {}
     for name in ("ffmpeg", "ffprobe"):
         executable = ffbin / (name + (".exe" if target.startswith("win32-") else ""))
@@ -290,8 +367,9 @@ def main():
         shutil.copyfile(DESKTOP / "modal-contract.json", output / "modal-contract.json")
     # Backend admission reads these beside backend.py. Include them in the
     # native inventory so direct native boot and installer boot use one policy.
-    for policy in ("models.json", "processing-locks.json"):
+    for policy in ("models.json", "processing-locks.json", "hardware-policy.json"):
         shutil.copyfile(DESKTOP / policy, output / policy)
+    copy_processing_memory_policy(target, output)
     shutil.copyfile(ROOT / "frontend/src/brand.js", output / "brand.mjs")
     for source in DESKTOP.glob("runtime*.py"):
         shutil.copyfile(source, output / source.name)

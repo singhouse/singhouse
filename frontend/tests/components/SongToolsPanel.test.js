@@ -31,7 +31,7 @@ vi.mock('@/api/client', () => ({
     list: vi.fn(async () => ({ data: { songs: [], total: 0 } })),
     pollJob: vi.fn(async () => ({ data: { status: 'running' } })),
   },
-  featuresApi: { get: vi.fn(async () => ({ data: {} })) },
+  featuresApi: { get: vi.fn(async () => ({ data: { llm_paging: true } })) },
   lyricsSetsApi: {
     list: (...a) => api.listSets(...a),
     get: (...a) => api.getSet(...a),

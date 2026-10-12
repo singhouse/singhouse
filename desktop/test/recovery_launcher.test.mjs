@@ -3,11 +3,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, recover, recoveryAnchorInvocationPath, recoveryAnchorRecord, recoveryInvocation, recoveryTransaction, stableFirstInstallerExecutable, trustedSourceFileMetadata, readOnlyAppImageMount, verifiedAppImageRuntime } from '../recovery_launcher.mjs'
+import { readOnlyApplicationRoot } from '../application_inventory.mjs'
 import { verifyRecoveryAnchor } from '../bootstrap.mjs'
 import { canonicalJson } from '../release.mjs'
 import { recoveryDataDirectory, recoveryHandoff, recoveryStateRoot } from '../recovery_cli.mjs'
@@ -18,6 +19,13 @@ const kitBinding = (recoveryPoint = 'point-1') => ({ schema: 1, recoveryPoint,
   recoveryManifestSha256: '1'.repeat(64), updateMetadataSha256: '2'.repeat(64),
   previousReleaseId: '3'.repeat(64), targetReleaseId: '4'.repeat(64), sequence: 1 })
 process.umask(0o077)
+
+// Every temporary root is removed when its test ends, whatever the outcome.
+function temporaryRoot(t, prefix) {
+  const root = mkdtempSync(resolve(tmpdir(), prefix))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  return root
+}
 
 test('read-only AppImage mount contents may be root-owned but never writable', () => {
   assert.equal(trustedSourceFileMetadata({ uid: 0, mode: 0o100555 }, { requireOwner: false, currentUid: 1000 }), true)
@@ -30,8 +38,8 @@ const anchorFor = (platform = 'linux', arch = 'x64', recoveryRoot) => {
     digests: { anchorPath: digest(Buffer.from(anchorPath)) } }
 }
 
-test('only a verified first installer repairs or rotates the recovery anchor without touching user data', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-anchor-reinstall-'))
+test('only a verified first installer repairs or rotates the recovery anchor without touching user data', t => {
+  const root = temporaryRoot(t, 'singhouse-anchor-reinstall-')
   const recovery = resolve(root, 'recovery-tool'), anchorPath = resolve(recovery, 'anchor.json')
   const executablePath = resolve(root, 'Singhouse.exe'), bootstrapPath = resolve(root, 'resources', 'app.asar', 'bootstrap.mjs')
   const pythonPath = resolve(root, 'resources', 'native', 'python', 'python.exe'), helperPath = resolve(root, 'resources', 'native', 'backend.py')
@@ -60,8 +68,8 @@ test('only a verified first installer repairs or rotates the recovery anchor wit
   assert.equal(readFileSync(library, 'utf8'), 'user library')
 })
 
-function fixture() {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-recovery-'))
+function fixture(t) {
+  const root = temporaryRoot(t, 'singhouse-recovery-')
   const points = resolve(root, 'points', 'point-1')
   const applications = resolve(root, 'applications', 'prior')
   const kitApplication = resolve(root, 'kit-runtime')
@@ -133,8 +141,8 @@ function fixture() {
     recoveryKitManifest }
 }
 
-test('standalone recovery validates the signed handoff and durably completes both selections', () => {
-  const options = fixture()
+test('standalone recovery validates the signed handoff and durably completes both selections', t => {
+  const options = fixture(t)
   const nativeRun = options.run
   options.run = (python, args, spawnOptions) => {
     assert.equal(spawnOptions.env.ELECTRON_RUN_AS_NODE, undefined)
@@ -153,22 +161,22 @@ test('standalone recovery validates the signed handoff and durably completes bot
   assert.equal(recoveryTransaction(resolve(options.root, 'recovery-transaction.json')).state, 'completed')
 })
 
-test('standalone recovery rejects a live owner through the single native transaction', () => {
-  const options = fixture()
+test('standalone recovery rejects a live owner through the single native transaction', t => {
+  const options = fixture(t)
   assert.throws(() => recover({ ...options, run: () => ({ status: 1 }) }), /Paired recovery failed/)
   assert.equal(existsSync(resolve(options.root, 'recovery-transaction.json')), false)
   assert.equal(readFileSync(options.databasePath, 'utf8'), 'new database')
 })
 
-test('recovery rejects substituted application, metadata and symlinked point paths', () => {
-  const changed = fixture()
+test('recovery rejects substituted application, metadata and symlinked point paths', t => {
+  const changed = fixture(t)
   writeFileSync(changed.retainedManifest, JSON.stringify({ ...changed.application, entrypoint: 'other' }))
   assert.throws(() => recover(changed), /not bound/)
 
-  const unsigned = fixture()
+  const unsigned = fixture(t)
   assert.throws(() => recover({ ...unsigned, verifyMetadata: () => ({ schema: 1, files: [] }) }), /does not authorize/)
 
-  const swappedKit = fixture()
+  const swappedKit = fixture(t)
   swappedKit.recoveryKitManifest = { ...swappedKit.recoveryKitManifest,
     binding: { ...swappedKit.recoveryKitManifest.binding, recoveryPoint: 'point-other' } }
   const swappedHandoff = JSON.parse(readFileSync(swappedKit.handoffPath, 'utf8'))
@@ -177,25 +185,25 @@ test('recovery rejects substituted application, metadata and symlinked point pat
   assert.throws(() => recover(swappedKit), /not bound to this authenticated handoff/)
 
   if (process.platform !== 'win32') {
-    const linked = fixture(); const link = resolve(linked.root, 'point-link.json')
+    const linked = fixture(t); const link = resolve(linked.root, 'point-link.json')
     symlinkSync(linked.pointPath, link)
     assert.throws(() => recover({ ...linked, pointPath: link }), /non-symlink/)
   }
 })
 
-test('recovery never consumes a damaged external prior slot and rejects damaged retained executable or asar', () => {
-  const external = fixture()
+test('recovery never consumes a damaged external prior slot and rejects damaged retained executable or asar', t => {
+  const external = fixture(t)
   writeFileSync(resolve(external.applicationDestinationPath, 'Singhouse'), 'corrupt target executable')
   mkdirSync(resolve(external.applicationDestinationPath, 'resources')); writeFileSync(resolve(external.applicationDestinationPath, 'resources/app.asar'), 'corrupt target asar')
   assert.deepEqual(recover(external), { releaseId: 'release-prior', completed: true, launched: true })
   assert.equal(readFileSync(resolve(external.applicationDestinationPath, 'resources/app.asar'), 'utf8'), 'asar')
-  const missingExternal = fixture()
+  const missingExternal = fixture(t)
   rmSync(missingExternal.applicationDestinationPath, { recursive: true })
   assert.deepEqual(recover(missingExternal), { releaseId: 'release-prior', completed: true, launched: true })
   assert.equal(readFileSync(resolve(missingExternal.applicationDestinationPath, 'Singhouse'), 'utf8'), 'executable')
   for (const relative of ['Singhouse', 'resources/app.asar']) {
     for (const mutation of ['corrupt', 'missing']) {
-      const damaged = fixture(); const path = resolve(damaged.applicationSourcePath, relative)
+      const damaged = fixture(t); const path = resolve(damaged.applicationSourcePath, relative)
       if (mutation === 'corrupt') writeFileSync(path, 'corrupt')
       else rmSync(path)
       assert.throws(() => recover(damaged), /Paired recovery failed/)
@@ -203,8 +211,8 @@ test('recovery never consumes a damaged external prior slot and rejects damaged 
   }
 })
 
-test('recovery kit must live outside the replaceable target', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-kit-'))
+test('recovery kit must live outside the replaceable target', t => {
+  const root = temporaryRoot(t, 'singhouse-kit-')
   const target = resolve(root, 'target'); mkdirSync(target); writeFileSync(resolve(target, 'runtime'), 'runtime', { mode: 0o755 })
   const source = resolve(root, 'launcher.mjs'); writeFileSync(source, 'launcher')
   const pythonPath = resolve(root, 'python'), backendHelperPath = resolve(root, 'backend.py')
@@ -243,9 +251,9 @@ test('recovery kit must live outside the replaceable target', () => {
   }
 })
 
-test('recovery kit publication is durable and survives either rotation rename failing', () => {
+test('recovery kit publication is durable and survives either rotation rename failing', t => {
   for (const failureAt of [1, 2]) {
-    const root = mkdtempSync(resolve(tmpdir(), `singhouse-kit-failure-${failureAt}-`))
+    const root = temporaryRoot(t, `singhouse-kit-failure-${failureAt}-`)
     const target = resolve(root, 'target'), recoveryRoot = resolve(root, 'recovery-tool', 'kits', 'current')
     mkdirSync(target); writeFileSync(resolve(target, 'runtime'), 'runtime', { mode: 0o755 })
     const source = resolve(root, 'launcher.mjs'); writeFileSync(source, 'old')
@@ -268,8 +276,8 @@ test('recovery kit publication is durable and survives either rotation rename fa
   }
 })
 
-test('point-versioned recovery kits preserve the compatible active kit across an aborted later attempt', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-versioned-kits-'))
+test('point-versioned recovery kits preserve the compatible active kit across an aborted later attempt', t => {
+  const root = temporaryRoot(t, 'singhouse-versioned-kits-')
   const target = resolve(root, 'target'); mkdirSync(target); writeFileSync(resolve(target, 'runtime'), 'runtime', { mode: 0o755 })
   const source = resolve(root, 'launcher.mjs'); writeFileSync(source, 'first')
   const firstRoot = resolve(root, 'recovery-tool', 'kits', 'kit-point-first')
@@ -295,9 +303,9 @@ test('recovery launch descriptors cover every qualified target family', () => {
   }
 })
 
-test('standalone launcher resolves the current stable trust anchor instead of freezing its executable path', () => {
+test('standalone launcher resolves the current stable trust anchor instead of freezing its executable path', t => {
   if (process.platform !== 'linux') return
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-kit-invoke-'))
+  const root = temporaryRoot(t, 'singhouse-kit-invoke-')
   const target = resolve(root, 'attested-running-app'), recoveryRoot = resolve(root, 'recovery-tool', 'kits', 'kit-point-1')
   mkdirSync(target); const runtime = resolve(target, 'node'); copyFileSync(process.execPath, runtime)
   const tools = resolve(root, 'sources'); mkdirSync(tools)
@@ -319,8 +327,8 @@ test('standalone launcher resolves the current stable trust anchor instead of fr
 
 })
 
-test('AppImage anchor selection rejects ambient paths and requires explicit outer-byte and mount evidence', async () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-anchor-'))
+test('AppImage anchor selection rejects ambient paths and requires explicit outer-byte and mount evidence', async t => {
+  const root = temporaryRoot(t, 'singhouse-appimage-anchor-')
   const outer = resolve(root, 'Singhouse.AppImage'), anchorPath = resolve(root, 'state', 'recovery-tool', 'anchor.json')
   mkdirSync(resolve(root, 'state'))
   writeFileSync(outer, 'candidate outer AppImage')
@@ -429,8 +437,8 @@ test('AppImage anchor selection rejects ambient paths and requires explicit oute
   assert.equal(existsSync(resolve(untouchedState, 'recovery-tool')), false)
 })
 
-test('AppImage runtime evidence comes from Linux ancestry and a read-only FUSE mount', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-proc-'))
+test('AppImage runtime evidence comes from Linux ancestry and a read-only FUSE mount', t => {
+  const root = temporaryRoot(t, 'singhouse-appimage-proc-')
   const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
   const outer = resolve(root, 'Downloaded Singhouse.AppImage'), intermediate = resolve(root, 'AppRun')
   const proc = resolve(root, 'proc')
@@ -459,8 +467,8 @@ test('AppImage runtime evidence comes from Linux ancestry and a read-only FUSE m
   assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /read-only FUSE root/)
 })
 
-test('AppImage runtime evidence rejects ambient candidates and non-AppImage ancestors', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-appimage-negative-'))
+test('AppImage runtime evidence rejects ambient candidates and non-AppImage ancestors', t => {
+  const root = temporaryRoot(t, 'singhouse-appimage-negative-')
   const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
   const candidate = resolve(root, 'Singhouse.AppImage'), proc = resolve(root, 'proc')
   mkdirSync(mount); writeFileSync(executable, 'mounted electron'); writeFileSync(candidate, 'ordinary executable')
@@ -472,8 +480,113 @@ test('AppImage runtime evidence rejects ambient candidates and non-AppImage ance
   assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
 })
 
-test('verified installer relocation rotates one invoker without invalidating existing recovery kits', () => {
-  const temporary = mkdtempSync(resolve(tmpdir(), 'singhouse-anchor-relocation-'))
+test('read-only AppImage mount evidence uses kernel mount facts and never reads the outer image', t => {
+  const root = temporaryRoot(t, 'singhouse-appimage-mount-')
+  const mount = resolve(root, '.mount_Singho'), executable = resolve(mount, 'Singhouse')
+  const outer = resolve(root, 'Singhouse.AppImage'), proc = resolve(root, 'proc')
+  mkdirSync(resolve(mount, 'resources', 'app'), { recursive: true }); writeFileSync(executable, 'mounted electron')
+  // An ancestor whose outer image is absent: the full runtime check needs to
+  // read it, the mount-only check must not touch it (this holds even as root).
+  writeFileSync(outer, 'outer image'); rmSync(outer)
+  for (const directory of ['self', '17']) mkdirSync(resolve(proc, directory), { recursive: true })
+  symlinkSync(executable, resolve(proc, 'self', 'exe')); symlinkSync(outer, resolve(proc, '17', 'exe'))
+  writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse) S 17 0 0 0\n')
+  writeFileSync(resolve(proc, '17', 'stat'), '17 (Singhouse.AppImage) S 1 0 0 0\n')
+  const encodedMount = mount.replaceAll(' ', '\\040')
+  // The fixture's files live on the test filesystem, so its mountinfo entry
+  // carries that filesystem's real major:minor.
+  const dev = statSync(mount, { bigint: true }).dev
+  const device = `${((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n)}:${(dev & 0xffn) | ((dev >> 12n) & 0xffffff00n)}`
+  const otherDevice = device === '0:9999' ? '0:9998' : '0:9999'
+  const mountinfo = (options, type = 'fuse.Singhouse', entryDevice = device) => writeFileSync(resolve(proc, 'self', 'mountinfo'),
+    `25 20 ${entryDevice} / ${encodedMount} ${options},nosuid,nodev - ${type} Singhouse.AppImage ${options}\n`)
+  const check = (overrides = {}) => readOnlyAppImageMount({ platform: 'linux', executablePath: executable, procRoot: proc, ...overrides })
+  const appRoot = resolve(mount, 'resources', 'app')
+  // (a) Read-only FUSE mount containing the application root.
+  mountinfo('ro')
+  const evidence = check()
+  assert.deepEqual(evidence, { readOnly: true, mountPath: mount, actualExecutablePath: executable })
+  assert.equal(readOnlyApplicationRoot(evidence, appRoot), true)
+  // (d) The outer image was never read: the full runtime check cannot
+  // authenticate it, yet the mount check succeeded. Without any ancestor at
+  // all the result is the same.
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
+  rmSync(resolve(proc, '17'), { recursive: true })
+  writeFileSync(resolve(proc, 'self', 'stat'), '99 (Singhouse) S 1 0 0 0\n')
+  assert.throws(() => verifiedAppImageRuntime({ platform: 'linux', executablePath: executable, procRoot: proc }), /no authenticated outer-image ancestor/)
+  assert.deepEqual(check(), evidence)
+  // Environment variables are never authority.
+  const saved = { APPIMAGE: process.env.APPIMAGE, APPDIR: process.env.APPDIR }
+  process.env.APPIMAGE = outer; process.env.APPDIR = root
+  try {
+    mountinfo('rw')
+    assert.equal(check(), null)
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+  }
+
+  // (b) A writable mount, a non-FUSE filesystem, or a root outside the mount.
+  mountinfo('rw'); assert.equal(check(), null); assert.equal(readOnlyApplicationRoot(check(), appRoot), false)
+  mountinfo('ro', 'ext4'); assert.equal(check(), null); assert.equal(readOnlyApplicationRoot(check(), appRoot), false)
+  mountinfo('ro')
+  assert.equal(readOnlyApplicationRoot(check(), resolve(root, 'elsewhere', 'app')), false)
+  assert.equal(readOnlyApplicationRoot(check(), `${mount}-other`), false)
+
+  // (c) Missing or contrary evidence yields null rather than throwing.
+  assert.equal(check({ platform: 'darwin' }), null)
+  assert.equal(check({ procRoot: resolve(root, 'missing-proc') }), null)
+  assert.equal(check({ executablePath: `${mount}/../.mount_Singho/Singhouse` }), null)
+  assert.equal(check({ executablePath: resolve(mount, 'missing') }), null)
+  writeFileSync(resolve(mount, 'Other'), 'other'); rmSync(resolve(proc, 'self', 'exe'))
+  symlinkSync(resolve(mount, 'Other'), resolve(proc, 'self', 'exe'))
+  assert.equal(check({ executablePath: resolve(mount, 'Other') }), null)
+  assert.equal(check(), null)
+  rmSync(resolve(proc, 'self', 'exe')); symlinkSync(executable, resolve(proc, 'self', 'exe'))
+  rmSync(resolve(proc, 'self', 'mountinfo')); assert.equal(check(), null)
+  mountinfo('ro'); assert.deepEqual(check(), evidence)
+
+  // (b) Another mount stacked on, or nested beneath, the selected mount point
+  // may expose writable files.
+  const base = `25 20 ${device} / ${encodedMount} ro,nosuid,nodev - fuse.Singhouse Singhouse.AppImage ro\n`
+  const stacked = [
+    `26 25 0:43 / ${encodedMount} rw,relatime - ext4 /dev/test rw\n`,
+    `26 25 0:43 / ${encodedMount} ro,relatime - fuse.Singhouse Singhouse.AppImage ro\n`,
+    `26 25 0:43 / ${encodedMount}/resources rw,relatime - tmpfs tmpfs rw\n`,
+    `26 25 0:43 / ${encodedMount}/resources/app ro,relatime - ext4 /dev/test ro\n`,
+    `26 25 0:43 / ${encodedMount}/..hidden rw,relatime - tmpfs tmpfs rw\n`,
+  ]
+  for (const extra of stacked) {
+    writeFileSync(resolve(proc, 'self', 'mountinfo'), base + extra)
+    assert.equal(check(), null, extra)
+    writeFileSync(resolve(proc, 'self', 'mountinfo'), extra + base)
+    assert.equal(check(), null, extra)
+  }
+  // Mounts beside or above it do not.
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `1 0 0:1 / / rw - ext4 /dev/root rw\n`
+    + `24 1 0:2 / ${root.replaceAll(' ', '\\040')} rw - tmpfs tmpfs rw\n${base}`
+    + `27 1 0:44 / ${encodedMount}-other rw - tmpfs tmpfs rw\n`)
+  assert.deepEqual(check(), evidence)
+
+  // (e) The files reached must be on the selected mount's device. A mount
+  // stacked later on an ancestor hides the FUSE mount without appearing at
+  // or beneath its mount point; the device then differs.
+  writeFileSync(resolve(proc, 'self', 'mountinfo'), `${base}`
+    + `30 1 0:45 / ${root.replaceAll(' ', '\\040')} rw - tmpfs tmpfs rw\n`)
+  assert.deepEqual(check(), evidence)
+  mountinfo('ro', 'fuse.Singhouse', otherDevice)
+  assert.equal(check(), null)
+  assert.equal(check({ applicationRoot: appRoot }), null)
+  mountinfo('ro', 'fuse.Singhouse', 'not-a-device')
+  assert.equal(check(), null)
+  mountinfo('ro')
+  assert.deepEqual(check({ applicationRoot: appRoot }), evidence)
+  // An application root on another filesystem, or missing, is not covered.
+  if (existsSync('/proc/self') && statSync('/proc/self').dev !== statSync(mount).dev) assert.equal(check({ applicationRoot: '/proc/self' }), null)
+  assert.equal(check({ applicationRoot: resolve(mount, 'missing') }), null)
+})
+
+test('verified installer relocation rotates one invoker without invalidating existing recovery kits', t => {
+  const temporary = temporaryRoot(t, 'singhouse-anchor-relocation-')
   const root = resolve(temporary, 'percent% amp& parens() bang! caret^')
   mkdirSync(root)
   const recoveryTool = resolve(root, 'state', 'recovery-tool'), anchorPath = resolve(recoveryTool, 'anchor.json')
@@ -519,8 +632,8 @@ test('verified installer relocation rotates one invoker without invalidating exi
   assert.doesNotMatch(invocation, /percent% amp/)
 })
 
-test('recovery CLI derives the database directory from the exact selected state root', () => {
-  const state = mkdtempSync(resolve(tmpdir(), 'singhouse-cli-data-'))
+test('recovery CLI derives the database directory from the exact selected state root', t => {
+  const state = temporaryRoot(t, 'singhouse-cli-data-')
   mkdirSync(resolve(state, 'backend'))
   assert.equal(recoveryDataDirectory(state, resolve(state, 'backend')), resolve(state, 'backend'))
   assert.throws(() => recoveryDataDirectory(`${state}/.`, resolve(state, 'backend')), /exactly match/)
@@ -529,8 +642,8 @@ test('recovery CLI derives the database directory from the exact selected state 
     /Recovery database path must exactly match the selected state root/)
 })
 
-test('recovery CLI binds a same-basename kit to its canonical containing state root', () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'singhouse-cli-root-binding-'))
+test('recovery CLI binds a same-basename kit to its canonical containing state root', t => {
+  const root = temporaryRoot(t, 'singhouse-cli-root-binding-')
   const trustedState = resolve(root, 'trusted'), copiedState = resolve(root, 'copied')
   const trustedKit = resolve(trustedState, 'recovery-tool', 'kits', 'kit-point-1')
   const copiedKit = resolve(copiedState, 'recovery-tool', 'kits', 'kit-point-1')
@@ -547,8 +660,8 @@ test('recovery CLI binds a same-basename kit to its canonical containing state r
   assert.throws(() => recoveryStateRoot(trustedKit, trustedState), /selected state root/)
 })
 
-test('recovery CLI rejects a symlinked handoff before loading it', () => {
-  const stateRoot = mkdtempSync(resolve(tmpdir(), 'singhouse-cli-handoff-'))
+test('recovery CLI rejects a symlinked handoff before loading it', t => {
+  const stateRoot = temporaryRoot(t, 'singhouse-cli-handoff-')
   const updatesRoot = resolve(stateRoot, 'updates'), handoffPath = resolve(updatesRoot, 'handoff.json')
   mkdirSync(updatesRoot); writeFileSync(resolve(updatesRoot, 'real-handoff.json'), '{}\n')
   symlinkSync(resolve(updatesRoot, 'real-handoff.json'), handoffPath)

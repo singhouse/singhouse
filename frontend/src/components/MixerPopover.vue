@@ -62,12 +62,23 @@
       </div>
     </div>
 
-    <!-- Lyrics offset control -->
-    <div class="mixer__offset">
+    <!-- Lyrics offset control. The stage draws lyrics at currentTime + offset,
+         so a positive offset shows them earlier and a negative one later. -->
+    <div v-if="showLyricsOffset" class="mixer__offset">
       <span class="mixer__offset-label">Lyrics offset</span>
-      <button class="offset-btn" @click="$emit('update:lyricsOffset', lyricsOffset - 100)">−</button>
+      <button
+        class="offset-btn"
+        title="Lyrics later"
+        aria-label="Lyrics later"
+        @click="$emit('update:lyricsOffset', lyricsOffset - 100)"
+      >−</button>
       <span class="offset-value">{{ lyricsOffset > 0 ? '+' : '' }}{{ lyricsOffset }}ms</span>
-      <button class="offset-btn" @click="$emit('update:lyricsOffset', lyricsOffset + 100)">+</button>
+      <button
+        class="offset-btn"
+        title="Lyrics earlier"
+        aria-label="Lyrics earlier"
+        @click="$emit('update:lyricsOffset', lyricsOffset + 100)"
+      >+</button>
       <button class="offset-btn" @click="$emit('update:lyricsOffset', 0)">↺</button>
     </div>
 
@@ -116,6 +127,7 @@ defineProps({
   tracks: { type: Array, required: true },
   lyricsState: { type: String, default: 'none' },
   lyricsOffset: { type: Number, default: 0 },
+  showLyricsOffset: { type: Boolean, default: true },
   keyOffset: { type: Number, default: 0 },
   keySupported: { type: Boolean, default: false },
   currentTime: { type: Number, default: 0 },

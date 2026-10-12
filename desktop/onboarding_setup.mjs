@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { recipeTransferBytes, recipeTransfers } from './processing_recipe.mjs'
+import { assessHardwarePolicy, validateHardwarePolicy } from './hardware_policy.mjs'
+import { hardwareSelectionPreferences } from './onboarding_state.mjs'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { checkedFile, processingAttestation } from './runtime_manager.mjs'
-import { QUALIFICATION_SCOPES, qualificationScopeError, validateSetupMemory } from './setup_catalog.mjs'
+import { QUALIFICATION_SCOPES, qualificationScopeError, qualificationStatusMatches, validateSetupMemory } from './setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -12,6 +15,9 @@ const bytes = manifest => manifest.files.reduce((sum, file) => sum + file.size, 
 const complete = manifest => ['transcription', 'separation'].every(id => manifest.capabilities?.includes(id))
   && LOCAL_MODEL_IDS.every(id => manifest.models?.includes(id)
     && manifest.modelCapabilities?.[id] === (id === 'heart-transcriptor' ? 'transcription' : 'separation'))
+const NVIDIA_REQUIRED = 'Local processing in this build requires an NVIDIA GPU with a current driver, and none was detected on this computer. You can still play your existing karaoke files.'
+// The accelerator of the runtime a plan installs or uses, for wizard wording only.
+const planAccelerator = runtime => ['cpu', 'cuda', 'metal'].includes(runtime?.accelerator) ? runtime.accelerator : null
 const REOPEN_MESSAGE = 'Setup is verified. Reopen singhouse to use local processing.'
 const initial = () => ({ state: 'idle', phase: 'preflight', message: 'Choose local processing or playback.', retryable: false, restartRequired: false })
 
@@ -81,6 +87,116 @@ function memoryAssessment(catalog, runtime, hardware) {
   return result
 }
 
+// Advisory planning ranges, never readiness or memory requirements. Evidence,
+// assumptions, and deliberately broad bands are documented in README.md.
+// Minutes for one three-minute track through the full default workflow.
+const GIB = 1024 ** 3
+// A nominal 16 GB machine reports slightly less than 16 GiB of total memory.
+const LOW_MEMORY_BYTES = 15 * GIB
+const EXTRAPOLATED = 'the range is extrapolated from published component timings.'
+const CPU_EXTRAPOLATED = `These tools and models use the CPU, even if your computer has a graphics card; ${EXTRAPOLATED}`
+// Ordered fastest to slowest; less than 15 GiB RAM moves one row slower.
+const CPU_TIERS = Object.freeze([
+  { minCpus: 16, minutes: [9, 16], evidence: 'measured',
+    basis: 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.' },
+  { minCpus: 12, minutes: [12, 20], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+  { minCpus: 8, minutes: [15, 28], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+  { minCpus: 1, minutes: [25, 45], evidence: 'extrapolated', basis: CPU_EXTRAPOLATED },
+])
+const METAL_BASIS = `These tools and models use Apple Metal; ${EXTRAPOLATED}`
+const METAL_TIERS = Object.freeze({
+  performance: { minutes: [5, 12], evidence: 'extrapolated', basis: METAL_BASIS },
+  base: { minutes: [8, 20], evidence: 'extrapolated', basis: METAL_BASIS },
+  lowMemory: { minutes: [15, 35], evidence: 'extrapolated', basis: METAL_BASIS },
+})
+const CUDA_BASIS = `These tools and models use your NVIDIA graphics card; ${EXTRAPOLATED}`
+// Ordered fastest to slowest; demotions move toward the last row, never past it.
+const CUDA_TIERS = Object.freeze([
+  { id: 'high', minutes: [1, 3], evidence: 'extrapolated', basis: CUDA_BASIS },
+  { id: 'mainstream', minutes: [2, 5], evidence: 'extrapolated', basis: CUDA_BASIS },
+  { id: 'entry', minutes: [5, 12], evidence: 'extrapolated', basis: CUDA_BASIS },
+])
+// Consumer model number → tier. Ti, Super, D, and memory-size variants keep the
+// tier. Unlisted names (including GTX 10-series, which current CUDA PyTorch
+// builds are unlikely to support), workstation/datacenter cards, MX, and
+// non-NVIDIA adapters stay unknown.
+const CUDA_MODELS = Object.freeze({
+  rtx: { 2050: 'entry', 3050: 'entry', 4050: 'entry', 5050: 'entry',
+    2060: 'mainstream', 2070: 'mainstream', 2080: 'mainstream', 3060: 'mainstream', 3070: 'mainstream',
+    4060: 'mainstream', 5060: 'mainstream',
+    3080: 'high', 3090: 'high', 4070: 'high', 4080: 'high', 4090: 'high', 5070: 'high', 5080: 'high', 5090: 'high' },
+  gtx: { 1630: 'entry', 1650: 'entry', 1660: 'entry' },
+})
+// Transcription needs more than 6 GiB of free VRAM; smaller or unknown cards may
+// run it on the CPU or refuse it, so they get no CUDA range.
+const CUDA_MIN_VRAM_BYTES = 7.5 * GIB
+// 8 GB cards fit transcription only narrowly; 10 GB and larger fit every stage.
+const CUDA_REDUCED_VRAM_BYTES = 9.5 * GIB
+const LEVELS = Object.freeze([[12, 3, 'Faster'], [30, 2, 'Moderate'], [Infinity, 1, 'Slower']])
+
+function cudaTier(device) {
+  if (typeof device?.name !== 'string') return null
+  const vram = device.dedicatedMemoryBytes
+  if (!Number.isSafeInteger(vram) || vram < CUDA_MIN_VRAM_BYTES) return null
+  let name = device.name.toLowerCase().replace(/\s+/g, ' ').trim().replace(/^nvidia /, '').replace(/^geforce /, '')
+  const laptop = / (?:laptop gpu|with max-q design)$/.test(name)
+  name = name.replace(/(?: laptop gpu| with max-q design)+$/, '').replace(/ \d{1,2} ?gb$/, '')
+  let id = null
+  if (/^(tesla )?t4$/.test(name)) id = 'mainstream'
+  else {
+    const match = /^(rtx|gtx) (\d{4})(?: d)?(?: ti)?(?: super)?$/.exec(name)
+    id = match ? CUDA_MODELS[match[1]][match[2]] ?? null : null
+  }
+  if (!id) return null
+  const index = CUDA_TIERS.findIndex(tier => tier.id === id)
+    + Number(vram < CUDA_REDUCED_VRAM_BYTES) + Number(laptop)
+  return CUDA_TIERS[Math.min(index, CUDA_TIERS.length - 1)]
+}
+
+function metalTier(hardware) {
+  if (hardware.totalMemoryBytes < LOW_MEMORY_BYTES) return 'lowMemory'
+  const chip = /^Apple M(\d+)(?:\s+(Pro|Max|Ultra))?\b/i.exec(typeof hardware.cpu === 'string' ? hardware.cpu.trim() : '')
+  return chip && (chip[2] || Number(chip[1]) >= 4) ? 'performance' : 'base'
+}
+
+// Advisory timing is independent of hardware qualification and measured memory
+// evidence. The caller still validates catalog scope and applies existing memory
+// admission; estimates never enable installation or processing.
+function processingEstimate(runtime, hardware = {}, { cudaEstimateAllowed = false } = {}) {
+  const unknown = { level: null, label: 'Not enough information', minutes: null,
+    basis: 'Matching supported processing tools and models, and computer details, are needed for an estimate.' }
+  if (!runtime || !complete(runtime) || runtime.models.length !== LOCAL_MODEL_IDS.length
+      || !runtime.provenance?.lockSha256
+      || !['cpu', 'metal', 'cuda'].includes(runtime.accelerator)
+      || runtime.platform !== hardware.platform || runtime.arch !== hardware.arch
+      || !Number.isSafeInteger(hardware.cpuCount) || hardware.cpuCount < 1
+      || !Number.isSafeInteger(hardware.totalMemoryBytes) || hardware.totalMemoryBytes <= 0) return unknown
+  if (runtime.accelerator === 'metal'
+      && (hardware.platform !== 'darwin' || hardware.arch !== 'arm64' || hardware.unifiedMemory !== true)) return unknown
+  let tier
+  if (runtime.accelerator === 'cuda') {
+    // Only one unambiguous CUDA device identifies the processing GPU.
+    if (cudaEstimateAllowed !== true || !['linux', 'win32'].includes(hardware.platform) || hardware.arch !== 'x64'
+        || hardware.unifiedMemory === true
+        || !Array.isArray(hardware.cudaDevices) || hardware.cudaDevices.length !== 1) return unknown
+    tier = cudaTier(hardware.cudaDevices[0])
+    if (!tier) return unknown
+  } else if (runtime.accelerator === 'metal') {
+    tier = METAL_TIERS[metalTier(hardware)]
+  } else {
+    const index = CPU_TIERS.findIndex(row => hardware.cpuCount >= row.minCpus)
+    tier = CPU_TIERS[Math.min(index + Number(hardware.totalMemoryBytes < LOW_MEMORY_BYTES), CPU_TIERS.length - 1)]
+  }
+  const [, level, label] = LEVELS.find(([upper]) => tier.minutes[1] <= upper)
+  return { level, label, minutes: [...tier.minutes], basis: tier.basis, evidence: tier.evidence }
+}
+
+// A run that finished and verified its installation, whether it is already
+// loaded or needs reopening.
+export function setupCompleted(status) {
+  return status?.phase === 'complete' && ['ready', 'restart-required'].includes(status.state)
+}
+
 // Catalog, policy, and qualification are release-owned inputs. Never populate
 // these from renderer messages, persisted progress, or an unsigned remote feed.
 export class OnboardingSetup {
@@ -95,16 +211,37 @@ export class OnboardingSetup {
   }
 
   // releaseChannel is the validated release policy's channel; it decides
-  // whether private-smoke qualification evidence is acceptable.
-  constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
-    loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
-    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
+  // whether private-smoke or hardware-test qualification is acceptable.
+  constructor({ runtime, cache, policy, catalog = null, alternativeCatalogs = [], catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
+    hardwarePolicy = null, loadHardwareSelection = async () => null, saveHardwareSelection = async () => {},
+    installLocation = null, loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
+    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, installLocation, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
+    this.primaryCatalog = this.catalog
+    if (!Array.isArray(alternativeCatalogs)) throw new Error('Invalid alternative processing catalogs')
+    this.alternativeCatalogs = structuredClone(alternativeCatalogs)
+    this.hardwarePolicy = hardwarePolicy && validateHardwarePolicy(hardwarePolicy)
+    this.loadHardwareSelection = loadHardwareSelection
+    this.saveHardwareSelection = saveHardwareSelection
+    this.hardwareSelection = this.hardwarePolicy ? hardwareSelectionPreferences(null, this.hardwarePolicy) : null
     this.state = initial()
     this.operation = null
     this.controller = null
+    this.pausing = false
+    this.consentedPlanId = null
     this.restoring = null
     this.check = null
+    this.runtimeUpdateRequested = false
+    this.hardwareSelectionPersistence = null
+  }
+
+  // A running or paused attempt keeps its stores until it finishes or stops.
+  storesLocked() { return Boolean(this.operation) || Boolean(this.hardwareSelectionPersistence) || this.state.state === 'paused' }
+
+  // Later installs and repairs use these stores; existing files stay where they are.
+  useStores({ runtime, cache, installLocation }) {
+    if (this.storesLocked()) throw new Error('Wait for the current setup operation before changing the install location.')
+    Object.assign(this, { runtime, cache, installLocation })
   }
 
   async getStatus() {
@@ -115,6 +252,11 @@ export class OnboardingSetup {
   }
 
   async restore() {
+    if (this.hardwarePolicy) {
+      let saved = null
+      try { saved = await this.loadHardwareSelection() } catch { /* restore automatic */ }
+      this.hardwareSelection = hardwareSelectionPreferences(saved, this.hardwarePolicy)
+    }
     let previous = null
     // An unreadable checkpoint is treated as none.
     try { previous = await this.load() } catch { /* start from idle */ }
@@ -124,9 +266,10 @@ export class OnboardingSetup {
     // one, is only checked again: the next preflight settles it from live
     // verification. It is not saved, so an exit while checking leaves the
     // checkpoint to be checked again.
+    this.runtimeUpdateRequested = previous?.runtimeUpdateRequested === true
     if (previous?.state === 'restart-required' || (previous?.state === 'error' && previous.phase === 'verification')) {
       this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
-    } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
+    } else if (previous && ['running', 'paused', 'error', 'cancelled'].includes(previous.state)) {
       this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
     }
   }
@@ -139,35 +282,85 @@ export class OnboardingSetup {
     return !this.catalogError && QUALIFICATION_SCOPES.includes(scope) && !qualificationScopeError(scope, this.releaseChannel) ? scope : null
   }
 
+  async requestRuntimeUpdate() {
+    await this.getStatus()
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before reviewing an update.')
+    this.runtimeUpdateRequested = true
+    await this.update({})
+    return this.preflight()
+  }
+
+  async setHardwareSelection(value) {
+    await this.getStatus()
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
+    if (!this.hardwarePolicy) throw new Error('Hardware selection is unavailable in this release.')
+    if (!value || !['automatic', 'manual'].includes(value.mode)
+        || (value.mode === 'manual' && !this.hardwarePolicy.variants.some(v => v.id === value.variantId))) {
+      throw new Error('Unknown processing selection.')
+    }
+    const next = { mode: value.mode, variantId: value.mode === 'manual' ? value.variantId : null,
+      policyVersion: this.hardwarePolicy.version }
+    if (next.mode === 'manual') {
+      const current = await this.preflight()
+      const variant = current.hardwareAssessment?.variants.find(v => v.id === next.variantId)
+      if (!variant?.supported) {
+        throw new Error(variant?.status === 'update-required' ? variant.reason : 'This processing variant is not supported by the current qualification and resources.')
+      }
+    }
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
+    const installed = await this.installed()
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
+    const definition = next.mode === 'manual' ? this.hardwarePolicy.variants.find(variant => variant.id === next.variantId) : null
+    const targetLock = (definition?.admission || definition?.evidence)?.runtimeLockSha256
+    const target = [this.primaryCatalog, ...this.alternativeCatalogs].find(catalog =>
+      catalog?.runtime?.provenance?.lockSha256 === targetLock && catalog.runtime.accelerator === definition?.accelerator)
+    if (installed.installed && target && (installed.runtime.recipeId || installed.runtime.id) !== hash(target.runtime)) {
+      throw new Error('This manual option uses a different installed processing recipe. Choose Automatic and review the runtime update before changing recipes.')
+    }
+    // Publish the new preference before persistence yields, so concurrent consent
+    // must revalidate its plan against this selection.
+    const previous = this.hardwareSelection
+    this.hardwareSelection = next
+    this.hardwareSelectionPersistence = Promise.resolve().then(() => this.saveHardwareSelection(next))
+    try { await this.hardwareSelectionPersistence }
+    catch (error) { this.hardwareSelection = previous; throw error }
+    finally { this.hardwareSelectionPersistence = null }
+    return this.preflight()
+  }
+
   async update(values) {
     this.state = { ...this.state, ...values }
-    await this.save({ schema: 1, state: this.state.state, phase: this.state.phase })
+    await this.save({ schema: 1, state: this.state.state, phase: this.state.phase,
+      ...(this.runtimeUpdateRequested ? { runtimeUpdateRequested: true } : {}) })
     this.notify(structuredClone(this.state))
     return this.getStatus()
   }
 
-  async installed({ signal } = {}) {
+  // Navigation may reuse the launch checks. Installation and restored completion
+  // checks retain full file verification and a fresh native probe.
+  async installed({ signal, advisory = false } = {}) {
     signal?.throwIfAborted()
-    const [runtime, models] = await Promise.all([this.runtime.active().catch(() => null), this.cache.active().catch(() => null)])
+    const [runtime, models] = await Promise.all([this.runtime.active({ launch: advisory }).catch(() => null), this.cache.active({ launch: advisory }).catch(() => null)])
     signal?.throwIfAborted()
     let functional = false
     if (runtime && complete(runtime.manifest)) {
-      try { functional = processingAttestation(runtime, await this.runtime.probe(runtime, { signal })).capabilitiesReady === true }
+      try { functional = processingAttestation(runtime, await (advisory ? this.runtime.launchProbe(runtime, { signal }) : this.runtime.probe(runtime, { signal }))).capabilitiesReady === true }
       catch { /* Failed or import-only probes never satisfy local readiness. */ }
     }
     signal?.throwIfAborted()
     const installed = functional && LOCAL_MODEL_IDS.every(id => models?.manifest.models.includes(id))
-    const ready = installed && this.loaded.runtimeId === runtime.id && this.loaded.modelsId === models.id
+    const sameSelection = runtime?.manifest.schema !== 2
+      || JSON.stringify(this.loaded.hardwareSelection) === JSON.stringify(this.hardwareSelection)
+    const ready = installed && sameSelection && this.loaded.runtimeId === runtime.id && this.loaded.modelsId === models.id
     return { runtime, models, installed, ready, restartRequired: installed && !ready }
   }
 
-  selection(active) {
+  selection(active, catalog = this.catalog) {
     if (this.catalogError) throw new Error(this.catalogError)
-    const catalog = this.catalog
-    if (!catalog || catalog.schema !== 1 || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
+    if (!catalog || ![1, 2].includes(catalog.schema) || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
-    if (!complete(runtime) || runtime.probe.schema !== 2 || q?.passed !== true
+    if (!complete(runtime) || runtime.probe.schema !== 2 || !qualificationStatusMatches(q)
         || q.runtimeLockSha256 !== runtime.provenance.lockSha256 || qualificationScopeError(q.scope, this.releaseChannel)
         || ['platform', 'arch', 'accelerator'].some(key => q[key] !== runtime[key])) {
       throw new Error('Local song processing is not available in this version yet. Its processing tools still need to pass the required checks.')
@@ -239,7 +432,50 @@ export class OnboardingSetup {
     }
   }
 
-  async preflight({ signal } = {}) {
+  assessCatalogChoices(hardware, freeBytes, installed) {
+    const catalogs = this.alternativeCatalogs.length ? [this.primaryCatalog, ...this.alternativeCatalogs] : [this.catalog]
+    const evaluate = catalog => {
+      const assessment = this.hardwarePolicy ? assessHardwarePolicy({ policy: this.hardwarePolicy, hardware,
+        runtimeLockSha256: catalog?.runtime?.provenance?.lockSha256, accelerator: catalog?.runtime?.accelerator,
+        releaseChannel: this.releaseChannel, variantId: this.hardwareSelection?.variantId,
+        installedModelIds: installed.models?.manifest.models || [], diskFreeBytes: freeBytes }) : null
+      let eligible = Boolean(assessment?.selectedVariantId)
+      if (eligible) {
+        try { this.selection(installed.models, catalog) } catch { eligible = false }
+      }
+      return { catalog, assessment, eligible }
+    }
+    const choices = catalogs.map(evaluate)
+    // A reviewed attempt keeps its catalog through running, pause and resume.
+    // Fresh preflights may prefer eligible CUDA, then CPU; Metal is unchanged.
+    if (!this.storesLocked() && this.alternativeCatalogs.length) {
+      const order = { cuda: 0, cpu: 1, metal: 2 }
+      const eligible = choices.filter(choice => choice.eligible).sort((a, b) =>
+        (order[a.catalog.runtime.accelerator] ?? 3) - (order[b.catalog.runtime.accelerator] ?? 3))
+      this.catalog = eligible[0]?.catalog || this.primaryCatalog
+    }
+    const selected = choices.find(choice => choice.catalog === this.catalog) || evaluate(this.catalog)
+    if (!selected.assessment || !this.alternativeCatalogs.length) return selected.assessment
+    // Each variant's own catalog supplies its status; a CPU choice must not be
+    // hidden by the CUDA catalog's intentional accelerator/lock mismatch.
+    const variants = selected.assessment.variants.map(variant => {
+      const definition = this.hardwarePolicy.variants.find(value => value.id === variant.id)
+      const lock = (definition.admission || definition.evidence)?.runtimeLockSha256
+      const owner = choices.find(choice => choice.catalog?.runtime?.accelerator === definition.accelerator
+        && choice.catalog.runtime.provenance.lockSha256 === lock)
+      const assessed = owner?.assessment.variants.find(value => value.id === variant.id) || variant
+      if (installed.installed && owner && (installed.runtime.recipeId || installed.runtime.id) !== hash(owner.catalog.runtime)) {
+        // These entries also drive the manual picker. Automatic can propose a
+        // consented recipe update; manual overrides stay on the installed recipe.
+        return { ...assessed, supported:false, status:'update-required',
+          reason:'This manual option uses a different installed processing recipe. Choose Automatic and review the runtime update before changing recipes.' }
+      }
+      return assessed
+    })
+    return { ...selected.assessment, variants }
+  }
+
+  async preflight({ signal, advisory = true } = {}) {
     await this.getStatus()
     const offlineDirectory = this.#offlineModelsDirectory
     const modelSource = offlineDirectory === null ? 'upstream' : 'offline'
@@ -253,25 +489,46 @@ export class OnboardingSetup {
       ).finally(() => { this.check = null })
       installed = await this.check
       signal?.throwIfAborted()
-    } else installed = await this.installed({ signal })
+    } else installed = await this.installed({ signal, advisory })
     const hardware = await this.hardware()
     signal?.throwIfAborted()
-    const memory = memoryAssessment(this.catalog, installed.installed ? installed.runtime.manifest : this.catalog?.runtime, hardware)
+    let freeBytes = null
+    try { freeBytes = this.diskFree ? await this.diskFree() : null } catch { /* reported as unknown */ }
+    signal?.throwIfAborted()
+    if (!Number.isSafeInteger(freeBytes)) freeBytes = null
+    const hardwareAssessment = this.assessCatalogChoices(hardware, freeBytes, installed)
+    const updateAvailable = Boolean(installed.installed && this.catalog?.runtime
+      && (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime))
+    const updating = updateAvailable && this.runtimeUpdateRequested
+    const memory = memoryAssessment(this.catalog, installed.installed && !updating ? installed.runtime.manifest : this.catalog?.runtime, hardware)
     const { blocked: memoryBlocked, ...memoryFields } = memory
-    const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
-    if (installed.installed) return { ...base, available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+    const estimateOptions = { cudaEstimateAllowed: qualificationStatusMatches(this.catalog?.qualification)
+      && !qualificationScopeError(this.catalog?.qualification?.scope, this.releaseChannel) }
+    const base = { ...memoryFields, hardwareAssessment, hardwareSelection: this.hardwareSelection, available: false, ready: installed.ready && !updating, restartRequired: installed.restartRequired && !updating, hardware, updateAvailable,
+      processingEstimate: processingEstimate(null), installLocation: this.installLocation ?? null, freeBytes,
+      qualificationScope: this.qualificationScope(), accelerator: planAccelerator(installed.installed && !updating ? installed.runtime.manifest : this.catalog?.runtime), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+    if (installed.installed && !updating) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
+      || (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
+    if (this.catalog?.runtime?.schema === 2 && !hardwareAssessment?.selectedVariantId) {
+      return { ...base, reason: hardwareAssessment?.reason || 'No matching qualified hardware policy or eligible private resource envelope is available for this processing recipe.' }
+    }
     try {
       const selected = this.selection(installed.models)
+      // A CUDA pack activates only after its CUDA device check passes, so never
+      // offer its multi-GB download to a computer with no NVIDIA driver inventory.
+      if (selected.runtime.accelerator === 'cuda' && !(Array.isArray(hardware.cudaDevices) && hardware.cudaDevices.length)) {
+        return { ...base, reason: NVIDIA_REQUIRED }
+      }
       if (memoryBlocked) return { ...base, reason: memory.memoryQualification.reason }
-      const runtimeNeeded = installed.runtime?.id !== hash(selected.runtime)
+      const runtimeNeeded = (installed.runtime?.recipeId || installed.runtime?.id) !== hash(selected.runtime)
       const modelsNeeded = installed.models?.id !== hash(selected.models)
       if (modelsNeeded && offlineDirectory !== null) await this.inspectOfflineModels(selected.models, offlineDirectory, signal)
       // Archive-form runtimes transfer their compressed parts, then extract the
       // full uncompressed tree; per-file runtimes transfer the tree itself.
       const runtimeParts = selected.runtime.archive?.parts
-      const runtimeInstalledBytes = runtimeNeeded ? bytes(selected.runtime) : 0
-      const runtimeBytes = !runtimeNeeded ? 0 : runtimeParts ? runtimeParts.reduce((sum, part) => sum + part.size, 0) : runtimeInstalledBytes
+      const isRecipe = selected.runtime.schema === 2
+      const runtimeInstalledBytes = runtimeNeeded ? (isRecipe ? selected.runtime.recipe.installedSize : bytes(selected.runtime)) : 0
+      const runtimeBytes = !runtimeNeeded ? 0 : isRecipe ? recipeTransferBytes(selected.runtime) : runtimeParts ? runtimeParts.reduce((sum, part) => sum + part.size, 0) : runtimeInstalledBytes
       const modelBytes = modelsNeeded ? bytes(selected.models) : 0
       // Never weaker than the reservation each installer makes. A per-file
       // runtime and the models need their staged copy plus the activated tree
@@ -279,49 +536,86 @@ export class OnboardingSetup {
       // be retrieved yet) plus the uncompressed tree. Each install adds 64 MiB.
       // Conservative: existing model files are reused, but their staged copies
       // still need space.
-      const runtimeReserve = !runtimeNeeded ? 0 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
+      const runtimeReserve = !runtimeNeeded ? 0 : isRecipe ? runtimeBytes + runtimeInstalledBytes * 2 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
       const diskRequiredBytes = runtimeReserve + modelBytes * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
-      const diskFreeBytes = this.diskFree ? await this.diskFree() : null
+      const diskFreeBytes = freeBytes
       signal?.throwIfAborted()
-      const runtimeSources = runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
+      const runtimeSources = isRecipe ? recipeTransfers(selected.runtime).map(file => file.url) : runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
       const components = [
         ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, installedBytes: runtimeInstalledBytes, sourceMode: 'catalog',
           sources: [...new Set(runtimeSources.map(url => new URL(url).origin))],
-          terms: selected.runtime.provenance.packages.map(p => ({ label: `${p.name}: ${p.license}`, url: p.sourceUrl })) }] : []),
+          terms: (isRecipe ? selected.runtime.recipe.wheels : selected.runtime.provenance.packages).map(p => ({ label: `${p.name}: ${p.license}`, url: p.sourceUrl })) }] : []),
         ...selected.entries.map(entry => ({ label: entry.id, sourceMode: modelSource, bytes: installed.models?.manifest.models.includes(entry.id) ? 0 : bytes(entry),
           sources: offlineDirectory === null ? [...new Set(entry.files.map(file => new URL(file.url).origin))] : ['Selected model folder'], terms: entry.terms })),
       ]
-      const planId = hash([selected.runtime, selected.models, components, modelSource, offlineDirectory, memory.memoryRequirements])
+      const planId = hash([selected.runtime, selected.models, components, modelSource, offlineDirectory, memory.memoryRequirements, ...(this.hardwareSelection ? [this.hardwareSelection] : [])])
       const result = { ...base, planId, components, diskRequiredBytes, diskFreeBytes, runtimeTransferRequired: runtimeNeeded }
       if (!Number.isSafeInteger(diskFreeBytes) || diskFreeBytes < diskRequiredBytes) {
         return { ...result, reason: diskFreeBytes === null ? 'Available disk space could not be checked.' : 'Not enough free disk space for complete local setup.' }
       }
-      return { ...result, available: true }
+      return { ...result, processingEstimate: processingEstimate(selected.runtime, hardware, estimateOptions), available: true }
     } catch (error) { signal?.throwIfAborted(); return { ...base, reason: error.message } }
   }
 
   async start({ consent, planId } = {}) {
     await this.getStatus()
+    if (this.hardwareSelectionPersistence) await this.hardwareSelectionPersistence
     if (this.operation) return this.getStatus()
     if (consent !== true) return this.getStatus()
     // Reserve immediately, before preflight yields, so concurrent starts share
     // the same attempt and cannot open two installs.
     this.controller = new AbortController()
+    this.pausing = false
+    // Resuming a paused attempt repeats its consented request. The plan id
+    // can change once the runtime has activated (its component is no longer
+    // offered), so the recorded consent is accepted for this attempt only.
+    const resuming = this.state.state === 'paused' && this.consentedPlanId !== null && planId === this.consentedPlanId
+    if (!resuming) this.consentedPlanId = planId ?? null
     const signal = this.controller.signal
-    this.operation = this.run(planId, signal).finally(() => { this.operation = null; this.controller = null })
+    this.operation = this.run(planId, signal, { resuming }).finally(() => { this.operation = null; this.controller = null; this.pausing = false })
     return this.getStatus()
   }
 
   cancel() { this.controller?.abort() }
 
-  async run(planId, signal) {
+  // Stops the running attempt but keeps every partially transferred file;
+  // starting again with the same plan resumes from the saved bytes.
+  async pause() {
+    await this.getStatus()
+    const operation = this.operation
+    if (!operation) return this.getStatus()
+    this.pausing = true
+    this.controller.abort()
+    await operation
+    return this.getStatus()
+  }
+
+  // Stops setup for good: a running attempt is cancelled as before, and a
+  // paused one returns to idle. Saved partial files are left for a later
+  // attempt; the installers have no separate discard operation.
+  async stop() {
+    await this.getStatus()
+    if (this.operation) {
+      const operation = this.operation
+      this.controller.abort()
+      await operation
+      return this.getStatus()
+    }
+    if (this.state.state !== 'paused') return this.getStatus()
+    this.consentedPlanId = null
+    return this.update({ ...initial(), stage: undefined, progress: undefined, error: undefined })
+  }
+
+  async run(planId, signal, { resuming = false } = {}) {
     const originalRuntimeProgress = this.runtime.progress, originalModelProgress = this.cache.progress
     try {
-      await this.update({ state: 'running', phase: 'preflight', message: 'Verifying the complete local setup.', error: undefined, progress: undefined, retryable: false })
-      const plan = await this.preflight({ signal })
+      // A resumed attempt keeps showing the stage it was paused in.
+      await this.update({ state: 'running', phase: 'preflight', message: 'Verifying the complete local setup.', error: undefined, progress: undefined, retryable: false,
+        stage: this.state.state === 'paused' && this.state.stage ? this.state.stage : 'retrieve' })
+      const plan = await this.preflight({ signal, advisory: false })
       signal.throwIfAborted()
       if (!plan.available) throw new Error(plan.reason)
-      if (plan.planId !== planId) throw new Error('The setup plan changed. Review the complete installation plan again.')
+      if (plan.planId !== planId && !resuming) throw new Error('The setup plan changed. Review the complete installation plan again.')
       if (!plan.ready && !plan.restartRequired) {
         const active = await this.installed({ signal })
         const selected = this.selection(active.models)
@@ -333,9 +627,14 @@ export class OnboardingSetup {
           ['runtime', this.runtime, selected.runtime, active.runtime], ['models', this.cache, selected.models, active.models],
         ]) {
           signal.throwIfAborted()
-          if (existing?.id === hash(manifest)) continue
-          await this.update({ phase, message: phase === 'runtime' ? 'Installing the local processing runtime.' : 'Installing separation and Heart model files.' })
-          manager.progress = progress => { this.state.progress = progress; this.notify(structuredClone(this.state)) }
+          if ((existing?.recipeId || existing?.id) === hash(manifest)) continue
+          await this.update({ phase, stage: phase === 'runtime' ? 'retrieve' : 'models',
+            message: phase === 'runtime' ? 'Installing the local processing runtime.' : 'Installing separation and Heart model files.' })
+          manager.progress = progress => {
+            this.state.progress = progress
+            if (phase === 'runtime') this.state.stage = progress?.phase === 'extract' ? 'unpack' : 'retrieve'
+            this.notify(structuredClone(this.state))
+          }
           if (phase === 'models' && this.#offlineModelsDirectory !== null) {
             try { await this.cache.installFromDirectory(manifest, this.#offlineModelsDirectory, { prefix: '', signal }) }
             catch (error) {
@@ -346,13 +645,19 @@ export class OnboardingSetup {
         }
       }
       signal.throwIfAborted()
-      await this.update({ phase: 'verification', message: 'Verifying all local processing components.', progress: undefined })
+      await this.update({ phase: 'verification', stage: 'verify', message: 'Verifying all local processing components.', progress: undefined })
       const result = await this.installed({ signal })
       signal.throwIfAborted()
-      if (!result.installed) throw new Error('Complete local processing verification failed. Retry setup to repair the saved files.')
-      await this.update({ state: result.ready ? 'ready' : 'restart-required', phase: 'complete',
+      if (!result.installed || (this.runtimeUpdateRequested && (result.runtime?.recipeId || result.runtime?.id) !== hash(this.catalog.runtime))) throw new Error('Complete local processing verification failed. Retry setup to repair the saved files.')
+      this.consentedPlanId = null
+      await this.update({ state: result.ready ? 'ready' : 'restart-required', phase: 'complete', stage: 'complete',
         message: result.ready ? 'Local processing is ready.' : REOPEN_MESSAGE, restartRequired: result.restartRequired })
     } catch (error) {
+      if (signal.aborted && this.pausing) {
+        // The last progress stays visible beside the paused stage.
+        await this.update({ state: 'paused', phase: 'paused', message: 'Setup paused.', error: undefined, retryable: true, restartRequired: false })
+        return
+      }
       await this.update({ state: signal.aborted ? 'cancelled' : 'error', phase: 'paused', progress: undefined,
         message: signal.aborted ? 'Setup cancelled. Retry to resume saved files.' : error.message,
         error: signal.aborted ? undefined : error.message, retryable: true, restartRequired: false })

@@ -93,6 +93,7 @@
         :tracks="tracks"
         :lyricsState="lyricsState"
         :lyricsOffset="lyricsOffset"
+        :showLyricsOffset="hasLyricsOrVocals"
         :keyOffset="engine.keyOffset.value"
         :keySupported="engine.keyShiftSupported.value"
         :currentTime="engine.currentTime.value"
@@ -119,6 +120,7 @@ import { useSongsStore } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
 import { usePlayerStore } from '@/stores/player'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const props = defineProps({
   song: { type: Object, required: true }
@@ -136,6 +138,7 @@ const store = useSongsStore()
 const songTools = useSongToolsStore()
 const features = useFeaturesStore()
 const player = usePlayerStore()
+const playGuard = usePlayGuard()
 const engine = useAudioEngine()
 
 function endedInfo(reason) {
@@ -206,6 +209,16 @@ const hasStems = computed(() => {
   return !!(s.instrumental || (Array.isArray(s.vocals) && s.vocals.length))
 })
 
+// The lyrics offset only moves lyrics, so it is offered only when the song has
+// something it can move: a vocal lane or lyrics. Read from the loaded tracks
+// and lyrics rather than the media type, so a karaoke video that later gains
+// stems gets the control.
+const hasLyricsOrVocals = computed(() =>
+  tracks.value.some((t) => t.kind === 'vocal') ||
+  lyricsState.value !== 'none' ||
+  !!props.song.word_sync?.segments
+)
+
 // Vocal regions for the progress bar. One block per lyric line,
 // then merged across short gaps so adjacent phrases read as one chunk instead
 // of a stutter of slivers. Falls back gracefully when word-level sync isn't
@@ -275,6 +288,7 @@ onUnmounted(() => {
 
 watch(() => props.song?.id, () => {
   mixerOpen.value = false   // avoid acting on a previous song's (stale) mixer state
+  lyricsOffset.value = 0    // the player store's offset is cleared on song change too
   stemCacheBust.value = 0
   engine.cleanup()
   loadState.value = 'idle'
@@ -458,13 +472,39 @@ function toggleMute(track) {
   engine.setVolume(track.key, track.volume)
 }
 
+// Global playback shortcuts leave focused controls, dialogs and menus to
+// handle their own keys. Handled library navigation must not reach the deck.
+const ACTIVATABLE = [
+  'button', 'a[href]', 'input', 'textarea', 'select',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="button"]', '[role="menuitem"]', '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]', '[role="option"]', '[role="switch"]', '[role="tab"]',
+].join(', ')
+const SHORTCUT_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
+
+function shortcutBelongsElsewhere(e) {
+  for (const el of [e.target, document.activeElement]) {
+    if (!el || typeof el.closest !== 'function') continue
+    if (el.closest(ACTIVATABLE) || el.closest(SHORTCUT_OWNERS)) return true
+  }
+  return false
+}
+
 // Keyboard shortcuts
 function handleKeyboard(e) {
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return
+  if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return
+  if (shortcutBelongsElsewhere(e)) return
   switch (e.code) {
     case 'Space':
+      if (e.shiftKey) return
       e.preventDefault()
-      togglePlayPause()
+      // A stray Space must not stop the song mid-show: pausing asks first,
+      // resuming does not. The transport button stays unguarded.
+      if (engine.playerState.value === 'playing') {
+        playGuard.guard(() => engine.pause(), { kind: 'pause' })
+      } else {
+        togglePlayPause()
+      }
       break
     case 'ArrowLeft':
       e.preventDefault()

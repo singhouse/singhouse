@@ -53,27 +53,35 @@ def test_checkpoint_and_runtime_are_independent(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_managed_transcription_refuses_before_queue_or_reference(client, monkeypatch):
+async def test_managed_transcription_validates_song_while_setup_waits(client, monkeypatch):
     monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", "{}")
     response = await client.post("/api/songs/999/lyrics/transcribe", json={"whisper_model": "heart"})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "heart_model_missing"
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_managed_upload_refuses_before_persisting(client, monkeypatch):
+async def test_managed_upload_waits_durably_for_setup(client, monkeypatch):
     monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", "{}")
     response = await client.post("/api/separate", files={"file": ("song.wav", b"audio", "audio/wav")})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "heart_model_missing"
+    assert response.status_code == 202
+    from karaoke_backend.jobs import queue
+    from karaoke_backend.database import AsyncSessionLocal
+    from karaoke_backend.models.song import Job
+    assert await queue.claim_next("waiting-worker") is None
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, response.json()["job_id"])
+        assert job.status == "queued"
+        assert job.attempts == 0
+        assert job.claimed_by is None
+        assert job.message == "Waiting for desktop processing setup"
 
 
 @pytest.mark.asyncio
-async def test_managed_media_server_import_refuses_before_persisting(client, monkeypatch):
+async def test_managed_media_server_import_validates_configuration_while_setup_waits(client, monkeypatch):
     monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", "{}")
     response = await client.post("/api/plex/import", json={"tracks": [{"rating_key": "123", "title": "Song"}]})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "heart_model_missing"
+    assert response.status_code == 400
+    assert "heart_model_missing" not in response.text
 
 
 @pytest.mark.asyncio

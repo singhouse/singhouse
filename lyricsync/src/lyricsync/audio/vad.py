@@ -11,6 +11,34 @@ from lyricsync.audio.io import read_wav_mono
 
 logger = logging.getLogger(__name__)
 
+# Splitting ceiling used when ``VadConfig.max_segment_duration`` is ``None``
+# ("auto"). Whisper's window is 30 s, so no slice longer than this is useful.
+# A decode subprocess that can measure device memory may re-split these slices
+# further; see the Heart decode script.
+AUTO_MAX_SEGMENT_CEILING = 30.0
+
+# Fixed cap for transcribers that cannot measure accelerator memory when the
+# config asks for "auto". Safe on ~8 GB cards.
+SAFE_MAX_SEGMENT_DURATION = 15.0
+
+
+def _fallback_window(config: VadConfig) -> float:
+    """Length of the single whole-file window used when VAD finds nothing.
+
+    Auto keeps the safe fixed window: a silent or near-silent stem gives the
+    decoder nothing to size against, so it gets the same 15 s window as before.
+    """
+    if config.max_segment_duration is None:
+        return SAFE_MAX_SEGMENT_DURATION
+    return config.max_segment_duration
+
+
+def effective_max_segment_duration(config: VadConfig) -> float:
+    """The splitting cap for ``config``: the explicit value, else the ceiling."""
+    if config.max_segment_duration is None:
+        return AUTO_MAX_SEGMENT_CEILING
+    return config.max_segment_duration
+
 
 def compute_rms_vad(
     samples: np.ndarray,
@@ -49,6 +77,7 @@ def rms_vad_segments(
     """
     if config is None:
         config = VadConfig()
+    max_duration = effective_max_segment_duration(config)
 
     rms = compute_rms_vad(samples, sample_rate, config.frame_size)
     hop = config.frame_size
@@ -73,7 +102,7 @@ def rms_vad_segments(
 
     if not regions:
         duration = len(samples) / sample_rate
-        return [(0, min(duration, config.max_segment_duration))]
+        return [(0, min(duration, _fallback_window(config)))]
 
     # Merge regions separated by less than min_silence
     merged = [regions[0]]
@@ -87,9 +116,9 @@ def rms_vad_segments(
     # Split segments longer than max_duration
     final: list[tuple[float, float]] = []
     for start, end in merged:
-        while end - start > config.max_segment_duration:
-            final.append((start, start + config.max_segment_duration))
-            start += config.max_segment_duration
+        while end - start > max_duration:
+            final.append((start, start + max_duration))
+            start += max_duration
         if end > start:
             final.append((start, end))
 
@@ -105,7 +134,7 @@ def rms_vad_segments(
             len(final),
             config.min_segment_duration,
         )
-        return [(0, min(duration, config.max_segment_duration))]
+        return [(0, min(duration, _fallback_window(config)))]
 
     logger.info(
         "RMS-VAD: %d segments from %.1fs audio (%d dropped below %.1fs)",

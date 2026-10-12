@@ -18,12 +18,9 @@ import logging
 import os
 from typing import Optional
 
-from lyricsync.correction.client import CorrectionUnavailable, OpenAIChatClient
-
-# The LLM credential is read the one way the correction path reads it, rather
-# than re-deriving the same env precedence a second time. `word_sync_worker`
-# imports nothing from here, so this is a plain edge, not a cycle.
-from karaoke_backend.workers.word_sync_worker import _read_api_key
+from karaoke_backend.workers.llm_client import (
+    PagingUnavailable, OpenAIChatClient, _read_api_key, paging_configured,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +235,7 @@ def structure_pages(
         try:
             raw = client.complete_json(system_prompt, user_prompt)
             data = json.loads(raw)
-        except (CorrectionUnavailable, json.JSONDecodeError) as e:
+        except (PagingUnavailable, json.JSONDecodeError) as e:
             if attempt == 0:
                 user_prompt += (
                     f"\n\nYour previous reply was invalid ({e}). "
@@ -446,6 +443,8 @@ async def page_word_sync(word_data: dict, paging_text: str) -> dict:
     """
     status = PAGING_UNAVAILABLE
     try:
+        if not paging_configured():
+            raise PagingUnavailable("No usable paging endpoint is configured")
         client = OpenAIChatClient(
             base_url=os.environ.get("KARAOKE_LLM_BASE_URL", "").strip(),
             model=os.environ.get("KARAOKE_LLM_MODEL", "local"),

@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import vm from 'node:vm'
+import * as privateMeasurement from '../private_measurement.mjs'
 
 const mainUrl = new URL('../main.mjs', import.meta.url)
 
@@ -23,13 +24,14 @@ async function recoveryEntry(platform, { invalidArguments = false, runtimeError 
   if (invalidArguments) args.pop()
   const fakeProcess = { platform, arch: 'x64', execPath: '/fixture/Singhouse', resourcesPath: '/fixture/resources',
     argv: ['/fixture/Singhouse', ...args], env: { SINGHOUSE_RECOVERY_ANCHOR: '1' }, on() {} }
-  const context = vm.createContext({ process: fakeProcess, console, URL, Buffer })
+  const context = vm.createContext({ process: fakeProcess, console, URL, Buffer, AbortController })
   const overrides = {
     electron: { app: { isPackaged: true, getName: () => 'Singhouse', requestSingleInstanceLock: () => true,
       getPath: () => '/state', on() {}, whenReady: () => Promise.resolve(), quit: () => finish() },
       dialog: { showErrorBox: (_title, message) => errors.push(message) } },
     'node:module': { createRequire: () => () => ({}) },
     'node:fs': { readFileSync() { policyReads++; throw new Error('Recovery must not load application/update policy') } },
+    './private_measurement.mjs': privateMeasurement,
     './lifecycle.mjs': { persistentRuntime: () => ({ root: '/state' }), projectorBlocker: () => ({}) },
     './update_manager.mjs': { OperationGate: class {} },
     './startup.mjs': { createStartupSurface: () => ({ ready: Promise.resolve(), update: async () => {}, close() {} }) },

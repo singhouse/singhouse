@@ -28,6 +28,7 @@ class ProcessingPackTests(unittest.TestCase):
         (self.payload / "NOTICE.fixture").write_bytes(b"MIT notice")
         self.lock = {"schema": 1, "kind": "processing-input", "appVersion": "0.1.0", "backendVersion": "0.1.0", "lyricsyncVersion": "0.1.0",
                      "pythonVersion": "3.12.14", "platform": "linux", "arch": "x64", "accelerator": "cpu", "python": "python/bin/python3",
+                     "nativeLockSha256": "c" * 64, "ffmpegRelease": "b6.1.1",
                      "sourceCommit": "a" * 40, "capabilities": ["transcription"], "models": ["whisper"], "modelCapabilities": {"whisper": "transcription"},
                      "excludedPackages": builder.EXCLUDED_PACKAGES,
                      "packages": [{"name": "fixture", "version": "1", "license": "MIT", "sourceUrl": "https://example.org/fixture.whl", "sha256": "b" * 64, "notices": ["NOTICE.fixture"]}],

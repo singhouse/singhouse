@@ -27,3 +27,10 @@ it('admits an already installed model only when no restart is needed', async () 
     prepareHeart: vi.fn().mockResolvedValue({ installed: true, restartRequired: false }) } })
   await expect(prepareHeart()).resolves.toBeUndefined()
 })
+
+it('lets managed desktop actions enter the durable readiness-gated queue without starting setup', async () => {
+  const setup = vi.fn()
+  vi.stubGlobal('window', { karaokeDesktop: { isDesktop: true, managedSetup: true, prepareHeart: setup } })
+  await expect(prepareHeart()).resolves.toBeUndefined()
+  expect(setup).not.toHaveBeenCalled()
+})

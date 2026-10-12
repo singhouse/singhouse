@@ -1,27 +1,47 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 const { contextBridge, ipcRenderer } = require('electron')
-// Fixed host-only setup actions; no renderer-selected paths or generic IPC.
+// Fixed host-only setup and export actions; no renderer-selected paths or generic IPC.
 // Modal credentials flow inward only; status never returns stored secrets.
 contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   isDesktop: true,
   managedSetup: process.argv.includes('--singhouse-managed-setup'),
   prepareHeart: () => ipcRenderer.invoke('heart:prepare'),
+  getLyricsLookup: () => ipcRenderer.invoke('setup:lyrics-lookup'),
+  setLyricsLookup: enabled => ipcRenderer.invoke('setup:lyrics-lookup-save', enabled),
   getOnboardingState: () => ipcRenderer.invoke('setup:preferences'),
   setOnboardingState: state => ipcRenderer.invoke('setup:save-preferences', state),
+  setHardwareSelection: value => ipcRenderer.invoke('setup:hardware-selection', value),
+  reviewProcessingUpdate: () => ipcRenderer.invoke('setup:runtime-update'),
   preflightSetup: () => ipcRenderer.invoke('setup:preflight'),
   chooseModelSource: mode => ipcRenderer.invoke('setup:model-source', mode),
+  chooseInstallLocation: () => ipcRenderer.invoke('setup:install-location'),
   getModalStatus: () => ipcRenderer.invoke('setup:modal-status'),
   saveModalConfig: config => ipcRenderer.invoke('setup:modal-save', config),
   checkModalConnection: () => ipcRenderer.invoke('setup:modal-check'),
   forgetModalConfig: () => ipcRenderer.invoke('setup:modal-forget'),
   getSetupStatus: () => ipcRenderer.invoke('setup:status'),
   startSetup: request => ipcRenderer.invoke('setup:start', request),
+  pauseSetup: () => ipcRenderer.invoke('setup:pause'),
   cancelSetup: () => ipcRenderer.invoke('setup:cancel'),
   restartApp: () => ipcRenderer.invoke('setup:restart'),
   openSetupHelp: topic => ipcRenderer.invoke('setup:help', topic),
+  getExportDefaults: () => ipcRenderer.invoke('export:defaults'),
+  chooseExportFolder: () => ipcRenderer.invoke('export:choose-folder'),
+  saveExportDefaults: defaults => ipcRenderer.invoke('export:save-defaults', defaults),
+  exportSong: request => ipcRenderer.invoke('export:write', request),
+  writeVideoExport: request => ipcRenderer.invoke('export:write-video', request),
   onOpenSetup: callback => {
     const listener = () => callback()
     ipcRenderer.on('setup:open', listener)
     return () => ipcRenderer.removeListener('setup:open', listener)
+  },
+  // Unsaved-edits close guard: the renderer arms it, answers each close
+  // request with 'proceed' or 'cancel'.
+  setCloseGuard: armed => ipcRenderer.invoke('editor:close-guard', armed === true),
+  answerCloseRequest: decision => ipcRenderer.invoke('editor:close-decision', decision),
+  onCloseRequested: callback => {
+    const listener = () => callback()
+    ipcRenderer.on('window:close-requested', listener)
+    return () => ipcRenderer.removeListener('window:close-requested', listener)
   },
 }))

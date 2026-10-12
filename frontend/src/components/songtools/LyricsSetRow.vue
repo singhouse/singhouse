@@ -21,7 +21,7 @@
       <div class="vset__menu-pop" role="menu">
         <button v-if="!set.is_active" type="button" :disabled="busy" @click="pick('activate')">Activate</button>
         <button v-if="!set.is_verified" type="button" :disabled="busy" @click="pick('verify')">Verify</button>
-        <button v-if="set.has_word_sync" type="button" :disabled="busy" @click="pick('repage')">Re-page</button>
+        <button v-if="set.has_word_sync && features.llmPagingEnabled" type="button" :disabled="busy" @click="pick('repage')">Re-page</button>
         <button type="button" :disabled="busy" @click="pick('duplicate')">Duplicate</button>
         <a
           v-if="set.has_word_sync"
@@ -46,6 +46,10 @@
 // One row of the VERSIONS list. Carries the same action set everywhere it is
 // shown, so a host does not have to remember which surface offers Verify.
 import { computed, ref } from 'vue'
+import { useFeaturesStore } from '@/stores/features'
+
+const features = useFeaturesStore()
+features.load()
 import { formatServerDate } from '@/utils/serverTime'
 
 const props = defineProps({

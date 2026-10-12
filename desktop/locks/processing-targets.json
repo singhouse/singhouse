@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "Targets marked native-passed were rebuilt after the diffq exclusion and passed their native functional probes; a probe is not release qualification and no target is release-qualified; targets marked rebuild-required still need a build and functional probe",
+  "status": "Dependency requirements changed; every target needs a new build and functional probe. Retained inputLockSha256 and sourceCommit values identify the last tested historical inputs, not qualification of the current requirements. No target is release-qualified.",
   "inputLockKind": "processing-input",
   "requirementsLockKind": "processing-requirements",
   "builder": "desktop/build/build_processing.py",
@@ -12,13 +12,15 @@
       "accelerator": "cpu",
       "inputLockSha256": "3698438455749d7eda82a36a51d2229cfe755141654661bbcaf0fdce0f370216",
       "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
-      "functionalProbe": "native-passed"
+      "functionalProbe": "rebuild-required"
     },
     {
       "platform": "linux",
       "arch": "x64",
       "accelerator": "cuda",
-      "functionalProbe": "rebuild-required"
+      "functionalProbe": "rebuild-required",
+      "inputLockSha256": "9bed42cea996204c52159380b2141dbe3056abe2e189858ef81746b701bd85a1",
+      "sourceCommit": "dd9ebe77d3c8044f7e681815d182357ce0c7129c"
     },
     {
       "platform": "linux",
@@ -32,7 +34,7 @@
       "accelerator": "metal",
       "inputLockSha256": "204c9aabf10c88426276ac8adfb53770b1ff23371845e45489f317972ec81180",
       "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
-      "functionalProbe": "native-passed"
+      "functionalProbe": "rebuild-required"
     },
     {
       "platform": "darwin",
@@ -40,7 +42,7 @@
       "accelerator": "cpu",
       "inputLockSha256": "2c580fe38000c8778e1e4730b322fb462ce7a8bdd2a8bd4134bf15bd08bc9f25",
       "sourceCommit": "46f08efec09570fa5ea723a7fd4c2c8c3441c069",
-      "functionalProbe": "native-passed"
+      "functionalProbe": "rebuild-required"
     },
     {
       "platform": "win32",
@@ -48,13 +50,15 @@
       "accelerator": "cpu",
       "inputLockSha256": "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb",
       "sourceCommit": "c0873f8bde08f6296f6632af5ba8e01fbaaa45be",
-      "functionalProbe": "native-passed"
+      "functionalProbe": "rebuild-required"
     },
     {
       "platform": "win32",
       "arch": "x64",
       "accelerator": "cuda",
-      "functionalProbe": "rebuild-required"
+      "functionalProbe": "rebuild-required",
+      "inputLockSha256": "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
+      "sourceCommit": "404a4fd5b1c82a169492259acf3ec3213d3088dc"
     }
   ]
 }

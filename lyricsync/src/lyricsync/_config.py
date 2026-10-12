@@ -10,14 +10,27 @@ class VadConfig:
     onset_threshold: float = 0.03
     offset_threshold: float = 0.02
     min_silence_duration: float = 1.5
-    # Whisper's window is 30 s, but word-level timestamps are extracted by
+    # Longest audio slice handed to the transcriber in one forward pass.
+    # ``None`` (the default) means "auto": the parent splits VAD regions at a
+    # 30 s ceiling (Whisper's window) and the Heart decode subprocess, which
+    # knows the device, re-splits any longer slice into equal parts sized to
+    # the free accelerator memory it measures after loading the model. An
+    # explicit number is a fixed cap applied everywhere, exactly as before.
+    #
+    # Why memory matters: word-level timestamps are extracted by
     # concatenating cross-attention across every decode step, layer and head
-    # (_extract_token_timestamps). That tensor scales with tokens generated, so
-    # a near-30 s segment can cost GiB — enough to OOM an 8 GB card on the
-    # FIRST segment. 15 s halves the token axis at identical audio coverage
-    # (segments are only split, never dropped; word timestamps are offset back
-    # to global time). Raise it on a card with more headroom.
-    max_segment_duration: float = 15.0
+    # (_extract_token_timestamps). That tensor scales with tokens generated,
+    # so a near-30 s segment can cost GiB, enough to exhaust an 8 GB card that
+    # also drives a desktop. A fixed 15 s cap was the earlier default for that
+    # reason; it halves the token axis at identical audio coverage (segments
+    # are split, and word timestamps are offset back to global time), but it
+    # needlessly limits context on cards with more headroom. Auto keeps 15 s
+    # on ~8 GB cards and allows up to 30 s on large ones; CPU decode keeps
+    # 15 s (host RAM is not probed). faster-whisper cannot measure memory and
+    # treats ``None`` as a fixed 15 s. The Modal runner cannot either, but
+    # runs on data-centre GPUs, so it takes the 30 s ceiling as is. The
+    # whole-file window used when VAD finds no usable region is 15 s.
+    max_segment_duration: float | None = None
     # Shortest region worth transcribing. Sub-second RMS blips (breaths,
     # cymbal bleed, stem-separation artifacts) carry no lyric but still get
     # padded to Whisper's 30 s window, where the model has nothing to anchor
@@ -72,53 +85,10 @@ class PostProcessConfig:
 
 
 @dataclass(frozen=True)
-class CorrectionConfig:
-    """LLM-assisted alignment correction.
-
-    Off by default; ``enabled`` + ``base_url`` gate the whole pass. The
-    endpoint speaks OpenAI chat completions, so a local llama-server/ollama
-    and any hosted OpenAI-compatible API are interchangeable. Every failure
-    mode (endpoint down, bad JSON after one retry, low confidence) falls
-    back to the deterministic heuristic for that region — a dead endpoint
-    yields the exact same word timing as ``enabled=False``.
-    """
-    enabled: bool = False
-    base_url: str = ""              # e.g. "http://127.0.0.1:11435/v1"
-    model: str = "local"
-    api_key: str = ""               # never persisted (redacted by the backend)
-    # Per-call seconds. Generous because local thinking models burn 2-3.5k
-    # reasoning tokens per region at ~8-13 tok/s (measured: Qwen3.6-35B-A3B
-    # UD-IQ3_XXS on an M2 through ollama — up to ~5 min a call, and
-    # disabling thinking measurably wrecks its timing judgement).
-    timeout: float = 600.0
-    # Region triggering. Experiment 1: the heuristic ties the LLM in tight
-    # gaps, so only garble clusters (any corrected word), wide gaps, and
-    # phrase-opening runs are worth a call.
-    tight_gap_sec: float = 0.6
-    wide_gap_sec: float = 1.0
-    # A silence gap longer than this before a line-opening interpolated run
-    # marks a phrase entry: unlock the line's first exact words (Whisper's
-    # first matched word tends to absorb the pickup word's onset).
-    phrase_gap_sec: float = 2.0
-    unlock_words: int = 2
-    # Exact runs of at least this length bound suspect regions; shorter
-    # exact islands inside a cluster are absorbed but locked.
-    min_anchor_run: int = 2
-    # Mappings self-rated below this are dropped (experiment 1: the only
-    # bad mapping was self-rated "low").
-    confidence_gate: str = "medium"
-    window_slack_sec: float = 0.1
-    # Whisper catches consonant onsets ~0.25s before sung-vowel authoring.
-    # Global shift applied to accepted spans; never per-word.
-    calibration_offset: float = 0.0
-
-
-@dataclass(frozen=True)
 class PipelineConfig:
     vad: VadConfig = field(default_factory=VadConfig)
     matching: MatchConfig = field(default_factory=MatchConfig)
     postprocess: PostProcessConfig = field(default_factory=PostProcessConfig)
-    correction: CorrectionConfig = field(default_factory=CorrectionConfig)
     # When True, the plain-lyrics path uses anchor-and-gap alignment instead of
     # global Needleman-Wunsch. Anchor regions preserve whisper-native timing.
     use_anchor_gap_alignment: bool = False
@@ -133,6 +103,21 @@ class PipelineConfig:
     # reference times and the whisper transcription, and shifts LRC times by
     # that offset before alignment. Public LRCs are commonly off by 0.1–1.5s.
     detect_lrc_offset: bool = True
+    # Acoustic re-timing stage (off by default). When True and the pipeline
+    # was given an ``acoustic_aligner``, the final result's word starts/ends
+    # are re-timed by fusing several CTC acoustic models with the existing
+    # timing; text and line structure never change, and any failure keeps the
+    # existing timing. The three boundary parameters: a constant shift added
+    # to every start; a word whose end is within ``acoustic_join_gap`` of the
+    # next start runs up to it; otherwise its end extends by
+    # ``acoustic_tail_extend`` (never past the next start). A word is flagged
+    # low-confidence when two or more start voters deviate from the fused
+    # median start by more than ``acoustic_flag_threshold`` seconds.
+    acoustic_alignment: bool = False
+    acoustic_start_shift: float = -0.02
+    acoustic_join_gap: float = 0.0
+    acoustic_tail_extend: float = 0.2
+    acoustic_flag_threshold: float = 0.2
     hallucination_phrases: tuple[str, ...] = (
         "thanks for watching", "thank you for watching", "subscribe",
         "like and subscribe", "please subscribe", "see you next time",

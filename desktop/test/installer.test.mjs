@@ -127,7 +127,7 @@ test('installer rejects stale native admission policy instead of overlaying it',
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
-    for (const policy of ['models.json', 'processing-locks.json']) {
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) {
       await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     }
     const { default: valid, releasePolicyPath } = await import(`${installer}?valid=${Date.now()}`)
@@ -150,7 +150,13 @@ test('installer rejects stale native admission policy instead of overlaying it',
     assert.equal(valid.dmg.icon, valid.mac.icon)
     assert.equal(valid.win.icon, resolve(icons, 'singhouse.ico'))
     assert.equal(valid.nsis.installerIcon, valid.win.icon)
-    assert.equal(valid.nsis.uninstallerIcon, valid.win.icon)
+    assert.equal(Object.hasOwn(valid.nsis, 'uninstallerIcon'), false,
+      'NSIS must use its embedded app icon rather than install a post-receipt icon file')
+    // getResource also detects this conventional filename without a setting.
+    for (const project of [desktop, resolve(desktop, '..')]) {
+      await assert.rejects(readFile(resolve(project, valid.directories.buildResources || 'build', 'uninstallerIcon.ico')),
+        { code: 'ENOENT' })
+    }
     assert.ok(!valid.files.some(file => typeof file === 'object' && file.to === 'release.json'))
     await writeFile(resolve(native, 'processing-locks.json'), '{}\n')
     await assert.rejects(import(`${installer}?stale=${Date.now()}`), /Reassemble the native runtime after changing processing-locks.json/)
@@ -180,6 +186,42 @@ test('installer rejects stale native admission policy instead of overlaying it',
   }
 })
 
+test('installer requires the native memory policy to match the target platform source exactly', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'installer-memory-'))
+  const previous = process.env.KARAOKE_NATIVE_PAYLOAD
+  process.env.KARAOKE_NATIVE_PAYLOAD = native
+  const stale = /Reassemble the native runtime after changing processing-memory.json/
+  const memory = resolve(native, 'processing-memory.json')
+  try {
+    const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
+    const target = (platform, arch = 'x64') => writeFile(resolve(native, 'manifest.json'),
+      JSON.stringify({ appVersion: pkg.version, platform, arch }))
+    await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
+    await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) {
+      await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
+    }
+    const source = await readFile(resolve(desktop, 'processing-memory', 'linux-x64.json'))
+
+    await target('linux')
+    await assert.rejects(import(`${installer}?memory-missing=${Date.now()}`), stale)
+    await writeFile(memory, Buffer.concat([source, Buffer.from('\n')]))
+    await assert.rejects(import(`${installer}?memory-changed=${Date.now()}`), stale)
+    await writeFile(memory, source)
+    await import(`${installer}?memory-match=${Date.now()}`)
+
+    // A target without a measured policy may not carry one.
+    await target('darwin', 'arm64')
+    await assert.rejects(import(`${installer}?memory-unexpected=${Date.now()}`), stale)
+    await rm(memory)
+    await import(`${installer}?memory-absent=${Date.now()}`)
+  } finally {
+    if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
+    else process.env.KARAOKE_NATIVE_PAYLOAD = previous
+    await rm(native, { recursive: true, force: true })
+  }
+})
+
 test('only a processing-ready build maps its validated catalog onto the packaged name', async () => {
   const native = await mkdtemp(resolve(tmpdir(), 'installer-catalog-'))
   const previous = process.env.KARAOKE_NATIVE_PAYLOAD
@@ -190,10 +232,19 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     await writeFile(resolve(native, 'files.json'), '{}\n')
     await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
     await writeFile(resolve(native, 'backend.py'), '# fixture backend\n')
-    for (const policy of ['models.json', 'processing-locks.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
+    for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) await writeFile(resolve(native, policy), await readFile(resolve(desktop, policy)))
     const { default: config, stageProcessingCatalog, withStagedCatalog } = await import(`${installer}?catalog=${Date.now()}`)
     // Neither a stray legacy catalog nor the per-target sources are in the static file list.
     assert.ok(config.files.every(file => typeof file === 'string' && !file.includes('processing-catalog')))
+    // Runtime imports and worker entry points must survive the explicit ASAR
+    // allowlist. Checking dependencies catches missing modules before assembly.
+    for (const file of config.files.filter(file => file.endsWith('.mjs'))) {
+      const source = await readFile(resolve(desktop, file), 'utf8')
+      const dependencies = source.matchAll(/(?:from\s+|new URL\(\s*)['"]\.\/([^'"]+)['"]/g)
+      for (const [, dependency] of dependencies) {
+        if (/\.(mjs|cjs)$/.test(dependency)) assert.ok(config.files.includes(dependency), `${file} needs packaged ${dependency}`)
+      }
+    }
     // The installed name is fixed: packaging, signing and recovery match these files by exact name.
     assert.equal(config.productName, 'Singhouse')
     assert.equal(config.executableName, 'Singhouse')
@@ -220,6 +271,22 @@ test('only a processing-ready build maps its validated catalog onto the packaged
       assert.deepEqual(await readdir(fileSet.from), ['processing-catalog.json']); return 'built'
     }, { warn: () => assert.fail('no warning expected') }), 'built')
     await assert.rejects(readdir(fileSet.from), /ENOENT/)
+
+    const cpuBytes = Buffer.from('{"schema":2,"accelerator":"cpu"}\n')
+    const cpu = { name: 'processing-catalog-cpu.json', catalogBytes: cpuBytes,
+      catalogSha256: createHash('sha256').update(cpuBytes).digest('hex') }
+    await assert.rejects(stageProcessingCatalog({ mode: 'playback-only', alternativeCatalogBytes: [cpu] }), /cannot stage alternative/)
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256,
+      alternativeCatalogBytes: [{ ...cpu, catalogSha256: 'b'.repeat(64) }] }), /alternative processing catalog differs/)
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256,
+      alternativeCatalogBytes: [{ ...cpu, name: '../outside.json' }] }), /alternative processing catalog differs/)
+    const unified = await stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256, alternativeCatalogBytes: [cpu] })
+    await withStagedCatalog(unified, async () => {
+      assert.deepEqual(unified.files[0].filter, ['processing-catalog.json', 'processing-catalog-cpu.json'])
+      assert.deepEqual(await readFile(resolve(unified.files[0].from, cpu.name)), cpuBytes)
+      assert.deepEqual(await readFile(resolve(unified.files[0].from, 'processing-catalog.json')), catalogBytes)
+    })
+    await assert.rejects(readdir(unified.files[0].from), /ENOENT/)
 
     // Cleanup failures warn (temporary directory name only) and never replace a build result or error.
     const locked = Object.assign(new Error(`EBUSY: resource busy, rmdir '${tmpdir()}/x'`), { code: 'EBUSY' })

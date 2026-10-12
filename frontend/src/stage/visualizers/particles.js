@@ -1,219 +1,320 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// particles.js — audio-reactive 3D warp-starfield backdrop.
+// Orbit — a shadowed ringed world, deep nebula, and drifting starlight.
+// Geometry depends on song time; per-stage state holds only the fixed star and
+// dust layouts plus smoothed audio luminance.
 //
-// A fixed pool of stars flies outward from center (classic hyperspace warp).
-// Each star has a normalized direction (sx,sy in [-1,1]) and a depth (sz in
-// (0,1]); projecting sx/sy by 1/sz pushes it toward the edges as it nears the
-// viewer, growing brighter/larger. bass drives fly speed + thickness, beat
-// fires an outward burst + brightness pop, treble twinkles the stars. Stars
-// are drawn CRISP directly on the device ctx with additive 'lighter' streaks;
-// only the faint depth wash uses the shared downscaled buffer. Vignette last.
-//
-// Normalized star coords are resolution-independent, so resize needs no reseed.
-// Everything is DETERMINISTIC: directions come from a hash of (star index,
-// respawn counter), never Math.random — so the field is reproducible and
-// identical across the host canvas, the Document-PiP window and the projector.
-// All motion is dt/t-driven: dt=0 (pause/seek) freezes the field cleanly while
-// still fully repainting.
-//
-// The star pool + burst envelope live in PER-STAGE state (frame.viz), seeded
-// lazily on first draw: the host renders two stages at once, and a shared pool
-// would let each stage advance/recycle the other's stars.
+// Two resolutions: the soft sky (base, glows, nebula, world halos) renders
+// into a small buffer and is blitted up; everything with a hard edge (stars,
+// world bodies, rings, dust) draws straight onto the device canvas, so it
+// stays crisp on a 4K projector. The lyric shade is baked once per size.
 import { getBuffer, blit } from './offscreen.js'
 
-const N = 350
-const Z_NEAR = 0.05
+const TAU = Math.PI * 2
+const unit = value => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
+const fract = value => value - Math.floor(value)
+const rnd = (i, seed) => fract(Math.sin(i * 127.1 + seed * 311.7) * 43758.5453)
 
-// Cheap deterministic pseudo-random in [0,1) from two integer seeds.
-function rnd(a, b) {
-  const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453
-  return x - Math.floor(x)
-}
-
-// Mostly-white with a few cool/warm stars for a little chromatic life.
-const PALETTE = ['rgb(255,255,255)', 'rgb(160,195,255)', 'rgb(255,224,178)']
-
-// (Re)place star i using its current respawn counter as the seed. `deep` sends
-// it to the far plane (z=1); otherwise it lands at a deterministic depth.
-function place(f, i, deep) {
-  const k = f.rc[i]
-  // Direction on the projection plane; avoid a dead-center pile.
-  let ax, ay, s = 0
-  do {
-    ax = rnd(i * 2 + 1, k + s) * 2 - 1
-    ay = rnd(i * 2 + 2, k + s) * 2 - 1
-    s++
-  } while (ax * ax + ay * ay < 0.0009 && s < 8)
-  f.sx[i] = ax
-  f.sy[i] = ay
-  f.sz[i] = deep ? 1 : Z_NEAR + rnd(i * 2 + 7, k) * (1 - Z_NEAR)
-}
-
-// Recycle star i to the far plane, advancing its seed so its next flight differs.
-function respawn(f, i) {
-  f.rc[i]++
-  place(f, i, true)
-}
-
-// Build a fresh, fully-seeded field (per stage). Deterministic — no Math.random.
-function initField() {
-  const f = {
-    sx: new Float32Array(N),
-    sy: new Float32Array(N),
-    sz: new Float32Array(N),
-    rc: new Uint32Array(N),     // respawn counter → deterministic re-seed
-    phase: new Float32Array(N), // twinkle phase seed
-    tw: new Float32Array(N),    // twinkle rate
-    col: new Uint8Array(N),     // palette index
-    burst: 0,                   // beat-driven outward-burst envelope
-    vgW: 0, vgH: 0,             // overlay size guard
+function initScene() {
+  return {
+    audio: 0,
+    dust: Array.from({ length: 240 }, (_, i) => ({
+      angle: rnd(i, 1) * TAU,
+      orbit: rnd(i, 2),
+      speed: 0.018 + rnd(i, 3) * 0.024,
+      size: 0.3 + rnd(i, 4) * 1.1,
+      tint: rnd(i, 5),
+    })),
+    stars: Array.from({ length: 270 }, (_, i) => ({
+      x: rnd(i, 6), y: rnd(i, 7),
+      depth: rnd(i, 8),
+      size: 0.27 + rnd(i, 9) * 0.9,
+      tint: rnd(i, 10),
+      phase: rnd(i, 11) * TAU,
+    })),
   }
-  for (let i = 0; i < N; i++) {
-    place(f, i, false)
-    f.phase[i] = rnd(i, 101) * Math.PI * 2
-    f.tw[i] = 2 + rnd(i, 202) * 5
-    const r = rnd(i, 303)
-    f.col[i] = r < 0.82 ? 0 : r < 0.92 ? 1 : 2
-  }
-  return f
 }
 
-// Baked legibility overlay (scrim + vignette). Size-invariant, so it's rendered
-// once per resize into a downscaled buffer and blitted — no device-res gradient
-// fills on the per-frame path. Size guard lives in the per-stage state `f`.
-function overlay(buffers, f, w, h) {
-  const buf = getBuffer(buffers, 'particles-vg', w, h, 720)
-  if (f.vgW !== w || f.vgH !== h) {
-    f.vgW = w; f.vgH = h
+function glow(c, x, y, radius, color, alpha) {
+  const g = c.createRadialGradient(x, y, 0, x, y, radius)
+  g.addColorStop(0, color)
+  g.addColorStop(1, 'rgba(0,0,0,0)')
+  c.globalAlpha = unit(alpha)
+  c.fillStyle = g
+  c.fillRect(x - radius, y - radius, radius * 2, radius * 2)
+  c.globalAlpha = 1
+}
+
+function hash(x, y, seed) {
+  let n = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 1442695041)
+  n = Math.imul(n ^ (n >>> 13), 1274126177)
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967295
+}
+
+function noise(x, y, seed) {
+  const ix = Math.floor(x), iy = Math.floor(y)
+  let fx = x - ix, fy = y - iy
+  fx = fx * fx * (3 - 2 * fx)
+  fy = fy * fy * (3 - 2 * fy)
+  const a = hash(ix, iy, seed) * (1 - fx) + hash(ix + 1, iy, seed) * fx
+  const b = hash(ix, iy + 1, seed) * (1 - fx) + hash(ix + 1, iy + 1, seed) * fx
+  return a * (1 - fy) + b * fy
+}
+
+function makeNebula(texture) {
+  // A small per-stage image is generated once per size, then translated during
+  // playback. Multi-scale noise tears soft gas envelopes into natural wisps.
+  const { w, h } = texture
+  const pixels = texture.ctx.createImageData(w, h)
+  const data = pixels.data
+  for (let py = 0; py < h; py++) {
+    const y = py / h * 1.16 - 0.08
+    for (let px = 0; px < w; px++) {
+      const x = px / w * 1.16 - 0.08
+      const left = Math.exp(-(((x - 0.08) / 0.33) ** 2 + ((y - 0.14) / 0.34) ** 2))
+      const upper = Math.exp(-(((x - 0.79) / 0.29) ** 2 + ((y - 0.05) / 0.29) ** 2))
+      const lower = Math.exp(-(((x - 0.79) / 0.38) ** 2 + ((y - 0.99) / 0.32) ** 2))
+      const envelope = Math.max(left, upper * 0.85, lower)
+      const warp = (noise(x * 5, y * 5, 1) - 0.5) * 0.14
+      const grain = noise((x + warp) * 8, (y - warp) * 8, 2) * 0.55
+        + noise(x * 19, y * 19, 3) * 0.3
+        + noise(x * 39, y * 39, 4) * 0.15
+      const density = Math.max(0, grain - 0.32) * Math.pow(envelope, 1.15) * 2.6
+      const total = left + upper + lower + 0.001
+      const a = Math.min(205, density * 470)
+      const p = (py * w + px) * 4
+      data[p] = Math.round((55 * left + 114 * upper + 150 * lower) / total)
+      data[p + 1] = Math.round((144 * left + 68 * upper + 55 * lower) / total)
+      data[p + 2] = Math.round((207 * left + 190 * upper + 178 * lower) / total)
+      data[p + 3] = Math.round(a)
+    }
+  }
+  texture.ctx.putImageData(pixels, 0, 0)
+  texture.ready = true
+}
+
+function nebula(c, w, h, t, audio, texture) {
+  c.save()
+  c.globalCompositeOperation = 'screen'
+  c.globalAlpha = 0.77 + audio * 0.23
+  c.drawImage(
+    texture.canvas,
+    w * (-0.075 + Math.sin(t * 0.18) * 0.038),
+    h * (-0.075 + Math.cos(t * 0.13) * 0.025),
+    w * 1.15, h * 1.15,
+  )
+  c.restore()
+}
+
+function drawRings(c, x, y, r, front) {
+  c.save()
+  c.translate(x, y)
+  c.rotate(-0.29)
+  c.scale(1, 0.28)
+  for (let i = 0; i < 9; i++) {
+    c.beginPath()
+    c.arc(0, 0, r * (1.43 + i * 0.065), front ? 0 : Math.PI, front ? Math.PI : TAU)
+    const alpha = (front ? 0.18 : 0.11) + (i % 3 === 1 ? 0.14 : 0)
+    c.strokeStyle = i % 3 === 2
+      ? `rgba(231,173,201,${alpha})`
+      : `rgba(139,199,231,${alpha})`
+    c.lineWidth = r * (i % 3 === 1 ? 0.026 : 0.012)
+    c.stroke()
+  }
+  c.restore()
+}
+
+// Positions are pure functions of (w, h, t), so the sky buffer and the device
+// canvas place each world's halo and body at the same spot.
+function worldAt(w, h, t) {
+  const s = Math.min(w, h)
+  return {
+    x: w * 0.91 + Math.sin(t * 0.055) * s * 0.025,
+    y: h * 0.63 + Math.cos(t * 0.071) * s * 0.025,
+    r: s * 0.29,
+  }
+}
+
+function moonAt(w, h, t) {
+  const s = Math.min(w, h)
+  return {
+    x: w * 0.13 + Math.cos(t * 0.13) * s * 0.044,
+    y: h * 0.23 + Math.sin(t * 0.13) * s * 0.032,
+    r: s * 0.08,
+  }
+}
+
+function planet(c, w, h, t, audio) {
+  const { x, y, r } = worldAt(w, h, t)
+  drawRings(c, x, y, r, false)
+
+  const disc = c.createRadialGradient(x - r * 0.69, y - r * 0.54, 0, x + r * 0.21, y + r * 0.12, r * 1.35)
+  disc.addColorStop(0, '#436789')
+  disc.addColorStop(0.22, '#1a3858')
+  disc.addColorStop(0.66, '#0b1c32')
+  disc.addColorStop(1, '#040c19')
+  c.fillStyle = disc
+  c.beginPath()
+  c.arc(x, y, r, 0, TAU)
+  c.fill()
+
+  // Uneven, muted belts remain inside the terminator's shadow. Their offset
+  // drifts with song time, but no same-width stripes divide the sphere.
+  c.save()
+  c.beginPath()
+  c.arc(x, y, r, 0, TAU)
+  c.clip()
+  c.translate(Math.sin(t * 0.09) * r * 0.12, 0)
+  for (let i = 0; i < 13; i++) {
+    const yy = y + r * (-0.83 + i * 0.14 + (rnd(i, 41) - 0.5) * 0.1)
+    c.beginPath()
+    c.moveTo(x - r * 1.2, yy)
+    c.bezierCurveTo(
+      x - r * 0.54, yy - r * (0.05 + rnd(i, 42) * 0.11),
+      x + r * 0.27, yy + r * (rnd(i, 43) - 0.5) * 0.22,
+      x + r * 1.15, yy - r * 0.06,
+    )
+    c.strokeStyle = i % 3 === 0 ? 'rgba(96,159,181,0.095)' : 'rgba(3,10,25,0.18)'
+    c.lineWidth = r * (0.025 + rnd(i, 44) * 0.075)
+    c.stroke()
+  }
+  const night = c.createLinearGradient(x - r, y - r, x + r, y + r)
+  night.addColorStop(0, 'rgba(0,0,0,0)')
+  night.addColorStop(0.45, 'rgba(1,5,13,0.34)')
+  night.addColorStop(1, 'rgba(1,4,12,0.83)')
+  c.fillStyle = night
+  c.fillRect(x - r, y - r, r * 2, r * 2)
+  c.restore()
+  drawRings(c, x, y, r, true)
+  c.strokeStyle = `rgba(126,205,231,${0.42 + audio * 0.24})`
+  c.lineWidth = Math.max(1, r * 0.025)
+  c.beginPath()
+  c.arc(x, y, r, 2.64, 5.36)
+  c.stroke()
+  return { x, y, r }
+}
+
+function moon(c, w, h, t) {
+  const s = Math.min(w, h)
+  const { x, y, r } = moonAt(w, h, t)
+  const g = c.createRadialGradient(x - r * 0.39, y - r * 0.4, 0, x, y, r * 1.3)
+  g.addColorStop(0, '#aac9d7')
+  g.addColorStop(0.4, '#4b6b86')
+  g.addColorStop(1, '#0a1c33')
+  c.fillStyle = g
+  c.beginPath()
+  c.arc(x, y, r, 0, TAU)
+  c.fill()
+  c.strokeStyle = 'rgba(218,239,245,0.54)'
+  c.lineWidth = Math.max(0.8, s * 0.002)
+  c.beginPath()
+  c.arc(x, y, r, 2.6, 5.25)
+  c.stroke()
+}
+
+// Every layer yields to a dark lyric center. Size-invariant, so it is baked
+// once per resize and blitted last — no device-resolution gradient fill on
+// the per-frame path. Low-frequency alpha, so the nearest upscale is invisible.
+// The guard lives on the buffer itself, so a replaced buffer always rebakes.
+function shade(buffers, w, h) {
+  const buf = getBuffer(buffers, 'orbit-shade', w, h, 720)
+  if (buf.bakedW !== w || buf.bakedH !== h) {
     const c = buf.ctx
-    const cx = buf.w / 2, cy = buf.h / 2
-    const R = Math.hypot(buf.w, buf.h) / 2, unit = Math.min(buf.w, buf.h)
-    c.setTransform(1, 0, 0, 1, 0, 0)
+    const s = Math.min(buf.w, buf.h)
+    c.globalAlpha = 1
     c.globalCompositeOperation = 'source-over'
     c.clearRect(0, 0, buf.w, buf.h)
-    const scrim = c.createRadialGradient(cx, cy, 0, cx, cy, unit * 0.42)
-    scrim.addColorStop(0, 'rgba(3,3,10,0.32)')
-    scrim.addColorStop(1, 'rgba(3,3,10,0)')
-    c.fillStyle = scrim
+    const g = c.createRadialGradient(buf.w * 0.5, buf.h * 0.51, s * 0.05, buf.w * 0.5, buf.h * 0.51, s * 0.67)
+    g.addColorStop(0, 'rgba(1,4,13,0.82)')
+    g.addColorStop(0.63, 'rgba(1,4,13,0.42)')
+    g.addColorStop(1, 'rgba(1,4,13,0)')
+    c.fillStyle = g
     c.fillRect(0, 0, buf.w, buf.h)
-    const vg = c.createRadialGradient(cx, cy, unit * 0.18, cx, cy, R)
-    vg.addColorStop(0, 'rgba(2,2,8,0)')
-    vg.addColorStop(0.7, 'rgba(2,2,8,0.42)')
-    vg.addColorStop(1, 'rgba(2,2,8,0.85)')
-    c.fillStyle = vg
-    c.fillRect(0, 0, buf.w, buf.h)
+    buf.bakedW = w; buf.bakedH = h
   }
   return buf
 }
 
 export default {
-  id: 'particles',
-  name: 'Starfield',
+  id: 'particles', // Saved preferences retain their visualizer.
+  name: 'Orbit',
   draw(ctx, w, h, frame) {
-    const { t, dt, level, bands, beat, animate } = frame
-    const bass = bands ? bands.bass : 0
-    const mid = bands ? bands.mid : 0
-    const treble = bands ? bands.treble : 0
-
-    // Per-stage star field + burst envelope, seeded on first draw.
-    const f = (frame.viz.particles ||= initField())
-    const { sx, sy, sz, rc, phase, tw, col } = f
-
-    const cx = w * 0.5
-    const cy = h * 0.5
-    const minDim = Math.min(w, h)
-    const spread = minDim * 0.16
-    const margin = minDim * 0.08
-
-    // --- opaque base: faint depth wash via the downscaled buffer ---
-    const buf = getBuffer(frame.buffers, 'particles', w, h, 480)
-    const bctx = buf.ctx
-    const glow = animate ? level : Math.min(level, 0.4)
-    const g = bctx.createRadialGradient(
-      buf.w * 0.5, buf.h * 0.5, 0,
-      buf.w * 0.5, buf.h * 0.5, Math.hypot(buf.w, buf.h) * 0.5,
-    )
-    const cr = 8 + glow * 18
-    g.addColorStop(0, `rgb(${cr | 0},${(cr * 1.2) | 0},${(cr * 2.4 + 6) | 0})`)
-    g.addColorStop(0.5, 'rgb(5,6,14)')
-    g.addColorStop(1, 'rgb(1,1,4)')
-    bctx.fillStyle = g
-    bctx.fillRect(0, 0, buf.w, buf.h)
-    blit(ctx, buf, w, h)
-
-    // --- advance + draw stars (crisp, additive) ---
-    if (dt > 0) {
-      // Beat kicks an outward burst; decays exponentially (bounded).
-      f.burst += beat * 1.6
-      f.burst *= Math.exp(-dt * 3.5)
-      if (f.burst > 3) f.burst = 3
+    const t = Number.isFinite(frame.t) ? frame.t : 0
+    const scene = (frame.viz.particles ||= initScene())
+    if (frame.animate) {
+      scene.audio = unit(frame.level) * 0.45 + unit(frame.bands?.bass) * 0.35 + unit(frame.bands?.mid) * 0.2
     }
-    const burst = f.burst
-    const speed = 0.11 + bass * 0.5 + burst * 1.1
-    const brightPop = 1 + burst * 0.35
+    const audio = scene.audio
+    // ---- soft sky: small buffer, nearest upscale ------------------------
+    const buf = getBuffer(frame.buffers, 'particles', w, h, 720)
+    const sky = buf.ctx
+    const bw = buf.w, bh = buf.h
+    sky.globalAlpha = 1
+    sky.globalCompositeOperation = 'source-over'
+    sky.fillStyle = '#020611'
+    sky.fillRect(0, 0, bw, bh)
+    glow(sky, bw * 0.1, bh * 0.14, bw * 0.58, 'rgba(20,66,121,0.68)', 0.72 + audio * 0.3)
+    glow(sky, bw * 0.93, bh * 0.94, bw * 0.58, 'rgba(74,29,107,0.68)', 0.64 + audio * 0.28)
+    const texture = getBuffer(frame.buffers, 'orbit-nebula', w, h, 420)
+    if (!texture.ready) makeNebula(texture)
+    nebula(sky, bw, bh, t, audio, texture)
+    const halo = worldAt(bw, bh, t)
+    glow(sky, halo.x, halo.y, halo.r * 2.1, 'rgba(31,71,119,0.28)', 0.52 + audio * 0.32)
+    const moonHalo = moonAt(bw, bh, t)
+    glow(sky, moonHalo.x, moonHalo.y, moonHalo.r * 4.5, 'rgba(80,139,201,0.34)', 0.45 + audio * 0.32)
 
     ctx.save()
-    ctx.globalCompositeOperation = 'lighter'
-    ctx.lineCap = 'round'
-    const maxLW = minDim * 0.007
-    let curCol = -1
+    ctx.globalAlpha = 1
+    ctx.globalCompositeOperation = 'source-over'
+    blit(ctx, buf, w, h)
 
-    for (let i = 0; i < N; i++) {
-      const oldInv = 1 / sz[i]
-      let respawned = false
-      if (dt > 0) {
-        sz[i] -= dt * speed
-        if (sz[i] <= Z_NEAR) {
-          respawn(f, i)
-          respawned = true
-        }
-      }
-      const z = sz[i]
-      const inv = 1 / z
-      const X = cx + sx[i] * inv * spread
-      const Y = cy + sy[i] * inv * spread
-
-      // Off-canvas stars aren't drawn; recycle them to keep density up, but
-      // only while playing — a paused frame must never mutate the pool.
-      if (X < -margin || X > w + margin || Y < -margin || Y > h + margin) {
-        if (dt > 0) respawn(f, i)
-        continue
-      }
-
-      const depth = 1 - z // 0 far .. ~0.95 near
-      // treble twinkle: bounded oscillation, more when trebly.
-      const twk = 1 + treble * 0.6 * Math.sin(t * tw[i] + phase[i])
-      let a = depth * depth * (0.5 + mid * 0.5) * brightPop * twk
-      if (a > 1) a = 1
-      else if (a < 0) a = 0
-      if (a < 0.015) continue
-
-      const c = col[i]
-      if (c !== curCol) { ctx.strokeStyle = PALETTE[c]; curCol = c }
-      ctx.globalAlpha = a
-
-      const lw = 0.6 + depth * maxLW * (0.6 + bass * 0.9)
-      ctx.lineWidth = lw
-
-      if (respawned || dt === 0) {
-        // no streak: draw a short dot-like segment
-        ctx.beginPath()
-        ctx.moveTo(X, Y)
-        ctx.lineTo(X + 0.01, Y)
-        ctx.stroke()
-      } else {
-        // warp streak from previous projected position
-        const pX = cx + sx[i] * oldInv * spread
-        const pY = cy + sy[i] * oldInv * spread
-        ctx.beginPath()
-        ctx.moveTo(pX, pY)
-        ctx.lineTo(X, Y)
-        ctx.stroke()
+    // ---- crisp layers: device resolution --------------------------------
+    const c = ctx
+    const s = Math.min(w, h)
+    for (let i = 0; i < scene.stars.length; i++) {
+      const star = scene.stars[i]
+      const x = fract(star.x + t * (0.00005 + star.depth * 0.00022))
+      const y = fract(star.y - t * (0.000025 + star.depth * 0.00007))
+      const edge = Math.min(1, Math.min(x, 1 - x, y, 1 - y) * 35)
+      const distance = Math.hypot(x - 0.5, y - 0.5)
+      const glint = i < 12
+      c.globalAlpha = unit(edge * Math.min(0.76, distance * (0.42 + star.depth * 0.37 + audio * 0.3)
+        * (0.84 + 0.16 * Math.sin(t * 0.31 + star.phase))))
+      c.fillStyle = star.tint < 0.68 ? '#d6e9f5' : '#f1d4df'
+      c.beginPath()
+      c.arc(x * w, y * h, star.size * (glint ? 1.3 : 1) * s / 480, 0, TAU)
+      c.fill()
+      if (glint) {
+        c.lineWidth = Math.max(0.35, s / 950)
+        c.strokeStyle = c.fillStyle
+        c.beginPath()
+        c.moveTo(x * w - s * 0.007, y * h)
+        c.lineTo(x * w + s * 0.007, y * h)
+        c.moveTo(x * w, y * h - s * 0.007)
+        c.lineTo(x * w, y * h + s * 0.007)
+        c.stroke()
       }
     }
-    ctx.restore()
+    c.globalAlpha = 1
+    const world = planet(c, w, h, t, audio)
+    moon(c, w, h, t)
 
-    // --- legibility: baked scrim + edge vignette, one blit (last) ---
-    blit(ctx, overlay(frame.buffers, f, w, h), w, h)
+    // Grain travels on ellipses around the planet; no particle integrates dt.
+    for (const grain of scene.dust) {
+      const a = grain.angle + t * grain.speed * (grain.orbit < 0.5 ? 1 : -1)
+      const radius = world.r * (1.43 + grain.orbit * 0.58)
+      const x = world.x + Math.cos(a) * radius
+      const y = world.y + Math.sin(a) * radius * 0.28 - Math.cos(a) * radius * 0.08
+      if (x < 0 || x > w || y < 0 || y > h) continue
+      if (Math.sin(a) < 0 && Math.hypot(x - world.x, y - world.y) < world.r) continue
+      const center = Math.min(1, Math.hypot((x / w - 0.5) * 2, (y / h - 0.5) * 2))
+      c.globalAlpha = unit((0.14 + center * 0.43) * (0.78 + audio * 0.7))
+      c.fillStyle = grain.tint < 0.5 ? '#b7ddea' : '#e6bfd2'
+      c.beginPath()
+      c.arc(x, y, grain.size * s / 480, 0, TAU)
+      c.fill()
+    }
+    c.globalAlpha = 1
+    blit(ctx, shade(frame.buffers, w, h), w, h)
+    ctx.restore()
   },
 }

@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "runtimeLockSha256": "b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280",
+  "evidenceReference": "Prior bound recipe: 63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3. Original basis: Private Windows CUDA recipe built by https://github.com/singhouse/singhouse/actions/runs/38172656012; experimental bounded-v1 budgets remain unqualified. Native Windows CUDA inference and measured memory qualification pending; see issue #117. Current candidate: b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280; final installer acceptance remains pending. HEART CUDA reservation raised to 9 GiB after the 6,964 MiB peak reported in issue #117; these transferred reservations are not new measurement or qualification evidence.",
+  "executionProfile": "bounded-v1",
+  "models": {
+    "demucs-mdx-extra": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 10737418240,
+          "vramBytes": 2147483648
+        },
+        "cpu": {
+          "ramBytes": 10737418240
+        }
+      }
+    },
+    "karaoke-roformer": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 8589934592,
+          "vramBytes": 4294967296
+        },
+        "cpu": {
+          "ramBytes": 12884901888
+        }
+      }
+    },
+    "heart-transcriptor": {
+      "maxDurationSeconds": 600,
+      "maxSampleRate": 48000,
+      "maxChannels": 2,
+      "devices": {
+        "cuda": {
+          "ramBytes": 10737418240,
+          "vramBytes": 9663676416
+        },
+        "cpu": {
+          "ramBytes": 17179869184
+        }
+      }
+    }
+  }
+}

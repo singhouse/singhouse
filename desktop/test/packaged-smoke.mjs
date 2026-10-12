@@ -96,6 +96,9 @@ async function launch() {
     assert.equal(facts.ready, false, 'Clean profile cannot already have local processing')
     await host.getByRole('button', { name: /My Modal account/ }).click()
     await host.getByRole('button', { name: 'Continue →', exact: true }).click()
+    await host.getByRole('heading', { name: 'Look up lyrics with LRCLIB?' }).waitFor()
+    assert.equal(await host.getByTestId('onboarding-lrclib').isChecked(), false, 'Lyrics lookup is opt-in and defaults off')
+    await host.getByTestId('onboarding-lyrics-continue').click()
     await host.getByRole('heading', { name: 'Save and check your connection' }).waitFor()
     assert.equal(await host.getByRole('button', { name: 'Check saved connection' }).isEnabled(), false)
     assert.equal(await host.locator('input[name="tokenSecret"]').inputValue(), '')
@@ -117,7 +120,7 @@ async function sandboxChecks(host) {
     bridge: Object.keys(window.karaokeDesktop),
     blocked: await fetch('http://127.0.0.1:9/').then(() => false, () => true),
   }))
-  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'chooseModelSource', 'getModalStatus', 'saveModalConfig', 'checkModalConnection', 'forgetModalConfig', 'getSetupStatus', 'startSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
+  assert.deepEqual(boundary, { node: 'undefined', bridge: ['isDesktop', 'managedSetup', 'prepareHeart', 'getLyricsLookup', 'setLyricsLookup', 'getOnboardingState', 'setOnboardingState', 'preflightSetup', 'chooseModelSource', 'getModalStatus', 'saveModalConfig', 'checkModalConnection', 'forgetModalConfig', 'getSetupStatus', 'startSetup', 'pauseSetup', 'cancelSetup', 'restartApp', 'openSetupHelp', 'onOpenSetup'], blocked: true })
 }
 
 try {
@@ -157,7 +160,7 @@ try {
   await host.getByRole('button', { name: 'Play', exact: true }).click()
   await host.getByRole('button', { name: 'Pause', exact: true }).waitFor()
   const opened = application.waitForEvent('window')
-  await host.locator('button.popout-btn').click()
+  await host.getByRole('button', { name: 'Pop out lyrics', exact: true }).click()
   const projector = await opened
   await projector.locator('video').waitFor()
   await projector.waitForFunction(() => [...document.querySelectorAll('video')].some(video => video.readyState >= 2 && video.currentTime > 0), null, { timeout: 15000 })

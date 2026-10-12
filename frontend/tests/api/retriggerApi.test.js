@@ -49,11 +49,11 @@ describe('songApi.resplit', () => {
 describe('the LLM flags on the re-sync routes', () => {
   it('travel in the transcribe body', async () => {
     await lyricsSetsApi.transcribe(1, {
-      whisper_model: 'heart', llm_correction: true, llm_paging: true,
+      whisper_model: 'heart', llm_paging: true,
     })
     expect(lastConfig.url).toBe('/songs/1/lyrics/transcribe')
     expect(JSON.parse(lastConfig.data)).toEqual({
-      whisper_model: 'heart', llm_correction: true, llm_paging: true,
+      whisper_model: 'heart', llm_paging: true,
     })
   })
 

@@ -26,7 +26,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from karaoke_backend.api.auth import get_current_user, get_host_id, require_user
@@ -35,6 +35,7 @@ from karaoke_backend.database import get_db
 from karaoke_backend import stem_layout, stem_storage
 from karaoke_backend.jobs import queue
 from karaoke_backend.models.song import Job, JobKind, LyricsSet, Song, SongStatus
+from karaoke_backend.search import search_predicate
 from karaoke_backend.workers import karaoke_models, modal_worker
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,18 @@ class SongListResponse(BaseModel):
     page_size: int
 
 
+class ArtistSummary(BaseModel):
+    artist: str
+    count: int
+
+
+class ArtistListResponse(BaseModel):
+    items: list[ArtistSummary]
+    total: int
+    page: int
+    page_size: int
+
+
 class SongUpdateRequest(BaseModel):
     artist: Optional[str] = None
     title: Optional[str] = None
@@ -176,7 +189,7 @@ class RetryIngestResponse(BaseModel):
 # What a song must already have on disk for a re-split to mean anything: the
 # vocal pair Pass 2 produces and the bed the karaoke mix needs. A video import
 # has an instrumental and nothing else, so this is also what excludes it.
-RESPLIT_REQUIRED_STEMS = ("lead_vocals.wav", "backing_vocals.wav", "instrumental.wav")
+RESPLIT_REQUIRED_STEMS = ("lead_vocals", "backing_vocals", "instrumental")
 
 
 # The kinds that CREATE a song. Every song in the library arrived through
@@ -482,8 +495,9 @@ async def list_songs(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(20, ge=1, le=500, description="Items per page"),
     status: Optional[str] = Query(None, description="Filter by status: processing|ready|failed"),
-    artist: Optional[str] = Query(None, description="Filter by artist (partial match)"),
-    search: Optional[str] = Query(None, description="Free-text search across title, artist, and filename"),
+    artist: Optional[str] = Query(None, max_length=200, description="Filter by artist (partial match)"),
+    artist_exact: Optional[str] = Query(None, description="Exact artist name for browsing"),
+    search: Optional[str] = Query(None, max_length=200, description="Free-text search across title, artist, and filename"),
     db: AsyncSession = Depends(get_db),
     host_id: int = Depends(get_host_id),
     user: Optional[Identity] = Depends(get_current_user),
@@ -513,14 +527,14 @@ async def list_songs(
     if status:
         query = query.where(Song.status == status)
     if artist:
-        query = query.where(Song.artist.ilike(f"%{artist}%"))
+        query = query.where(search_predicate(artist, Song.artist))
+    if artist_exact is not None:
+        query = query.where(Song.artist == artist_exact)
     if search:
-        needle = f"%{search.strip()}%"
-        if search.strip():
-            fields = [Song.title.ilike(needle), Song.artist.ilike(needle)]
-            if not is_guest:
-                fields.append(Song.filename.ilike(needle))
-            query = query.where(or_(*fields))
+        fields = [Song.title, Song.artist]
+        if not is_guest:
+            fields.append(Song.filename)
+        query = query.where(search_predicate(search, *fields))
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
@@ -528,7 +542,8 @@ async def list_songs(
 
     # Paginate
     offset = (page - 1) * page_size
-    query = query.order_by(Song.created_at.desc()).offset(offset).limit(page_size)
+    ordering = (func.lower(Song.title), Song.title, Song.id) if artist_exact is not None else (Song.created_at.desc(), Song.id.desc())
+    query = query.order_by(*ordering).offset(offset).limit(page_size)
     rows = (await db.execute(query)).scalars().all()
 
     jobs_by_id = await _fetch_jobs_for(db, list(rows))
@@ -559,6 +574,31 @@ async def list_songs(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/artists", response_model=ArtistListResponse, summary="Browse library artists")
+async def list_artists(
+    search: Optional[str] = Query(None, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(40, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    host_id: int = Depends(get_host_id),
+) -> ArtistListResponse:
+    # Group exact stored names, keeping collaborations and similarly named
+    # artists distinct. Only playable rows contribute to the guest browser.
+    query = select(Song.artist, func.count(Song.id).label("count")).where(
+        Song.owner_id == host_id, Song.status == "ready",
+    )
+    if search and search.strip():
+        query = query.where(search_predicate(search, Song.artist))
+    query = query.group_by(Song.artist)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+    rows = (await db.execute(query.order_by(func.lower(Song.artist), Song.artist)
+                            .offset((page - 1) * page_size).limit(page_size))).all()
+    return ArtistListResponse(
+        items=[ArtistSummary(artist=artist, count=count) for artist, count in rows],
+        total=total, page=page, page_size=page_size,
     )
 
 
@@ -744,7 +784,7 @@ async def get_stem_file(
     Valid filenames are the recognized stem basenames actually present on disk
     for this song: `instrumental`, `karaoke`, `lead_vocals`, `backing_vocals`
     (numbered variants `lead_vocals_<N>`/`backing_vocals_<N>` included), or
-    any `vocal_<id>` per-voice stem, in `.flac` or `.wav`.
+    any `vocal_<id>` per-voice stem, in `.mp3`, `.m4a`, `.webm`, `.flac` or `.wav`.
     """
     # Reject path traversal before anything else — the allowlist below is
     # basenames only, but a malformed filename should 400 regardless of song.
@@ -780,7 +820,10 @@ async def get_stem_file(
         )
 
     stem_path = stems_dir / filename
-    media_type = "audio/flac" if filename.endswith(".flac") else "audio/wav"
+    media_type = {
+        ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".webm": "audio/webm",
+        ".flac": "audio/flac", ".wav": "audio/wav",
+    }[Path(filename).suffix]
     return FileResponse(
         path=str(stem_path),
         media_type=media_type,
@@ -837,7 +880,8 @@ async def resplit_stems(
 
     stems_dir = _song_stems_dir(song)
     missing = [
-        name for name in RESPLIT_REQUIRED_STEMS if not (stems_dir / name).is_file()
+        name for name in RESPLIT_REQUIRED_STEMS
+        if stem_layout.resolve_stem(stems_dir, name) is None
     ]
     if missing:
         raise HTTPException(
@@ -1006,7 +1050,7 @@ async def retry_ingest(
       rows lost the race and has its enqueue rolled back with it.
 
     **How the options are recovered.** They are not on the song row — the
-    Pass-2 model, the pasted reference lyrics, the two LLM flags, the Plex
+    Pass-2 model, the pasted reference lyrics, the lyrics paging flag, the Plex
     rating key, the video's upload name all live only in the job's payload —
     so the payload of this song's most recent producing job is what is
     replayed, verbatim. That is the failed job itself in the normal case, which
@@ -1033,6 +1077,10 @@ async def retry_ingest(
     rows (kind IS NULL), and ``delete_song``, which names this song's own jobs
     — and by then the song, and any retry of it, is gone anyway.
     """
+    # Enforce the numeric boundary for direct callers as well as HTTP routing,
+    # before the ID is used in a query or a filesystem path component.
+    song_id = int(song_id)
+
     # Resolved at call time from the ingest module's own view of the world, and
     # not from this module's snapshot: these two paths have to be the ones the
     # handlers will look at, or the checks answer about different files. The
@@ -1094,7 +1142,7 @@ async def retry_ingest(
     kind = last_job.kind if options_recovered else JobKind.INGEST.value
     if kind not in (JobKind.VIDEO_IMPORT.value, JobKind.CDG_IMPORT.value):
         from karaoke_backend.workers.managed_processing import require_heart_model
-        require_heart_model()
+        require_heart_model(allow_wait=True)
     stems_dir = INGEST_STEMS_DIR / str(song_id)
 
     if kind == JobKind.PLEX_IMPORT.value:
@@ -1170,7 +1218,6 @@ async def retry_ingest(
                 "artist": song.artist,
                 "title": song.title,
                 "pasted_lyrics": None,
-                "llm_correction": False,
                 "llm_paging": False,
                 "karaoke_model": karaoke_models.DEFAULT_CHOICE,
             }

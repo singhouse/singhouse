@@ -134,10 +134,16 @@ export default client
 
 export const songApi = {
   /** GET /api/songs — list songs in the library (optionally search/page) */
-  list({ search, pageSize = 200, page = 1 } = {}) {
+  list({ search, artistExact, status, pageSize = 200, page = 1 } = {}) {
     const params = { page, page_size: pageSize }
     if (search) params.search = search
+    if (artistExact != null) params.artist_exact = artistExact
+    if (status) params.status = status
     return client.get('/songs', { params })
+  },
+
+  artists({ search, page = 1, pageSize = 40 } = {}) {
+    return client.get('/songs/artists', { params: { search, page, page_size: pageSize } })
   },
 
   /** GET /api/songs/:id — get single song details */
@@ -157,7 +163,6 @@ export const songApi = {
     if (artist) form.append('artist', artist)
     if (title) form.append('title', title)
     if (opts.plainLyrics) form.append('plain_lyrics', opts.plainLyrics)
-    if (opts.llmCorrection) form.append('llm_correction', 'true')
     if (opts.llmPaging) form.append('llm_paging', 'true')
     // Pass-2 lead/backing model ID. Sent only when the operator moved the
     // picker off its default, so a stock upload is the exact request it was
@@ -225,6 +230,12 @@ export const songApi = {
    *  Third-party lookup is opt-in: 503 when the operator has not enabled it. */
   lyrics(artist, title) {
     return client.get('/lyrics', { params: { artist, title } })
+  },
+
+  /** GET /api/lyrics/lookup — preview reference lyrics before a file is
+   *  added: `{ found, plain_lyrics, synced }`. 404 when lookup is off. */
+  lookupLyrics(artist, title) {
+    return client.get('/lyrics/lookup', { params: { artist, title } })
   },
 
   /** PATCH /api/songs/:id — update song metadata. The server accepts
@@ -466,9 +477,9 @@ export const historyApi = {
 }
 
 // ─── Export API (CD+G / MP3+G) ──────────────────────────────────────────────
-// Single-song export of the host's own library material. The attribution-card
-// preference is a server-side setting; per-request `card` exists only as an
-// explicit override and is normally omitted.
+// Single-song export of the host's own library material. The export dialog
+// always asks for the attribution card (`card: true`); the stored server-side
+// preference applies only when a caller omits `card`.
 
 export const exportApi = {
   /** GET /api/export/settings — { attribution_card } */
@@ -494,6 +505,52 @@ export const exportApi = {
       responseType: 'blob',
       timeout: 300000, // 5 min, matching the other long-running calls
     })
+  },
+
+  /** POST /api/export/songs/:id/video — open a video export session.
+   *  `{ session, mode: 'frames', duration, frames_expected }` when the client
+   *  renders the picture, `{ session, mode: 'remux', ready }` when the song's
+   *  own prepared video is used. */
+  openVideo(songId, { audio, lyricsSet } = {}) {
+    const body = { audio, fps: 30, width: 1280, height: 720 }
+    if (lyricsSet != null) body.lyrics_set = lyricsSet
+    return client.post(`/export/songs/${songId}/video`, body, { timeout: 120000 })
+  },
+
+  /** PUT /api/export/video/:session/frames — one in-order batch of JPEG
+   *  frames starting at frame `index`. */
+  putVideoFrames(session, index, frames, { signal } = {}) {
+    const form = new FormData()
+    form.append('index', String(index))
+    frames.forEach((blob, i) => form.append('frames', blob, `${index + i}.jpg`))
+    return client.put(`/export/video/${encodeURIComponent(session)}/frames`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+      signal,
+    })
+  },
+
+  /** POST /api/export/video/:session/finish — `{ ready, filename, bytes }` */
+  finishVideo(session) {
+    return client.post(`/export/video/${encodeURIComponent(session)}/finish`, null, { timeout: 600000 })
+  },
+
+  /** GET /api/export/video/:session — `{ state, received, frames_expected, filename? }` */
+  videoStatus(session) {
+    return client.get(`/export/video/${encodeURIComponent(session)}`)
+  },
+
+  /** GET /api/export/video/:session/file — the finished video as a blob. */
+  videoFile(session) {
+    return client.get(`/export/video/${encodeURIComponent(session)}/file`, {
+      responseType: 'blob',
+      timeout: 600000,
+    })
+  },
+
+  /** DELETE /api/export/video/:session — cancel and remove the session's files. */
+  cancelVideo(session) {
+    return client.delete(`/export/video/${encodeURIComponent(session)}`)
   },
 }
 

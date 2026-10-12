@@ -1,0 +1,268 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Backdrop studio</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#0c0f15;color:#eef1f8;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0}main{max-width:1560px;margin:auto;padding:44px 32px 32px}
+    .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.2em;color:#97aaa8;margin:0 0 12px}
+    h1{font-size:clamp(30px,4vw,46px);font-weight:550;letter-spacing:-.045em;margin:0 0 10px}
+    .intro{color:#9ba5b9;line-height:1.6;max-width:760px;margin:0 0 30px;font-size:15px}
+    .controls{display:flex;align-items:center;gap:22px;flex-wrap:wrap;padding:18px 20px;background:#141923;border:1px solid #252d3b;border-radius:14px;margin-bottom:24px}
+    .audio-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 20px;background:#141923;border:1px solid #252d3b;border-radius:14px;margin-bottom:12px;font-size:12px;color:#b6c0d2}
+    .audio-controls strong{color:#eef1f8;font-weight:550}.audio-controls input{max-width:250px}
+    .audio-controls .hint{margin-left:auto;color:#8e9bb0}
+    .audio-controls [hidden],.slider[hidden]{display:none}
+    button{border:1px solid #384253;background:#202938;color:#e7edf7;border-radius:8px;padding:9px 13px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+    button:hover{background:#2b394b}button:focus-visible,input:focus-visible{outline:2px solid #a0e4d1;outline-offset:4px}
+    #pause{min-width:112px;background:#bddbcc;color:#11271c;border-color:#bddbcc}
+    .slider{display:grid;gap:7px;flex:1;min-width:170px;max-width:340px}.slider label{font-size:11px;color:#b6c0d2;display:flex;justify-content:space-between;gap:12px}
+    output{font-variant-numeric:tabular-nums;color:#e8edf4}input[type=range]{width:100%;margin:0;accent-color:#a5c8bc;cursor:pointer}input[type=checkbox]{accent-color:#a5c8bc}
+    .check{font-size:12px;color:#c6cfdf;display:flex;align-items:center;gap:7px;white-space:nowrap}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+    .card{overflow:hidden;border:1px solid #273040;border-radius:14px;background:#111620;min-width:0}
+    .stage{position:relative;aspect-ratio:16/9;isolation:isolate;background:#03040a;overflow:hidden;container-type:inline-size}
+    canvas{display:block;width:100%;height:100%}
+    .lyrics{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;pointer-events:none;text-align:center;padding:8%;text-shadow:0 2px 8px #000,0 0 24px #000}
+    .lyrics p{font-size:clamp(14px,4cqw,56px);font-weight:700;line-height:1.25;letter-spacing:-.025em;margin:0}
+    .lyrics .next{opacity:.65;font-size:clamp(12px,3cqw,44px)}.lyrics span{color:#ff9b91}
+    .lyrics.hidden{display:none}.stage-tag{position:absolute;top:14px;left:16px;color:#d5dee9a6;font-size:10px;letter-spacing:.12em;text-transform:uppercase;pointer-events:none}
+    .card-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 18px}
+    h2{font-size:15px;font-weight:550;letter-spacing:-.01em;margin:0 0 5px}.description{color:#8e9bb0;font-size:12px;margin:0;line-height:1.45}.actions{display:flex;gap:6px}
+    .actions button{padding:7px 9px;font-size:11px}
+    .grid.focused{grid-template-columns:1fr}.grid.focused .card:not(.selected){display:none}.grid.focused .stage{max-height:74vh;aspect-ratio:16/9}
+    .stage:fullscreen{width:100vw;height:100vh;aspect-ratio:auto}.stage:fullscreen .stage-tag{font-size:14px}
+    footer{color:#6e7b91;font-size:11px;line-height:1.6;margin-top:22px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+    #error{color:#ffb5ad;padding:14px;border:1px solid #72403d;border-radius:8px;margin-bottom:16px}#error:empty{display:none}
+    @media(max-width:760px){main{padding:28px 16px}.grid{grid-template-columns:1fr}.controls{gap:18px}.slider{max-width:none}.card-meta{align-items:flex-start}.description{max-width:240px}.actions{flex-direction:column}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  </style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Motion studies · live canvas</p>
+  <h1>Room for the song.</h1>
+  <p class="intro">A familiar favorite, ringed worlds, rolling waves, and warm embers. Compare them behind sample lyrics, then focus a backdrop to feel how it fills the room.</p>
+  <div class="audio-controls">
+    <strong id="source-label">Synthetic preview</strong>
+    <label for="audio-file">Choose a local audio file</label>
+    <input id="audio-file" type="file" accept="audio/*">
+    <span class="hint" id="source-hint">Selected files play only in this browser.</span>
+    <audio id="audio" preload="metadata"></audio>
+  </div>
+  <div class="controls" aria-label="Preview controls">
+    <button id="pause" type="button">Pause motion</button>
+    <div class="slider" id="energy-control"><label for="energy">Synthetic audio energy <output id="energy-value">45%</output></label><input id="energy" type="range" min="0" max="100" value="45"></div>
+    <div class="slider"><label for="time">Animation time <output id="time-value">0:00</output></label><input id="time" type="range" min="0" max="600" value="0" step="0.1"></div>
+    <label class="check"><input id="lyrics-toggle" type="checkbox" checked> Sample lyrics</label>
+    <button id="reset" type="button">Restart</button>
+  </div>
+  <div id="error" role="alert"></div>
+  <div class="grid" id="grid"></div>
+  <footer><span>Original sample text · audio uses your browser only.</span><span>Pause freezes the scene · Focus to compare at stage size · Esc exits fullscreen</span></footer>
+</main>
+<script type="module">
+  import aurora from './src/stage/visualizers/aurora.js'
+  import orbit from './src/stage/visualizers/particles.js'
+  import tidal from './src/stage/visualizers/tidal.js'
+  import ember from './src/stage/visualizers/ember.js'
+  import { registerAnalysers, sample } from './src/composables/audioReactive.js'
+
+  const specs = [
+    [aurora, 'The familiar favorite', 'Soft color, slow wandering light.', 'Reference'],
+    [orbit, 'Orbit', 'Drifting nebula clouds, distant stars, and shadowed worlds.', 'New study'],
+    [tidal, 'Tidal', 'Broad, blue-green ribbons moving like water.', 'New study'],
+    [ember, 'Ember', 'A warm glow with a few unhurried sparks.', 'New study'],
+  ]
+  const grid = document.querySelector('#grid')
+  const energy = document.querySelector('#energy')
+  const time = document.querySelector('#time')
+  const pause = document.querySelector('#pause')
+  const lyricToggle = document.querySelector('#lyrics-toggle')
+  const audio = document.querySelector('#audio')
+  const audioFile = document.querySelector('#audio-file')
+  const sourceLabel = document.querySelector('#source-label')
+  const sourceHint = document.querySelector('#source-hint')
+  let playing = !matchMedia('(prefers-reduced-motion: reduce)').matches
+  let t = 0, previous = null, dirty = true, focused = null
+  let audioMode = false, audioContext = null, objectUrl = null, lastAudio = sample()
+  async function prepareAudio() {
+    if (!audioContext) {
+      audioContext = new AudioContext()
+      const source = audioContext.createMediaElementSource(audio)
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 1024
+      source.connect(analyser)
+      analyser.connect(audioContext.destination)
+      registerAnalysers({ mix: analyser })
+    }
+    await audioContext.resume()
+  }
+  function loadAudio(url, title) {
+    audio.pause()
+    playing = false
+    audioMode = true
+    audio.src = url
+    audio.load()
+    t = 0
+    previous = null
+    lastAudio = { level: 0, bands: { bass: 0, mid: 0, treble: 0 }, beat: 0 }
+    sourceLabel.textContent = title
+    sourceHint.textContent = 'Real audio analysis · sample lyrics are illustrative.'
+    document.querySelector('#energy-control').hidden = true
+    dirty = true
+    updatePause()
+  }
+  audioFile.addEventListener('change', () => {
+    if (!audioFile.files?.[0]) return
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    objectUrl = URL.createObjectURL(audioFile.files[0])
+    loadAudio(objectUrl, audioFile.files[0].name)
+  })
+  const params = new URLSearchParams(location.search)
+  const localAudio = params.get('audio')
+  if (localAudio) {
+    try {
+      const url = new URL(localAudio, location.href)
+      if (url.origin === location.origin) loadAudio(url.href, params.get('title') || 'Local audio')
+      else document.querySelector('#error').textContent = 'Audio must come from this preview server or a local file.'
+    } catch {
+      document.querySelector('#error').textContent = 'Invalid audio address. Choose a local file instead.'
+    }
+  }
+  audio.addEventListener('loadedmetadata', () => {
+    if (Number.isFinite(audio.duration)) time.max = String(audio.duration)
+    dirty = true
+  })
+  audio.addEventListener('error', () => {
+    document.querySelector('#error').textContent = 'The audio file could not be loaded. Choose a local file instead.'
+    audio.pause()
+    syncPlayback()
+  })
+  function syncPlayback() {
+    playing = !audio.paused && !audio.ended
+    previous = null
+    updatePause()
+    dirty = true
+  }
+  for (const event of ['play', 'pause', 'ended']) audio.addEventListener(event, syncPlayback)
+  const cards = specs.map(([visualizer, subtitle, description, tag]) => {
+    const card = document.createElement('article')
+    card.className = 'card'
+    card.innerHTML = `<div class="stage"><canvas aria-label="${visualizer.name} animated backdrop"></canvas><div class="stage-tag">${tag}</div><div class="lyrics"><p><span>Let the quiet</span> find us here</p><p class="next">Leave a little room for light</p></div></div><div class="card-meta"><div><h2>${visualizer.name}</h2><p class="description">${description}</p></div><div class="actions"><button class="focus" type="button" aria-label="Focus ${visualizer.name}" aria-pressed="false">Focus</button><button class="fullscreen" type="button" aria-label="Fullscreen ${visualizer.name}">Fullscreen</button></div></div>`
+    card.title = subtitle
+    grid.append(card)
+    const stage = card.querySelector('.stage')
+    const canvas = card.querySelector('canvas')
+    const ctx = canvas.getContext('2d')
+    const state = { visualizer, card, stage, canvas, ctx, buffers: new Map(), viz: {} }
+    card.querySelector('.focus').addEventListener('click', () => {
+      focused = focused === state ? null : state
+      grid.classList.toggle('focused', Boolean(focused))
+      cards.forEach(c => {
+        c.card.classList.toggle('selected', c === focused)
+        const button = c.card.querySelector('.focus')
+        button.textContent = c === focused ? 'All four' : 'Focus'
+        button.setAttribute('aria-pressed', String(c === focused))
+      })
+      dirty = true
+    })
+    card.querySelector('.fullscreen').addEventListener('click', async () => {
+      try {
+        await stage.requestFullscreen()
+      } catch {
+        document.querySelector('#error').textContent = 'Fullscreen is unavailable in this browser. Use Focus for a larger view.'
+      }
+      dirty = true
+    })
+    new ResizeObserver(() => { dirty = true }).observe(stage)
+    return state
+  })
+  function updatePause() {
+    pause.textContent = audioMode ? (playing ? 'Pause song' : 'Play song') : (playing ? 'Pause motion' : 'Play motion')
+    pause.setAttribute('aria-pressed', String(!playing))
+  }
+  updatePause()
+  pause.addEventListener('click', async () => {
+    if (audioMode) {
+      if (playing) audio.pause()
+      else {
+        try {
+          await prepareAudio()
+          await audio.play()
+        } catch (error) {
+          document.querySelector('#error').textContent = `Audio could not play: ${error.message}`
+          return
+        }
+      }
+      syncPlayback()
+    } else {
+      playing = !playing
+      previous = null
+      updatePause()
+      dirty = true
+    }
+  })
+  energy.addEventListener('input', () => {
+    document.querySelector('#energy-value').textContent = `${energy.value}%`
+    dirty = true
+  })
+  time.addEventListener('input', () => {
+    t = Number(time.value)
+    if (audioMode && Number.isFinite(audio.duration)) audio.currentTime = Math.min(t, audio.duration)
+    previous = null; dirty = true
+  })
+  lyricToggle.addEventListener('change', () => {
+    document.querySelectorAll('.lyrics').forEach(el => el.classList.toggle('hidden', !lyricToggle.checked))
+  })
+  document.querySelector('#reset').addEventListener('click', () => {
+    t = 0; previous = null; dirty = true
+    if (audioMode) audio.currentTime = 0
+    cards.forEach(c => { c.viz = {}; c.buffers.clear() })
+  })
+  document.addEventListener('fullscreenchange', () => { dirty = true })
+  document.addEventListener('visibilitychange', () => { previous = null })
+  function frame(now) {
+    const dt = previous === null || !playing || document.hidden ? 0 : Math.min((now - previous) / 1000, 0.05)
+    previous = now
+    if (audioMode) t = audio.currentTime || 0
+    else if (playing) t += dt
+    if (!audioMode) time.max = String(Math.max(600, Math.ceil(t / 60) * 60))
+    time.value = String(t)
+    document.querySelector('#time-value').textContent = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`
+    if ((playing || dirty) && !document.hidden) {
+      const e = Number(energy.value) / 100
+      if (audioMode && playing) lastAudio = sample('mix')
+      const level = audioMode ? lastAudio.level : e * (0.76 + 0.24 * Math.sin(t * 0.6) ** 2)
+      const bands = audioMode ? lastAudio.bands : { bass: e * (0.5 + 0.5 * Math.sin(t * 1.1) ** 2), mid: e * (0.5 + 0.5 * Math.sin(t * 0.7 + 1) ** 2), treble: e * (0.3 + 0.7 * Math.sin(t * 1.3 + 2) ** 2) }
+      const beat = audioMode ? lastAudio.beat : e * Math.exp(-(((t % 1.5) / 0.2) ** 2))
+      for (const c of cards) {
+        if (focused && focused !== c) continue
+        if (document.fullscreenElement && document.fullscreenElement !== c.stage) continue
+        const rect = c.stage.getBoundingClientRect()
+        const ratio = Math.min(devicePixelRatio || 1, 2)
+        const w = Math.max(1, Math.round(rect.width * ratio)), h = Math.max(1, Math.round(rect.height * ratio))
+        if (c.canvas.width !== w || c.canvas.height !== h) { c.canvas.width = w; c.canvas.height = h }
+        try {
+          c.ctx.save()
+          c.visualizer.draw(c.ctx, w, h, { t, dt, animate: playing, level, bands, beat, freq: audioMode ? lastAudio.freq : null, waveform: audioMode ? lastAudio.waveform : null, buffers: c.buffers, viz: c.viz })
+          c.ctx.restore()
+        } catch (error) {
+          c.ctx.restore()
+          document.querySelector('#error').textContent = `${c.visualizer.name} could not render: ${error.message}`
+          if (audioMode) audio.pause()
+          playing = false
+          updatePause()
+        }
+      }
+      dirty = false
+    }
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+</script>
+</body>
+</html>

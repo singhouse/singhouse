@@ -7,111 +7,145 @@
       :class="{ 'sidebar--collapsed': sidebarCollapsed, 'sidebar--resizing': isResizing }"
       :style="sidebarCollapsed ? null : { width: sidebarWidth + 'px', minWidth: sidebarWidth + 'px' }"
     >
-      <!-- Brand -->
-      <div class="sidebar__brand">
-        <BrandLogo v-if="!sidebarCollapsed" :size="44" class="brand-lockup" />
-        <BrandMark v-else :size="36" class="brand-mark" />
-        <button class="collapse-btn" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? 'Expand' : 'Collapse'" :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline :points="sidebarCollapsed ? '9 18 15 12 9 6' : '15 18 9 12 15 6'"/>
-          </svg>
-        </button>
-      </div>
-
-      <!-- Upload primary action -->
-      <div v-if="!sidebarCollapsed" class="sidebar__upload">
-        <button type="button" class="upload-cta" @click="uploadOpen = true">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          <span>Upload</span>
-        </button>
-      </div>
-
-      <!-- Collapsed icons -->
-      <div v-if="sidebarCollapsed" class="sidebar__nav-icons">
-        <button
-          type="button"
-          class="nav-icon nav-icon--upload"
-          title="Upload"
-          @click="uploadOpen = true"
-        >☁️</button>
-      </div>
+      <!-- Collapsed rail: the mark (status dot included) + add files. The
+           expanded header row lives in SongList's bar, below. -->
+      <template v-if="sidebarCollapsed">
+        <div class="sidebar__brand">
+          <span class="brand-btn brand-btn--static" :title="apiStatusLabel">
+            <BrandMark :size="32" />
+            <span class="brand-dot" :class="`brand-dot--${apiStatus}`" aria-hidden="true" />
+          </span>
+          <button class="collapse-btn" @click="sidebarCollapsed = false" title="Expand" aria-label="Expand sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </button>
+        </div>
+        <div class="sidebar__nav-icons">
+          <button
+            type="button"
+            class="nav-icon nav-icon--upload"
+            title="Add files"
+            aria-label="Add files"
+            @click="uploadOpen = true"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </button>
+        </div>
+        <button v-if="desktopSetupAvailable" type="button" class="nav-icon" title="Set up song processing" aria-label="Set up song processing" @click="onboardingOpen = true">⚙</button>
+      </template>
 
       <!-- Library content -->
-      <button v-if="desktopSetupAvailable" type="button" class="btn" :title="sidebarCollapsed ? 'Set up song processing' : undefined" @click="onboardingOpen = true">
-        {{ sidebarCollapsed ? '⚙' : 'Set up song processing' }}
-      </button>
-      <div v-if="!sidebarCollapsed" class="sidebar__content">
-        <SongList />
-      </div>
+      <div v-else class="sidebar__content">
+        <SongList>
+          <!-- Brand mark = account/status. The dot is the backend health
+               that used to be the footer pill. -->
+          <template #lead>
+            <PopoverMenu label="Account and status">
+              <template #trigger="{ toggle, attrs }">
+                <button
+                  type="button"
+                  class="brand-btn"
+                  :title="`${BRAND_NAME} — ${apiStatusLabel}`"
+                  :aria-label="`Account and status (${apiStatusLabel})`"
+                  v-bind="attrs"
+                  @click="toggle"
+                >
+                  <BrandMark :size="32" decorative />
+                  <span class="brand-dot" :class="`brand-dot--${apiStatus}`" aria-hidden="true" />
+                </button>
+              </template>
+              <template #default="{ close }">
+                <p class="ui-menu__section">Status</p>
+                <div class="acct-row">
+                  <div class="connection-status" :class="`connection-status--${apiStatus}`">
+                    <div class="connection-dot" />
+                    <span>{{ apiStatusLabel }}</span>
+                  </div>
+                </div>
+                <!-- The queue provider's own status indicator, if it has one.
+                     The rotation's is public-tunnel health; core's queue has
+                     nothing to report beyond the backend line above. -->
+                <!-- The pill may render nothing (e.g. no tunnel configured);
+                     .acct-row:empty keeps that from leaving a padded gap. -->
+                <div v-if="queueProvider?.statusPill" class="acct-row acct-row--pill"><component :is="queueProvider.statusPill" /></div>
+                <hr class="ui-menu__sep" />
+                <p class="ui-menu__section">Signed in</p>
+                <div class="acct-row acct-row--user" :title="session.identity?.name || 'Host'">
+                  {{ session.identity?.name || 'Host' }}
+                </div>
+                <template v-if="desktopSetupAvailable">
+                  <hr class="ui-menu__sep" />
+                  <button type="button" class="ui-menu__item" @click="close(); onboardingOpen = true">
+                    <span class="ui-menu__icon" aria-hidden="true">⚙</span>Set up song processing
+                  </button>
+                </template>
+                <template v-if="showExit">
+                  <hr class="ui-menu__sep" />
+                  <button type="button" class="ui-menu__item ui-menu__item--danger" @click="close(); exitSession()">
+                    <span class="ui-menu__icon" aria-hidden="true">⏻</span>{{ exitTitle }}
+                  </button>
+                </template>
+              </template>
+            </PopoverMenu>
+          </template>
 
-      <!-- Connection status -->
-      <div v-if="!sidebarCollapsed" class="sidebar__footer">
-        <div class="connection-status" :class="`connection-status--${apiStatus}`">
-          <div class="connection-dot" />
-          <span>{{ apiStatusLabel }}</span>
-        </div>
-        <!-- The queue provider's own status indicator, if it has one. The
-             rotation's is public-tunnel health; core's queue has nothing to
-             report beyond the backend pill above. -->
-        <component :is="queueProvider.statusPill" v-if="queueProvider?.statusPill" />
-        <div class="sidebar__user" :title="session.identity?.name || 'Host'">
-          {{ session.identity?.name || 'Host' }}
-        </div>
-        <label class="host-select" title="Audio-reactive backdrop drawn behind the canvas lyrics.">
-          <span class="host-select__label">Backdrop</span>
-          <!-- :value + @change, NOT v-model: v-model's updated hook re-applies
-               option.selected on every render, which strobes an open native
-               dropdown. :value only writes the DOM when the value truly
-               changes (on selection, which closes the popup). This shell also
-               deliberately no longer reads player.currentTime anywhere in its
-               template (see the lyrics-host comment below), so it no longer
-               re-renders at rAF rate while a song plays — both halves matter
-               for keeping Firefox's native select popup stable. -->
-          <select
-            :value="backdropChoice"
-            @change="hostSettings.backdrop = $event.target.value"
-            class="host-select__input"
-          >
-            <option v-for="o in visualizerOptions" :key="o.id" :value="o.id">{{ o.name }}</option>
-          </select>
-        </label>
-        <label
-          v-if="backdropChoice !== 'none'"
-          class="host-select"
-          title="Which audio the backdrop reacts to."
-        >
-          <span class="host-select__label">Reacts to</span>
-          <select
-            :value="hostSettings.audioSource"
-            @change="hostSettings.audioSource = $event.target.value"
-            class="host-select__input"
-          >
-            <option value="mix">Full mix</option>
-            <option value="inst">Instrumental</option>
-            <option value="vocals">Lead vocals</option>
-          </select>
-        </label>
-        <div class="footer-actions">
-          <!-- Standalone projector page. It arrives with the queue system
-               that needs it (a rotation's now-singing/on-deck board); core's
-               projector is the popout above, so the link is only offered when
-               the route actually exists. -->
-          <router-link v-if="hasScreenRoute" to="/screen" target="_blank" class="btn btn-ghost footer-btn" title="Open projector view">📺</router-link>
-          <!-- Play history is a core-only surface: premium fills the
-               queue-provider slot and does not mount /api/history, so this is
-               offered only when no provider is registered. -->
-          <button v-if="!queueProvider" class="btn btn-ghost footer-btn" @click="historyOpen = true" title="Play history">🕘</button>
-          <!-- Import from a Plex media server the host runs themselves. Host
-               affordance only, same visibility as Refresh: it reads the
-               operator's own server through the operator's own credential. -->
-          <button class="btn btn-ghost footer-btn" @click="plexOpen = true" title="Import from Plex">🎞</button>
-          <button class="btn btn-ghost footer-btn" @click="store.fetchSongs()" title="Refresh">↺</button>
-          <button v-if="showExit" class="btn btn-ghost footer-btn" @click="exitSession" :title="exitTitle">⏻</button>
-        </div>
+          <template #actions>
+            <PopoverMenu role="menu" align="end" label="Add to library">
+              <template #trigger="{ toggle, attrs, open }">
+                <button
+                  type="button"
+                  class="add-btn"
+                  :class="{ 'add-btn--open': open }"
+                  title="Add songs to the library"
+                  v-bind="attrs"
+                  @click="toggle"
+                >+ Add <span class="caret" aria-hidden="true">▾</span></button>
+              </template>
+              <template #default="{ close }">
+                <button type="button" role="menuitem" class="ui-menu__item" @click="close(); uploadOpen = true">
+                  <span class="ui-menu__icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>Add files…
+                </button>
+                <!-- Import from a Plex media server the host runs themselves.
+                     Host affordance only: it reads the operator's own server
+                     through the operator's own credential. -->
+                <button type="button" role="menuitem" class="ui-menu__item" @click="close(); plexOpen = true">
+                  <span class="ui-menu__icon" aria-hidden="true">🎞</span>Import from Plex…
+                </button>
+              </template>
+            </PopoverMenu>
+            <!-- Settings: the host's display settings (backdrop and what it
+                 reacts to), the same popover as Display on the stage. -->
+            <button
+              type="button"
+              ref="settingsBtn"
+              class="settings-btn"
+              :class="{ 'settings-btn--open': displayMenu?.isOpen }"
+              title="Settings"
+              aria-label="Settings"
+              aria-haspopup="dialog"
+              :aria-expanded="displayMenu?.isOpen ? 'true' : 'false'"
+              @click="openSettings"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </template>
+
+          <template #trail>
+            <button class="collapse-btn" @click="sidebarCollapsed = true" title="Collapse" aria-label="Collapse sidebar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+          </template>
+
+          <template #notice>
+            <div v-if="apiStatus === 'offline'" class="offline-banner" role="status">
+              <span aria-hidden="true">⚠</span>
+              <span>{{ apiStatusLabel }} — reconnecting…</span>
+            </div>
+          </template>
+        </SongList>
       </div>
 
       <!-- Resize handle -->
@@ -176,23 +210,104 @@
                exactly the state the host needs it. Floats over the lyrics
                area so it is reachable from both the welcome pane and a
                running song. -->
-          <button
-            class="popout-btn popout-btn--icon popout-btn--float"
-            :class="{ 'popout-btn--active': lyricsWin.isOpen.value }"
-            :title="lyricsWin.isOpen.value ? 'Close lyrics window' : 'Pop out lyrics to a separate window (double-click in popup or F11 to fullscreen)'"
-            :aria-label="lyricsWin.isOpen.value ? 'Close lyrics window' : 'Pop out lyrics'"
-            @click="toggleWindow"
-          >⛶</button>
+          <div class="stage-tools">
+            <!-- Display settings: what the host tunes once per venue, not
+                 per song — hence a popover rather than always-on controls. -->
+            <PopoverMenu ref="displayMenu" align="end" label="Display settings" @close="onDisplayClose">
+              <template #trigger="{ toggle, attrs, open }">
+                <button
+                  type="button"
+                  class="popout-btn popout-btn--float popout-btn--display"
+                  :class="{ 'popout-btn--active': open }"
+                  title="Backdrop and projector"
+                  v-bind="attrs"
+                  @click="toggle"
+                >Display <span class="caret" aria-hidden="true">▾</span></button>
+              </template>
+              <template #default="{ close }">
+                <p class="ui-menu__section">Backdrop</p>
+                <label class="host-select" title="Audio-reactive backdrop drawn behind the canvas lyrics.">
+                  <span class="host-select__label">Style</span>
+                  <!-- :value + @change, NOT v-model: v-model's updated hook
+                       re-applies option.selected on every render, which strobes
+                       an open native dropdown. :value only writes the DOM when
+                       the value truly changes (on selection, which closes the
+                       popup). This shell also deliberately no longer reads
+                       player.currentTime anywhere in its template (see the
+                       lyrics-host comment below), so it no longer re-renders at
+                       rAF rate while a song plays — both halves matter for
+                       keeping Firefox's native select popup stable. -->
+                  <select
+                    :value="backdropChoice"
+                    @change="hostSettings.backdrop = $event.target.value"
+                    class="host-select__input"
+                  >
+                    <option v-for="o in visualizerOptions" :key="o.id" :value="o.id">{{ o.name }}</option>
+                  </select>
+                </label>
+                <label
+                  v-if="backdropChoice !== 'none'"
+                  class="host-select"
+                  title="Which audio the backdrop reacts to."
+                >
+                  <span class="host-select__label">Reacts to</span>
+                  <select
+                    :value="hostSettings.audioSource"
+                    @change="hostSettings.audioSource = $event.target.value"
+                    class="host-select__input"
+                  >
+                    <option value="mix">Full mix</option>
+                    <option value="inst">Instrumental</option>
+                    <option value="vocals">Lead vocals</option>
+                  </select>
+                </label>
+                <!-- Standalone projector page. It arrives with the queue system
+                     that needs it (a rotation's now-singing/on-deck board);
+                     core's projector is the popout, so the link is only offered
+                     when the route actually exists. -->
+                <template v-if="hasScreenRoute">
+                  <hr class="ui-menu__sep" />
+                  <p class="ui-menu__section">Screens</p>
+                  <router-link to="/screen" target="_blank" class="ui-menu__item" @click="close()">
+                    <span class="ui-menu__icon" aria-hidden="true">📺</span>Open projector view
+                  </router-link>
+                </template>
+              </template>
+            </PopoverMenu>
+            <button
+              class="popout-btn popout-btn--icon popout-btn--float"
+              :class="{ 'popout-btn--active': lyricsWin.isOpen.value }"
+              :title="lyricsWin.isOpen.value ? 'Close lyrics window' : 'Pop out lyrics to a separate window (double-click in popup or F11 to fullscreen)'"
+              :aria-label="lyricsWin.isOpen.value ? 'Close lyrics window' : 'Pop out lyrics'"
+              @click="toggleWindow"
+            >⛶</button>
+          </div>
 
+          <!-- Once the library has had songs, the welcome is about the
+               library; the three steps are for a first-time empty one. -->
           <Transition name="fade">
-            <div v-if="!store.currentSong" class="welcome">
+            <div v-if="!store.currentSong && libraryLoaded && libraryStarted" class="welcome">
               <BrandLogo :size="96" class="welcome__logo" />
-              <p class="welcome__sub">Upload a song or select from your library to begin</p>
+              <p class="welcome__sub">Add more songs, or pick one on the left.</p>
+              <button type="button" class="btn btn-primary welcome__cta" @click="uploadOpen = true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                Add files
+              </button>
+              <button
+                v-if="processingNeedsSetup"
+                type="button"
+                class="welcome__setup"
+                @click="onboardingOpen = true"
+              ><span aria-hidden="true">⚙</span>Set up song processing</button>
+            </div>
+            <div v-else-if="!store.currentSong && libraryLoaded" class="welcome">
+              <BrandLogo :size="96" class="welcome__logo" />
+              <p class="welcome__sub">Add a song or select from your library to begin</p>
 
               <div class="welcome__steps">
                 <div class="welcome__step">
                   <span class="step-num">1</span>
-                  <span>Upload an audio file (MP3, FLAC, WAV) or a karaoke video</span>
+                  <span>Add an audio file (MP3, FLAC, WAV) or a karaoke video</span>
                 </div>
                 <div class="welcome__step">
                   <span class="step-num">2</span>
@@ -205,7 +320,8 @@
               </div>
 
               <button type="button" class="btn btn-primary welcome__cta" @click="uploadOpen = true">
-                ☁️ Upload a Song
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                Add files
               </button>
             </div>
           </Transition>
@@ -216,7 +332,7 @@
                Do NOT pass currentTime/offset props here: reading
                player.currentTime in THIS template re-renders the whole shell
                at rAF rate while a song plays, and that churn is what made the
-               sidebar's native <select> dropdowns flash and drop picks in
+               Display's native <select> dropdowns flash and drop picks in
                Firefox (Vue force-visits `value` props on every render — the
                write is guarded, the visit is not). -->
           <div v-show="store.currentSong" class="lyrics-host">
@@ -280,36 +396,57 @@
       />
     </aside>
 
-    <DesktopOnboarding v-if="onboardingOpen" @close="onboardingOpen = false" @add-song="openOnboardingImport" />
-    <!-- Upload modal. Lives inside HostShell so AudioPlayer keeps playing
-         while the user uploads — opening it does not unmount the player. -->
+    <DesktopOnboarding v-if="desktopSetupAvailable" :open="onboardingOpen" @background="onOnboardingAway" @lyrics-saved="features.load({ force: true })" @open="onboardingOpen = true" @close="onOnboardingAway" @add-song="openOnboardingImport" />
+    <!-- Add-files modal. Lives inside HostShell so AudioPlayer keeps playing
+         while files are added — opening it does not unmount the player. -->
     <Modal :visible="uploadOpen" size="lg" @close="uploadOpen = false">
       <div class="upload-modal">
         <div class="upload-modal__title">
-          <span class="title-icon">☁️</span>
-          <h2>Upload</h2>
+          <span class="title-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          </span>
+          <h2>Add files</h2>
         </div>
-        <UploadZone />
+        <UploadZone @close="uploadOpen = false" />
       </div>
     </Modal>
 
-    <!-- Play-history modal (core-only). Rendered lazily so the list only
-         fetches when opened. The 🕘 button that opens it is itself gated on
-         the absence of a queue provider, so this never appears in premium. -->
-    <Modal :visible="historyOpen" size="lg" @close="historyOpen = false">
-      <HistoryModal v-if="historyOpen" />
-    </Modal>
-
-    <!-- Plex import modal. Rendered lazily for the same reason the history one
-         is: opening it is what fetches the settings and the library list. -->
+    <!-- Plex import modal. Rendered lazily: opening it is what fetches the
+         settings and the library list. -->
     <Modal :visible="plexOpen" size="lg" @close="plexOpen = false">
       <PlexImportModal v-if="plexOpen" />
+    </Modal>
+
+    <!-- The one confirmation shown before an action interrupts the song that
+         is playing (usePlayGuard). Enter presses the focused primary button;
+         Escape cancels. -->
+    <Modal :visible="!!playGuard.pending.value" :closable="false" @close="playGuard.cancel()">
+      <div
+        v-if="playGuard.pending.value"
+        ref="playGuardDialog"
+        class="play-guard"
+        role="alertdialog"
+        aria-modal="true"
+        aria-describedby="play-guard-message"
+        tabindex="-1"
+        @focusout="onPlayGuardFocusOut"
+      >
+        <p id="play-guard-message" class="play-guard__message">{{ playGuardMessage }}</p>
+        <div class="play-guard__actions">
+          <Button variant="ghost" @click="playGuard.cancel()">Cancel</Button>
+          <Button ref="playGuardPrimary" variant="primary" @click="playGuard.confirm()">
+            {{ playGuard.pending.value.kind === 'pause' ? 'Pause' : 'Load' }}
+          </Button>
+        </div>
+      </div>
     </Modal>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSongsStore } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
@@ -323,15 +460,18 @@ import { getSignOutHandler } from '@/auth/gate'
 import { BRAND_NAME } from '@/brand'
 import BrandMark from '@/components/BrandMark.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
+import PopoverMenu from '@/components/ui/PopoverMenu.vue'
 import SongList from '@/components/SongList.vue'
 import SongToolsPanel from '@/components/SongToolsPanel.vue'
 import QueuePanel from '@/components/QueuePanel.vue'
 import AudioPlayer from '@/components/AudioPlayer.vue'
 import ScreenStage from '@/components/ScreenStage.vue'
 import UploadZone from '@/components/UploadZone.vue'
-import HistoryModal from '@/components/HistoryModal.vue'
 import PlexImportModal from '@/components/PlexImportModal.vue'
 import Modal from '@/components/ui/Modal.vue'
+import Button from '@/components/ui/Button.vue'
+import { usePlayGuard } from '@/composables/usePlayGuard'
+import { useFeaturesStore } from '@/stores/features'
 import DesktopOnboarding from '@/components/DesktopOnboarding.vue'
 import { useHistoryStore } from '@/stores/history'
 
@@ -339,7 +479,8 @@ import { useHistoryStore } from '@/stores/history'
 // a 'queue-provider' — an object, not a component:
 //
 //   panel          Component  — mounted in the queue area instead of QueuePanel
-//   statusPill     Component? — optional indicator for the sidebar footer
+//   statusPill     Component? — optional indicator for the account/status
+//                  popover behind the sidebar's brand mark
 //   useCurrent()   ComputedRef<{ key, songId, label?, songText? } | null> —
 //                  who is up now. `key` is opaque here: the shell only ever
 //                  compares it for equality. It MUST be a string-safe scalar
@@ -688,25 +829,93 @@ function onSongEnded(info) {
 
 const sidebarCollapsed = ref(false)
 const uploadOpen = ref(false)
+const features = useFeaturesStore()
 const desktopSetupAvailable = window.karaokeDesktop?.managedSetup === true
 const onboardingOpen = ref(false)
 let stopSetupListener
 function openOnboardingImport() { onboardingOpen.value = false; uploadOpen.value = true }
 function showProcessingSetup() { onboardingOpen.value = true }
+// The saved setup step; 'ready' once song processing has been set up. Null
+// until read, and always null outside the desktop app, which has no setup.
+const setupStep = ref(null)
+const processingNeedsSetup = computed(() =>
+  desktopSetupAvailable && setupStep.value !== null && setupStep.value !== 'ready',
+)
+async function readSetupState() {
+  const preferences = await window.karaokeDesktop.getOnboardingState()
+  setupStep.value = preferences?.step ?? 'welcome'
+  return preferences
+}
 onMounted(async () => {
   if (!desktopSetupAvailable) return
   stopSetupListener = window.karaokeDesktop.onOpenSetup?.(showProcessingSetup)
   try {
-    const preferences = await window.karaokeDesktop.getOnboardingState()
+    const preferences = await readSetupState()
     onboardingOpen.value = preferences.skipped !== true && preferences.step !== 'ready'
   } catch { /* Development desktop keeps its explicitly configured environment. */ }
 })
+// Setup may have finished while it was open or running in the background.
+function onOnboardingAway() {
+  onboardingOpen.value = false
+  readSetupState().catch(() => {})
+}
 onBeforeUnmount(() => stopSetupListener?.())
-const historyOpen = ref(false)
+
+// The welcome switches from the first-time steps once the library has had a
+// song or an import has started, and stays switched (a search that matches
+// nothing, or deleting every song, is not a first run). Neither panel shows
+// until the first library load has answered. The remembered flag is kept per
+// host identity.
+const libraryLoaded = ref(false)
+const libraryStartedKey = computed(() => {
+  const id = session.identity?.id
+  return id != null ? `karaoke:libraryStarted:${id}` : 'karaoke:libraryStarted'
+})
+const startedKeys = ref(new Set())   // also held in memory, for blocked storage
+function readStarted(key) {
+  if (startedKeys.value.has(key)) return true
+  try { return localStorage.getItem(key) === '1' } catch { return false }
+}
+const libraryStarted = computed(() =>
+  store.songs.length > 0 || store.uploads.length > 0 || readStarted(libraryStartedKey.value),
+)
+// Written only once the identity probe has settled, so a flag is never filed
+// under the plain key just because the identity had not arrived yet.
+const identitySettled = computed(() => !['unknown', 'loading'].includes(session.status))
+watch(
+  [() => store.songs.length + store.uploads.length, libraryStartedKey, identitySettled],
+  ([n, key, settled]) => {
+    if (n <= 0 || !settled || startedKeys.value.has(key)) return
+    startedKeys.value = new Set([...startedKeys.value, key])
+    try { localStorage.setItem(key, '1') } catch { /* non-fatal */ }
+  },
+  { immediate: true },
+)
+
+// The sidebar's Settings button opens the stage's Display settings popover,
+// and focus goes back to the Settings button when that popover closes.
+const displayMenu = ref(null)
+const settingsBtn = ref(null)
+let settingsFromGear = false
+function openSettings() {
+  settingsFromGear = true
+  displayMenu.value?.open()
+}
+async function onDisplayClose() {
+  if (!settingsFromGear) return
+  settingsFromGear = false
+  // The popover hands focus to its own trigger when it restores focus at all
+  // (Escape, Tab out); an outside click leaves focus where it landed.
+  await nextTick()
+  const displayTrigger = document.querySelector('.popout-btn--display')
+  if (document.activeElement === displayTrigger) settingsBtn.value?.focus()
+}
 const plexOpen = ref(false)
 
 const MIN_PANEL_WIDTH = 300
-const DEFAULT_SIDEBAR_WIDTH = 320
+// Wide enough for the library's default columns; narrower panels get its
+// compact rows.
+const DEFAULT_SIDEBAR_WIDTH = 400
 const SIDEBAR_WIDTH_KEY = 'karaoke:sidebarWidth'
 
 function loadSavedWidth() {
@@ -826,6 +1035,89 @@ const apiStatusLabel = computed(() => ({
   offline: 'Backend offline'
 }[apiStatus.value]))
 
+// Play guard confirmation: the primary button takes focus so Enter confirms,
+// Escape cancels from anywhere, and focus goes back where it was afterwards.
+const playGuard = usePlayGuard()
+const playGuardPrimary = ref(null)
+const playGuardDialog = ref(null)
+const playGuardMessage = computed(() => {
+  const p = playGuard.pending.value
+  if (!p) return ''
+  return p.kind === 'pause'
+    ? 'Pause the current song?'
+    : `Stop the current song and load “${p.title}”?`
+})
+let playGuardReturnFocus = null
+function onPlayGuardKey(e) {
+  if (e.key !== 'Escape') return
+  e.preventDefault()
+  e.stopPropagation()
+  playGuard.cancel()
+}
+
+// Keys currently held down. Some browsers press the focused button on the
+// keyup of Space, so a prompt opened by a key press must not move focus onto
+// its primary button until that key is released.
+const heldKeys = new Set()
+function onAnyKeyDown(e) { heldKeys.add(e.code || e.key) }
+function onAnyKeyUp(e) { heldKeys.delete(e.code || e.key) }
+function onWindowBlur() { heldKeys.clear() }
+let pendingPrimaryFocus = null
+function cancelPrimaryFocus() {
+  if (!pendingPrimaryFocus) return
+  window.removeEventListener('keyup', pendingPrimaryFocus, true)
+  pendingPrimaryFocus = null
+}
+function focusPlayGuardPrimary() {
+  cancelPrimaryFocus()
+  if (heldKeys.size === 0) {
+    playGuardPrimary.value?.$el?.focus?.()
+    return
+  }
+  // Until then the dialog itself holds focus; Space there does nothing.
+  playGuardDialog.value?.focus?.()
+  pendingPrimaryFocus = () => {
+    if (heldKeys.size > 0) return
+    cancelPrimaryFocus()
+    if (playGuard.pending.value) playGuardPrimary.value?.$el?.focus?.()
+  }
+  window.addEventListener('keyup', pendingPrimaryFocus, true)
+}
+// A click on the overlay or the message must not drop focus to the page,
+// where Space is play/pause again.
+function onPlayGuardFocusOut(e) {
+  const dialogEl = playGuardDialog.value
+  if (!dialogEl || (e.relatedTarget && dialogEl.contains(e.relatedTarget))) return
+  setTimeout(() => {
+    if (!playGuard.pending.value || !dialogEl.isConnected) return
+    const active = document.activeElement
+    if (!active || active === document.body || !dialogEl.contains(active)) dialogEl.focus()
+  })
+}
+
+watch(() => playGuard.pending.value, async (p, prev) => {
+  if (p && !prev) {
+    playGuardReturnFocus = document.activeElement
+    window.addEventListener('keydown', onPlayGuardKey, true)
+  } else if (!p && prev) {
+    cancelPrimaryFocus()
+    window.removeEventListener('keydown', onPlayGuardKey, true)
+    const el = playGuardReturnFocus
+    playGuardReturnFocus = null
+    if (el && el.isConnected && typeof el.focus === 'function') el.focus()
+    return
+  }
+  if (!p) return
+  await nextTick()
+  if (playGuard.pending.value) focusPlayGuardPrimary()
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', onAnyKeyDown, true)
+  window.addEventListener('keyup', onAnyKeyUp, true)
+  window.addEventListener('blur', onWindowBlur)
+})
+
 let healthInterval = null
 
 onMounted(async () => {
@@ -834,6 +1126,7 @@ onMounted(async () => {
   // seed the session store here for the sidebar identity + Lock affordance.
   if (session.status === 'unknown') session.probe()
   await store.fetchSongs()
+  libraryLoaded.value = true
   checkApiHealth()
   healthInterval = setInterval(checkApiHealth, 30000)
   // No queue polling here: whichever panel is mounted owns its own lifecycle,
@@ -849,6 +1142,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onVResizeMove)
   window.removeEventListener('mouseup', stopVResize)
   window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onPlayGuardKey, true)
+  window.removeEventListener('keydown', onAnyKeyDown, true)
+  window.removeEventListener('keyup', onAnyKeyUp, true)
+  window.removeEventListener('blur', onWindowBlur)
+  cancelPrimaryFocus()
+  playGuard.cancel()
 })
 
 watch(() => store.currentSong?.id, (id) => {
@@ -885,7 +1184,7 @@ async function checkApiHealth() {
 .app--resizing-y * { cursor: row-resize !important; }
 
 .sidebar {
-  width: 320px; min-width: 320px;
+  width: 400px; min-width: 400px;
   background: rgba(0, 0, 0, 0.55);
   border-right: 1px solid rgba(255,255,255,0.07);
   display: flex; flex-direction: column;
@@ -907,39 +1206,76 @@ async function checkApiHealth() {
 .sidebar__resize:focus-visible { outline: none; }
 
 .sidebar__brand {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 1rem 1rem 0.75rem;
+  display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
+  padding: 0.75rem 0.5rem 0.5rem;
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
 }
-.brand-lockup { flex: 1; min-width: 0; }
-.brand-mark { flex-shrink: 0; margin: 0 auto; }
 .collapse-btn {
   color: rgba(255,255,255,0.35); background: none; border: none;
   cursor: pointer; padding: 0.2rem; border-radius: 0.3rem;
   transition: color 0.15s; flex-shrink: 0;
 }
 .collapse-btn:hover { color: rgba(255,255,255,0.7); }
+.collapse-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 2px; }
 
-.sidebar__upload { padding: 0.75rem 0.75rem 0; flex-shrink: 0; }
-.upload-cta {
-  display: flex; align-items: center; justify-content: center; gap: 0.5rem;
-  width: 100%; padding: 0.55rem 0.75rem;
-  border-radius: 0.5rem;
-  background: linear-gradient(135deg, rgba(226,62,87,0.18), rgba(247,231,200,0.18));
-  border: 1px solid rgba(226,62,87,0.35);
-  color: #f7e7c8;
-  font-family: inherit;
-  font-size: 0.85rem; font-weight: 600; letter-spacing: 0.01em;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+/* Brand mark as the account/status button, with the backend-health dot. */
+.brand-btn {
+  position: relative; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; background: none; border: 0; border-radius: var(--radius-sm);
+  cursor: pointer; line-height: 0;
 }
-.upload-cta:hover {
-  background: linear-gradient(135deg, rgba(226,62,87,0.28), rgba(247,231,200,0.28));
-  border-color: rgba(226,62,87,0.55);
+.brand-btn--static { cursor: default; }
+.brand-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 2px; }
+.brand-dot {
+  position: absolute; right: -3px; bottom: -3px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--text-muted);
+  border: 2px solid #0d0f14;
 }
-.upload-cta:active { transform: translateY(1px); }
+.brand-dot--online  { background: var(--c-success); }
+.brand-dot--offline { background: var(--c-error); }
+
+.add-btn {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.3rem 0.6rem; border-radius: var(--radius-sm);
+  background: var(--c-primary-bg); border: 1px solid var(--c-primary-border);
+  color: #ffd0d7; font-family: inherit; font-size: 0.78rem; font-weight: 600;
+  white-space: nowrap; cursor: pointer; transition: background 0.15s, border-color 0.15s;
+}
+.add-btn:hover,
+.add-btn--open { background: rgba(226,62,87,0.22); border-color: rgba(226,62,87,0.55); }
+.add-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+.caret { opacity: 0.6; font-size: 0.6rem; }
+
+.settings-btn {
+  flex: none;
+  width: 30px; height: 30px; padding: 0; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent;
+  color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+}
+.settings-btn:hover { background: var(--bg-glass-hover); color: white; }
+.settings-btn--open { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
+.settings-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+
+.offline-banner {
+  display: flex; align-items: center; gap: 0.45rem;
+  margin: 0 0 0.5rem; padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-md);
+  background: var(--c-error-bg); border: 1px solid var(--c-error-border);
+  color: #ffd9cf; font-size: 0.78rem;
+}
+
+/* Account/status popover rows (teleported, but slot content keeps this
+   component's scope, so these rules still reach it). */
+.acct-row { display: flex; align-items: center; padding: 0.3rem 0.6rem; min-width: 0; }
+.acct-row:empty { display: none; }
+.acct-row--user {
+  font-size: 0.8rem; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;
+}
 
 .nav-icon--upload {
   color: inherit;
@@ -960,52 +1296,32 @@ async function checkApiHealth() {
 
 .sidebar__content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0.75rem; }
 
-.sidebar__footer {
-  flex-shrink: 0; padding: 0.5rem;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  display: flex; align-items: center; justify-content: space-between; gap: 0.4rem;
-  flex-wrap: wrap;
-}
-.connection-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; color: rgba(255,255,255,0.4); }
+.connection-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: rgba(255,255,255,0.4); }
 .connection-dot   { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.25); }
-.connection-status--online .connection-dot { background: #f2cf7a; box-shadow: 0 0 6px rgba(242, 207, 122,0.7); }
-.connection-status--offline .connection-dot { background: #fb7f5c; }
-.connection-status--online  { color: rgba(242, 207, 122,0.7); }
-.connection-status--offline { color: rgba(251, 127, 92,0.7); }
-.footer-actions { display: flex; gap: 0.3rem; }
-.footer-btn { padding: 0.3rem 0.6rem; font-size: 0.75rem; text-decoration: none; }
+.connection-status--online .connection-dot { background: var(--c-success); box-shadow: 0 0 6px rgba(242, 207, 122,0.7); }
+.connection-status--offline .connection-dot { background: var(--c-error); }
+.connection-status--online  { color: rgba(242, 207, 122,0.85); }
+.connection-status--offline { color: rgba(251, 127, 92,0.85); }
 
-/* Host settings dropdowns (backdrop visualizer + its audio source) */
+/* Host settings dropdowns (backdrop visualizer + its audio source), in the
+   Display popover. */
 .host-select {
-  display: flex; align-items: center; gap: 0.4rem;
-  font-size: 0.72rem; color: rgba(255,255,255,0.55); width: 100%;
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem; color: var(--text-secondary); width: 100%;
+  min-width: 240px;
 }
-.host-select__label { flex-shrink: 0; }
+.host-select__label { flex: 0 0 4.5rem; }
 .host-select__input {
   flex: 1; min-width: 0;
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 4px;
   color: rgba(255,255,255,0.85);
-  font-size: 0.72rem; padding: 0.15rem 0.3rem; cursor: pointer;
+  font-size: 0.78rem; padding: 0.25rem 0.35rem; cursor: pointer;
 }
 .host-select__input:focus-visible { outline: 2px solid #f7e7c8; outline-offset: 1px; }
 .host-select__input option { background: #12121c; color: #fff; }
-
-.sidebar__user {
-  font-size: 0.72rem; color: rgba(255,255,255,0.55);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0; flex: 1;
-}
-.sidebar__user-badge {
-  margin-left: 0.35rem;
-  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 0.1rem 0.35rem;
-  border-radius: 0.25rem;
-  background: rgba(226,62,87,0.15);
-  color: #e23e57;
-}
 
 .tools-dock {
   flex: 0 0 380px;
@@ -1061,15 +1377,22 @@ async function checkApiHealth() {
   color: #e23e57;
 }
 
-/* Floating variant: lives in .lyrics-area (position:relative) rather than the
-   player panel. Held at low opacity so it doesn't compete with the lyrics
+/* Floating variant: lives in .lyrics-area's .stage-tools cluster rather than
+   the player panel. Held at low opacity so it doesn't compete with the lyrics
    preview, and lifted to full on hover/focus/active. z-index clears
    .screen-stage, which is an isolated stacking context at the auto level. */
-.popout-btn--float {
+.stage-tools {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
   z-index: 5;
+  display: flex; align-items: center; gap: 0.35rem;
+}
+.popout-btn--display {
+  height: 30px;
+  display: inline-flex; align-items: center; gap: 0.3rem;
+}
+.popout-btn--float {
   /* This is now the ONLY affordance that opens the projector, so it has to
      stay findable in a dark venue — hence 0.65 rather than a true ghost. */
   opacity: 0.65;
@@ -1198,7 +1521,32 @@ async function checkApiHealth() {
   color: var(--c-primary); font-size: 0.75rem; font-weight: 700;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.welcome__cta { margin-top: 0.5rem; padding: 0.7rem 1.75rem; font-size: 1rem; }
+.welcome__cta {
+  margin-top: 0.5rem; padding: 0.7rem 1.75rem; font-size: 1rem;
+  display: inline-flex; align-items: center; gap: 0.5rem;
+}
+.welcome__setup {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  margin-top: -0.25rem; padding: 0.3rem 0.6rem;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: rgba(255,255,255,0.5); font-family: inherit; font-size: 0.85rem; font-weight: 500;
+  cursor: pointer; transition: color 0.15s, background 0.15s;
+}
+.welcome__setup:hover { color: white; background: rgba(255,255,255,0.05); }
+.welcome__setup:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+
+.play-guard:focus { outline: none; }
+.play-guard__message {
+  margin: 0 0 1.25rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.play-guard__actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
 
 .upload-modal__title {
   display: flex; align-items: center; gap: 0.6rem;
@@ -1208,6 +1556,6 @@ async function checkApiHealth() {
   font-size: 1.05rem; font-weight: 700; color: white;
   letter-spacing: -0.01em; margin: 0;
 }
-.upload-modal__title .title-icon { font-size: 1.2rem; }
+.upload-modal__title .title-icon { display: flex; color: rgba(255,255,255,0.6); }
 
 </style>

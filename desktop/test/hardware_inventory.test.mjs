@@ -22,15 +22,108 @@ test('Apple silicon identifies unified memory without claiming RAM as dedicated 
   const result = await collectHardware({ ...base, processAdapter: { platform: 'darwin', arch: 'arm64' },
     getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'Apple M4', videoMemory: 123456 }] }),
     runCommand: async () => { calls++; return 'Apple M4, 16384' } })
-  assert.equal(calls, 0)
+  assert.equal(calls, 1)
   assert.equal(result.unifiedMemory, true)
   assert.equal(result.gpu, 'Apple M4')
   assert.equal(result.videoMemoryBytes, null)
 })
 
+const vmStat = (pageSize = 16384, free = 262144, inactive = 393216) =>
+  `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)\nPages free: ${free}.\nPages active: 999999.\nPages inactive: ${inactive}.\nPages speculative: 999999.\n`
+const mac = { ...base, processAdapter: { platform: 'darwin', arch: 'arm64' } }
+
+test('Mac reports free plus inactive pages with the observed page size using a bounded fixed probe', async () => {
+  for (const pageSize of [4096, 16384]) {
+    const result = await collectHardware({ ...mac, runCommand: async (file, args, options) => {
+      assert.equal(file, '/usr/bin/vm_stat')
+      assert.deepEqual(args, [])
+      assert.equal(options.shell, false)
+      assert.equal(options.timeout, 1500)
+      assert.equal(options.maxBuffer, 65536)
+      assert.equal(options.killSignal, 'SIGKILL')
+      return vmStat(pageSize)
+    } })
+    assert.equal(result.availableMemoryBytes, (262144 + 393216) * pageSize)
+  }
+  assert.equal((await collectHardware({ ...mac, runCommand: async () => vmStat(4096, 0, 0) })).availableMemoryBytes, 0)
+})
+
+test('Mac rejects malformed, unsafe, or impossible memory observations and uses free-memory fallback', async () => {
+  for (const output of [
+    '', null, { stdout: vmStat() }, 'x'.repeat(65537),
+    vmStat().replace('Mach Virtual Memory Statistics:', 'Other statistics:'),
+    vmStat().replace('page size of', 'page size:'),
+    vmStat(0), vmStat(-4096), vmStat(4097), vmStat(131072), vmStat('NaN'),
+    vmStat(16384, '-1'), vmStat(16384, '1.5'), vmStat(16384, 'Infinity'),
+    vmStat(16384, '9007199254740992'), vmStat(16384, '9007199254740991'),
+    vmStat(16384, 1048576, 1),
+    vmStat().replace('Pages inactive:', 'Missing inactive:'),
+    vmStat().replace('Pages free: 262144.', 'Pages free: 262144. garbage'),
+    `${vmStat()}Pages free: 1.\n`,
+  ]) {
+    const result = await collectHardware({ ...mac, runCommand: async () => output })
+    assert.equal(result.availableMemoryBytes, osAdapter.freemem(), String(output))
+  }
+  const unknownTotal = await collectHardware({ ...mac, osAdapter: { ...osAdapter, totalmem: () => -1 }, runCommand: async () => vmStat() })
+  assert.equal(unknownTotal.availableMemoryBytes, osAdapter.freemem())
+})
+
+test('Mac memory probe failure or timeout falls back without blocking inventory', async () => {
+  for (const runCommand of [async () => { throw Error('unavailable') }, () => new Promise(() => {})]) {
+    assert.equal((await collectHardware({ ...mac, runCommand })).availableMemoryBytes, osAdapter.freemem())
+  }
+})
+
+test('Mac memory observation also applies to Intel and never runs on other platforms', async () => {
+  assert.equal((await collectHardware({ ...mac, processAdapter: { platform: 'darwin', arch: 'x64' },
+    runCommand: async () => vmStat() })).availableMemoryBytes, 10 * 1024 ** 3)
+  for (const platform of ['linux', 'win32', 'unknown']) {
+    const result = await collectHardware({ ...base, processAdapter: { platform, arch: 'x64' }, runCommand: async file => {
+      assert.equal(file, 'nvidia-smi')
+      return ''
+    } })
+    assert.equal(result.availableMemoryBytes, osAdapter.freemem())
+  }
+})
+
 test('Intel Mac and ARM Linux do not imply unified Apple memory', async () => {
   for (const processAdapter of [{ platform: 'darwin', arch: 'x64' }, { platform: 'linux', arch: 'arm64' }]) {
     assert.equal((await collectHardware({ ...base, processAdapter })).unifiedMemory, false)
+  }
+})
+
+test('Apple silicon supplies an integrated GPU label when Electron omits names', async () => {
+  for (const cpu of ['Apple M2', 'Apple M4 Pro', 'Apple M3 Max', 'Apple M2 Ultra']) {
+    for (const gpuInfo of [null, { gpuDevice: [] }, { gpuDevice: [{ deviceString: '', vendorString: '' }] }]) {
+      const result = await collectHardware({ ...base,
+        processAdapter: { platform: 'darwin', arch: 'arm64' },
+        osAdapter: { ...osAdapter, cpus: () => [{ model: cpu }] },
+        getGPUInfo: async () => gpuInfo })
+      assert.equal(result.gpu, `${cpu} GPU`)
+      assert.deepEqual(result.gpuDevices, [{ name: `${cpu} GPU`, dedicatedMemoryBytes: null, availableMemoryBytes: null }])
+      assert.equal(result.unifiedMemory, true)
+      assert.equal(result.videoMemoryBytes, null)
+      assert.equal(result.memoryMinimumBytes, null)
+      assert.deepEqual(result.cudaDevices, [])
+    }
+  }
+})
+
+test('Apple GPU fallback preserves Electron labels and requires an observed Apple chip', async () => {
+  const apple = { ...base, processAdapter: { platform: 'darwin', arch: 'arm64' },
+    osAdapter: { ...osAdapter, cpus: () => [{ model: 'Apple M2' }] } }
+  for (const device of [{ deviceString: 'Observed GPU' }, { vendorString: 'Observed Vendor' }]) {
+    const result = await collectHardware({ ...apple, getGPUInfo: async () => ({ gpuDevice: [device] }) })
+    assert.equal(result.gpu, device.deviceString || device.vendorString)
+  }
+  for (const options of [
+    { processAdapter: { platform: 'darwin', arch: 'x64' } },
+    { processAdapter: { platform: 'linux', arch: 'arm64' } },
+    { osAdapter },
+    { osAdapter: { ...osAdapter, cpus: () => null } },
+  ]) {
+    const result = await collectHardware({ ...apple, ...options, getGPUInfo: async () => ({ gpuDevice: [{}] }) })
+    assert.equal(result.gpu, 'Unidentified GPU')
   }
 })
 
@@ -40,20 +133,21 @@ test('NVIDIA probe uses bounded fixed execFile arguments on Windows and Linux', 
       getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'NVIDIA Test GPU' }] }),
       runCommand: async (file, args, options) => {
         assert.equal(file, 'nvidia-smi')
-        assert.deepEqual(args, ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'])
+        assert.deepEqual(args, ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'])
         assert.equal(options.shell, false)
         assert.equal(options.timeout, 1500)
         assert.equal(options.maxBuffer, 65536)
         assert.equal(options.killSignal, 'SIGKILL')
-        return 'NVIDIA Test GPU, 8192\n'
+        return 'NVIDIA Test GPU, 8192, 2048\n'
       } })
     assert.equal(result.videoMemoryBytes, 8 * 1024 ** 3)
     assert.equal(result.gpuDevices.length, 1)
+    assert.equal(result.cudaDevices[0].availableMemoryBytes, 2 * 1024 ** 3)
   }
 })
 
 test('multiple adapters never add their VRAM into a fictional single GPU', async () => {
-  const result = await collectHardware({ ...base, runCommand: async () => 'NVIDIA Test GPU, 8192\nNVIDIA Test GPU, 8192\n' })
+  const result = await collectHardware({ ...base, runCommand: async () => 'NVIDIA Test GPU, 8192, 2048\nNVIDIA Test GPU, 8192, 2048\n' })
   assert.equal(result.gpuDevices.length, 2)
   assert.equal(result.videoMemoryBytes, null)
   assert.equal(result.gpuDevices[0].dedicatedMemoryBytes, 8 * 1024 ** 3)
@@ -87,15 +181,24 @@ test('CUDA inventory comes from NVIDIA driver results, not generic display names
   const getGPUInfo = async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA Test GPU' }] })
   const noDriver = await collectHardware({ ...base, getGPUInfo })
   assert.deepEqual(noDriver.cudaDevices, [])
-  const detected = await collectHardware({ ...base, getGPUInfo, runCommand: async () => 'NVIDIA Test GPU, 4096\n' })
+  const detected = await collectHardware({ ...base, getGPUInfo, runCommand: async () => 'NVIDIA Test GPU, 4096, 1024\n' })
   assert.equal(detected.gpuDevices.length, 2)
-  assert.deepEqual(detected.cudaDevices, [{ name: 'NVIDIA Test GPU', dedicatedMemoryBytes: 4 * 1024 ** 3 }])
+  assert.deepEqual(detected.cudaDevices, [{ name: 'NVIDIA Test GPU', dedicatedMemoryBytes: 4 * 1024 ** 3, availableMemoryBytes: 1024 ** 3 }])
   assert.equal(detected.videoMemoryBytes, null)
 })
 
 test('multiple NVIDIA cards remain distinct CUDA observations with no chosen adapter', async () => {
   const result = await collectHardware({ ...base,
-    runCommand: async () => 'NVIDIA Small, 4096\nNVIDIA Large, 24576\n' })
+    runCommand: async () => 'NVIDIA Small, 4096, 1024\nNVIDIA Large, 24576, 8192\n' })
   assert.deepEqual(result.cudaDevices.map(device => device.dedicatedMemoryBytes), [4 * 1024 ** 3, 24 * 1024 ** 3])
   assert.equal(result.videoMemoryBytes, null)
+})
+
+test('available VRAM is observed independently and impossible driver values stay unknown', async () => {
+  for (const output of ['GPU, 8192, 8193', 'GPU, 8192, N/A', 'GPU, 8192', 'GPU, 8192, -1']) {
+    assert.deepEqual((await collectHardware({ ...base, runCommand: async () => output })).cudaDevices, [])
+  }
+  const result = await collectHardware({ ...base, runCommand: async () => 'GPU, 8192, 0' })
+  assert.equal(result.cudaDevices[0].availableMemoryBytes, 0)
+  assert.equal(result.cudaDevices[0].dedicatedMemoryBytes, 8 * 1024 ** 3)
 })

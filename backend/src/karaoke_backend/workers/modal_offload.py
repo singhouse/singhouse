@@ -299,6 +299,12 @@ class ModalHeartTranscriber:
             from lyricsync.audio.vad import rms_vad_segments
 
             samples, sr = read_wav_mono(audio_path)
+            # The remote function has no device-memory probe, so an "auto" cap
+            # (``max_segment_duration=None``) is not re-split there: slices go
+            # out at the VAD's 30 s ceiling. Modal GPUs are data-centre cards
+            # with no desktop on them, so this is the top auto tier. Silent
+            # stems still get the 15 s whole-file window. An explicit cap is
+            # passed through unchanged.
             vad_segments = rms_vad_segments(samples, sr, self.vad_config)
             logger.info(
                 "ModalHeartTranscriber: VAD produced %d segments (%.1fs audio)",
@@ -322,6 +328,31 @@ class ModalHeartTranscriber:
         if "error" in raw:
             raise RuntimeError(f"Modal HeartTranscriptor error: {raw['error']}")
 
+        skipped = raw.get("skipped_segments")
+        if skipped:
+            # The runner isolated these VAD segments after their decode raised;
+            # the rest of the song transcribed, so this is a warning, not a failure.
+            # Diagnostic only: a malformed entry must never fail the transcription.
+            try:
+                detail = ", ".join(
+                    "seg %s [%ss-%ss] %s" % (
+                        int(s["index"]) + 1, s.get("start"), s.get("end"), s.get("error", "")
+                    )
+                    for s in skipped
+                )
+                logger.warning(
+                    "ModalHeartTranscriber: skipped %d VAD segment(s) after decode errors: %s",
+                    len(skipped), detail,
+                )
+            except Exception:
+                logger.warning(
+                    "ModalHeartTranscriber: skipped VAD segment(s) after decode errors "
+                    "(count: %s; details unreadable)",
+                    len(skipped) if isinstance(skipped, (list, tuple)) else "unknown",
+                )
+
+        from lyricsync.transcription._heart_words import normalize_heart_words
+
         segments: list = []
         for seg in raw.get("segments", []):
             words = [
@@ -333,10 +364,13 @@ class ModalHeartTranscriber:
                 for w in seg.get("words", [])
                 if (w.get("word", w.get("text", ""))).strip()
             ]
+            normalized_words = normalize_heart_words(words)
+            text = seg.get("text", "").replace("＇", "'")
+            words = normalized_words
             segments.append(TranscriptionSegment(
                 start=seg.get("start", 0),
                 end=seg.get("end", 0),
-                text=seg.get("text", ""),
+                text=text,
                 words=words,
             ))
 
@@ -347,5 +381,5 @@ class ModalHeartTranscriber:
         return TranscriptionResult(
             segments=segments,
             language=raw.get("language"),
-            full_text=raw.get("full_text", ""),
+            full_text=raw.get("full_text", "").replace("＇", "'"),
         )

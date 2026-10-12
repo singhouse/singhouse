@@ -57,8 +57,7 @@
           spellcheck="false"
         ></textarea>
         <p v-if="pasteIsLrc" class="lyr__hint">
-          LRC detected — the timestamps will be used as anchors. LLM correction
-          doesn't apply to LRC.
+          LRC detected — the timestamps will be used as anchors.
         </p>
       </template>
 
@@ -71,7 +70,7 @@
             Keeps the current transcription, re-fits timing to the anchor above.
             Instant.
           </p>
-          <label class="card__check">
+          <label v-if="features.llmPagingEnabled" class="card__check">
             <input type="checkbox" v-model="refitPaging" />
             <span>LLM paging</span>
           </label>
@@ -111,15 +110,10 @@
             </label>
           </div>
 
-          <label class="card__check">
+          <label v-if="features.llmPagingEnabled" class="card__check">
             <input type="checkbox" v-model="listenPaging" />
             <span>LLM paging</span>
           </label>
-          <label class="card__check">
-            <input type="checkbox" v-model="listenCorrection" />
-            <span>LLM correction</span>
-          </label>
-          <p v-if="correctionHint" class="lyr__hint">{{ correctionHint }}</p>
 
           <button
             class="card__go"
@@ -204,7 +198,6 @@ const language = ref('')
 const useVad = ref(true)
 const refitPaging = ref(false)
 const listenPaging = ref(false)
-const listenCorrection = ref(false)
 
 const manualText = ref('')
 const setBusy = ref(false)
@@ -346,36 +339,6 @@ const listenBlocked = computed(
   () => songBlocked.value || busyBlocked.value || anchorBlocked.value
 )
 
-// LLM correction lives inside the PLAIN-TEXT aligners only. A synced (LRC)
-// reference is handed to the LRC-anchored aligner, which is built without a
-// corrector, and no reference at all reaches no aligner — in both the box can
-// be ticked and nothing will happen.
-const correctionHint = computed(() => {
-  if (!listenCorrection.value) return ''
-  if (anchor.value === 'none') {
-    return 'LLM correction works against a reference — with nothing to anchor '
-      + 'to there is nothing for it to correct.'
-  }
-  if (anchor.value === 'paste') {
-    return pasteIsLrc.value
-      ? 'That reference is synced (LRC), which is aligned by timestamp — LLM '
-        + 'correction only runs on a plain-text reference.'
-      : ''
-  }
-  if (anchor.value === 'active') {
-    // ANY synced lyrics on the set send it down the LRC-anchored path server
-    // side — a set that also carries plain text does not get the corrector
-    // back. Gating this on "synced and NOT plain" left exactly that set
-    // silently ticking a box that does nothing.
-    const ls = activeSet.value
-    return ls && ls.has_synced_lyrics
-      ? 'That reference is synced (LRC), which is aligned by timestamp — LLM '
-        + 'correction only runs on a plain-text reference.'
-      : ''
-  }
-  return ''
-})
-
 // ── Cache probe ────────────────────────────────────────────────────────────
 // Every probe is answered, and the answers do not have to come back in the
 // order they were asked: flipping the model twice can leave a slow reply for
@@ -422,7 +385,7 @@ watch(activeSet, async (ls) => {
 }, { immediate: true })
 
 // ── Requests ───────────────────────────────────────────────────────────────
-function buildBody({ correction = false, paging = false } = {}) {
+function buildBody({ paging = false } = {}) {
   const body = {
     whisper_model: model.value,
     use_vad: useVad.value,
@@ -431,8 +394,7 @@ function buildBody({ correction = false, paging = false } = {}) {
   }
   const lang = language.value.trim()
   if (lang) body.language = lang
-  if (paging) body.llm_paging = true
-  if (correction) body.llm_correction = true
+  if (features.llmPagingEnabled && paging) body.llm_paging = true
   // Lyrics travel ONLY with `paste`. The server 400s a body that carries
   // lyrics under reference_mode=none, precisely so they are never silently
   // discarded — so they are never sent.
@@ -457,7 +419,6 @@ function runListen() {
   say('')
   store.startTranscribe(props.songId, buildBody({
     paging: listenPaging.value,
-    correction: listenCorrection.value,
   }))
 }
 
@@ -524,8 +485,8 @@ async function saveManual() {
 
 defineExpose({
   anchor, anchorOptions, anchorBlocked, refitBlocked, listenBlocked,
-  correctionHint, buildBody, cache, pasteText, model, useVad, language,
-  refitPaging, listenPaging, listenCorrection, manualText, runRefit, runListen,
+  buildBody, cache, pasteText, model, useVad, language,
+  refitPaging, listenPaging, manualText, runRefit, runListen,
 })
 </script>
 

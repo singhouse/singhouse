@@ -334,11 +334,18 @@ async def _ingest_fixture(tmp_path_unused=None) -> tuple[JobContext, Path, Path]
             "artist": "A",
             "title": "B",
             "pasted_lyrics": None,
-            "llm_correction": False,
             "llm_paging": False,
         },
     )
     return ctx, upload, stems_dir
+
+
+@pytest.fixture(autouse=True)
+def fake_final_encoding(monkeypatch):
+    async def encode(source, target):
+        shutil.copy2(source, target)
+    monkeypatch.setenv("STEM_FORMAT", "mp3")
+    monkeypatch.setattr("karaoke_backend.stem_encoding.encode_stem", encode)
 
 
 def _write_stems(stems_dir: Path, *, marker: bool = True) -> None:
@@ -347,7 +354,8 @@ def _write_stems(stems_dir: Path, *, marker: bool = True) -> None:
     for name in ("lead_vocals.wav", "instrumental.wav", "karaoke.wav"):
         (stems_dir / name).write_bytes(b"stem")
     if marker:
-        (stems_dir / SEPARATION_MARKER).write_text("{}")
+        from karaoke_backend.jobs.ingest import write_separation_marker
+        write_separation_marker(stems_dir)
 
 
 @pytest.mark.asyncio
@@ -441,9 +449,9 @@ async def test_the_marker_is_written_atomically_and_names_the_artifacts():
         await run_ingest(ctx)
 
     marker = stems_dir / SEPARATION_MARKER
-    assert json.loads(marker.read_text())["artifacts"] == [
-        "lead_vocals.wav", "instrumental.wav", "karaoke.wav",
-    ]
+    assert set(json.loads(marker.read_text())["artifacts"]) == {
+        "lead_vocals.mp3", "instrumental.mp3", "karaoke.mp3",
+    }
     assert not (stems_dir / f"{SEPARATION_MARKER}.tmp").exists(), (
         "the temp file must be renamed, never left beside the marker"
     )
@@ -914,7 +922,6 @@ async def test_the_drain_helper_runs_a_queued_ingest_to_done():
                 "artist": "A",
                 "title": "B",
                 "pasted_lyrics": None,
-                "llm_correction": False,
                 "llm_paging": False,
             },
         )
@@ -1347,3 +1354,40 @@ async def test_ingest_plain_lookup_alignment(monkeypatch, enabled, plain, pasted
     assert lookup.await_count == int(enabled and not pasted)
     if enabled and not pasted and not expected:
         assert any("No plain lyrics found" in str(c) for c in progress.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_desktop_setup_defers_processing_without_claims_or_attempts(monkeypatch):
+    from karaoke_backend.workers import modal_offload
+    monkeypatch.setenv("KARAOKE_HEART_MODEL_STATUS_JSON", "{}")
+    monkeypatch.delenv("KARAOKE_DESKTOP_PROCESSING_JSON", raising=False)
+    monkeypatch.setattr(modal_offload, "is_enabled", lambda: False)
+    for kind in (JobKind.INGEST, JobKind.PLEX_IMPORT, JobKind.RETRANSCRIBE, JobKind.REALIGN, JobKind.RESPLIT):
+        await _seed_job(kind.value, kind=kind.value)
+    await _seed_job("video", kind=JobKind.VIDEO_IMPORT.value)
+    assert (await queue.claim_next("before-restart")).id == "video"
+    assert await queue.claim_next("before-restart") is None
+    # A second worker sees exactly the same durable waiting state.
+    assert await queue.claim_next("after-restart") is None
+    for kind in (JobKind.INGEST, JobKind.PLEX_IMPORT, JobKind.RETRANSCRIBE, JobKind.REALIGN, JobKind.RESPLIT):
+        job = await _get(kind.value)
+        assert (job.status, job.attempts, job.claimed_by) == ("queued", 0, None)
+    # Configured offload releases processing without requiring a local pack.
+    monkeypatch.setattr(modal_offload, "is_enabled", lambda: True)
+    assert (await queue.claim_next("ready-worker")).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_encoding_failure_keeps_upload_and_wavs_without_completion_marker(monkeypatch):
+    ctx, upload, stems_dir = await _ingest_fixture()
+    async def separate(**kwargs):
+        _write_stems(stems_dir, marker=False)
+    async def broken_encode(source, target):
+        raise RuntimeError("encoder failed")
+    monkeypatch.setattr("karaoke_backend.jobs.ingest.separate_stems", separate)
+    monkeypatch.setattr("karaoke_backend.stem_encoding.encode_stem", broken_encode)
+    with pytest.raises(JobFailure):
+        await run_ingest(ctx)
+    assert upload.exists()
+    assert not separation_is_complete(stems_dir)
+    assert len(list(stems_dir.glob("*.wav"))) == 3

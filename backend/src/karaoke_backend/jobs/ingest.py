@@ -56,8 +56,10 @@ from typing import Optional
 
 from sqlalchemy import update
 
+from karaoke_backend.stem_encoding import finalize_stems, stem_format
+from karaoke_backend.stem_layout import allowed_stem_filenames, resolve_stem
 from karaoke_backend.jobs import queue
-from karaoke_backend.jobs._llm import make_correction_progress_callback
+from karaoke_backend.jobs._progress import make_message_callback
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 from karaoke_backend.models.song import Job, JobPhase, LyricsSet, LyricsSource, Song
 from karaoke_backend.workers.llm_paging import page_word_sync
@@ -68,12 +70,16 @@ from karaoke_backend.workers.lyrics_worker import (
     fetch_lyrics,
     lrclib_enabled,
 )
-from karaoke_backend.workers.modal_worker import StemSeparationError, separate_stems
+from karaoke_backend.workers.modal_worker import (
+    StemSeparationError,
+    ProcessingRefusedError,
+    separate_stems,
+    separation_timeout,
+)
 from karaoke_backend.workers.word_sync_worker import (
     DEFAULT_MODEL,
     describe_run,
     generate_word_sync,
-    make_correction_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,11 +93,6 @@ _PHASE_RANGES = {
     JobPhase.ALIGNING.value:        (95, 100),
 }
 
-# The outputs separation is expected to leave behind. Recorded IN the marker,
-# never used as the completion test — see the module docstring for why file
-# existence cannot distinguish a finished mix from a killed one.
-SEPARATION_ARTIFACTS = ("lead_vocals.wav", "instrumental.wav", "karaoke.wav")
-
 SEPARATION_MARKER = ".separation-complete"
 
 
@@ -101,7 +102,18 @@ class IngestError(Exception):
 
 def separation_is_complete(stems_dir: Path) -> bool:
     """Whether a previous attempt finished separation for this song."""
-    return (stems_dir / SEPARATION_MARKER).is_file()
+    try:
+        marker = json.loads((stems_dir / SEPARATION_MARKER).read_text())
+        if not isinstance(marker, dict):
+            return False
+        artifacts = marker["artifacts"]
+        required = {"lead_vocals", "instrumental", "karaoke"}
+        return (isinstance(artifacts, list)
+                and all(isinstance(n, str) and n in allowed_stem_filenames(stems_dir)
+                        for n in artifacts)
+                and required <= {Path(n).stem for n in artifacts})
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def write_separation_marker(stems_dir: Path) -> None:
@@ -111,12 +123,16 @@ def write_separation_marker(stems_dir: Path) -> None:
     so a crash leaves either no marker or a complete one. A half-written
     marker would reintroduce exactly the ambiguity it exists to remove.
     """
+    required = ("lead_vocals", "instrumental", "karaoke")
+    if any(resolve_stem(stems_dir, base) is None for base in required):
+        raise IngestError("Cannot complete separation: a required playback stem is missing")
     marker = stems_dir / SEPARATION_MARKER
     tmp = stems_dir / f"{SEPARATION_MARKER}.tmp"
     payload = json.dumps(
         {
             "artifacts": [
-                name for name in SEPARATION_ARTIFACTS if (stems_dir / name).exists()
+                path.name for base in sorted({Path(name).stem for name in allowed_stem_filenames(stems_dir)})
+                if (path := resolve_stem(stems_dir, base)) is not None
             ],
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -145,6 +161,9 @@ async def _run_with_retry(coro_factory, *, job_id: str, timeout_s: int) -> None:
             return
         except asyncio.TimeoutError:
             raise StemSeparationError(f"Stem separation timed out after {timeout_s}s")
+        except ProcessingRefusedError:
+            # Processing was refused up front; a second attempt cannot change that.
+            raise
         except StemSeparationError as e:
             last_err = e
             if attempt == 0:
@@ -178,6 +197,7 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
     from karaoke_backend.api.separate import STEMS_DIR, UPLOADS_DIR, _make_stems_urls
     from karaoke_backend.database import AsyncSessionLocal
 
+    stem_format()  # Refuse invalid configuration before doing expensive work.
     payload = ctx.payload
     song_id = ctx.song_id
     if song_id is None:
@@ -186,7 +206,6 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
     artist: str = payload.get("artist") or "Unknown Artist"
     title: str = payload.get("title") or ""
     pasted_lyrics: Optional[str] = payload.get("pasted_lyrics")
-    llm_correction: bool = bool(payload.get("llm_correction"))
     llm_paging: bool = bool(payload.get("llm_paging"))
     # Pass-2 lead/backing model for this song, as an ID from
     # karaoke_models.CHOICES. It is absent on legacy jobs and on uploads that
@@ -248,9 +267,12 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
                     karaoke_model=karaoke_model,
                 ),
                 job_id=ctx.job_id,
-                timeout_s=900,
+                # Follows the inner stage deadlines: a guarded worker may choose
+                # its slower measured CPU route after its own memory check.
+                timeout_s=separation_timeout(),
             )
             # Only now — separation returned, so every mix ran to completion.
+            await finalize_stems(stems_dir)
             write_separation_marker(stems_dir)
 
         # The stems are the artifact now; the upload is only ever needed to
@@ -317,7 +339,7 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
                 )
 
         # ── 3. Transcription + alignment ──────────────────────────────
-        vocals_path = stems_dir / "lead_vocals.wav"
+        vocals_path = resolve_stem(stems_dir, "lead_vocals") or stems_dir / "lead_vocals.wav"
         if not vocals_path.exists():
             # fallback: any vocals stem
             for name in ("vocals.wav", "Vocals.wav"):
@@ -331,17 +353,6 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
         await set_phase(
             JobPhase.TRANSCRIBING.value, 0, f"Transcribing vocals with {DEFAULT_MODEL}"
         )
-        pipeline_config = None
-        correction_progress_fn = None
-        if llm_correction:
-            from lyricsync import PipelineConfig
-            pipeline_config = make_correction_config(PipelineConfig())
-            correction_progress_fn = make_correction_progress_callback(
-                ctx.job_id,
-                ctx.worker_id,
-                asyncio.get_running_loop(),
-            )
-
         # song_id is what writes the transcription cache — and a cache hit on a
         # later attempt is what makes the transcription phase resume as
         # align-only. Omitting it (as the pre-queue call did) meant ingest
@@ -355,8 +366,12 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
             whisper_model=DEFAULT_MODEL,
             use_vad=True,
             song_id=song_id,
-            pipeline_config=pipeline_config,
-            correction_progress_fn=correction_progress_fn,
+            device_notice_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
+            stage_progress_fn=make_message_callback(
+                ctx.job_id, ctx.worker_id, asyncio.get_running_loop()
+            ),
         )
         if word_data is None:
             raise IngestError("Transcription returned no result")
@@ -433,6 +448,8 @@ async def run_ingest(ctx: JobContext) -> Optional[str]:
         # and deleting it here would be the same bug as the blanket `finally`,
         # aimed at somebody else's work.
         raise
+    except ProcessingRefusedError as exc:
+        raise JobFailure(str(exc), str(exc)) from exc
     except StemSeparationError as exc:
         raise JobFailure("Stem separation failed", str(exc)) from exc
     except IngestError as exc:

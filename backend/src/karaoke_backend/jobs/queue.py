@@ -31,9 +31,8 @@ providers own their job row and some write their own intermediate strings
 "claimed and NOT terminal", so such a job keeps its heartbeat and, if its
 process dies, is still visible to the expiry sweep.
 
-Sessions are short and per-write by design (the `_persist_correction_
-progress` pattern). A long-lived session held across a 15-minute separation
-pins a connection and — worse — makes the heartbeat wait behind whatever the
+Sessions are short and per-write by design. A long-lived session held across a
+15-minute separation pins a connection and — worse — makes the heartbeat wait behind whatever the
 orchestrator is doing.
 """
 
@@ -152,6 +151,10 @@ def enqueue(
     to attach it to — the ingest and video-import uploads are both named after
     it, and `Song.job_id` references it.
     """
+    from karaoke_backend.workers.managed_processing import deferred_job_kinds
+
+    if kind in deferred_job_kinds():
+        message = "Waiting for desktop processing setup"
     job = Job(
         id=job_id,
         song_id=song_id,
@@ -193,10 +196,13 @@ async def claim_next(worker_id: str) -> Optional[Job]:
     chose the same row updates zero rows and is told so by the RETURNING
     clause — no read-then-write window exists for it to win in.
     """
+    from karaoke_backend.workers.managed_processing import deferred_job_kinds
+
+    deferred = deferred_job_kinds()
     now = _now()
     oldest = (
         select(Job.id)
-        .where(Job.status == JobStatus.QUEUED.value)
+        .where(Job.status == JobStatus.QUEUED.value, Job.kind.notin_(deferred))
         .order_by(Job.created_at, Job.id)
         .limit(1)
         .scalar_subquery()

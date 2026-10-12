@@ -7,8 +7,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
-import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
+import { OnboardingSetup, LOCAL_MODEL_IDS, setupCompleted } from '../onboarding_setup.mjs'
 import { RuntimeManager } from '../runtime_manager.mjs'
+import { channelTrustedLocks, validateSetupCatalog } from '../setup_catalog.mjs'
+import { validateProcessingRecipe } from '../processing_recipe.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 function fixture(overrides = {}) {
@@ -25,6 +27,7 @@ function fixture(overrides = {}) {
     probe: async () => ({ schema: 2, accelerator: 'cpu', components: { module: '1' }, capabilitiesReady: true,
       verifiedCapabilities: manifest.capabilities, capabilities: manifest.capabilities, hardwareAvailable: true,
       pythonVersion: '3', backendVersion: '1', lyricsyncVersion: '1', checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } }) }
+  runtime.launchProbe = (...args) => runtime.probe(...args)
   const cache = { active: async () => cache.value, validate: value => value,
     install: async value => { calls.push('models'); cache.value = { id: hash(value), manifest: value } } }
   const catalog = { schema: 1, runtime: manifest, qualification: { passed: true, scope: 'full', runtimeLockSha256: 'locked', platform: 'linux', arch: 'x64', accelerator: 'cpu' },
@@ -70,6 +73,70 @@ test('CUDA device presence alone does not establish dedicated VRAM or override u
     assert.equal(plan.available, false)
     assert.equal(plan.memoryQualification.status, 'unknown')
   }
+})
+test('preflight reports the install location and the free space of its volume', async () => {
+  const { setup } = fixture({ installLocation: '/data/karaoke-tools', diskFree: async () => 5e10 })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/karaoke-tools')
+  assert.equal(plan.freeBytes, 5e10)
+  assert.equal(plan.diskFreeBytes, 5e10)
+  const unknown = fixture({ diskFree: async () => { throw new Error('statfs failed') } })
+  const blocked = await unknown.setup.preflight()
+  assert.equal(blocked.installLocation, null)
+  assert.equal(blocked.freeBytes, null)
+  assert.equal(blocked.available, false)
+  assert.match(blocked.reason, /could not be checked/)
+})
+test('a changed install location sends the next install to the new stores and is refused while setup runs', async () => {
+  const { setup, runtime, cache, calls } = fixture({ installLocation: '/data/first' })
+  const moved = fixture()
+  setup.useStores({ runtime: moved.runtime, cache: moved.cache, installLocation: '/data/second' })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/second')
+  assert.equal((await setup.start({ consent: true, planId: plan.planId })).state, 'running')
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  await setup.operation
+  assert.deepEqual(calls, [])
+  assert.deepEqual(moved.calls, ['runtime', 'models'])
+  assert.equal(runtime.value, undefined)
+  assert.equal(cache.value, undefined)
+  assert.ok(moved.runtime.value && moved.cache.value)
+  assert.equal(setup.storesLocked(), false)
+  setup.state = { ...setup.state, state: 'paused' }
+  assert.equal(setup.storesLocked(), true)
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  assert.equal(setup.installLocation, '/data/second')
+})
+test('a finished run counts as completed whether it is already loaded or needs reopening', async () => {
+  const first = fixture()
+  const reopen = await start(first.setup, (await first.setup.preflight()).planId)
+  assert.equal(reopen.state, 'restart-required')
+  assert.equal(setupCompleted(reopen), true)
+  // A run whose installed identities equal the loaded ones ends ready.
+  const second = fixture()
+  const plan = await second.setup.preflight()
+  const loaded = fixture()
+  await start(loaded.setup, (await loaded.setup.preflight()).planId)
+  second.setup.loaded = { runtimeId: loaded.runtime.value.id, modelsId: loaded.cache.value.id }
+  const ready = await start(second.setup, plan.planId)
+  assert.equal(ready.state, 'ready')
+  assert.equal(ready.phase, 'complete')
+  assert.equal(setupCompleted(ready), true)
+  for (const status of [{ state: 'ready', phase: 'preflight' }, { state: 'error', phase: 'complete' }, { state: 'paused', phase: 'retrieve' }, null]) {
+    assert.equal(setupCompleted(status), false)
+  }
+})
+test('the desktop host settles the install location on any completed run and re-reads the store after menu consent', async () => {
+  const main = await readFile(new URL('../main.mjs', import.meta.url), 'utf8')
+  assert.match(main, /if \(setupCompleted\(await onboardingSetup\.getStatus\(\)\)\) await installCompleted\(\)/)
+  const menu = main.slice(main.indexOf('async function installProcessing()'), main.indexOf('async function start()'))
+  const consent = menu.indexOf('if (consent.response !== 1 || quitting) return')
+  assert.ok(consent > 0)
+  const after = menu.slice(consent)
+  assert.match(after, /operationGate\.active \|\| processingOperation/)
+  assert.match(after, /const current = manifest\.kind === 'models' \? modelCache : processingManager/)
+  assert.match(after, /await current\.install\(manifest/)
+  assert.doesNotMatch(after, /await manager\.install/)
 })
 test('low disk and missing weight terms block the complete setup', async () => {
   const { setup } = fixture({ diskFree: async () => 1 })
@@ -356,12 +423,12 @@ test('CUDA memory uses its single observed NVIDIA device, never a larger mixed d
     getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'AMD Display' }, { deviceString: 'NVIDIA GPU' }] }),
     runCommand: async () => output,
   })
-  const observed = await inventory('NVIDIA GPU, 4096\n')
+  const observed = await inventory('NVIDIA GPU, 4096, 4096\n')
   observed.gpuDevices[0].dedicatedMemoryBytes = 24 * GiB
   observed.videoMemoryBytes = 24 * GiB
   setup.hardware = async () => observed
   assert.equal((await setup.preflight()).memoryQualification.status, 'insufficient')
-  setup.hardware = async () => inventory('NVIDIA GPU, 8192\n')
+  setup.hardware = async () => inventory('NVIDIA GPU, 8192, 8192\n')
   assert.equal((await setup.preflight()).memoryQualification.status, 'meets-measured-requirements')
 })
 
@@ -376,7 +443,8 @@ test('CUDA memory stays unknown for missing, generic-only, or ambiguous CUDA dev
     const plan = await setup.preflight()
     assert.equal(plan.available, false)
     assert.equal(plan.memoryQualification.status, 'unknown')
-    assert.match(plan.reason, /unambiguous CUDA device/)
+    // No NVIDIA device at all is reported as such before any memory reason.
+    assert.match(plan.reason, cudaDevices?.length ? /unambiguous CUDA device/ : /requires an NVIDIA GPU/)
     assert.equal((await start(setup, plan.planId)).state, 'error')
   }
   assert.deepEqual(calls, [])
@@ -522,9 +590,161 @@ test('full setup installs an archive-form runtime catalog through the runtime ma
   assert.equal((await setup.preflight()).ready, true)
 })
 
+test('pausing keeps the partial transfer and resuming continues it with a range request', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'onboarding-pause-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { manifest, parts, urls } = archiveRuntime(archiveEntries)
+  const held = 10
+  const requests = []
+  let hold = true
+  const fetchImpl = async (url, options) => {
+    const index = urls.indexOf(String(url))
+    requests.push({ index, range: options.headers?.Range ?? null })
+    const bytes = parts[index]
+    if (index === 1 && hold) {
+      hold = false
+      // Delivers the first bytes, then waits until the attempt is stopped.
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new Uint8Array(bytes.subarray(0, held)))
+        options.signal.addEventListener('abort', () => controller.error(new Error('aborted')), { once: true })
+      } }))
+    }
+    const range = /^bytes=(\d+)-$/.exec(options.headers?.Range ?? '')
+    if (range) {
+      const start = Number(range[1])
+      return new Response(bytes.subarray(start), { status: 206, headers: { 'content-range': `bytes ${start}-${bytes.length - 1}/${bytes.length}` } })
+    }
+    return new Response(bytes)
+  }
+  const runtime = new RuntimeManager(join(root, 'processing'), archiveIdentity, { fetchImpl,
+    lockPython: process.platform === 'win32' ? 'python.exe' : 'python3',
+    durabilityHelper: fileURLToPath(new URL('../backend.py', import.meta.url)),
+    trustedLocks: [manifest.provenance.lockSha256], diskFree: async () => 1e12 })
+  runtime.probe = async () => ({ schema: 2, accelerator: 'cpu', hardwareAvailable: true, pythonVersion: '3.12.14', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0',
+    capabilities: manifest.capabilities, components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1'])),
+    capabilitiesReady: true, verifiedCapabilities: manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } })
+  const { setup, calls, saved } = fixture({ runtime })
+  setup.catalog.runtime = manifest
+  setup.catalog.qualification.runtimeLockSha256 = manifest.provenance.lockSha256
+  const stages = []
+  let reachedHold
+  const holding = new Promise(resolve => { reachedHold = resolve })
+  setup.notify = state => {
+    if (state.stage && stages.at(-1) !== state.stage) stages.push(state.stage)
+    if (state.progress?.part === 2 && state.progress.received === held) reachedHold()
+  }
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  await setup.start({ consent: true, planId: plan.planId })
+  await holding
+  const paused = await setup.pause()
+  assert.equal(setup.operation, null)
+  assert.equal(paused.state, 'paused')
+  assert.equal(paused.message, 'Setup paused.')
+  assert.equal(paused.stage, 'retrieve')
+  assert.equal(paused.retryable, true)
+  assert.equal(paused.error, undefined)
+  assert.deepEqual([paused.progress.part, paused.progress.parts, paused.progress.received], [2, 2, held])
+  assert.equal(saved.at(-1).state, 'paused')
+  assert.deepEqual(calls, [])
+
+  // Resuming is the same start request; the held part continues from its saved bytes.
+  const status = await start(setup, plan.planId)
+  assert.equal(status.state, 'restart-required', status.error)
+  assert.equal(status.stage, 'complete')
+  assert.deepEqual(requests, [{ index: 0, range: null }, { index: 1, range: null }, { index: 1, range: `bytes=${held}-` }])
+  assert.deepEqual(calls, ['models'])
+  assert.deepEqual(stages, ['retrieve', 'unpack', 'models', 'verify', 'complete'])
+})
+
+for (const stage of ['models', 'verify']) {
+  test(`a setup paused in the ${stage} stage resumes with its original consented request`, async () => {
+    const { setup, runtime, cache, calls } = fixture()
+    let entered, hold = true
+    const reached = new Promise(resolve => { entered = resolve })
+    const waitForAbort = signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+    if (stage === 'models') {
+      const install = cache.install
+      cache.install = async (value, options) => {
+        if (!hold) return install(value, options)
+        hold = false; entered(); await waitForAbort(options.signal)
+      }
+    } else {
+      const probe = runtime.probe
+      runtime.probe = async (active, options = {}) => {
+        if (setup.state.stage !== 'verify' || !hold) return probe(active, options)
+        hold = false; entered(); await waitForAbort(options.signal)
+      }
+    }
+    const plan = await setup.preflight()
+    await setup.start({ consent: true, planId: plan.planId })
+    await reached
+    const paused = await setup.pause()
+    assert.equal(paused.state, 'paused')
+    assert.equal(paused.stage, stage)
+    // The activated runtime is no longer offered, so a fresh plan differs.
+    assert.notEqual((await setup.preflight()).planId, plan.planId)
+    const status = await start(setup, plan.planId)
+    assert.equal(status.state, 'restart-required', status.message)
+    assert.equal(status.stage, 'complete')
+    assert.deepEqual(calls, ['runtime', 'models'])
+    assert.equal(setup.consentedPlanId, null)
+  })
+}
+
+test('a recorded consent is honoured only while paused and is cleared by stopping', async () => {
+  async function pausedInModels() {
+    const context = fixture()
+    let entered
+    const reached = new Promise(resolve => { entered = resolve })
+    context.cache.install = async (_, { signal }) => {
+      entered(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+    }
+    const plan = await context.setup.preflight()
+    await context.setup.start({ consent: true, planId: plan.planId })
+    await reached
+    assert.equal((await context.setup.pause()).state, 'paused')
+    return { ...context, plan }
+  }
+  // A different request is not the paused attempt, and once that attempt has
+  // ended the original request is checked against a fresh plan again.
+  const first = await pausedInModels()
+  assert.match((await start(first.setup, 'other')).message, /setup plan changed/)
+  assert.match((await start(first.setup, first.plan.planId)).message, /setup plan changed/)
+  // Stopping a paused attempt forgets its consent.
+  const second = await pausedInModels()
+  assert.equal((await second.setup.stop()).state, 'idle')
+  assert.equal(second.setup.consentedPlanId, null)
+  assert.match((await start(second.setup, second.plan.planId)).message, /setup plan changed/)
+})
+
+test('stopping a paused setup returns to idle; stopping a running one still cancels', async () => {
+  const { setup, runtime } = fixture()
+  let entered
+  const started = () => new Promise(resolve => { entered = resolve })
+  runtime.install = async (_, { signal }) => { entered(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) }
+  const plan = await setup.preflight()
+  let running = started()
+  await setup.start({ consent: true, planId: plan.planId })
+  await running
+  assert.equal((await setup.pause()).state, 'paused')
+  // Pausing or stopping with nothing running leaves the state alone.
+  assert.equal((await setup.pause()).state, 'paused')
+  const stopped = await setup.stop()
+  assert.equal(stopped.state, 'idle')
+  assert.equal(stopped.stage, undefined)
+  assert.equal(stopped.progress, undefined)
+  assert.equal((await setup.stop()).state, 'idle')
+  running = started()
+  await setup.start({ consent: true, planId: plan.planId })
+  await running
+  assert.equal((await setup.stop()).state, 'cancelled')
+})
+
 // ---- Restored checkpoints ---------------------------------------------------
 test('each restored checkpoint kind maps to its workflow state without proving readiness', async () => {
-  for (const [saved, state, phase = 'paused'] of [['running', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
+  for (const [saved, state, phase = 'paused'] of [['running', 'cancelled'], ['paused', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
     ['restart-required', 'checking', 'complete'], ['error', 'checking', 'verification'], ['ready', 'idle'], ['idle', 'idle'], [undefined, 'idle']]) {
     const { setup, saved: writes } = fixture({ load: async () => saved && { schema: 1, state: saved, phase } })
     const status = await setup.getStatus()
@@ -710,4 +930,790 @@ test('an unreadable checkpoint is treated as none and does not wedge status', as
   assert.equal((await setup.getStatus()).state, 'idle')
   assert.equal((await setup.preflight()).available, true)
   assert.equal((await setup.getStatus()).state, 'idle')
+})
+
+const CPU_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cpu' }
+const METAL_PACK = { platform: 'darwin', arch: 'arm64', accelerator: 'metal' }
+const CUDA_PACK = { platform: 'linux', arch: 'x64', accelerator: 'cuda' }
+const MEASURED_BASIS = 'These tools and models use the CPU, even if your computer has a graphics card. Based on one measured run on a 16-core desktop processor; computers with fewer cores may take longer.'
+const measured = measuredPeakBytes => ({ measuredPeakBytes, evidenceReference: 'measured-fixture',
+  representativeHardware: { verified: true, description: 'Test measurement host' } })
+// Matching measured memory evidence: 10 GiB RAM and 5 GiB VRAM after headroom.
+const cudaMemory = (target = CUDA_PACK) => ({ runtimeLockSha256: 'locked', ...target, ram: measured(8 * GiB), vram: measured(4 * GiB) })
+function estimateFixture(target, hardware, { memory = target.accelerator === 'cuda' ? cudaMemory(target) : undefined } = {}) {
+  const { setup, runtime, cache } = fixture({ hardware: async () => hardware })
+  Object.assign(setup.catalog.runtime, target)
+  Object.assign(setup.catalog.qualification, target)
+  if (memory) setup.catalog.memory = memory
+  return { setup, runtime, cache }
+}
+function installEstimateFixture(target, hardware, options) {
+  const result = estimateFixture(target, hardware, options)
+  const { runtime, cache, setup } = result
+  runtime.value = { id: hash(setup.catalog.runtime), directory: '/runtime', manifest: structuredClone(setup.catalog.runtime) }
+  cache.value = { id: 'models', manifest: { models: [...LOCAL_MODEL_IDS] } }
+  const probe = runtime.probe
+  runtime.probe = async (...args) => ({ ...await probe(...args), accelerator: target.accelerator })
+  return result
+}
+const cpuHost = extra => ({ platform: 'linux', arch: 'x64', cpuCount: 16, totalMemoryBytes: 32 * GiB, ...extra })
+const appleHost = extra => ({ platform: 'darwin', arch: 'arm64', cpu: 'Apple M2', cpuCount: 10,
+  totalMemoryBytes: 16 * GiB, unifiedMemory: true, ...extra })
+const cudaHost = (name, vramGiB = 12, extra) => cpuHost({ cudaDevices: [{ name, dedicatedMemoryBytes: Math.round(vramGiB * GiB) }], ...extra })
+
+test('processing planning estimate follows the selected pack, never the display GPU', async () => {
+  const hardware = cudaHost('NVIDIA GeForce RTX 4090', 24, { gpu: 'NVIDIA GeForce RTX 4090' })
+  const plan = await estimateFixture(CPU_PACK, hardware).setup.preflight()
+  assert.deepEqual(plan.processingEstimate, { level: 2, label: 'Moderate', minutes: [9, 16], evidence: 'measured', basis: MEASURED_BASIS })
+  hardware.cpuCount = 4
+  const slow = (await estimateFixture(CPU_PACK, hardware).setup.preflight()).processingEstimate
+  assert.deepEqual(slow.minutes, [25, 45])
+  assert.match(slow.basis, /use the CPU/)
+  assert.equal(slow.evidence, 'extrapolated')
+})
+
+const ESTIMATE_CASES = [
+  // CPU packs: logical processors, then less than 15 GiB RAM moves one tier slower.
+  [CPU_PACK, cpuHost({ cpuCount: 32 }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16 }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 15 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 12 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 11 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 8 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 7 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 1 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: 15 * GiB }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: Math.round(15.6 * GiB) }), [9, 16], 'measured'],
+  [CPU_PACK, cpuHost({ cpuCount: 16, totalMemoryBytes: 15 * GiB - 1 }), [12, 20]],
+  [CPU_PACK, cpuHost({ cpuCount: 12, totalMemoryBytes: 15 * GiB - 1 }), [15, 28]],
+  [CPU_PACK, cpuHost({ cpuCount: 8, totalMemoryBytes: 15 * GiB - 1 }), [25, 45]],
+  [CPU_PACK, cpuHost({ cpuCount: 7, totalMemoryBytes: 8 * GiB }), [25, 45]],
+  // A CPU pack on an NVIDIA host stays a CPU estimate.
+  [CPU_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24, { cpuCount: 12 }), [12, 20]],
+  // Apple Metal packs.
+  [METAL_PACK, appleHost({ cpu: 'Apple M1' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M3' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M1 Pro' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M3 Ultra' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M4' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M4 Pro' }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple' }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: undefined }), [8, 20]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max', totalMemoryBytes: 15 * GiB }), [5, 12]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M2 Max', totalMemoryBytes: 15 * GiB - 1 }), [15, 35]],
+  [METAL_PACK, appleHost({ cpu: 'Apple M1', totalMemoryBytes: 8 * GiB }), [15, 35]],
+  // CUDA packs classify the single CUDA device (12 GiB unless stated).
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 D', 24), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 5090 D', 32), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Ti'), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070 SUPER'), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070 Ti SUPER', 16), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060'), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 12GB'), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 2080 Ti', 11), [2, 5]],
+  [CUDA_PACK, cudaHost('Tesla T4', 15), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA T4', 15), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 5050', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1660 SUPER', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060', 12, { platform: 'win32' }), [2, 5], 'extrapolated', { platform: 'win32' }],
+  // Dedicated VRAM: 7.5 GiB up to (not including) 9.5 GiB demotes one tier; entry is the floor.
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 10), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 9.4), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080', 9.5), [1, 3]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070', 8), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4070', 7.5), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4060 Ti', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4060 Ti', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), [1, 3]],
+  // Laptop and Max-Q parts demote one tier and stack with the VRAM demotion.
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 Laptop GPU', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Laptop GPU', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 2080 with Max-Q Design', 8), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3080 Laptop GPU with Max-Q Design', 16), [2, 5]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 Laptop GPU', 12), [5, 12]],
+  [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050 8GB Laptop GPU', 8), [5, 12]],
+]
+
+test('processing estimate tiers cover every hardware boundary', async () => {
+  for (const [pack, hardware, minutes, evidence = 'extrapolated', packOverride = {}] of ESTIMATE_CASES) {
+    const estimate = (await estimateFixture({ ...pack, ...packOverride }, hardware).setup.preflight()).processingEstimate
+    const name = `${pack.accelerator} ${hardware.cpu ?? hardware.cudaDevices?.[0]?.name ?? ''} ${hardware.cpuCount} ${hardware.totalMemoryBytes}`
+    const level = minutes[1] <= 12 ? 3 : minutes[1] <= 30 ? 2 : 1
+    assert.deepEqual(estimate.minutes, minutes, name)
+    assert.equal(estimate.level, level, name)
+    assert.equal(estimate.label, ['Slower', 'Moderate', 'Faster'][level - 1], name)
+    assert.equal(estimate.evidence, evidence, name)
+    if (evidence === 'measured') assert.equal(estimate.basis, MEASURED_BASIS, name)
+    else {
+      assert.match(estimate.basis, { cpu: /use the CPU/, metal: /use Apple Metal/, cuda: /use your NVIDIA graphics card/ }[pack.accelerator], name)
+      assert.match(estimate.basis, /extrapolated from published component timings/, name)
+    }
+    assert.doesNotMatch(estimate.basis, /\bpacks?\b/i, name)
+  }
+})
+
+test('CUDA estimates require an admitted, recognized single CUDA device with enough VRAM', async () => {
+  const unqualified = setup => { setup.catalog.qualification.passed = false }
+  for (const [pack, hardware, change = () => {}, options] of [
+    [CUDA_PACK, cudaHost('NVIDIA RTX A5000', 24)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce MX450', 8)],
+    [CUDA_PACK, cudaHost('NVIDIA A100-SXM4-40GB', 40)],
+    [CUDA_PACK, cudaHost('AMD Radeon RX 7900 XTX', 24)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1080 Ti', 11)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce GTX 1060 6GB', 8)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090 Mystery Edition', 24)],
+    [CUDA_PACK, cudaHost('', 12)],
+    [CUDA_PACK, cudaHost(undefined, 12)],
+    // Dedicated VRAM unknown, at most 6 GB, or below 7.5 GiB.
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090' }] })],
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: null }] })],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3060 Laptop GPU', 6)],
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3050 6GB Laptop GPU', 6)],
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4070', dedicatedMemoryBytes: 7.5 * GiB - 1 }] })],
+    // Ambiguous or unsupported targets.
+    [CUDA_PACK, cpuHost({ cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB },
+      { name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [CUDA_PACK, cpuHost({ cudaDevices: [] })],
+    [CUDA_PACK, cpuHost({ gpuDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [{ ...CUDA_PACK, platform: 'darwin', arch: 'arm64' }, appleHost({ unifiedMemory: false,
+      cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 24 * GiB }] })],
+    [{ ...CUDA_PACK, arch: 'arm64' }, cudaHost('NVIDIA GeForce RTX 4090', 24, { arch: 'arm64' })],
+    // Invalid qualification status for the selected release scope.
+    [CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), unqualified],
+  ]) {
+    const { setup } = estimateFixture(pack, hardware, options)
+    change(setup)
+    const estimate = (await setup.preflight()).processingEstimate
+    assert.equal(estimate.minutes, null, JSON.stringify(hardware.cudaDevices))
+    assert.equal(estimate.level, null)
+    assert.doesNotMatch(estimate.basis, /\bpacks?\b/i)
+  }
+  // Withholding the advisory range never blocks an otherwise available plan.
+  const { setup } = estimateFixture(CUDA_PACK, cudaHost('NVIDIA RTX A5000', 24))
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.memoryQualification.status, 'meets-measured-requirements')
+  assert.equal(plan.processingEstimate.minutes, null)
+  const unmeasured = estimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
+  assert.equal((await unmeasured.setup.preflight()).available, true)
+})
+
+test('Release candidate CUDA profiles use shipped admission policies and preserve pending qualification', async () => {
+  const json = async path => JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'))
+  const hardwarePolicy = await json('../hardware-policy.json')
+  const modelPolicy = await json('../models.json')
+  const lockPolicy = await json('../processing-locks.json')
+  const app = await json('../package.json')
+  const backendSource = await readFile(new URL('../../backend/src/karaoke_backend/__init__.py', import.meta.url), 'utf8')
+  const lyricsyncSource = await readFile(new URL('../../lyricsync/pyproject.toml', import.meta.url), 'utf8')
+  const backendVersion = backendSource.match(/__version__\s*=\s*"([^"]+)"/)[1]
+  const lyricsyncVersion = lyricsyncSource.match(/^version\s*=\s*"([^"]+)"/m)[1]
+  const nativeLockSha256 = createHash('sha256').update(await readFile(new URL('../locks/native.json', import.meta.url))).digest('hex')
+  for (const platform of ['linux', 'win32']) {
+    const source = await json(`../processing-catalogs/${platform}-x64.json`)
+    const identity = { appVersion: app.version, backendVersion, lyricsyncVersion, platform, arch: 'x64' }
+    const trustedLocks = channelTrustedLocks(lockPolicy, 'private-test')
+    const catalog = validateSetupCatalog(source, { identity, trustedLocks, modelPolicy, releaseChannel: 'private-test' })
+    // Native lock bytes are identical on every target; hash the source directly.
+    validateProcessingRecipe(catalog.runtime, identity, trustedLocks, { nativeLockSha256 })
+    assert.equal(catalog.runtime.schema, 2)
+    assert.equal(catalog.runtime.accelerator, 'cuda')
+    const hardware = cudaHost('NVIDIA GeForce RTX 3090', 24, { platform,
+      unifiedMemory: false, availableMemoryBytes: 24 * GiB })
+    const { setup } = fixture({ catalog, hardwarePolicy, policy: modelPolicy, releaseChannel: 'private-test',
+      hardware: async () => hardware, diskFree: async () => 100 * GiB })
+    const plan = await setup.preflight()
+    assert.equal(plan.available, true, `${platform}: ${plan.reason}`)
+    assert.deepEqual(plan.processingEstimate.minutes, [1, 3], platform)
+    assert.equal(plan.processingEstimate.evidence, 'extrapolated')
+    assert.equal(plan.qualificationScope, 'hardware-test')
+    assert.equal(plan.memoryQualification.status, 'unknown')
+    assert.equal(plan.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).requirements.acceptancePending, true)
+    assert.equal(catalog.qualification.passed, false)
+    // Missing legacy measured-memory evidence is honest; the separately bound
+    // candidate resource envelope still controls admission and advisory estimates.
+    hardware.availableMemoryBytes = null
+    let denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'unknown')
+    assert.equal(denied.processingEstimate.minutes, null)
+    hardware.availableMemoryBytes = 1
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'insufficient')
+    hardware.availableMemoryBytes = 24 * GiB
+    setup.releaseChannel = 'stable'
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.processingEstimate.minutes, null)
+    setup.releaseChannel = 'private-test'
+    setup.diskFree = async () => 0
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.processingEstimate.minutes, null)
+    assert.equal(catalog.qualification.passed, false)
+  }
+})
+
+test('memory-blocked plans never get a speed estimate', async () => {
+  for (const hardware of [
+    cudaHost('NVIDIA GeForce RTX 4090', 24, { totalMemoryBytes: 9 * GiB }),
+    cudaHost('NVIDIA GeForce RTX 4090', 24, { cudaDevices: [{ name: 'NVIDIA GeForce RTX 4090', dedicatedMemoryBytes: 4 * GiB }] }),
+  ]) {
+    const plan = await estimateFixture(CUDA_PACK, hardware).setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.processingEstimate.minutes, null)
+  }
+  const cpu = estimateFixture(CPU_PACK, cpuHost({ totalMemoryBytes: 9 * GiB }),
+    { memory: { runtimeLockSha256: 'locked', ...CPU_PACK, ram: measured(8 * GiB) } })
+  const plan = await cpu.setup.preflight()
+  assert.equal(plan.available, false)
+  assert.equal(plan.processingEstimate.minutes, null)
+})
+
+test('installed runtimes matching the catalog keep their CUDA and Metal tiers', async () => {
+  const cuda = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  let plan = await cuda.setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.components.length, 0, 'the installed path answered')
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3])
+  const unqualified = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  unqualified.setup.catalog.qualification.passed = false
+  plan = await unqualified.setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.components.length, 0)
+  assert.equal(plan.processingEstimate.minutes, null)
+  const experimental = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 3090', 24), { memory: null })
+  experimental.setup.releaseChannel = 'private-test'
+  Object.assign(experimental.setup.catalog.qualification, { passed: false, scope: 'hardware-test' })
+  plan = await experimental.setup.preflight()
+  assert.equal(plan.components.length, 0)
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3])
+  assert.equal(plan.qualificationScope, 'hardware-test')
+  const unmeasured = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24), { memory: null })
+  assert.deepEqual((await unmeasured.setup.preflight()).processingEstimate.minutes, [1, 3])
+  const drifted = installEstimateFixture(CUDA_PACK, cudaHost('NVIDIA GeForce RTX 4090', 24))
+  drifted.setup.catalog.runtime = { ...drifted.setup.catalog.runtime, id: `${drifted.setup.catalog.runtime.id}-other` }
+  plan = await drifted.setup.preflight()
+  assert.equal(plan.updateAvailable, true)
+  assert.equal(plan.runtimeTransferRequired, false, 'catalog drift preserves the working runtime until review')
+  plan = await drifted.setup.requestRuntimeUpdate()
+  assert.equal(plan.available, true)
+  assert.equal(plan.runtimeTransferRequired, true, 'reviewed catalog update replaces the selected runtime')
+  assert.equal(plan.components[0].label, 'Local processing runtime')
+  assert.equal(plan.components.length, 4)
+  assert.deepEqual(plan.processingEstimate.minutes, [1, 3], 'the replacement plan estimates the selected qualified runtime')
+  const metal = installEstimateFixture(METAL_PACK, appleHost({ cpu: 'Apple M4 Pro', totalMemoryBytes: 24 * GiB }))
+  plan = await metal.setup.preflight()
+  assert.equal(plan.components.length, 0)
+  assert.deepEqual(plan.processingEstimate.minutes, [5, 12])
+  assert.equal(plan.processingEstimate.label, 'Faster')
+})
+
+test('unknown, mismatched, incomplete, and blocked plans never get a speed estimate', async () => {
+  const hardware = { platform: 'linux', arch: 'x64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3 }
+  for (const change of [
+    setup => { setup.catalog = null },
+    setup => { setup.catalog.qualification.passed = false },
+    setup => { setup.catalog.runtime.models = ['heart-transcriptor'] },
+    setup => { setup.catalog.runtime.models = [...LOCAL_MODEL_IDS, 'unknown-model'] },
+    setup => { setup.hardware = async () => ({ ...hardware, arch: 'arm64' }) },
+    setup => { setup.hardware = async () => ({ ...hardware, cpuCount: null }) },
+    setup => { setup.diskFree = async () => 0 },
+    setup => { setup.catalog.runtime.provenance.lockSha256 = ''; setup.catalog.qualification.runtimeLockSha256 = '' },
+  ]) {
+    const { setup } = fixture({ hardware: async () => hardware })
+    change(setup)
+    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+  }
+})
+
+test('Metal planning range requires an Apple silicon unified-memory target', async () => {
+  const hardware = { platform: 'darwin', arch: 'arm64', cpuCount: 8, totalMemoryBytes: 16 * 1024 ** 3, unifiedMemory: true }
+  const { setup } = fixture({ hardware: async () => hardware })
+  Object.assign(setup.catalog.runtime, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(setup.catalog.qualification, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  const plan = await setup.preflight()
+  assert.deepEqual(plan.processingEstimate.minutes, [8, 20])
+  assert.match(plan.processingEstimate.basis, /use Apple Metal/)
+  hardware.unifiedMemory = false
+  assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+})
+
+test('hardware-test requires private channel and false status, and cannot skip functional verification', async () => {
+  for (const releaseChannel of ['private-test', 'stable', undefined]) {
+    const candidate = fixture({ releaseChannel })
+    candidate.setup.catalog.qualification.scope = 'hardware-test'
+    candidate.setup.catalog.qualification.passed = false
+    const plan = await candidate.setup.preflight()
+    assert.equal(plan.available, releaseChannel === 'private-test')
+    if (plan.available) {
+      assert.equal(plan.qualificationScope, 'hardware-test')
+      candidate.runtime.probe = async () => { throw new Error('CUDA device unavailable') }
+      assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+      assert.equal((await candidate.setup.preflight()).ready, false)
+    } else {
+      assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+      assert.deepEqual(candidate.calls, [])
+    }
+  }
+  const misleading = fixture({ releaseChannel: 'private-test' })
+  misleading.setup.catalog.qualification.scope = 'hardware-test'
+  assert.equal((await misleading.setup.preflight()).available, false)
+})
+
+test('navigation reuses launch verification while consent still requires full verification', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  const modes = []
+  runtime.active = async options => { modes.push(['runtime', options?.launch]); return runtime.value }
+  cache.active = async options => { modes.push(['models', options?.launch]); return cache.value }
+  const accepted = await runtime.probe()
+  runtime.launchProbe = async () => { modes.push(['cached']); return accepted }
+  runtime.probe = async () => { modes.push(['fresh']); throw new Error('native check failed') }
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, true)
+  assert.deepEqual(modes, [['runtime', true], ['models', true], ['cached']])
+  modes.length = 0
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.ok(modes.some(([kind, launch]) => kind === 'runtime' && launch === false))
+  assert.ok(modes.some(([kind]) => kind === 'fresh'))
+})
+
+test('a usable CPU installation offers the selected CUDA upgrade and reuses models', async () => {
+  const { setup, runtime, cache, calls } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  setup.catalog.runtime = structuredClone(setup.catalog.runtime)
+  setup.catalog.runtime.accelerator = 'cuda'
+  setup.catalog.qualification.accelerator = 'cuda'
+  setup.hardware = async () => ({ cudaDevices: [{ name: 'NVIDIA fixture' }] })
+  const probe = runtime.probe
+  runtime.probe = async active => ({ ...await probe(), accelerator: active.manifest.accelerator })
+  calls.length = 0
+  const plan = await setup.requestRuntimeUpdate()
+  assert.equal(plan.ready, false)
+  assert.equal(plan.restartRequired, false)
+  assert.equal(plan.runtimeTransferRequired, true)
+  assert.equal(plan.components[0].label, 'Local processing runtime')
+  assert.ok(plan.components.slice(1).every(component => component.bytes === 0))
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime'])
+  assert.equal(runtime.value.manifest.accelerator, 'cuda')
+  setup.loaded.runtimeId = runtime.value.id
+  assert.equal((await setup.preflight()).ready, true)
+})
+
+test('falling back to CPU after a CUDA installation never completes the upgrade', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  setup.catalog.runtime = structuredClone(setup.catalog.runtime)
+  setup.catalog.runtime.accelerator = 'cuda'
+  setup.catalog.qualification.accelerator = 'cuda'
+  setup.hardware = async () => ({ cudaDevices: [{ name: 'NVIDIA fixture' }] })
+  runtime.install = async () => {} // The manager returned the older usable pointer.
+  assert.equal((await start(setup, (await setup.requestRuntimeUpdate()).planId)).state, 'error')
+  assert.equal((await setup.preflight()).ready, false)
+})
+
+test('hardware selection restores automatic for stale versions and rejects unknown overrides', async () => {
+  const hardwarePolicy = { schema: 1, version: '1.0.0', recipes: [{ id: 'standard', label: 'Standard', modelIds: LOCAL_MODEL_IDS }], variants: [] }
+  const saved = []
+  const { setup } = fixture({ hardwarePolicy, loadHardwareSelection: async () => ({ mode: 'manual', policyVersion: 'old', variantId: 'old' }),
+    saveHardwareSelection: async value => saved.push(value) })
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+  assert.deepEqual(plan.hardwareSelection, { mode: 'automatic', variantId: null, policyVersion: '1.0.0' })
+  await assert.rejects(() => setup.setHardwareSelection({ mode: 'manual', variantId: 'unknown' }), /Unknown processing/)
+  await setup.setHardwareSelection({ mode: 'automatic' })
+  assert.deepEqual(saved, [{ mode: 'automatic', variantId: null, policyVersion: '1.0.0' }])
+})
+
+test('new processing recipes require matching qualified hardware selection before any transfer', async () => {
+  const { setup, calls } = fixture()
+  setup.catalog.runtime.schema = 2
+  const plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.match(plan.reason, /qualified hardware policy/)
+  await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
+})
+
+test('working runtime stays selected until the user reviews and consents to a catalog update', async () => {
+  const { setup, runtime, cache, calls, saved } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.pythonVersion = '3-next'
+  // Keep the fixture functional probe aligned with the new runtime after install.
+  const probe = runtime.probe
+  runtime.probe = async (...args) => ({ ...await probe(...args), pythonVersion: runtime.value.manifest.pythonVersion })
+  const before = await setup.preflight()
+  assert.equal(before.ready, true)
+  assert.equal(before.updateAvailable, true)
+  assert.equal(before.runtimeTransferRequired, false)
+  assert.equal(runtime.value, previous)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.ready, false)
+  assert.equal(update.runtimeTransferRequired, true)
+  assert.equal(runtime.value, previous)
+  assert.equal(saved.at(-1).runtimeUpdateRequested, true)
+  await setup.start({ planId: update.planId })
+  assert.equal(runtime.value, previous)
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'models', 'runtime'])
+  assert.notEqual(runtime.value.id, previous.id)
+})
+
+test('unqualified recipe cannot replace a working legacy runtime or block its ordinary setup', async () => {
+  const { setup, runtime, cache } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  const previous = runtime.value
+  setup.loaded = { runtimeId: previous.id, modelsId: cache.value.id }
+  setup.catalog.runtime.schema = 2
+  assert.equal((await setup.preflight()).ready, true)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.available, false)
+  assert.match(update.reason, /qualified hardware policy/)
+  assert.equal(runtime.value, previous)
+})
+
+test('instance identity differs from recipe identity without scheduling an unchanged runtime transfer', async () => {
+  const { setup, runtime, cache, calls } = fixture()
+  await start(setup, (await setup.preflight()).planId)
+  runtime.value.recipeId = runtime.value.id
+  runtime.value.id = 'a-local-instance-identity'
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id }
+  calls.length = 0
+  const plan = await setup.preflight()
+  assert.equal(plan.ready, true)
+  assert.equal(plan.updateAvailable, false)
+  assert.equal(plan.runtimeTransferRequired, false)
+  assert.deepEqual(calls, [])
+})
+
+test('a CUDA pack is unavailable without an NVIDIA device and retrieves nothing', async () => {
+  for (const cudaDevices of [[], undefined]) {
+    const candidate = fixture({ releaseChannel: 'private-test' })
+    Object.assign(candidate.setup.catalog.qualification, { scope: 'hardware-test', passed: false, accelerator: 'cuda' })
+    candidate.setup.catalog.runtime.accelerator = 'cuda'
+    candidate.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', totalMemoryBytes: 64 * GiB, gpuDevices: [{ name: 'Other GPU', dedicatedMemoryBytes: 16 * GiB }], cudaDevices })
+    const plan = await candidate.setup.preflight()
+    assert.equal(plan.available, false)
+    assert.match(plan.reason, /requires an NVIDIA GPU with a current driver/)
+    assert.deepEqual(plan.components, [])
+    assert.equal((await start(candidate.setup, plan.planId)).state, 'error')
+    assert.deepEqual(candidate.calls, [])
+  }
+  const nvidia = fixture({ releaseChannel: 'private-test' })
+  Object.assign(nvidia.setup.catalog.qualification, { scope: 'hardware-test', passed: false, accelerator: 'cuda' })
+  nvidia.setup.catalog.runtime.accelerator = 'cuda'
+  nvidia.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', cudaDevices: [{ name: 'NVIDIA GPU', dedicatedMemoryBytes: 8 * GiB }] })
+  const offered = await nvidia.setup.preflight()
+  assert.equal(offered.available, true, offered.reason)
+  assert.equal(offered.qualificationScope, 'hardware-test')
+  assert.equal(offered.accelerator, 'cuda')
+  // CPU packs never require an NVIDIA device.
+  const cpu = fixture()
+  cpu.setup.hardware = async () => ({ platform: 'linux', arch: 'x64', cudaDevices: [] })
+  const cpuPlan = await cpu.setup.preflight()
+  assert.equal(cpuPlan.available, true)
+  assert.equal(cpuPlan.accelerator, 'cpu')
+})
+
+test('a runtime installed from a private-test-only lock is not activated by a build on another channel', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'onboarding-channel-trust-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { manifest, parts, urls } = archiveRuntime(archiveEntries)
+  const lock = manifest.provenance.lockSha256
+  const policy = { schema: 1, lockSha256: ['b'.repeat(64), lock], privateTestLockSha256: [lock] }
+  const options = channel => ({ lockPython: process.platform === 'win32' ? 'python.exe' : 'python3',
+    durabilityHelper: fileURLToPath(new URL('../backend.py', import.meta.url)), trustedLocks: channelTrustedLocks(policy, channel) })
+  const probe = async () => ({ schema: 2, accelerator: 'cpu', hardwareAvailable: true, pythonVersion: '3.12.14', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0',
+    capabilities: manifest.capabilities, components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1'])),
+    capabilitiesReady: true, verifiedCapabilities: manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } })
+  const tester = new RuntimeManager(join(root, 'processing'), archiveIdentity, { ...options('private-test'),
+    fetchImpl: async url => new Response(parts[urls.indexOf(String(url))]), diskFree: async () => 1e12 })
+  tester.probe = probe
+  const installedByTester = fixture({ runtime: tester, releaseChannel: 'private-test' })
+  installedByTester.setup.catalog.runtime = manifest
+  Object.assign(installedByTester.setup.catalog.qualification, { scope: 'hardware-test', passed: false, runtimeLockSha256: lock })
+  const plan = await installedByTester.setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  assert.equal((await start(installedByTester.setup, plan.planId)).state, 'restart-required')
+  const installedId = (await tester.active()).id
+
+  // A later stable build at the same application version, over the same state.
+  for (const channel of ['stable', undefined]) {
+    const later = new RuntimeManager(join(root, 'processing'), archiveIdentity, options(channel))
+    later.probe = probe
+    assert.throws(() => later.validate(manifest), /not trusted/)
+    await assert.rejects(later.active())
+    const stable = fixture({ runtime: later, releaseChannel: channel, loaded: { runtimeId: installedId, modelsId: installedByTester.cache.value.id } })
+    stable.cache.value = installedByTester.cache.value
+    const status = await stable.setup.installed()
+    assert.equal(status.installed, false)
+    assert.equal(status.ready, false)
+  }
+  // The private-test build still trusts it.
+  const again = new RuntimeManager(join(root, 'processing'), archiveIdentity, options('private-test'))
+  assert.equal((await again.active()).id, installedId)
+})
+
+// Synthetic runtime managers isolate normal wizard orchestration; real recipe
+// inventory and functional-probe verification remain covered by manager tests.
+function candidateWizardFixture(releaseChannel = 'private-test') {
+  const f = fixture({ releaseChannel, hardware: async () => ({ platform: 'linux', arch: 'x64',
+    unifiedMemory: false, totalMemoryBytes: 200, availableMemoryBytes: 150 }) })
+  const lock = 'a'.repeat(64)
+  Object.assign(f.setup.catalog.runtime, { schema: 2, provenance: { ...f.manifest.provenance, lockSha256: lock },
+    recipe: { installedSize: 10, python: { size: 5, url: 'https://example.org/python' }, wheels: [] } })
+  Object.assign(f.setup.catalog.qualification, { passed: false, scope: 'hardware-test', runtimeLockSha256: lock })
+  f.setup.hardwarePolicy = { schema: 1, version: '1.0.0',
+    recipes: [{ id: 'standard', label: 'Standard', modelIds: LOCAL_MODEL_IDS }],
+    variants: [{ id: 'cpu-candidate', label: 'CPU', recipeId: 'standard', platform: 'linux', arch: 'x64', accelerator: 'cpu',
+      priority: 1, status: 'candidate', qualityTradeoff: 'Existing processing profile.', settings: {},
+      admission: { runtimeLockSha256: lock, reference: 'pending-final-acceptance', basisReferences: ['historical-budget'],
+        ramBytes: 125, vramBytes: null, unifiedMemory: false, workingDiskBytes: 10, downloadBytes: 20, installedBytes: 30 } }] }
+  f.setup.hardwareSelection = { mode: 'automatic', variantId: null, policyVersion: '1.0.0' }
+  return f
+}
+
+test('pending acceptance uses the normal recipe wizard, ordinary consent and functional verification', async () => {
+  const { setup, runtime, cache, calls } = candidateWizardFixture()
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, 'cpu-candidate')
+  assert.equal(plan.hardwareAssessment.variants[0].requirements.acceptancePending, true)
+  assert.equal(plan.qualificationScope, 'hardware-test')
+  assert.deepEqual(calls, [])
+  await setup.start({ planId: plan.planId })
+  assert.deepEqual(calls, [])
+  const status = await start(setup, plan.planId)
+  assert.equal(status.state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'models'])
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id, hardwareSelection: setup.hardwareSelection }
+  assert.equal((await setup.preflight()).ready, true)
+  assert.equal(setup.catalog.qualification.passed, false)
+})
+
+test('pending normal wizard fails closed outside private-test or after resources or identity change', async () => {
+  for (const mutate of [setup => { setup.releaseChannel = 'public' },
+    setup => { setup.catalog.runtime.provenance.lockSha256 = 'b'.repeat(64) },
+    setup => { setup.hardware = async () => ({ platform: 'linux', arch: 'x64', unifiedMemory: false,
+      totalMemoryBytes: 200, availableMemoryBytes: 124 }) },
+    setup => { setup.diskFree = async () => 9 }]) {
+    const { setup, calls } = candidateWizardFixture()
+    mutate(setup)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    await start(setup, plan.planId)
+    assert.deepEqual(calls, [])
+  }
+  const { setup, runtime } = candidateWizardFixture()
+  runtime.probe = async () => ({ capabilitiesReady: false })
+  assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
+})
+
+function unifiedWizardFixture(hardwareChanges = {}) {
+  const f = candidateWizardFixture()
+  const cpu = f.setup.catalog
+  const cuda = structuredClone(cpu)
+  cuda.runtime.accelerator = 'cuda'
+  cuda.runtime.provenance.lockSha256 = 'b'.repeat(64)
+  Object.assign(cuda.qualification, { accelerator:'cuda', runtimeLockSha256:'b'.repeat(64) })
+  const cpuVariant = f.setup.hardwarePolicy.variants[0]
+  const cudaVariant = structuredClone(cpuVariant)
+  Object.assign(cudaVariant, { id:'cuda-candidate', label:'CUDA', accelerator:'cuda', priority:2 })
+  Object.assign(cudaVariant.admission, { runtimeLockSha256:'b'.repeat(64), ramBytes:150, vramBytes:100 })
+  f.setup.hardwarePolicy.variants.push(cudaVariant)
+  f.setup.primaryCatalog = cuda; f.setup.catalog = cuda; f.setup.alternativeCatalogs = [cpu]
+  const hardware = { platform:'linux', arch:'x64', unifiedMemory:false,
+    totalMemoryBytes:200, availableMemoryBytes:175,
+    cudaDevices:[{ name:'NVIDIA fixture', dedicatedMemoryBytes:125 }], ...hardwareChanges }
+  f.setup.hardware = async () => hardware
+  const probe = f.runtime.probe
+  f.runtime.probe = async (...args) => ({ ...await probe(...args), accelerator:f.runtime.value?.manifest.accelerator || 'cpu' })
+  return { ...f, cpu, cuda, hardware }
+}
+
+test('unified installer automatically selects resource-eligible CUDA or CPU without hardware', async () => {
+  for (const [hardware, accelerator] of [[{}, 'cuda'], [{ cudaDevices:[] }, 'cpu'],
+    [{ cudaDevices:undefined }, 'cpu'], [{ cudaDevices:[{ dedicatedMemoryBytes:99 }] }, 'cpu'],
+    [{ availableMemoryBytes:140 }, 'cpu']]) {
+    const { setup, calls } = unifiedWizardFixture(hardware)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, true, plan.reason)
+    assert.equal(plan.accelerator, accelerator)
+    assert.equal(plan.hardwareAssessment.selectedVariantId, `${accelerator}-candidate`)
+    assert.deepEqual(calls, [])
+    assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+    assert.equal(setup.catalog.runtime.accelerator, accelerator)
+    assert.deepEqual(calls, ['runtime', 'models'])
+  }
+})
+
+test('unified selection leaves unknown and insufficient shared resources unavailable', async () => {
+  for (const hardware of [{ availableMemoryBytes:null }, { totalMemoryBytes:null }, { availableMemoryBytes:124 }]) {
+    const { setup, calls } = unifiedWizardFixture(hardware)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+    await start(setup, plan.planId)
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('manual unified variant selects its matching catalog and invalidates prior consent', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const automatic = await setup.preflight()
+  const manual = await setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  assert.equal(manual.accelerator, 'cpu')
+  assert.equal(manual.hardwareAssessment.selectedVariantId, 'cpu-candidate')
+  assert.notEqual(manual.planId, automatic.planId)
+  assert.equal((await start(setup, automatic.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, manual.planId)).state, 'restart-required')
+})
+
+test('unified installer preserves a verified installed CPU runtime until explicit update consent', async () => {
+  const { setup, runtime, cache, calls } = unifiedWizardFixture({ cudaDevices:[] })
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId:runtime.value.id, modelsId:cache.value.id, hardwareSelection:setup.hardwareSelection }
+  const installed = runtime.value
+  calls.length = 0
+  setup.hardware = async () => ({ platform:'linux', arch:'x64', unifiedMemory:false,
+    totalMemoryBytes:200, availableMemoryBytes:175, cudaDevices:[{ dedicatedMemoryBytes:125 }] })
+  const ordinary = await setup.preflight()
+  assert.equal(ordinary.ready, true)
+  assert.equal(ordinary.accelerator, 'cpu')
+  assert.equal(ordinary.updateAvailable, true)
+  assert.equal(ordinary.runtimeTransferRequired, false)
+  assert.equal(runtime.value, installed)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.accelerator, 'cuda')
+  assert.equal(update.runtimeTransferRequired, true)
+  assert.equal(runtime.value, installed)
+  await setup.start({ planId:update.planId })
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime'])
+  assert.equal(runtime.value.manifest.accelerator, 'cuda')
+})
+
+test('reviewed catalog cannot switch during consent, active setup or pause', async () => {
+  const { setup, hardware, runtime, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  // Losing the GPU after review does not silently install a different CPU plan.
+  hardware.cudaDevices = []
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+  const cpuPlan = await setup.preflight()
+  assert.equal(cpuPlan.accelerator, 'cpu')
+  hardware.cudaDevices = [{ dedicatedMemoryBytes:125 }]
+  runtime.install = async (_value, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once:true })
+  })
+  await setup.start({ consent:true, planId:cpuPlan.planId })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal((await setup.preflight()).accelerator, 'cpu')
+  await assert.rejects(setup.setHardwareSelection({ mode:'manual', variantId:'cuda-candidate' }), /Wait for setup/)
+  await setup.pause()
+  assert.equal(setup.state.state, 'paused')
+  assert.equal((await setup.preflight()).accelerator, 'cpu')
+  await assert.rejects(setup.requestRuntimeUpdate(), /Wait for setup/)
+  await setup.stop()
+  assert.equal((await setup.preflight()).accelerator, 'cuda')
+})
+
+
+test('consent waits for a concurrent hardware preference save and rejects the previous recipe plan', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  let releaseSave
+  setup.saveHardwareSelection = async () => new Promise(resolve => { releaseSave = resolve })
+  const changed = setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  while (!releaseSave) await new Promise(resolve => setImmediate(resolve))
+  const attempt = start(setup, plan.planId)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(calls, [])
+  assert.equal(setup.operation, null)
+  releaseSave()
+  await changed
+  assert.equal((await attempt).state, 'error')
+  assert.deepEqual(calls, [])
+})
+
+test('a failed preference save restores selection and cannot authorize pending consent', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  const previous = setup.hardwareSelection
+  let rejectSave
+  setup.saveHardwareSelection = async () => new Promise((_resolve, reject) => { rejectSave = reject })
+  const changed = setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  while (!rejectSave) await new Promise(resolve => setImmediate(resolve))
+  const attempt = start(setup, plan.planId)
+  const changeRejected = assert.rejects(changed, /fixture save failed/)
+  const startRejected = assert.rejects(attempt, /fixture save failed/)
+  await new Promise(resolve => setImmediate(resolve))
+  rejectSave(new Error('fixture save failed'))
+  await Promise.all([changeRejected, startRejected])
+  assert.equal(setup.hardwareSelection, previous)
+  assert.deepEqual(calls, [])
+})
+
+async function installedUnifiedCuda() {
+  const f = unifiedWizardFixture()
+  await start(f.setup, (await f.setup.preflight()).planId)
+  f.setup.loaded = { runtimeId:f.runtime.value.id, modelsId:f.cache.value.id, hardwareSelection:f.setup.hardwareSelection }
+  f.calls.length = 0
+  const preferences = []
+  f.setup.saveHardwareSelection = async value => preferences.push(structuredClone(value))
+  return { ...f, preferences }
+}
+
+test('installed CUDA rejects cross-recipe manual CPU without changing readiness or preferences', async () => {
+  const { setup, runtime, calls, preferences } = await installedUnifiedCuda()
+  const original = runtime.value, effective = setup.hardwareSelection
+  const plan = await setup.preflight()
+  const cpuOption = plan.hardwareAssessment.variants.find(variant => variant.id === 'cpu-candidate')
+  assert.equal(cpuOption.supported, false)
+  assert.equal(cpuOption.status, 'update-required')
+  assert.match(cpuOption.reason, /Choose Automatic and review the runtime update/)
+  await assert.rejects(setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' }), /different installed processing recipe/)
+  setup.cancel()
+  assert.equal(setup.hardwareSelection, effective)
+  assert.equal((await setup.preflight()).ready, true)
+  assert.equal(runtime.value, original)
+  assert.deepEqual(preferences, [])
+  assert.deepEqual(calls, [])
+})
+
+test('automatic CPU resource fallback updates an installed CUDA recipe through normal consent', async () => {
+  const { setup, runtime, hardware, calls } = await installedUnifiedCuda()
+  const original = runtime.value
+  hardware.cudaDevices = []
+  const ordinary = await setup.preflight()
+  assert.equal(ordinary.ready, true)
+  assert.equal(ordinary.accelerator, 'cuda')
+  assert.equal(ordinary.updateAvailable, true)
+  assert.equal(runtime.value, original)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.accelerator, 'cpu')
+  assert.equal(update.runtimeTransferRequired, true)
+  await setup.start({ planId:update.planId })
+  assert.deepEqual(calls, [])
+  assert.equal(runtime.value, original)
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.equal(runtime.value.manifest.accelerator, 'cpu')
+  assert.equal(setup.hardwareSelection.mode, 'automatic')
+  assert.deepEqual(calls, ['runtime'])
 })

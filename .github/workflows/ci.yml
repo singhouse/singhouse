@@ -32,11 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Runtime activation, interruption, and upstream model cache
@@ -44,6 +44,8 @@ jobs:
       - name: Locked processing pack fixtures
         run: |
           python -m unittest discover -s desktop/test -p test_processing_pack.py
+          python -m unittest discover -s desktop/test -p test_processing_recipe.py
+          python -m unittest discover -s desktop/test -p test_uv_backend.py
           python -m unittest discover -s desktop/test -p test_notices.py
       - name: Desktop backend isolation and readiness attestation
         run: python -m unittest discover -s desktop -p test_backend.py
@@ -58,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Test neutrality exemptions
         run: python3 tools/test_core_neutrality.py
@@ -84,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Assert no tracked file is matched by an ignore rule
         run: |
@@ -140,9 +142,9 @@ jobs:
         # testing only one lets the declared floor quietly become a fiction.
         python-version: ['3.12', '3.14']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -186,9 +188,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -251,13 +253,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm

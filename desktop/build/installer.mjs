@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
-import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY } from './processing_catalog_gate.mjs'
+import { PACKAGED_CATALOG_NAME, PACKAGED_CPU_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName, stageProcessingArtifacts } from './processing_catalog_gate.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const icons = resolve(desktop, 'build/icons')
@@ -23,16 +23,26 @@ const { BRAND_INSTALLED_NAME } = await import(pathToFileURL(resolve(desktop, '..
 const signedRelease = process.argv.includes('--signed-release')
 const manualAzureCli = process.argv.includes('--azure-cli-user')
 const azureOidc = process.argv.includes('--azure-oidc')
+const processingAccelerator = processingAcceleratorFromArgs(process.argv, process.env)
+if (processingAccelerator !== undefined) catalogSourceName(manifest, processingAccelerator)
 if (manifest.appVersion !== pkg.version || !existsSync(resolve(native, 'backend.py'))) {
   throw new Error('Assemble a matching native runtime before creating an installer')
 }
 if (assembly.schema !== 1 || assembly.kind !== 'singhouse-assembly' || !['core', 'premium'].includes(assembly.edition)) throw new Error('Native assembly descriptor is invalid')
 if (assembly.edition === 'premium' ? !/^[0-9a-f]{64}$/.test(assembly.pairedCoreReleaseId || '') : assembly.pairedCoreReleaseId !== undefined) throw new Error('Native assembly pairing is invalid')
 if (releasePolicy.edition !== assembly.edition) throw new Error('Release policy edition must exactly match the native assembly edition')
-for (const policy of ['models.json', 'processing-locks.json']) {
+for (const policy of ['models.json', 'processing-locks.json', 'hardware-policy.json']) {
   if (!readFileSync(resolve(native, policy)).equals(readFileSync(resolve(desktop, policy)))) {
     throw new Error(`Reassemble the native runtime after changing ${policy}`)
   }
+}
+// Optional memory evidence is native-inventory owned, beside backend.py.
+const memoryName = 'processing-memory.json'
+const memorySource = resolve(desktop, 'processing-memory', `${manifest.platform}-${manifest.arch}.json`)
+if (existsSync(resolve(native, memoryName)) !== existsSync(memorySource)
+    || existsSync(resolve(native, memoryName))
+      && !readFileSync(resolve(native, memoryName)).equals(readFileSync(memorySource))) {
+  throw new Error('Reassemble the native runtime after changing processing-memory.json')
 }
 // The processing catalog is never part of the static file list: a stray
 // desktop/processing-catalog.json or the per-target desktop/processing-catalogs/
@@ -41,30 +51,47 @@ for (const policy of ['models.json', 'processing-locks.json']) {
 // directory (never the tracked source tree, which packaging requires clean) and
 // added as one FileSet to the application build. Packaging then re-reads the
 // produced app.asar and compares digests.
-export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256 } = {}) {
+export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256, artifactsDirectory, processingArtifacts = [], alternativeCatalogBytes = [] } = {}) {
   if (mode === PLAYBACK_ONLY) {
     if (catalogBytes !== null && catalogBytes !== undefined) throw new Error('Playback-only packaging cannot stage a processing catalog')
-    return { files: [], cleanup: async () => {}, label: null }
+    if (processingArtifacts.length) throw new Error('Playback-only packaging cannot stage processing artifacts')
+    if (alternativeCatalogBytes.length) throw new Error('Playback-only packaging cannot stage alternative processing catalogs')
+    return { files: [], extraResources: [], cleanup: async () => {}, label: null }
   }
   if (mode !== PROCESSING_READY || !Buffer.isBuffer(catalogBytes)) throw new Error('Processing-ready packaging requires the validated catalog bytes')
   const digest = createHash('sha256').update(catalogBytes).digest('hex')
   if (digest !== catalogSha256) throw new Error('Staged processing catalog differs from the validated source catalog')
+  if (alternativeCatalogBytes.length > 1 || alternativeCatalogBytes.some(entry => entry.name !== PACKAGED_CPU_CATALOG_NAME
+      || !Buffer.isBuffer(entry.catalogBytes) || createHash('sha256').update(entry.catalogBytes).digest('hex') !== entry.catalogSha256)) {
+    throw new Error('Staged alternative processing catalog differs from the validated source catalog')
+  }
   const directory = await mkdtemp(join(tmpdir(), 'singhouse-processing-catalog-'))
   const label = basename(directory)
   const cleanup = () => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  try { await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' }) }
+  try {
+    await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' })
+    for (const entry of alternativeCatalogBytes) await writeFile(join(directory, entry.name), entry.catalogBytes, { flag: 'wx' })
+  }
   catch (error) {
     try { await cleanup() } catch (cleanupError) { warnStagingCleanup(label, cleanupError, true) }
     throw error
   }
-  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], cleanup, label }
+  let artifacts
+  try { artifacts = await stageProcessingArtifacts({ mode, directory: artifactsDirectory, inventory: processingArtifacts }) }
+  catch (error) { await cleanup(); throw error }
+  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME, ...alternativeCatalogBytes.map(entry => entry.name)] }], extraResources: artifacts.extraResources,
+    cleanup: async () => {
+      const results = await Promise.allSettled([cleanup(), artifacts.cleanup()])
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+    }, label }
 }
 
 // The staged copy holds only the already-validated catalog, so a directory
 // that cannot be removed (for example, briefly locked on Windows) is reported
 // rather than failing a build. Only the temporary directory's name is logged.
 function warnStagingCleanup(label, error, afterFailure, warn = console.warn) {
-  warn(`Could not remove the temporary processing catalog staging directory ${label}${afterFailure ? ' after a failed build' : ''} (${error?.code || 'error'}); it holds only the packaged catalog and may be deleted manually.`)
+  warn(`Could not remove the temporary processing catalog staging directory ${label}${afterFailure ? ' after a failed build' : ''} (${error?.code || 'error'}); temporary processing catalog or artifact inputs may be deleted manually.`)
 }
 
 // Runs the application build with the staged catalog, then always removes the
@@ -84,13 +111,13 @@ export default {
   productName: BRAND_INSTALLED_NAME,
   executableName: BRAND_INSTALLED_NAME,
   directories: { app: desktop, output: resolve(desktop, 'artifacts') },
-  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'windows_signing.mjs', 'macos_signing.mjs'],
+  files: ['package.json', 'main.mjs', 'preload.cjs', 'policy.mjs', 'lifecycle.mjs', 'runtime_manager.mjs', 'processing_probe.py', 'heart_setup.mjs', 'onboarding_setup.mjs', 'onboarding_state.mjs', 'export_files.mjs', 'setup_relaunch.mjs', 'lyrics_lookup.mjs', 'hardware_inventory.mjs', 'setup_catalog.mjs', 'modal_credentials.mjs', 'modal_connection.mjs', 'startup.mjs', 'startup-logo.svg', 'models.json', 'processing-locks.json', 'release.mjs', 'update_manager.mjs', 'bootstrap.mjs', 'recovery_launcher.mjs', 'recovery_cli.mjs', 'application_inventory.mjs', 'application_inventory_worker.mjs', 'windows_signing.mjs', 'macos_signing.mjs', 'uv_runtime_manager.mjs', 'private_measurement.mjs', 'processing_recipe.mjs', 'hardware_policy.mjs', 'hardware-policy.json'],
   extraResources: [{ from: native, to: 'native', filter: ['**/*'] }, { from: releasePolicyPath, to: 'release.json' }],
   asar: true,
   npmRebuild: false,
   // Builds are private test artifacts; publication is a separate operation.
   publish: null,
-  artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
+  artifactName: '${productName}-${version}-${os}-${arch}' + processingArtifactSuffix(processingAccelerator) + '.${ext}',
   linux: {
     extraResources: [{ from: appImageNoticesDirectory, to: 'third-party/appimage', filter: ['**/*'] }],
     target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true,
@@ -113,7 +140,8 @@ export default {
   // use the ZIP extractor and disable the differential 7z package path.
   nsis: {
     installerIcon: resolve(icons, 'singhouse.ico'),
-    uninstallerIcon: resolve(icons, 'singhouse.ico'),
+    // MUI_UNICON already inherits installerIcon. An explicit uninstallerIcon
+    // adds an unmodeled installed file after the release receipt is generated.
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,

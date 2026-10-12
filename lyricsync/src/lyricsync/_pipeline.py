@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from lyricsync._config import PipelineConfig
 from lyricsync._types import (
@@ -14,6 +14,7 @@ from lyricsync._types import (
     TranscriptionResult,
 )
 from lyricsync.alignment.anchor_gap import AnchorGapAligner
+from lyricsync.alignment.ctc_aligner import AcousticAligner, apply_acoustic_alignment
 from lyricsync.alignment.lrc import parse_lrc
 from lyricsync.alignment.lrc_anchored import LrcAnchoredAligner
 from lyricsync.alignment.needleman_wunsch import NeedlemanWunschAligner
@@ -35,27 +36,20 @@ class SyncPipeline:
         self,
         transcriber: Transcriber,
         config: PipelineConfig | None = None,
-        correction_progress_fn=None,
+        acoustic_aligner: AcousticAligner | None = None,
     ):
         self.transcriber = transcriber
         self.config = config or PipelineConfig()
-        corrector = None
-        if self.config.correction.enabled and self.config.correction.base_url:
-            from lyricsync.correction import RegionCorrector
-            corrector = RegionCorrector(
-                self.config.correction, progress_fn=correction_progress_fn,
-            )
+        self.acoustic_aligner = acoustic_aligner
         self._nw_aligner = NeedlemanWunschAligner(
             match_config=self.config.matching,
             post_config=self.config.postprocess,
-            corrector=corrector,
         )
         self._anchor_gap_aligner = AnchorGapAligner(
             match_config=self.config.matching,
             post_config=self.config.postprocess,
             min_anchor_length=self.config.anchor_gap_min_length,
             gap_handler_chain=self.config.gap_handler_chain,
-            corrector=corrector,
         )
         self._lrc_aligner = LrcAnchoredAligner(
             match_config=self.config.matching,
@@ -69,8 +63,13 @@ class SyncPipeline:
         plain_lyrics: Optional[str] = None,
         synced_lyrics: Optional[str] = None,
         language: Optional[str] = None,
+        extra_audio_paths: Optional[Sequence[str]] = None,
     ) -> Optional[SyncResult]:
-        """Full pipeline: transcribe -> extract words -> align -> sync result."""
+        """Full pipeline: transcribe -> extract words -> align -> sync result.
+
+        ``extra_audio_paths`` (e.g. a backing-vocal stem) are summed with
+        ``audio_path`` for the acoustic re-timing stage only.
+        """
         if not Path(audio_path).exists():
             logger.warning("Audio file not found: %s", audio_path)
             return None
@@ -94,6 +93,7 @@ class SyncPipeline:
         result = self._align(whisper_words, plain_lyrics, synced_lyrics, transcription)
         if result is not None:
             result.metadata.extra["starts_trimmed_to_onset"] = n_trimmed
+            self._maybe_acoustic_align(result, audio_path, extra_audio_paths)
         return result
 
     def align_only(
@@ -102,13 +102,15 @@ class SyncPipeline:
         plain_lyrics: Optional[str] = None,
         synced_lyrics: Optional[str] = None,
         audio_path: Optional[str] = None,
+        extra_audio_paths: Optional[Sequence[str]] = None,
     ) -> Optional[SyncResult]:
         """Align pre-computed transcription to reference lyrics.
 
         ``audio_path`` is optional: when the original audio is available the
         onset-trim pass runs against it, correcting Whisper word starts that
         sit in silence (cached transcriptions store the raw timestamps, so
-        the trim re-applies on every realign).
+        the trim re-applies on every realign). The acoustic re-timing stage
+        also needs it; ``extra_audio_paths`` are summed with it there.
         """
         whisper_result, n_trimmed = self._maybe_trim_starts(whisper_result, audio_path)
 
@@ -120,7 +122,26 @@ class SyncPipeline:
         result = self._align(whisper_words, plain_lyrics, synced_lyrics, whisper_result)
         if result is not None:
             result.metadata.extra["starts_trimmed_to_onset"] = n_trimmed
+            self._maybe_acoustic_align(result, audio_path, extra_audio_paths)
         return result
+
+    def _maybe_acoustic_align(
+        self,
+        result: SyncResult,
+        audio_path: Optional[str],
+        extra_audio_paths: Optional[Sequence[str]],
+    ) -> None:
+        """Re-time the final result acoustically when enabled; never fails the sync."""
+        if not self.config.acoustic_alignment or self.acoustic_aligner is None:
+            return
+        paths = [p for p in [audio_path, *(extra_audio_paths or [])] if p]
+        apply_acoustic_alignment(
+            result, self.acoustic_aligner, paths,
+            start_shift=self.config.acoustic_start_shift,
+            join_gap=self.config.acoustic_join_gap,
+            tail_extend=self.config.acoustic_tail_extend,
+            flag_threshold=self.config.acoustic_flag_threshold,
+        )
 
     def _maybe_trim_starts(
         self,
@@ -175,14 +196,8 @@ class SyncPipeline:
                     len(whisper_words), len(ref_lines),
                     "anchor-gap" if self.config.use_anchor_gap_alignment else "needleman-wunsch",
                 )
-                # Transcription segments are VAD segments when VAD is on —
-                # phrase-onset evidence for the correction pass.
-                vad_segments = [
-                    (s.start, s.end) for s in transcription.segments
-                ]
                 result = aligner.align(
                     whisper_words, PlainLyricsReference(lines=ref_lines),
-                    vad_segments=vad_segments,
                 )
                 self._annotate_metadata(result, transcription)
                 return result

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { ACTIVE_COLOR, ACTIVE_BORDER } from './colors.mjs'
 // Word-sync adapter: normalizes word-sync lyrics JSON (v1 or v2) into the
 // stage model consumed by the renderer core.
 //
@@ -41,9 +42,7 @@ const LINE_MARGIN_X = 40
 // compress it — see regionCenter.
 const REGION_GUTTER = 20
 
-const ACTIVE_COLOR = '#ffdd66'
 const INACTIVE_COLOR = '#ffffff'
-const ACTIVE_BORDER = '#332200'
 const INACTIVE_BORDER = '#222222'
 
 // One input token -> one word (array of syllables), or null for fillers and

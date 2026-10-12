@@ -98,7 +98,7 @@ No processing catalog qualification is created or bypassed.
 Run only when the runtime installation, upstream model retrieval and local
 inference are authorized. The existing advanced route retrieves models from
 upstream; `--download-models` is mandatory and explicitly consents to this
-multi-gigabyte transfer. It does not enable Modal or external correction.
+multi-gigabyte transfer. It does not enable Modal or external paging.
 A combined offline folder picker is not exposed by that application route;
 `--model-folder` is rejected rather than copying cache activation pointers.
 
@@ -151,8 +151,7 @@ file hashes, installation and processing wall
 times, job phase transitions, readiness, output hashes/format/decode checks,
 and transcription count/timing checks without copying transcript text. The
 harness strips inherited service configuration, requires external lyric lookup
-to be off, verifies Modal is unselected, and requests both external correction
-and paging off. The ingest API selects Heart internally; output metadata must
+to be off, verifies Modal is unselected, and requests external paging off. The ingest API selects Heart internally; output metadata must
 confirm Heart. No cloud deployment or cloud inference is performed.
 
 The default overall deadline is one hour, configurable from 60 to 14,400
@@ -167,3 +166,36 @@ criteria, listening quality, representative RAM/VRAM minimums, clean-machine
 compatibility, physical audio/display behavior or complete release
 qualification. Record those separately; never turn this smoke result into an
 unsupported catalog attestation.
+
+## Private local acceptance supervisor
+
+`local_acceptance.py` supervises an explicitly prepared native **private-test**
+candidate and durable test profile. It does not install dependencies or models.
+Supply the selected processing/model directories and full identities, plus the
+actual successful processing attestation JSON produced by the parent probe:
+
+```sh
+python desktop/qualification/local_acceptance.py \
+  --native /path/to/candidate/native --profile /path/to/private-test-profile \
+  --processing /path/to/selected-processing --processing-id FULL_PROCESSING_ID \
+  --processing-probe /path/to/actual-attestation.json \
+  --models /path/to/selected-models --models-id FULL_MODEL_ID \
+  --evidence /path/to/private-evidence.json --open-browser
+```
+
+The supervisor retains the backend stdin ownership pipe, verifies readiness
+identity and the unqualified measurement marker, and authenticates through
+`POST /api/auth/gate`. A one-use loopback browser handoff transfers the resulting
+HttpOnly session cookie and redirects to the backend. Without `--open-browser`,
+the private handoff URL is shown only on an interactive terminal; do not share
+or record it. Launch passwords, control tokens, cookies, backend output, media
+names, and paths are excluded from evidence. Backend output is intentionally
+not logged. Ctrl-C closes the owned backend; the durable profile remains.
+
+Evidence contains candidate hashes/identities, timestamped aggregate job counts,
+and free profile disk bytes. It is always marked **unqualified private local
+measurement**. It does not establish per-job success, process/GPU peak memory,
+audio quality, clean-machine suitability, or release resource recommendations.
+Retain separate explicitly consented observations for those checks. Use a
+separate browser profile for the private test; loopback cookies are host scoped
+and can replace another local application's cookie with the same name.

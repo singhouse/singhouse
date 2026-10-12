@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Modal-hosted OpenAI-compatible LLM endpoint for lyric correction.
+"""Modal-hosted OpenAI-compatible LLM endpoint for lyric page grouping.
 
 Serves the official Qwen3.6-35B-A3B FP8 checkpoint on an H100 through vLLM.
 The lyricsync correction client speaks OpenAI chat completions, so selecting

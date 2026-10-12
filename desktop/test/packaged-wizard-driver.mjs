@@ -14,6 +14,7 @@ import { isIP } from 'node:net'
 import { join } from 'node:path'
 // The store's own naming rule, so these paths cannot drift from it.
 import { runtimeDirectoryName } from '../runtime_manager.mjs'
+import { qualificationScopeError, qualificationStatusMatches } from '../setup_catalog.mjs'
 
 export const LOCAL_MODEL_IDS = Object.freeze(['heart-transcriptor', 'demucs-mdx-extra', 'karaoke-roformer'])
 export const RUNTIME_COMPONENT_LABEL = 'Local processing runtime'
@@ -131,15 +132,21 @@ export function catalogLimitations(summary) {
   }
   const scope = summary.qualification.scope
   if (scope === undefined) limitations.push('The packaged catalog declares no qualification scope; it is not marked as full qualification')
+  else if (scope === 'hardware-test') limitations.push('The packaged runtime is an unqualified hardware-test candidate; real-song processing and release qualification have not passed')
   else if (scope !== 'full') limitations.push(`The packaged catalog qualification scope is ${JSON.stringify(scope)}, not full`)
   return limitations
 }
 
-export function assertCatalogLock(summary, expectedLock, host) {
+export function assertCatalogLock(summary, expectedLock, host, releaseChannel) {
   assert.match(expectedLock, /^[a-f0-9]{64}$/u, 'Expected runtime lock must be 64 lowercase hex characters')
   assert.equal(summary.runtimeLockSha256, expectedLock, 'Packaged catalog runtime lock differs from the expected lock')
   assert.equal(summary.qualification.runtimeLockSha256, expectedLock, 'Packaged catalog qualification is bound to a different lock')
-  assert.equal(summary.qualification.passed, true, 'Packaged catalog qualification is not marked passed')
+  if (summary.qualification.scope === 'hardware-test') {
+    assert.equal(qualificationScopeError('hardware-test', releaseChannel), null, 'Hardware-test catalog requires the packaged private-test release channel')
+    assert.equal(qualificationStatusMatches(summary.qualification), true, 'Hardware-test catalog must explicitly record passed: false')
+  } else {
+    assert.equal(summary.qualification.passed, true, 'Packaged catalog qualification is not marked passed')
+  }
   for (const key of ['platform', 'arch', 'accelerator']) {
     assert.equal(summary.qualification[key], summary.target[key], `Packaged catalog qualification ${key} differs from its runtime`)
   }
@@ -164,8 +171,8 @@ export function modelsManifestFromPolicy(policy) {
 // planId as onboarding_setup.mjs preflight() derives it for a plan that still
 // needs installation: the identity of [runtime, models manifest, offered
 // components, model source mode, offline folder, memory requirements].
-export function derivePlanId({ runtime, modelsManifest, components, modelSource, offlineDirectory = null, memoryRequirements }) {
-  return jsonIdentity([runtime, modelsManifest, components, modelSource, offlineDirectory, memoryRequirements])
+export function derivePlanId({ runtime, modelsManifest, components, modelSource, offlineDirectory = null, memoryRequirements, hardwareSelection }) {
+  return jsonIdentity([runtime, modelsManifest, components, modelSource, offlineDirectory, memoryRequirements, ...(hardwareSelection ? [hardwareSelection] : [])])
 }
 
 // Binds the consented plan to the shipped catalog runtime and the packaged
@@ -175,7 +182,7 @@ export function assertPlanIdentity(plan, { catalogRuntime, policy }) {
   const modelsManifest = modelsManifestFromPolicy(policy)
   assert.equal(plan.modelSource, 'upstream', 'Plan identity check requires upstream model sources')
   const expected = derivePlanId({ runtime: catalogRuntime, modelsManifest, components: plan.components, modelSource: plan.modelSource,
-    offlineDirectory: null, memoryRequirements: plan.memoryRequirements })
+    offlineDirectory: null, memoryRequirements: plan.memoryRequirements, hardwareSelection: plan.hardwareSelection })
   assert.equal(plan.planId, expected, 'Plan identity does not match the packaged catalog runtime and model policy')
   return { verified: true, planId: expected, runtimeId: jsonIdentity(catalogRuntime), modelsManifestId: jsonIdentity(modelsManifest),
     takenFromPlan: ['components', 'memoryRequirements'] }
@@ -226,8 +233,21 @@ export function assertWizardPlan(plan, summary, expectedLock) {
 // runtime) must also name that installed size right after the exact
 // retrieval size, in the renderer's size format.
 export const formatSize = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(bytes / 1024 ** 2)} MiB`
-export function assertConsentText(text, plan, formatted) {
+// The warning a hardware-test catalog's consent screen must show, and the
+// device requirement it states exactly when the plan's runtime is CUDA.
+export const HARDWARE_TEST_WARNING = 'Experimental hardware test: local processing in this build has not passed a real-song test or release qualification.'
+export const NVIDIA_REQUIREMENT = 'Requires an NVIDIA GPU and a current driver.'
+// `catalog` is the packaged catalog summary. A hardware-test catalog must reach
+// consent with that scope on the plan and its warning visible on the screen.
+export function assertConsentText(text, plan, formatted, catalog) {
   const normalized = normalizeText(text)
+  if (catalog?.qualification?.scope === 'hardware-test') {
+    assert.equal(plan.qualificationScope, 'hardware-test', 'Setup plan does not carry the catalog\'s hardware-test scope')
+    assert.ok(normalized.includes(HARDWARE_TEST_WARNING), 'Consent screen omits the hardware-test warning')
+    assert.equal(plan.accelerator, catalog.target?.accelerator, 'Setup plan accelerator differs from the catalog runtime')
+    if (plan.accelerator === 'cuda') assert.ok(normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen omits the NVIDIA GPU requirement')
+    else assert.ok(!normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen states an NVIDIA GPU requirement for a non-CUDA runtime')
+  }
   for (const [index, component] of plan.components.entries()) {
     assert.ok(normalized.includes(component.label), `Consent screen omits ${component.label}`)
     assert.ok(normalized.includes(`(${formatted[index]} bytes)`), `Consent screen omits the exact size of ${component.label}`)
@@ -346,7 +366,7 @@ const requestPath = url => url.split('?')[0]
 // A retry is classified only from the source server's request log. Polling
 // observations are recorded as supplementary context, never as proof.
 // `path` is the URL path of the interrupted runtime file; `after` is the
-// ISO time of the interruption (cancel click or injected failure); `size` is
+// ISO time of the interruption (pause click or injected failure); `size` is
 // that file's catalog size, when known. A `resumed` classification requires
 // the first request after the interruption to carry `Range: bytes=N-` (N > 0),
 // receive 206 and be logged `complete`, its served byte count to equal
@@ -609,7 +629,7 @@ export function assertPostRestart({ settled, readiness, installed, installedMode
 }
 
 // Setup has started once status leaves `idle` and differs from what it was
-// before the install click (a retry starts from `cancelled` or `error`).
+// before the install click (a retry starts from `paused`, `cancelled` or `error`).
 export function setupStarted(before, status) {
   if (!status || status.state === 'idle') return false
   if (status.state === 'running') return true
@@ -719,6 +739,9 @@ export async function chooseLocalAndContinue(page, { timeoutMs }) {
   if (await local.getAttribute('aria-pressed') !== 'true') await local.click()
   assert.equal(await local.getAttribute('aria-pressed'), 'true', 'Local processing choice was not selected')
   await control(page, 'onboarding-continue').click()
+  await waitForStep(page, 'lyrics', { timeoutMs })
+  await waitForIdle(page, { timeoutMs })
+  await control(page, 'onboarding-lyrics-continue').click()
   await waitForStep(page, 'consent', { timeoutMs })
   await waitForIdle(page, { timeoutMs })
 }
@@ -726,10 +749,13 @@ export async function chooseLocalAndContinue(page, { timeoutMs }) {
 export async function readPlan(page) { return page.evaluate(() => window.karaokeDesktop.preflightSetup()) }
 export async function readStatus(page) { return page.evaluate(() => window.karaokeDesktop.getSetupStatus()) }
 
-export async function consentSnapshot(page, plan) {
+export async function consentSnapshot(page, plan, catalog) {
+  assert.ok(catalog?.qualification, 'Consent snapshot requires the packaged catalog summary')
+  const notices = control(page, 'onboarding-installation-notices')
+  if (await notices.getAttribute('open') === null) await notices.locator('summary').click()
   const text = await onboardingDialog(page).innerText()
   const formatted = await page.evaluate(values => values.map(value => Number(value).toLocaleString()), plan.components.map(component => component.bytes))
-  assertConsentText(text, plan, formatted)
+  assertConsentText(text, plan, formatted, catalog)
   return { text: normalizeText(text), sha256: sha256(Buffer.from(normalizeText(text))) }
 }
 
@@ -753,10 +779,14 @@ export async function waitForSetupStart(read, { before, timeoutMs, interval = 25
   throw new Error(`Setup did not start within ${Math.round(timeoutMs / 1000)} s of the install click (status ${status?.state ?? 'missing'})`)
 }
 
-export async function cancelFromUi(page) {
-  const details = control(page, 'onboarding-setup-controls')
-  if (await details.getAttribute('open') === null) await details.locator('summary').click()
-  await control(page, 'onboarding-cancel').click()
+// The progress card's Pause control switches to Resume in place.
+export async function pauseFromUi(page) {
+  await control(page, 'onboarding-pause').click()
+}
+
+export async function resumeFromUi(page, { timeoutMs }) {
+  await waitForIdle(page, { timeoutMs })
+  await control(page, 'onboarding-pause').click()
 }
 
 export async function retryFromUi(page, { timeoutMs }) {

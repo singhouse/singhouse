@@ -89,16 +89,24 @@ def main(argv=None):
         raise ValueError("Invalid managed separation model filename")
     disable_mps_fallback()
     sys.addaudithook(deny_network)
-    import torch
-    import onnxruntime as ort
-    # Install the strict class before architecture modules import ORT sessions.
-    ort.InferenceSession = strict_session_type(args.device, ort)
-    from audio_separator.separator import Separator
-    selected = separator_type(args.device, torch, ort, Separator)(
-        model_file_dir=args.model_file_dir, output_dir=args.output_dir,
-        output_format=args.output_format)
-    selected.load_model(model_filename=args.model_filename)
-    selected.separate(args.audio)
+    from karaoke_backend.workers.memory_admission import admit, guarded, ROFORMER_PARAMETERS
+    model = "karaoke-roformer" if args.model_filename == "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt" else args.model_filename
+    bounded = guarded(args.device)
+    with admit(model, args.device, [args.audio]) as device:
+        import torch
+        import onnxruntime as ort
+        # Install the strict class before architecture modules import ORT sessions.
+        ort.InferenceSession = strict_session_type(device, ort)
+        from audio_separator.separator import Separator
+        # The bounded profile is part of the measured CUDA policy only.
+        # Unguarded CPU and Metal runtimes keep audio-separator defaults.
+        profile = (dict(use_soundfile=True, use_autocast=device == "cuda",
+                        mdxc_params=dict(ROFORMER_PARAMETERS)) if bounded else {})
+        selected = separator_type(device, torch, ort, Separator)(
+            model_file_dir=args.model_file_dir, output_dir=args.output_dir,
+            output_format=args.output_format, **profile)
+        selected.load_model(model_filename=args.model_filename)
+        selected.separate(args.audio)
 
 
 if __name__ == "__main__":

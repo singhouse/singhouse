@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from karaoke_backend.api.auth import require_user
 from karaoke_backend.api.identity import Identity
 from karaoke_backend.database import get_db
-from karaoke_backend import stem_storage
+from karaoke_backend import stem_layout, stem_storage
 from lyricsync import (
     MatchConfig,
     PipelineConfig,
@@ -134,7 +134,9 @@ class VadConfigIn(BaseModel):
     onset_threshold: float = Field(0.03, ge=0, le=1)
     offset_threshold: float = Field(0.02, ge=0, le=1)
     min_silence_duration: float = Field(1.5, ge=0)
-    max_segment_duration: float = Field(30.0, gt=0)
+    # None = auto: the transcriber sizes slices to the device (see
+    # lyricsync VadConfig.max_segment_duration). A number is a fixed cap.
+    max_segment_duration: Optional[float] = Field(None, gt=0)
 
 
 class MatchConfigIn(BaseModel):
@@ -177,17 +179,7 @@ class TranscribeRequest(BaseModel):
     reference_mode: ReferenceMode = "none"
     pipeline_config: Optional[PipelineConfigIn] = None
     activate: bool = True
-    # The two LLM stages the upload form offers are also explicit choices when
-    # redoing a song's lyrics. Both default off: they reach the operator's own
-    # configured endpoint, and a re-sync that quietly started calling one
-    # would be a surprise.
-    #
-    # Correction runs inside the aligner, so it is honoured on BOTH routes,
-    # but only the PLAIN-TEXT alignment path holds a corrector. A synced (LRC)
-    # reference dispatches to the LRC-anchored aligner, which has none, and an
-    # unanchored run never reaches an aligner at all — in both, asking for
-    # correction is accepted and does nothing.
-    llm_correction: bool = False
+    # Optional page grouping uses the user-configured endpoint.
     llm_paging: bool = False
 
 
@@ -413,7 +405,10 @@ async def _resolve_reference(
 
 def _vocals_path_for(song: Song) -> Path:
     stems_dir = stem_storage.active_stems_dir(song, STEMS_DIR)
-    for name in ("lead_vocals.flac", "lead_vocals.wav", "vocals.wav", "Vocals.wav"):
+    lead = stem_layout.resolve_stem(stems_dir, "lead_vocals")
+    if lead is not None:
+        return lead
+    for name in ("vocals.wav", "Vocals.wav"):
         candidate = stems_dir / name
         if candidate.exists():
             return candidate
@@ -684,7 +679,7 @@ async def transcribe(
     if body.whisper_model not in ALL_MODELS:
         raise HTTPException(400, f"Invalid model. Must be one of: {sorted(ALL_MODELS)}")
 
-    require_heart_model(body.whisper_model)
+    require_heart_model(body.whisper_model, allow_wait=True)
     song = await get_song_or_404(db, song_id, user.id)
     require_ready(song)
     vocals_path = _vocals_path_for(song)
@@ -717,7 +712,6 @@ async def transcribe(
                 body.pipeline_config.model_dump() if body.pipeline_config else None
             ),
             "activate": body.activate,
-            "llm_correction": body.llm_correction,
             "llm_paging": body.llm_paging,
         },
     )
@@ -802,7 +796,6 @@ async def realign(
                 body.pipeline_config.model_dump() if body.pipeline_config else None
             ),
             "activate": body.activate,
-            "llm_correction": body.llm_correction,
             "llm_paging": body.llm_paging,
         },
     )
@@ -847,14 +840,16 @@ async def page_set(
             f"transcription first.",
         )
 
-    # The same variable `make_correction_config` warns on, checked here rather
+    # Check endpoint configuration before queueing the standalone paging job.
     # than there: paging with no endpoint configured is a 503 the operator can
     # fix, not a job that queues and quietly declines.
-    if not os.environ.get("KARAOKE_LLM_BASE_URL", "").strip():
+    from karaoke_backend.workers.llm_client import paging_configured
+
+    if not paging_configured():
         raise HTTPException(
             503,
             "No LLM endpoint is configured on this server "
-            "(KARAOKE_LLM_BASE_URL is unset).",
+            "(check KARAOKE_LLM_BASE_URL, KARAOKE_LLM_MODEL and KARAOKE_LLM_TIMEOUT).",
         )
 
     job_id = str(uuid.uuid4())

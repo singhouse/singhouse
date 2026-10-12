@@ -14,6 +14,8 @@ from typing import Any
 from sqlalchemy import event
 from sqlalchemy.engine import Engine, URL, make_url
 
+from karaoke_backend.search import normalized_search
+
 
 def is_file_backed_sqlite(url: str | URL) -> bool:
     """Return whether ``url`` names a file-backed SQLite database."""
@@ -32,6 +34,7 @@ def configure_sqlite_connection(
     wal: bool,
 ) -> None:
     """Apply the connection-local SQLite policy used by runtime and migrations."""
+    dbapi_conn.create_function("normalized_search", -1, normalized_search, deterministic=True)
     cursor = dbapi_conn.cursor()
     try:
         cursor.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")

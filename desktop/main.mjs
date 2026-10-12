@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, session, dialog, Menu, screen, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
+import { app, BrowserWindow, session, dialog, Menu, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { statfs } from 'node:fs/promises'
+import { existsSync, readFileSync, lstatSync } from 'node:fs'
+import { realpath, statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
-import { validateShippedCatalog } from './setup_catalog.mjs'
+import { validateHardwarePolicy, assessHardwarePolicy } from './hardware_policy.mjs'
+import { channelTrustedLocks, validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
 import { checkModalConnection } from './modal_connection.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -12,17 +13,23 @@ import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
-import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, processingAttestation } from './runtime_manager.mjs'
+import { projectorBlocker, createRuntime, persistentRuntime, processingLaunchArguments, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
+import { ModelCache, launchSelection, managedStoreDirectories, processingAttestation, recheckPacks } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
-import { OnboardingSetup } from './onboarding_setup.mjs'
-import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { LyricsLookupPreference } from './lyrics_lookup.mjs'
+import { OnboardingSetup, setupCompleted } from './onboarding_setup.mjs'
+import { OnboardingState, chosenInstallRoot, onboardingPreferences, hardwareSelectionPreferences, resolveInstallRoot, restartForSetup, settleInstallLocation } from './onboarding_state.mjs'
+import { ExportPreferences, defaultExportFolder, writeExport, writeVideoExport } from './export_files.mjs'
+import { relaunchForSetup } from './setup_relaunch.mjs'
+import { UvRuntimeManager } from './uv_runtime_manager.mjs'
+import { privateMeasurementLaunch, assertPrivateMeasurementRelease, assertPrivateMeasurementRuntime, assertPrivateMeasurementMarker, privateMeasurementHandshake, privateMeasurementRuntimeOptions } from './private_measurement.mjs'
 import { createStartupSurface } from './startup.mjs'
-import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity, validateInstalledReleaseReceipt } from './release.mjs'
+import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
 import { completeActivationHandoff, completeManualRestoreHandoff, confirmRenderedFrame, DatabaseGuard, OperationGate, RecoveryStore, UpdateController, UpdateStore, describeStagedUpdate, installationBoundaryBusy, presentAndCompleteStartup } from './update_manager.mjs'
 import { managedBootstrapArguments, runRecoveryAnchor, waitForReady } from './bootstrap.mjs'
-import { ensureRecoveryAnchor, installRecoveryKit, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
-import { physicalApplicationRecords, physicalFileHash } from './application_inventory.mjs'
+import { ensureRecoveryAnchor, installRecoveryKit, readOnlyAppImageMount, readRecoveryAnchor, stableFirstInstallerExecutable, verifiedAppImageRuntime } from './recovery_launcher.mjs'
+import { assertNativeInventoryDeclared, declaredApplicationDigest, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
+import { observeReceiptApplicationOffThread } from './application_inventory_worker.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
 import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
 
@@ -31,6 +38,12 @@ const physicalFs = createRequire(import.meta.url)('original-fs')
 const desktopDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(desktopDir, '..')
 const packaged = app.isPackaged
+const privateMeasurement = privateMeasurementLaunch(process.argv, packaged)
+if (privateMeasurement.enabled) {
+  const info = lstatSync(privateMeasurement.profile)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Private resource measurement requires an existing plain test profile directory')
+  app.setPath('userData', privateMeasurement.profile)
+}
 const nativeDir = resolve(process.resourcesPath, 'native')
 const releasePolicyPath = packaged ? resolve(process.resourcesPath, 'release.json') : resolve(desktopDir, 'release.json')
 let brand = 'singhouse'
@@ -43,10 +56,13 @@ const ownsInstance = !packaged || app.requestSingleInstanceLock()
 const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userData')) : createRuntime()) : null
 if (!packaged) app.setPath('userData', runtime.electron)
 let expectedIdentity
-let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus
+let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus, processingUsage, loadedHardwareSelection
+// Where processing tools and models install; every install, repair and update opens its stores here.
+let installRoot, savedInstallLocation = null, openManagedStores
 let processingProbe
 let installation
 let processingOperation
+let packRecheck
 let heartSetup
 let onboardingSetup, onboardingState, startupSurface, modalCredentials, modalCheck, modalCheckController
 let modalLoadedFingerprint = null
@@ -58,9 +74,18 @@ if (!ownsInstance) app.quit()
 app.on('second-instance', () => { if (host) { if (host.isMinimized()) host.restore(); host.show(); host.focus() } })
 let backend, host, projector, quitting = false, shutdownComplete = false, handingOff = false
 let recoveryKitDurability = null, recoveryAnchor = null
+const startupVerification = new AbortController()
 const operationGate = new OperationGate()
+const DAMAGE_NOTICE_POLL_MS = 500
+// Setup checks (preflight verification, the model folder choice) in progress.
+let setupChecks = 0
+const setupCheck = action => async (...args) => {
+  setupChecks++
+  try { return await action(...args) } finally { setupChecks-- }
+}
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
+const closeGuard = createCloseGuard()
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function digestRecords(entries) { return hash(canonicalJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))))) }
@@ -69,9 +94,14 @@ async function installedReleaseIdentity() {
   const filesBytes = readFileSync(resolve(nativeDir, 'files.json'))
   if (hash(filesBytes) !== manifest.runtimeId) throw new Error('Installed native inventory identity mismatch')
   const files = JSON.parse(filesBytes)
-  for (const [name, expected] of Object.entries(files)) {
-    const path = resolve(nativeDir, ...name.split('/'))
-    if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+  // The managed-slot and signed macOS paths hash the native payload here. A
+  // receipt-described installation instead binds files.json to its receipt's
+  // declarations below, without reading the payload at launch.
+  const hashNativePayload = () => {
+    for (const [name, expected] of Object.entries(files)) {
+      const path = resolve(nativeDir, ...name.split('/'))
+      if (hash(readFileSync(path)) !== expected) throw new Error(`Installed native payload changed: ${name}`)
+    }
   }
   const provenance = JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8'))
   const assemblyBytes = readFileSync(resolve(nativeDir, 'assembly.json'))
@@ -86,17 +116,19 @@ async function installedReleaseIdentity() {
     platform: process.platform, resourcesPath: process.resourcesPath, applicationRoot,
   })
   if (portableBytes !== null) {
+    hashNativePayload()
     const portable = JSON.parse(portableBytes)
     const identity = assertReleaseIdentity(portable.identity)
     if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed managed release belongs to a different edition policy')
     managedReleaseSlot = true
     return identity
   }
-  const records = process.platform === 'darwin'
-    ? (() => { const bundle = resolve(process.resourcesPath, '../..'); return [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory'], ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)] })()
-    : physicalApplicationRecords(applicationRoot, physicalFs)
   const receiptPath = resolve(process.resourcesPath, 'release-receipt.json')
+  const bundle = process.platform === 'darwin' ? resolve(process.resourcesPath, '../..') : applicationRoot
+  const leading = process.platform === 'darwin' ? [[relative(applicationRoot, bundle).split(sep).join('/'), 'directory']] : []
   if (signedMarker) {
+    hashNativePayload()
+    const records = [...leading, ...physicalApplicationRecords(applicationRoot, physicalFs, bundle)]
     if (existsSync(receiptPath)) throw new Error('Signed macOS application must keep its release receipt outside the sealed bundle')
     const observed = records.map(([path, value]) => value === 'directory' ? { path, type: 'directory' }
       : value.startsWith('symlink:') ? { path, type: 'symlink', target: value.slice('symlink:'.length) }
@@ -114,29 +146,51 @@ async function installedReleaseIdentity() {
       schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes), applicationInventoryDigest: inventoryDigest,
       ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
   }
-  if (existsSync(receiptPath)) {
-    const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
-    if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
-    const identity = validateInstalledReleaseReceipt(receipt, new Map(records), { platform: process.platform, arch: process.arch })
-    if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
-    const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
-    const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
-    const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
-      : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
-    const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
-    if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
-    const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
-      sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
-      electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest: physicalFileHash(app.getAppPath(), physicalFs), frontendDigest: digestRecords(frontend),
-      backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
-      runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
-      schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
-      applicationInventoryDigest: receipt.application.inventoryDigest,
-      ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
-    if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
-    return identity
+  if (!existsSync(receiptPath)) throw new Error('Installed first-launch application lacks its release receipt')
+  const receiptBytes = readFileSync(receiptPath, 'utf8'), receipt = JSON.parse(receiptBytes)
+  if (receiptBytes !== `${canonicalJson(receipt)}\n`) throw new Error('Installed release receipt is not canonical')
+  // Content is hashed at launch only where it can change underneath the
+  // receipt. A read-only AppImage mount (kernel evidence) carries its receipt
+  // in the same immutable image, so digests come from the receipt. A writable
+  // installation is hashed in full on its first launch (or whenever its
+  // launch inventory is missing or stale); later launches compare each file's
+  // size, modification and change times, inode and device with that
+  // inventory. Every path still walks
+  // every entry's type and symlink target against the receipt.
+  const readOnly = process.platform === 'linux' && readOnlyApplicationRoot(readOnlyAppImageMount({ applicationRoot }), applicationRoot)
+  const launchInventoryPath = resolve(runtime.root, 'launch-inventory.json')
+  // The cache is bound to the canonical root, so a different installation
+  // reached through the same path never matches it.
+  const inventoryRoot = physicalFs.realpathSync.native(applicationRoot)
+  const observed = await observeReceiptApplicationOffThread({ rootDirectory: applicationRoot, current: bundle, leading, receipt,
+    target: { platform: process.platform, arch: process.arch }, readOnly, inventoryRoot,
+    launchInventory: readOnly ? null : await readLaunchInventory(launchInventoryPath) },
+    { signal: startupVerification.signal, diagnostic: event => console.info(JSON.stringify(event)) })
+  startupVerification.signal.throwIfAborted()
+  const identity = observed.identity
+  if (identity.edition !== releasePolicy.edition || identity.policyId !== releasePolicy.policyId) throw new Error('Installed release receipt belongs to a different edition policy')
+  const asarRelative = relative(applicationRoot, app.getAppPath()).split(sep).join('/')
+  const nativePrefix = `${relative(applicationRoot, nativeDir).split(sep).join('/')}/`
+  const modeled = receipt.application.files.map(record => [record.path, record.type === 'file' ? record.sha256
+    : record.type === 'directory' ? 'directory' : `symlink:${record.target}`])
+  assertNativeInventoryDeclared(files, receipt, nativePrefix)
+  const electronAppDigest = declaredApplicationDigest(receipt, asarRelative)
+  const electronRecords = modeled.filter(([name]) => name !== asarRelative && !name.startsWith(nativePrefix))
+  if (!electronRecords.length) throw new Error('Installed Electron runtime evidence is incomplete')
+  const derived = deriveReleaseIdentity({ schema: 1, appVersion: manifest.appVersion, edition: assembly.edition, policyId: releasePolicy.policyId,
+    sourceCommit: provenance.sourceCommit, electronVersion: process.versions.electron,
+    electronRuntimeDigest: digestRecords(electronRecords), electronAppDigest, frontendDigest: digestRecords(frontend),
+    backendDigest: digestRecords(backendFiles), nativeRuntimeId: manifest.runtimeId,
+    runtimeLocksDigest: hash(canonicalJson(provenance.locks)), modelPolicyDigest: files['models.json'],
+    schemaHistory: releasePolicy.schemaHistory, assemblyDigest: hash(assemblyBytes),
+    applicationInventoryDigest: receipt.application.inventoryDigest,
+    ...(assembly.pairedCoreReleaseId ? { pairedCoreReleaseId: assembly.pairedCoreReleaseId } : {}) })
+  if (derived.releaseId !== identity.releaseId) throw new Error('Installed release receipt does not match its modeled application evidence')
+  if (observed.launchInventory && !await writeLaunchInventory(launchInventoryPath, observed.launchInventory,
+    { lockPython: recoveryKitDurability?.pythonPath, durabilityHelper: recoveryKitDurability?.backendHelperPath })) {
+    console.warn('Could not record the application launch inventory; the next launch checks every file in full.')
   }
-  throw new Error('Installed first-launch application lacks its release receipt')
+  return identity
 }
 
 async function platformTrust({ root: applicationRoot, manifest }) {
@@ -194,15 +248,44 @@ async function launchBackend() {
   const python = packaged ? resolve(nativeDir, process.platform === 'win32' ? 'python/python.exe' : 'python/bin/python3') : process.env.KARAOKE_DESKTOP_PYTHON
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
+  assertPrivateMeasurementRelease(privateMeasurement.enabled, packaged, releasePolicy)
+  if (privateMeasurement.enabled && processingError) throw new Error(`Private resource measurement: ${processingError}`)
+  assertPrivateMeasurementRuntime(privateMeasurement.enabled, activeProcessing, activeModels, processingProbe)
+  if (privateMeasurement.enabled) {
+    const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
+    // Snapshot navigation preferences without asserting hardware qualification.
+    loadedHardwareSelection = hardwareSelectionPreferences((await onboardingState.read())?.hardwareSelection, policy)
+    args.push('--private-test-resource-measurement')
+  }
+  if (activeProcessing?.manifest.schema === 2 && !privateMeasurement.enabled) {
+    try {
+      const policy = validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8')))
+      const selection = hardwareSelectionPreferences((await onboardingState.read())?.hardwareSelection, policy)
+      const disk = await statfs(installRoot)
+      const assessment = assessHardwarePolicy({ policy, hardware: await collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
+        runtimeLockSha256: activeProcessing.manifest.provenance.lockSha256, accelerator: activeProcessing.manifest.accelerator,
+        variantId: selection.mode === 'manual' ? selection.variantId : undefined,
+        installedModelIds: activeModels?.manifest.models || [], diskFreeBytes: disk.bavail * disk.bsize,
+        phase: 'execution', releaseChannel: releasePolicy.channel })
+      if (assessment.status !== 'supported') throw new Error(assessment.reason)
+      const variant = assessment.variants.find(entry => entry.id === assessment.selectedVariantId)
+      if (Object.keys(variant.settings).length) throw new Error('This processing option requires settings this application does not support.')
+      args.push('--processing-variant', assessment.selectedVariantId)
+      loadedHardwareSelection = selection
+    } catch (error) {
+      await processingUsage?.release(); processingUsage = null
+      activeProcessing = null; processingProbe = null; processingError = error.message
+    }
+  }
   // Directory names may be shortened; the backend checks each manifest against the full identity.
-  if (activeProcessing) args.push('--processing', activeProcessing.directory, '--processing-id', activeProcessing.id)
-  if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
-  if (activeModels) args.push('--models', activeModels.directory, '--models-id', activeModels.id)
+  args.push(...processingLaunchArguments({ installRoot: packaged ? installRoot : null, processing: activeProcessing, probe: processingProbe, models: activeModels }))
+  if (packaged && releasePolicy) args.push('--release-channel', releasePolicy.channel)
   let privateModal = null
   if (packaged) {
     args.push('--desktop-config-stdin')
+    if ((await onboardingState.read())?.lyricsLookup?.enabled === true) args.push('--lyrics-lookup')
     const preferences = onboardingPreferences((await onboardingState.read())?.preferences)
-    if (preferences.choice === 'modal') {
+    if (!privateMeasurement.enabled && preferences.choice === 'modal') {
       try { privateModal = await modalCredentials.readForBackend() } catch { /* Playback still starts when a keyring is unavailable. */ }
     }
     modalLoadedFingerprint = privateModal ? createHash('sha256').update(JSON.stringify(privateModal)).digest('hex') : null
@@ -218,7 +301,10 @@ async function launchBackend() {
   // stdout is a private one-line credential channel. Never forward it to logs.
   backend.stderr.on('data', data => process.stderr.write(data))
   backend.once('exit', (code, signal) => {
+    const usage = processingUsage; processingUsage = null
+    usage?.release().catch(error => console.error(`Processing runtime lease could not be released: ${error.message}`))
     if (!quitting && !handingOff && host) {
+      closeGuard.release()
       dialog.showErrorBox(`${brand} backend stopped`, `The backend exited (${signal || code}). Your library is preserved. Quit and reopen ${brand} to recover.`)
       app.quit()
     }
@@ -241,7 +327,7 @@ async function launchBackend() {
       if (buffer.length > 4096) return finish(new Error('Invalid backend launch handshake'))
       const end = buffer.indexOf('\n')
       if (end < 0) return
-      try { finish(null, parseLaunch(buffer.slice(0, end), expectedIdentity)) }
+      try { finish(null, privateMeasurementHandshake(buffer.slice(0, end), expectedIdentity, privateMeasurement.enabled)) }
       catch { finish(new Error('Invalid backend launch handshake')) }
       buffer = ''
     }
@@ -296,6 +382,7 @@ async function boundaryState() {
   try { state = await releaseState() } catch { state = null }
   return { projectorOpen: Boolean(projector), audible: host?.webContents.isCurrentlyAudible() === true,
     activeJobs: state?.jobs?.nonterminal ?? null,
+    deferredJobs: state?.jobs?.deferred ?? 0,
     installing: Boolean(onboardingSetup?.operation) || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation }),
     backendReady: Boolean(host) && backend?.exitCode === null && backend?.signalCode === null }
 }
@@ -393,55 +480,134 @@ async function showUpdateRecovery() {
     detail: `Recovery point ${point.id}. Use the standalone paired recovery launcher at ${launcher}. This action does not modify the application or database.` })
 }
 
+// The host renderer can hold unsaved edits. While it has armed this guard,
+// closing the host window or quitting asks the renderer first; it shows its
+// own prompt and answers over a fixed channel. Unarmed, close proceeds at once.
+function createCloseGuard() {
+  let armed = false, pending = null, revision = 0
+  const settle = proceed => {
+    const current = pending
+    pending = null
+    current?.resolve(proceed)
+  }
+  return {
+    get armed() { return armed },
+    get revision() { return revision },
+    arm(value) {
+      revision++
+      armed = value === true
+      if (!armed) settle(true)
+    },
+    // Resolves true to proceed with closing, false to keep the window open.
+    request(contents) {
+      if (!armed || !contents || contents.isDestroyed()) return Promise.resolve(true)
+      if (!pending) {
+        let resolveDecision
+        pending = { promise: new Promise(resolveRequest => { resolveDecision = resolveRequest }), resolve: resolveDecision }
+        contents.send('window:close-requested')
+      }
+      return pending.promise
+    },
+    decide(decision) {
+      if (!pending) return false
+      if (decision === 'proceed') armed = false
+      settle(decision === 'proceed')
+      return true
+    },
+    // The renderer is gone or cannot answer; nothing is left to ask.
+    release() {
+      revision++
+      armed = false
+      settle(true)
+    },
+    // The renderer was replaced: its edits and any open prompt are gone, so a
+    // pending request is cancelled rather than approved.
+    reset() {
+      revision++
+      armed = false
+      settle(false)
+    },
+  }
+}
+
+function watchCloseGuardRenderer(win, guard) {
+  // A full page load replaces the renderer that armed the guard.
+  win.webContents.on('did-navigate', () => guard.reset())
+  // A hung renderer cannot answer; closing must still complete.
+  win.on('unresponsive', () => guard.release())
+}
+
+function gateHostClose(win, guard) {
+  let approved = false
+  win.on('close', event => {
+    if (approved || !guard.armed) return
+    event.preventDefault()
+    void guard.request(win.webContents).then(proceed => {
+      if (!proceed || win.isDestroyed()) return
+      approved = true
+      win.close()
+    })
+  })
+}
+
+// Resolve unsaved edits before quiescing. Approval belongs to this renderer
+// state only: a new edit or navigation during asynchronous restart preparation
+// cancels the restart and lets restartForSetup resume the backend.
+async function guardedSetupRestart({ guard, win, app, activity, quiesce, resume, isClosing, relaunch = relaunchForSetup }) {
+  const wasArmed = guard.armed
+  if (!await guard.request(win?.webContents)) return { restarting: false }
+  const revision = guard.revision
+  const assertCurrent = () => {
+    if (guard.armed || guard.revision !== revision || !win || win.isDestroyed()
+        || win.webContents.isDestroyed() || isClosing()) {
+      throw new Error('The application changed while preparing to restart. Review unsaved edits and try again.')
+    }
+  }
+  try {
+    assertCurrent()
+    return await restartForSetup({ activity, quiesce: () => { assertCurrent(); return quiesce() }, resume,
+      restart: () => {
+        assertCurrent()
+        return relaunch({
+          relaunch: options => { assertCurrent(); return app.relaunch(options) },
+          // AppImage preparation awaits its helper before calling quit. Throwing
+          // here cancels that helper as well as resuming the library.
+          quit: () => { assertCurrent(); return app.quit() },
+        })
+      },
+    })
+  } catch (error) {
+    // Discard approves this close; the renderer may still hold those edits if
+    // restart fails. Do not leave that approval active for a later quit.
+    if (wasArmed && guard.revision === revision && !win?.isDestroyed() && !isClosing()) guard.arm(true)
+    throw error
+  }
+}
+
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ label: brand, submenu: [{ role: 'quit' }] }] : []),
-    { label: 'Projector', submenu: [
-      { label: 'Toggle fullscreen', accelerator: 'F11', click: () => { if (projector) projector.setFullScreen(!projector.isFullScreen()) } },
-      { label: 'Move to next display', click: () => {
-        if (!projector) return
-        const displays = screen.getAllDisplays()
-        const current = screen.getDisplayMatching(projector.getBounds())
-        const target = displays[(displays.findIndex(display => display.id === current.id) + 1) % displays.length]
-        projector.setFullScreen(false)
-        projector.setBounds(target.workArea)
-      } },
-      { label: 'Close projector', click: () => projector?.close() },
-    ] },
-    ...(packaged ? [{ label: 'Release', submenu: [
-      { label: 'Stage an update…', click: () => runUpdateOperation(stageUpdate) },
-      { label: 'Review and apply staged update…', click: () => runUpdateOperation(applyUpdate) },
+    ...(packaged ? [{ label: 'Settings', submenu: [
+      { label: 'Song processing…', click: () => host?.webContents.send('setup:open') },
+      { type: 'separator' },
       { label: 'Back up library database', click: () => runUpdateOperation(backupLibrary) },
-      { label: 'Restore manual database backup…', click: () => runUpdateOperation(restoreLibrary) },
-      { label: 'Show update recovery information…', click: () => runUpdateOperation(showUpdateRecovery) },
-    ] }] : []),
-    ...(packaged ? [{ label: 'Processing', submenu: [
-      { label: 'Processing readiness', click: async () => {
-        try {
-          const status = processingStatus ? await processingStatus() : { playback: { ready: true } }
-          const labels = { playback: 'Playback', transcription: 'Transcription', separation: 'Stem separation', modal: 'User-owned Modal' }
-          const detail = Object.entries(labels).map(([key, label]) => {
-            const value = status[key]
-            return `${label}: ${value?.ready ? 'Ready' : 'Not ready'}${value?.reason ? ` — ${value.reason}` : ''}`
-          }).join('\n\n')
-          await dialog.showMessageBox(host, { type: 'info', title: 'Processing readiness',
-            message: processingError || 'Processing capabilities', detail })
-        } catch (error) { dialog.showErrorBox('Processing readiness', error.message) }
-      } },
-      { label: 'Advanced: install runtime or model manifest…', click: () => {
-        runProcessingOperation('processing or model installation', installProcessing)
-      } },
-      { label: 'Set up song processing…', click: () => host?.webContents.send('setup:open') },
-      { label: 'Cancel installation', click: () => { installation?.abort(); heartSetup?.cancel(); onboardingSetup?.cancel() } },
+      { label: 'Restore library database…', click: () => runUpdateOperation(restoreLibrary) },
     ] }] : []),
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'quit' }] },
   ]))
+}
+
+// A completed install settles which root later launches use.
+async function installCompleted() {
+  try { savedInstallLocation = await settleInstallLocation(onboardingState, { saved: savedInstallLocation, used: installRoot }) }
+  catch { console.error('Could not update the saved install location.') }
 }
 
 async function installProcessing() {
   if (installation || heartSetup?.operation) return
   const choice = await dialog.showOpenDialog(host, { title: 'Select a processing or upstream model manifest', properties: ['openFile'], filters: [{ name: 'Manifest', extensions: ['json'] }] })
   if (choice.canceled || !choice.filePaths.length) return
+  let owned = false
   try {
     const manifest = JSON.parse(readFileSync(choice.filePaths[0], 'utf8'))
     const manager = manifest.kind === 'models' ? modelCache : processingManager
@@ -449,14 +615,22 @@ async function installProcessing() {
     const bytes = manifest.files.reduce((sum, file) => sum + file.size, 0)
     const consent = await dialog.showMessageBox(host, { type: 'warning', buttons: ['Cancel', 'Install'], defaultId: 0, cancelId: 0,
       message: manifest.kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?',
-      detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Runtime packs contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
+      detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Processing tools and models contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
     if (consent.response !== 1 || quitting) return
+    // The install location may have changed while the dialogs were open; use
+    // the current store, and stay out of a running setup or location change.
+    if (operationGate.active || processingOperation || installation || heartSetup?.operation) throw new Error('Another installation or release operation is running.')
+    const current = manifest.kind === 'models' ? modelCache : processingManager
+    current.validate(manifest)
+    packRecheck?.abort()
     installation = new AbortController()
-    await manager.install(manifest, { signal: installation.signal })
+    owned = true
+    await current.install(manifest, { signal: installation.signal })
+    await installCompleted()
     if (!quitting) await dialog.showMessageBox(host, { message: 'Installation verified. Reopen the app to use it.' })
   } catch (error) {
     if (!quitting) dialog.showErrorBox('Installation did not complete', error.message)
-  } finally { installation = null; host?.setProgressBar(-1) }
+  } finally { if (owned) installation = null; host?.setProgressBar(-1) }
 }
 
 async function start() {
@@ -485,7 +659,9 @@ async function start() {
     const durabilityHelper = resolve(nativeDir, 'backend.py')
     recoveryKitDurability = { pythonPath: lockPython, backendHelperPath: durabilityHelper }
     releasePolicy = assertReleasePolicy(JSON.parse(readFileSync(releasePolicyPath, 'utf8')))
+    assertPrivateMeasurementRelease(privateMeasurement.enabled, packaged, releasePolicy)
     productRelease = await installedReleaseIdentity()
+    if (quitting) return
     if (releasePolicy.updatesEnabled) {
       const anchorPath = resolve(runtime.root, 'recovery-tool', 'anchor.json')
       if (managedReleaseSlot) recoveryAnchor = readRecoveryAnchor(anchorPath)
@@ -533,24 +709,42 @@ async function start() {
     brand = names.BRAND_NAME
     if (typeof brand !== 'string' || !brand || typeof names.BRAND_INSTALLED_NAME !== 'string' || !names.BRAND_INSTALLED_NAME) throw new Error('Installed product name is invalid')
     app.setName(names.BRAND_INSTALLED_NAME)
-    const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
-    if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), trustedLocks: processingPolicy.lockSha256 })
-    modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
-    try {
-      activeProcessing = await processingManager.active()
-      if (activeProcessing) {
-        const probeResult = await processingManager.probe(activeProcessing)
-        processingProbe = processingAttestation(activeProcessing, probeResult)
-      }
-    } catch (error) { activeProcessing = null; processingProbe = null; processingError = error.message }
-    try { activeModels = await modelCache.active() }
-    catch (error) { processingError = [processingError, error.message].filter(Boolean).join('\n') }
+    const trustedLocks = channelTrustedLocks(JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8')), releasePolicy.channel)
+    const modelPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8'))
+    openManagedStores = storeRoot => {
+      const directories = managedStoreDirectories(storeRoot)
+      return { processing: new UvRuntimeManager(directories.processing, expectedIdentity, { ...(packaged ? { bundledArtifactsDirectory: resolve(process.resourcesPath, 'processing-artifacts') } : {}), ...privateMeasurementRuntimeOptions(privateMeasurement.enabled, packaged, releasePolicy), nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv'), progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks }),
+        models: new ModelCache(directories.models, modelPolicy, { progress, lockPython, durabilityHelper }) }
+    }
+    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
+    savedInstallLocation = (await onboardingState.read())?.installLocation ?? null
+    installRoot = await resolveInstallRoot(runtime.root, savedInstallLocation)
+    ;({ processing: processingManager, models: modelCache } = openManagedStores(installRoot))
+    // Launch uses the structural pack checks and the self-test result recorded
+    // for this exact pack; payload hashes and a fresh self-test belong to
+    // installation, repair and activation. The two stores are independent, so
+    // their checks overlap; failures are reported in the same order as before.
+    // A fresh self-test (only after a full processing verification) starts once
+    // the model check has settled: its cold imports would otherwise compete
+    // with a full model verification for the disk and could exceed the
+    // self-test time limit on slow storage.
+    const models = modelCache.active({ launch: true })
+    const modelsSettled = () => models.then(() => {}, () => {})
+    const selection = launchSelection(...await Promise.allSettled([
+      (async () => {
+        const active = await processingManager.active({ launch: true })
+        if (!active) return { active }
+        if (active.manifest.schema === 2) processingUsage = await processingManager.acquireUsage(active.id, { launch: true })
+        return { active, probe: processingAttestation(active, await processingManager.launchProbe(active, { before: modelsSettled })) }
+      })(),
+      models,
+    ]))
+    ;({ activeProcessing, processingProbe, activeModels, processingError } = selection)
+    if (!activeProcessing) { await processingUsage?.release(); processingUsage = null }
   }
   await startupSurface.update('Starting your library…')
   if (quitting) return
   if (packaged) {
-    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
     modalCredentials = new ModalCredentials({ path: resolve(runtime.root, 'modal-config.enc'), safeStorage })
   }
   const launch = await launchBackend()
@@ -567,11 +761,12 @@ async function start() {
   for (let attempt = 0; attempt < 40; attempt++) {
     try {
       const identity = await fetchJSON('/desktop-ready')
+      assertPrivateMeasurementMarker(identity, privateMeasurement.enabled)
       if (identity.nonce !== launch.nonce || (packaged && !sameIdentity(identity.identity, expectedIdentity))) throw new Error('Backend identity mismatch')
       ready = true
       break
     } catch (error) {
-      if (error.message === 'Backend identity mismatch') throw error
+      if (error.message === 'Backend identity mismatch' || error.code === 'PRIVATE_MEASUREMENT_MARKER') throw error
       if (backend.exitCode !== null || backend.signalCode !== null) throw new Error('Backend stopped during launch')
       await new Promise(resolveWait => setTimeout(resolveWait, 250))
     }
@@ -589,32 +784,51 @@ async function start() {
     quiesceBackend = () => fetchJSON('/desktop-quiesce', { method: 'POST', headers: control() })
     resumeBackend = () => fetchJSON('/desktop-release', { method: 'POST', headers: control() })
   }
-  host = new BrowserWindow({ title: brand, width: 1440, height: 960, show: false,
+  const hostTitle = privateMeasurement.enabled ? `${brand} — Private resource measurement (unqualified)` : brand
+  host = new BrowserWindow({ title: hostTitle, width: 1440, height: 960, show: false,
     webPreferences: { session: ses, preload: resolve(desktopDir, 'preload.cjs'),
       additionalArguments: packaged ? ['--singhouse-managed-setup'] : [],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       backgroundThrottling: false, webviewTag: false, spellcheck: false } })
   secureContents(host.webContents, launch.origin, true)
+  if (privateMeasurement.enabled) host.on('page-title-updated', event => { event.preventDefault(); host?.setTitle(hostTitle) })
   if (packaged) {
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
-    let catalog = null, catalogError, catalogText = null
+    let catalog = null, alternativeCatalogs = [], catalogError, catalogText = null
     const rejectCatalog = () => { catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.' }
     try { if (existsSync(catalogPath)) catalogText = readFileSync(catalogPath, 'utf8') }
     catch { rejectCatalog(); console.error('Could not read the processing installation catalog.') }
     // The same validation the packaging gate applied to this exact catalog.
     if (catalogText !== null) {
       try {
-        catalog = validateShippedCatalog(catalogText, {
-          identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
-          releaseChannel: releasePolicy.channel,
-        })
-      } catch (error) { rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
+        const validateCatalog = text => {
+          const value = validateShippedCatalog(text, {
+            identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
+            releaseChannel: releasePolicy.channel,
+          })
+          processingManager.validate(value.runtime)
+          return value
+        }
+        catalog = validateCatalog(catalogText)
+        const cpuCatalogPath = resolve(desktopDir, 'processing-catalog-cpu.json')
+        if (existsSync(cpuCatalogPath)) {
+          const cpu = validateCatalog(readFileSync(cpuCatalogPath, 'utf8'))
+          if (!['linux', 'win32'].includes(expectedIdentity.platform) || catalog.runtime.accelerator !== 'cuda'
+              || cpu.runtime.accelerator !== 'cpu') throw new Error('Invalid alternate processing target')
+          alternativeCatalogs = [cpu]
+        }
+      } catch (error) { catalog = null; alternativeCatalogs = []; rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
     }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
+      policy: modelCache.policy, catalog, alternativeCatalogs, catalogError, releaseChannel: releasePolicy.channel,
+      hardwarePolicy: validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8'))),
+      loadHardwareSelection: async () => (await onboardingState.read())?.hardwareSelection,
+      saveHardwareSelection: selection => onboardingState.save('hardwareSelection', selection),
+      loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id, hardwareSelection: loadedHardwareSelection },
       hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
-      diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
+      installLocation: installRoot,
+      diskFree: async () => { const disk = await statfs(installRoot); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,
       save: state => onboardingState.save('setup', state) })
   }
@@ -623,10 +837,18 @@ async function start() {
     if (!onboardingSetup) throw new Error('Managed setup is available in the installed desktop application.')
   }
   const setupHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeSetup(event); return action(...args) })
+  const lyricsLookup = packaged ? new LyricsLookupPreference({ state: onboardingState,
+    apply: enabled => fetchJSON('/desktop-lyrics-lookup', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Singhouse-Desktop-Token': controlToken, Origin: launch.origin },
+      body: JSON.stringify({ enabled }) }) }) : null
+  setupHandler('setup:lyrics-lookup', () => lyricsLookup.get())
+  setupHandler('setup:lyrics-lookup-save', enabled => lyricsLookup.set(enabled))
   setupHandler('setup:preferences', async () => onboardingPreferences((await onboardingState.read())?.preferences))
   setupHandler('setup:save-preferences', value => onboardingState.save('preferences', onboardingPreferences(value)))
-  setupHandler('setup:preflight', () => onboardingSetup.preflight())
-  setupHandler('setup:model-source', async mode => {
+  setupHandler('setup:preflight', setupCheck(() => onboardingSetup.preflight()))
+  setupHandler('setup:runtime-update', setupCheck(() => onboardingSetup.requestRuntimeUpdate()))
+  setupHandler('setup:hardware-selection', setupCheck(value => onboardingSetup.setHardwareSelection(value)))
+  setupHandler('setup:model-source', setupCheck(async mode => {
     if (!['offline', 'upstream'].includes(mode)) throw new Error('Unknown model source')
     if (processingOperation || operationGate.active) throw new Error('Wait for the current installation to finish or cancel it.')
     if (mode === 'upstream') onboardingSetup.setOfflineModelsDirectory(null)
@@ -637,9 +859,45 @@ async function start() {
       if (!selected.canceled && selected.filePaths.length === 1) onboardingSetup.setOfflineModelsDirectory(selected.filePaths[0])
     }
     return onboardingSetup.preflight()
-  })
+  }))
+  const installBusy = () => processingOperation || operationGate.active || onboardingSetup.storesLocked()
+    || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation })
+  setupHandler('setup:install-location', setupCheck(async () => {
+    // A restored paused checkpoint must be read before the busy check.
+    await onboardingSetup.getStatus()
+    if (installBusy()) throw new Error('Wait for the current installation to finish or cancel it.')
+    const selected = await dialog.showOpenDialog(host, {
+      title: 'Choose where to install processing tools and models', defaultPath: installRoot, properties: ['openDirectory', 'createDirectory'],
+    })
+    if (!selected.canceled && selected.filePaths.length === 1) {
+      const real = await chosenInstallRoot(selected.filePaths[0])
+      const saved = real === await realpath(runtime.root) ? null : real
+      const chosen = saved ?? resolve(runtime.root)
+      if (installBusy()) throw new Error('Wait for the current installation to finish or cancel it.')
+      // The gate keeps setup from starting until the choice is saved. Files
+      // already installed elsewhere are left in place; the next install or
+      // repair uses this folder.
+      await operationGate.run('install location change', async () => {
+        const previous = { processing: processingManager, models: modelCache, root: installRoot }
+        const stores = openManagedStores(chosen)
+        onboardingSetup.useStores({ runtime: stores.processing, cache: stores.models, installLocation: chosen })
+        ;({ processing: processingManager, models: modelCache } = stores)
+        installRoot = chosen
+        try {
+          await onboardingState.save('installLocation', saved)
+          savedInstallLocation = saved
+        } catch (error) {
+          onboardingSetup.useStores({ runtime: previous.processing, cache: previous.models, installLocation: previous.root })
+          ;({ processing: processingManager, models: modelCache, root: installRoot } = previous)
+          throw error
+        }
+      })
+    }
+    return onboardingSetup.preflight()
+  }))
   setupHandler('setup:status', () => onboardingSetup.getStatus())
-  setupHandler('setup:cancel', async () => { onboardingSetup.cancel(); return onboardingSetup.getStatus() })
+  setupHandler('setup:pause', () => onboardingSetup.pause())
+  setupHandler('setup:cancel', () => onboardingSetup.stop())
   setupHandler('setup:modal-status', async () => {
     const status = await modalCredentials.status()
     let matchesLoaded = false
@@ -683,20 +941,33 @@ async function start() {
   })
   setupHandler('setup:start', async request => {
     if (processingOperation || operationGate.active) throw new Error('Another installation or release operation is running.')
+    packRecheck?.abort()
     let accept, reject
     const accepted = new Promise((resolve, fail) => { accept = resolve; reject = fail })
     processingOperation = operationGate.run('song processing setup', async () => {
       try {
         accept(await onboardingSetup.start({ consent: request?.consent === true, planId: request?.planId }))
         await onboardingSetup.operation
+        if (setupCompleted(await onboardingSetup.getStatus())) await installCompleted()
       } catch (error) { reject(error) }
     }).finally(() => { processingOperation = null; host?.setProgressBar(-1) })
     return accepted
   })
-  setupHandler('setup:restart', () => operationGate.run('setup restart', () => restartForSetup({
+  setupHandler('setup:restart', () => operationGate.run('setup restart', () => guardedSetupRestart({
+    guard: closeGuard, win: host, app, isClosing: () => quitting || handingOff,
     activity: boundaryState, quiesce: quiesceBackend, resume: resumeBackend,
-    restart: () => { app.relaunch(); app.quit() },
   })))
+  const authorizeHost = event => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Only available in the host window')
+  }
+  const hostHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeHost(event); return action(...args) })
+  hostHandler('editor:close-guard', armed => { closeGuard.arm(armed === true) })
+  hostHandler('editor:close-decision', decision => {
+    if (decision !== 'proceed' && decision !== 'cancel') throw new Error('Unknown close decision')
+    return closeGuard.decide(decision)
+  })
+  watchCloseGuardRenderer(host, closeGuard)
+  gateHostClose(host, closeGuard)
   ipcMain.handle('heart:prepare', async event => {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Heart setup is only available in the host window')
     // Development mode retains its explicitly configured backend environment.
@@ -706,6 +977,28 @@ async function start() {
     host.webContents.send('setup:open')
     return { installed: false, restartRequired: false, reason: 'Complete song processing setup before trying this action again.' }
   })
+  // Export writes into the folder chosen through the native picker; the
+  // renderer names a song and options, never a path.
+  const exportPreferences = new ExportPreferences({
+    state: new OnboardingState(resolve(runtime.root, 'export.json')),
+    defaultFolder: defaultExportFolder({ getPath: name => app.getPath(name), home: app.getPath('home'), brand }),
+    home: app.getPath('home') })
+  const exportHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Export is only available in the host window')
+    return action(...args)
+  })
+  exportHandler('export:defaults', () => exportPreferences.get())
+  exportHandler('export:choose-folder', () => exportPreferences.chooseFolder(async () => {
+    const selected = await dialog.showOpenDialog(host, { properties: ['openDirectory', 'createDirectory'] })
+    return !selected.canceled && selected.filePaths.length === 1 ? selected.filePaths[0] : null
+  }))
+  exportHandler('export:save-defaults', value => exportPreferences.saveDefaults(value))
+  exportHandler('export:write', async request => writeExport({
+    fetch: (path, init) => ses.fetch(`${launch.origin}${path}`, { ...init, redirect: 'error' }),
+    folder: (await exportPreferences.get()).folder, request, signal: AbortSignal.timeout(300000) }))
+  exportHandler('export:write-video', async request => writeVideoExport({
+    fetch: (path, init) => ses.fetch(`${launch.origin}${path}`, { ...init, redirect: 'error' }),
+    folder: (await exportPreferences.get()).folder, request, signal: AbortSignal.timeout(600000) }))
   host.webContents.on('did-create-window', child => {
     projector = child
     popupReserved = false
@@ -721,6 +1014,7 @@ async function start() {
   let presenting = packaged, rejectPresentation
   const presentationFailure = packaged ? new Promise((_, reject) => { rejectPresentation = reject }) : null
   host.webContents.on('render-process-gone', () => {
+    closeGuard.release()
     projector?.destroy()
     if (presenting) rejectPresentation(new Error('Renderer exited before the application finished presenting'))
     else app.quit()
@@ -747,6 +1041,76 @@ async function start() {
       } })
   else { await host.loadURL(launch.origin); host.show() }
   startupSurface.close()
+  if (packaged) recheckInstalledPacks()
+}
+
+// Launch admits packs from structural checks, which cannot see a same-size
+// change. Once the window is shown, packs admitted that way whose last full
+// verification is older than RECHECK_INTERVAL_MS (or unknown) are verified in
+// full again in the background, one file at a time. A failure has withdrawn
+// the pack's record, so the next launch verifies it in full; this session is
+// told now and offered setup, which repairs it.
+function recheckInstalledPacks() {
+  packRecheck = new AbortController()
+  void recheckPacks([
+    { store: processingManager, active: activeProcessing, label: 'song processing runtime' },
+    { store: modelCache, active: activeModels, label: 'separation and Heart model files' },
+  ], { signal: packRecheck.signal, onFailure: reportDamagedPack }).catch(error => {
+    console.error(`Could not complete the background check of installed processing files: ${error.message}`)
+  })
+}
+
+// Packs the background check found damaged, awaiting one notice, by label.
+const damagedPacks = new Map()
+let damageNotice = null
+
+// The failure is recorded at once; the dialog is shown by showDamageNotice().
+function reportDamagedPack({ label, store, id, error }) {
+  console.error(`Background verification of the installed ${label} failed: ${error.message}`)
+  if (quitting) return
+  const notice = `The installed ${label} failed verification. Repair it with Set up song processing, then reopen the app.`
+  if (!String(processingError || '').split('\n').includes(notice)) processingError = [processingError, notice].filter(Boolean).join('\n')
+  damagedPacks.set(label, { label, store, id })
+  damageNotice ??= Promise.resolve().then(showDamageNotice)
+    .catch(failure => console.error(`Could not show the damaged processing files notice: ${failure.message}`))
+    .finally(() => { damageNotice = null })
+}
+
+const damageNoticeBlocked = () => Boolean(processingOperation || updateOperation || installation || heartSetup?.operation
+  || operationGate.active || setupChecks > 0)
+
+// The dialog waits until no operation of any kind is running (a backup, an
+// update, recovery information, Heart model setup, or a processing
+// installation or setup, including its selection and consent). It then covers,
+// in one dialog, every queued pack that is still damaged: still the pack its
+// store would select, and not fully verified since (see damageOutstanding()).
+// A pack repaired or replaced meanwhile is dropped; its failure stays recorded
+// in the processing status.
+async function showDamageNotice() {
+  while (damagedPacks.size) {
+    if (quitting || !host) return
+    if (damageNoticeBlocked()) {
+      await new Promise(resolve => setTimeout(resolve, DAMAGE_NOTICE_POLL_MS))
+      continue
+    }
+    // Check every queued pack, including any queued while checking, so all
+    // of them are presented in one dialog.
+    const checked = new Map()
+    for (let fresh; (fresh = [...damagedPacks.values()].filter(pack => !checked.has(pack))).length;) {
+      for (const pack of fresh) checked.set(pack, await pack.store.damageOutstanding(pack.id).catch(() => true))
+    }
+    // An operation that started while the packs were checked delays the dialog again.
+    if (damageNoticeBlocked()) continue
+    const current = [...checked.keys()].filter(pack => damagedPacks.get(pack.label) === pack)
+    for (const pack of current) damagedPacks.delete(pack.label)
+    const outstanding = current.filter(pack => checked.get(pack))
+    if (!outstanding.length || quitting || !host) continue
+    const labels = outstanding.map(pack => pack.label).join(' and ')
+    const choice = await dialog.showMessageBox(host, { type: 'warning', buttons: ['Later', 'Set up song processing…'], defaultId: 1, cancelId: 0,
+      message: `The installed ${labels} failed verification`,
+      detail: 'Some of its files no longer match what was installed. Song processing may fail until it is repaired. Set up song processing to repair it, then reopen the app.' })
+    if (choice.response === 1 && !quitting) host?.webContents.send('setup:open')
+  }
 }
 
 app.on('before-quit', event => {
@@ -758,7 +1122,14 @@ app.on('before-quit', event => {
     void updateOperation.finally(() => app.quit())
     return
   }
+  // Unsaved edits in the host renderer: it answers before the host goes away.
+  if (closeGuard.armed && host && !handingOff) {
+    void closeGuard.request(host.webContents).then(proceed => { if (proceed) { closeGuard.release(); app.quit() } })
+    return
+  }
   quitting = true
+  startupVerification.abort()
+  packRecheck?.abort()
   installation?.abort()
   heartSetup?.cancel()
   onboardingSetup?.cancel()
@@ -772,7 +1143,7 @@ app.on('before-quit', event => {
   }).finally(() => { shutdownComplete = true; app.quit() })
 })
 app.on('window-all-closed', () => app.quit())
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => app.quit())
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { closeGuard.release(); app.quit() })
 process.on('exit', () => {
   if (backend?.pid && backend.exitCode === null && backend.signalCode === null) {
     try { forceChild(backend) }

@@ -8,12 +8,13 @@ import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { assertReleasePolicy } from '../release.mjs'
 import { isInside, packagedLayout, samePath } from './packaged-smoke-paths.mjs'
 import { closePackagedApplication, processTable, shutdownEvidence } from './packaged-smoke-shutdown.mjs'
-import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, cancelFromUi,
+import { WIZARD_LIMITATIONS, acceptConsent, assertArchiveRetryResumed, assertCatalogLock, assertWizardHooks, assertPlanIdentity, assertPostRestart, assertWizardPlan, pauseFromUi,
   catalogLimitations, chooseLocalAndContinue, classifyRetry, clickRestart, consentSnapshot, control, createStatusTracker, installedModelsIdentity,
   installedRuntimeIdentity, interceptRelaunch, judgePostRestart, observePostRestart, parsePackServerLog, partialRuntimeBytes,
-  readPlan, readStatus, resolveRetryTarget, retryFromUi, shouldInterrupt, stagedArchivePartBytes, summarizeCatalog, waitForIdle,
+  readPlan, readStatus, resolveRetryTarget, resumeFromUi, retryFromUi, shouldInterrupt, stagedArchivePartBytes, summarizeCatalog, waitForIdle,
   waitForSetupStart, waitForStep } from './packaged-wizard-driver.mjs'
 
 const BOOLEAN_FLAGS = { '--resume': 'resume', '--download-models': 'downloadModels', '--wizard': 'wizard', '--interrupt-runtime-retrieval': 'interruptRuntimeRetrieval',
@@ -32,7 +33,7 @@ export function parseArguments(args) {
     if (Object.hasOwn(BOOLEAN_FLAGS, flag)) {
       assert.ok(!options[BOOLEAN_FLAGS[flag]], `Duplicate ${flag}`); options[BOOLEAN_FLAGS[flag]] = true; continue
     }
-    if (flag === '--model-folder') throw new Error('The advanced application route has no combined offline model-folder import. Use --download-models explicitly; do not transplant cache pointers.')
+    if (flag === '--model-folder') throw new Error('Offline model-folder import is unavailable in this qualification harness. Use --wizard with --expected-runtime-lock-sha256; do not transplant cache pointers.')
     if (!valued.has(flag) || options[flag] !== undefined || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Invalid argument: ${flag}`)
     options[flag] = args[++i]
   }
@@ -78,7 +79,8 @@ export function parseArguments(args) {
     assert.ok(options.resume, 'Executable upgrade requires --resume')
     assert.match(upgradeFrom, /^[a-fA-F0-9]{64}$/, 'Upgrade prior executable SHA-256 must be 64 hex characters')
   }
-  return { ...common, mode: retainedProfile ? 'retained' : 'advanced', manifest: resolve(options['--runtime-manifest']),
+  assert.ok(retainedProfile, 'Legacy manifest-install qualification is retired. Use --wizard with --expected-runtime-lock-sha256 on a fresh evidence directory.')
+  return { ...common, mode: 'retained', manifest: resolve(options['--runtime-manifest']),
     retainedProfile: retainedProfile ? resolve(retainedProfile) : undefined, expectedSourceCommit: expectedSourceCommit?.toLowerCase(),
     resume: options.resume === true, upgradeFromExecutableSha256: upgradeFrom?.toLowerCase() }
 }
@@ -94,7 +96,22 @@ export const EVIDENCE_SCHEMA = 2
 export const HARNESS_FILES = Object.freeze(['test/packaged-processing-smoke.mjs', 'test/packaged-smoke-paths.mjs',
   'test/packaged-smoke-shutdown.mjs', 'test/packaged-wizard-driver.mjs', 'test/packaged-smoke-processes.py', 'lifecycle.mjs',
   // The driver takes the runtime store's directory naming from the store itself.
-  'runtime_manager.mjs', 'processing_probe.py'])
+  'runtime_manager.mjs', 'processing_probe.py', 'processing_recipe.mjs', 'setup_catalog.mjs', 'release.mjs'])
+// The packaged release policy, cross-checked against the build's release
+// receipt. A consistency check only, not receipt verification: policyId hashes
+// the complete release policy, so equality ties the packaged channel to the
+// policy this build's receipt names rather than to a loose channel string.
+export function packagedReleasePolicy(resources) {
+  const policyBytes = readFileSync(join(resources, 'release.json'))
+  const policy = assertReleasePolicy(JSON.parse(policyBytes))
+  const receiptPath = join(resources, 'release-receipt.json')
+  // Signed macOS builds keep the receipt outside the sealed bundle.
+  assert.ok(existsSync(receiptPath), 'This candidate has no resources/release-receipt.json (signed macOS builds keep it outside the sealed bundle), '
+    + 'so its packaged release channel cannot be cross-checked for a hardware-test catalog; use a build that includes the receipt')
+  const receipt = JSON.parse(readFileSync(receiptPath))
+  assert.equal(policy.policyId, receipt?.identity?.policyId, 'Packaged release policy differs from its receipt identity')
+  return { channel: policy.channel, policyId: policy.policyId, sha256: hash(policyBytes) }
+}
 export function playwrightVersion() {
   try { return createRequire(import.meta.url)('playwright/package.json').version } catch { return null }
 }
@@ -614,46 +631,6 @@ export async function run(options) {
     for (const preference of preferences) assert.deepEqual(preference, { sandbox: true, isolation: true, node: false })
     assert.equal((await api('/health')).status, 'ok')
   }
-  async function install(path, kind) {
-    const installationStarted = Date.now()
-    // Replace only the native file/consent dialogs. The actual advanced menu
-    // callback owns manifest validation, transfer, probing and activation.
-    await bounded(application.evaluate(({ Menu, dialog }, { path, kind }) => {
-      const entry = Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items
-        .find(item => item.label === 'Advanced: install runtime or model manifest…')
-      if (!entry) throw new Error('Packaged advanced installation route is unavailable')
-      const original = { showOpenDialog: dialog.showOpenDialog, showMessageBox: dialog.showMessageBox, showErrorBox: dialog.showErrorBox }
-      globalThis.__processingSmoke = { done: false, error: null, restore: () => Object.assign(dialog, original) }
-      dialog.showOpenDialog = async (_host, options) => {
-        if (options.title !== 'Select a processing or upstream model manifest') throw new Error('Unexpected file dialog')
-        return { canceled: false, filePaths: [path] }
-      }
-      dialog.showMessageBox = async (_host, options) => {
-        if (options.message === 'Installation verified. Reopen the app to use it.') {
-          globalThis.__processingSmoke.done = true; return { response: 0 }
-        }
-        const expected = kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?'
-        if (options.message !== expected || options.buttons?.join('|') !== 'Cancel|Install') throw new Error('Unexpected installation consent dialog')
-        return { response: 1 }
-      }
-      dialog.showErrorBox = (title, message) => { globalThis.__processingSmoke.error = `${title}: ${message}` }
-      entry.click()
-    }, { path, kind }))
-    try {
-      while (true) {
-        remaining()
-        const state = await bounded(application.evaluate(() => ({ done: globalThis.__processingSmoke.done, error: globalThis.__processingSmoke.error })))
-        if (state.error) throw new Error(state.error)
-        if (state.done) break
-        await pause(500)
-      }
-      // Let the real operation's finally release its installation marker.
-      await pause(100)
-    } finally {
-      await bounded(application.evaluate(() => { globalThis.__processingSmoke.restore(); delete globalThis.__processingSmoke }), 5000).catch(() => {})
-    }
-    evidence.timingsMs[`${kind}Installation`] = Date.now() - installationStarted; save()
-  }
   // The ordinary first-launch path: only visible UI controls act. The harness
   // reads setup status freely, but calls preflightSetup only before consent
   // (nothing installed) and only while the wizard is idle. Ends with the
@@ -671,7 +648,12 @@ export async function run(options) {
     const catalogBytes = Buffer.from(catalogEncoded, 'base64'), summary = summarizeCatalog(catalogBytes)
     wizard.catalog = summary
     evidence.limitations.push(...catalogLimitations(summary)); save()
-    assertCatalogLock(summary, expectedLock, evidence.application)
+    let releaseChannel
+    if (summary.qualification.scope === 'hardware-test') {
+      wizard.releasePolicy = packagedReleasePolicy(packagedLayout(options.executable).resources)
+      releaseChannel = wizard.releasePolicy.channel
+    }
+    assertCatalogLock(summary, expectedLock, evidence.application, releaseChannel)
     manifest = JSON.parse(catalogBytes.toString('utf8')).runtime
     const policyEncoded = await readArchive('models.json')
     assert.ok(policyEncoded, 'This candidate ships no model policy')
@@ -689,7 +671,7 @@ export async function run(options) {
     wizard.statusBeforeConsent = await bounded(readStatus(host), 20000)
     wizard.plan = assertWizardPlan(plan, summary, expectedLock)
     wizard.plan.identity = assertPlanIdentity(plan, { catalogRuntime: manifest, policy })
-    wizard.consent = await bounded(consentSnapshot(host, plan), 20000)
+    wizard.consent = await bounded(consentSnapshot(host, plan, summary), 20000)
     save()
 
     const setupStarted = Date.now(), tracker = createStatusTracker({ runtimeBytes: summary.runtimeBytes, start: setupStarted })
@@ -705,12 +687,12 @@ export async function run(options) {
     wizard.consent.acceptedAt = await accept()
     evidence.consent.modelRetrieval = 'application-setup-consent-screen'; save()
 
-    // Optional recovery exercise: a cancel from the UI, or an injected source
-    // failure, followed by "Review setup and retry" and the same plan.
-    const recoveryMode = options.interruptRuntimeRetrieval ? 'cancel' : options.expectRetrievalFailure ? 'injected-failure' : null
+    // Optional recovery exercise: a pause from the UI followed by Resume, or an
+    // injected source failure followed by "Review setup and retry"; both with
+    // the same plan.
+    const recoveryMode = options.interruptRuntimeRetrieval ? 'pause' : options.expectRetrievalFailure ? 'injected-failure' : null
     let recovery = null, lastRuntimeFile = null
-    async function retryAfter(stoppedStep) {
-      await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
+    function recordStaged() {
       // Every archive part's staged size, read now: the part the server
       // failed is known only from its log, after retrieval is over.
       if (summary.delivery === 'archive') recovery.stagedPartsAfterStop = stagedArchivePartBytes(profile, summary.runtimeId, manifest)
@@ -718,10 +700,25 @@ export async function run(options) {
         : recovery.stagedPartsAfterStop ? recovery.stagedPartsAfterStop[recovery.file] ?? null
           : partialRuntimeBytes(profile, summary.runtimeId, recovery.file, manifest)
       tracker.nextAttempt()
+    }
+    async function retryAfter(stoppedStep) {
+      await waitForStep(host, stoppedStep, { timeoutMs: stepTimeout() })
+      recordStaged()
       await retryFromUi(host, { timeoutMs: stepTimeout() })
       const retryPlan = await bounded(readPlan(host), 60000)
       assert.equal(retryPlan.planId, plan.planId, 'Retry offered a different installation plan')
       recovery.retryAcceptedAt = await accept()
+      save()
+    }
+    async function resumeAfterPause() {
+      await waitForStep(host, 'progress', { timeoutMs: stepTimeout() })
+      recordStaged()
+      const resumePlan = await bounded(readPlan(host), 60000)
+      assert.equal(resumePlan.planId, plan.planId, 'Resume found a different installation plan')
+      const before = await readLiveStatus()
+      await resumeFromUi(host, { timeoutMs: stepTimeout() })
+      recovery.retryAcceptedAt = new Date().toISOString()
+      tracker.observe(await bounded(waitForSetupStart(readLiveStatus, { before, timeoutMs: SETUP_START_TIMEOUT_MS }), SETUP_START_TIMEOUT_MS + 30000))
       save()
     }
     for (;;) {
@@ -730,17 +727,17 @@ export async function run(options) {
       if (observation.transition) { wizard.transitions = tracker.transitions; save() }
       // Unpacking progress names unpacked files, never a retrieved unit.
       if (status.phase === 'runtime' && typeof status.progress?.file === 'string' && status.progress.phase !== 'extract') lastRuntimeFile = status.progress.file
-      if (recoveryMode === 'cancel' && !recovery && shouldInterrupt(observation, status)) {
-        recovery = wizard.recovery = { kind: 'cancel', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
-          atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtCancel: observation.progress.received }
-        await cancelFromUi(host)
+      if (recoveryMode === 'pause' && !recovery && shouldInterrupt(observation, status)) {
+        recovery = wizard.recovery = { kind: 'pause', at: new Date().toISOString(), elapsedMs: Date.now() - setupStarted,
+          atFraction: observation.runtimeFraction, file: observation.progress.file, receivedAtPause: observation.progress.received }
+        await pauseFromUi(host)
         let after = status
         while (after.state === 'running') { remaining(); await pause(250); after = await readLiveStatus(); tracker.observe(after) }
         recovery.statusAfterStop = { state: after.state, retryable: after.retryable === true, message: after.message ?? null }
         save()
-        assert.equal(after.state, 'cancelled', `Cancelling runtime retrieval ended in ${after.state}`)
-        assert.equal(after.retryable, true, 'Cancelled setup is not retryable')
-        await retryAfter('cancelled')
+        assert.equal(after.state, 'paused', `Pausing runtime retrieval ended in ${after.state}`)
+        assert.equal(after.retryable, true, 'Paused setup is not resumable')
+        await resumeAfterPause()
         continue
       }
       if (recoveryMode === 'injected-failure' && !recovery && observation.terminal === 'error') {
@@ -766,7 +763,7 @@ export async function run(options) {
     evidence.timingsMs.wizardSetup = Date.now() - setupStarted
     save()
     if (recoveryMode) {
-      assert.ok(recovery, recoveryMode === 'cancel'
+      assert.ok(recovery, recoveryMode === 'pause'
         ? 'Runtime retrieval finished before the 5% interruption point was observed; throttle the pack server (--throttle-bytes-per-second) or use a larger runtime'
         : 'Setup completed without the expected retrieval failure; start the pack server with --fail-after-bytes smaller than a runtime file')
       // Classified only from the source server's request log, read now that
@@ -876,8 +873,7 @@ export async function run(options) {
       await wizardSetup()
     } else {
       evidence.runtimeReused = Boolean((resumed || options.retainedProfile) && reusableRuntime(initialReadiness, manifest)); save()
-      if (options.retainedProfile) assert.ok(evidence.runtimeReused, 'Retained runtime must be admitted without installation')
-      else if (!evidence.runtimeReused) await install(options.manifest, 'processing')
+      assert.ok(options.retainedProfile && evidence.runtimeReused, 'Retained runtime must be admitted without installation')
       const policyEncoded = await bounded(application.evaluate(({ app }) => {
         const fs = process.getBuiltinModule('fs'), path = process.getBuiltinModule('path')
         return fs.readFileSync(path.join(app.getAppPath(), 'models.json')).toString('base64')
@@ -900,10 +896,6 @@ export async function run(options) {
       writeFileSync(modelPath, modelManifestBytes, { flag: 'wx' })
       evidence.modelPolicySha256 = hash(policyBytes)
       evidence.modelManifestSha256 = hash(modelManifestBytes)
-      if (!options.retainedProfile) {
-        await install(modelPath, 'models')
-        await close(); await launch()
-      }
     }
     const readiness = await api('/api/features/processing')
     evidence.readiness = readiness
@@ -922,7 +914,7 @@ export async function run(options) {
       const data = Uint8Array.from(atob(bytes), value => value.charCodeAt(0)), form = new FormData()
       form.append('file', new Blob([data], { type: 'application/octet-stream' }), filename)
       form.append('artist', 'Licensed qualification audio'); form.append('title', 'Isolated processing smoke')
-      form.append('karaoke_model', 'roformer'); form.append('llm_correction', 'false'); form.append('llm_paging', 'false')
+      form.append('karaoke_model', 'roformer'); form.append('llm_paging', 'false')
       // Ingest selects Heart internally; there is no whisper_model upload field.
       const response = await fetch('/api/separate', { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
       if (response.status !== 202) throw new Error(`Audio upload returned ${response.status}`)
@@ -945,7 +937,7 @@ export async function run(options) {
     const song = await api(`/api/songs/${submitted.song_id}`)
     assert.equal(song.status, 'ready'); assert.equal(song.word_sync?.metadata?.model, 'heart')
     const words = song.word_sync.lines?.flat() || []
-    assert.equal(song.word_sync?.metadata?.pipeline_config?.correction?.enabled, false, 'External correction must remain disabled')
+    assert.equal(song.word_sync?.metadata?.pipeline_config?.correction, undefined, 'Alignment must not configure external correction')
     assert.ok(words.length > 0, 'Real Heart inference must produce word timings for the vocal excerpt')
     assert.ok(words.every(word => Number.isFinite(word.start) && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start), 'Invalid word intervals')
     assert.ok(words.every((word, index) => index === 0 || word.start >= words[index - 1].start), 'Word intervals are not ordered')
@@ -987,7 +979,7 @@ export async function run(options) {
     evidence.status = 'passed'
   } catch (error) {
     evidence.status = 'failed'; evidence.error = error.message
-    if (application && !options.retainedProfile) await bounded(application.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.find(item => item.label === 'Processing')?.submenu?.items.find(item => item.label === 'Cancel installation')?.click()), 5000).catch(() => {})
+    if (host && !options.retainedProfile) await bounded(host.evaluate(() => window.karaokeDesktop?.cancelSetup()), 5000).catch(() => {})
     throw error
   } finally {
     try { await close() }
