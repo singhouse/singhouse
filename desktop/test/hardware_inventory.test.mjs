@@ -22,10 +22,68 @@ test('Apple silicon identifies unified memory without claiming RAM as dedicated 
   const result = await collectHardware({ ...base, processAdapter: { platform: 'darwin', arch: 'arm64' },
     getGPUInfo: async () => ({ gpuDevice: [{ deviceString: 'Apple M4', videoMemory: 123456 }] }),
     runCommand: async () => { calls++; return 'Apple M4, 16384' } })
-  assert.equal(calls, 0)
+  assert.equal(calls, 1)
   assert.equal(result.unifiedMemory, true)
   assert.equal(result.gpu, 'Apple M4')
   assert.equal(result.videoMemoryBytes, null)
+})
+
+const vmStat = (pageSize = 16384, free = 262144, inactive = 393216) =>
+  `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)\nPages free: ${free}.\nPages active: 999999.\nPages inactive: ${inactive}.\nPages speculative: 999999.\n`
+const mac = { ...base, processAdapter: { platform: 'darwin', arch: 'arm64' } }
+
+test('Mac reports free plus inactive pages with the observed page size using a bounded fixed probe', async () => {
+  for (const pageSize of [4096, 16384]) {
+    const result = await collectHardware({ ...mac, runCommand: async (file, args, options) => {
+      assert.equal(file, '/usr/bin/vm_stat')
+      assert.deepEqual(args, [])
+      assert.equal(options.shell, false)
+      assert.equal(options.timeout, 1500)
+      assert.equal(options.maxBuffer, 65536)
+      assert.equal(options.killSignal, 'SIGKILL')
+      return vmStat(pageSize)
+    } })
+    assert.equal(result.availableMemoryBytes, (262144 + 393216) * pageSize)
+  }
+  assert.equal((await collectHardware({ ...mac, runCommand: async () => vmStat(4096, 0, 0) })).availableMemoryBytes, 0)
+})
+
+test('Mac rejects malformed, unsafe, or impossible memory observations and uses free-memory fallback', async () => {
+  for (const output of [
+    '', null, { stdout: vmStat() }, 'x'.repeat(65537),
+    vmStat().replace('Mach Virtual Memory Statistics:', 'Other statistics:'),
+    vmStat().replace('page size of', 'page size:'),
+    vmStat(0), vmStat(-4096), vmStat(4097), vmStat(131072), vmStat('NaN'),
+    vmStat(16384, '-1'), vmStat(16384, '1.5'), vmStat(16384, 'Infinity'),
+    vmStat(16384, '9007199254740992'), vmStat(16384, '9007199254740991'),
+    vmStat(16384, 1048576, 1),
+    vmStat().replace('Pages inactive:', 'Missing inactive:'),
+    vmStat().replace('Pages free: 262144.', 'Pages free: 262144. garbage'),
+    `${vmStat()}Pages free: 1.\n`,
+  ]) {
+    const result = await collectHardware({ ...mac, runCommand: async () => output })
+    assert.equal(result.availableMemoryBytes, osAdapter.freemem(), String(output))
+  }
+  const unknownTotal = await collectHardware({ ...mac, osAdapter: { ...osAdapter, totalmem: () => -1 }, runCommand: async () => vmStat() })
+  assert.equal(unknownTotal.availableMemoryBytes, osAdapter.freemem())
+})
+
+test('Mac memory probe failure or timeout falls back without blocking inventory', async () => {
+  for (const runCommand of [async () => { throw Error('unavailable') }, () => new Promise(() => {})]) {
+    assert.equal((await collectHardware({ ...mac, runCommand })).availableMemoryBytes, osAdapter.freemem())
+  }
+})
+
+test('Mac memory observation also applies to Intel and never runs on other platforms', async () => {
+  assert.equal((await collectHardware({ ...mac, processAdapter: { platform: 'darwin', arch: 'x64' },
+    runCommand: async () => vmStat() })).availableMemoryBytes, 10 * 1024 ** 3)
+  for (const platform of ['linux', 'win32', 'unknown']) {
+    const result = await collectHardware({ ...base, processAdapter: { platform, arch: 'x64' }, runCommand: async file => {
+      assert.equal(file, 'nvidia-smi')
+      return ''
+    } })
+    assert.equal(result.availableMemoryBytes, osAdapter.freemem())
+  }
 })
 
 test('Intel Mac and ARM Linux do not imply unified Apple memory', async () => {
