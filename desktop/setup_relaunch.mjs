@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { readOnlyAppImageMount, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
@@ -122,6 +122,20 @@ exec "$@"
 
 export async function prepareAppImageHandoff({ execPath, args }, { signal, readinessTimeout = 5000, shutdownTimeout = 120000 } = {}) {
   signal?.throwIfAborted()
+  // This boundary can also be called directly. Only a canonical, executable
+  // file owned by this user or the system may enter the positional handoff.
+  if (typeof execPath !== 'string' || execPath.includes('\0') || !isAbsolute(execPath)
+      || resolve(execPath) !== execPath || realpathSync(execPath) !== execPath) {
+    throw new Error('Invalid setup handoff executable')
+  }
+  const executable = statSync(execPath)
+  if (!executable.isFile() || !(executable.mode & 0o111) || (executable.mode & 0o022)
+      || ![0, process.getuid()].includes(executable.uid)) {
+    throw new Error('Unsafe setup handoff executable')
+  }
+  if (!Array.isArray(args) || args.some(value => typeof value !== 'string' || value.includes('\0'))) {
+    throw new Error('Invalid setup handoff arguments')
+  }
   const stat = readFileSync('/proc/self/stat', 'utf8')
   const startTime = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]
   if (!/^\d+$/.test(startTime || '')) throw new Error('Restart process identity is unavailable')

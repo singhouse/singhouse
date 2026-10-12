@@ -10,16 +10,11 @@ on:
           - playback-only
           - processing-ready
         default: playback-only
-      processing_accelerator:
-        description: Committed processing catalog variant (processing-ready only)
-        type: choice
-        options: [cpu, cuda]
-        default: cuda
       recipe_run_id:
         description: Exact successful Windows recipe build run (processing-ready only)
         type: string
-      recipe_artifact_id:
-        description: Exact selected CPU or CUDA recipe artifact ID (processing-ready only)
+      recipe_artifact_ids:
+        description: Exact CPU and CUDA recipe artifact IDs, comma separated (processing-ready only)
         type: string
 
 permissions:
@@ -139,25 +134,25 @@ jobs:
         shell: pwsh
         env:
           RECIPE_RUN_ID: ${{ inputs.recipe_run_id }}
-          RECIPE_ARTIFACT_ID: ${{ inputs.recipe_artifact_id }}
+          RECIPE_ARTIFACT_IDS: ${{ inputs.recipe_artifact_ids }}
         run: |
           if ($env:RECIPE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
-              $env:RECIPE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$') {
-            throw 'Processing-ready signing requires exact numeric recipe run and artifact IDs.'
+              $env:RECIPE_ARTIFACT_IDS -cnotmatch '^[1-9][0-9]*,[1-9][0-9]*$' -or
+              ($env:RECIPE_ARTIFACT_IDS -split ',')[0] -eq ($env:RECIPE_ARTIFACT_IDS -split ',')[1]) {
+            throw 'Processing-ready signing requires the exact run and two distinct CPU/CUDA recipe artifact IDs.'
           }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: inputs.processing_mode == 'processing-ready'
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.recipe_run_id }}
-          artifact-ids: ${{ inputs.recipe_artifact_id }}
+          artifact-ids: ${{ inputs.recipe_artifact_ids }}
           merge-multiple: true
           path: ${{ runner.temp }}/selected-recipe
       - name: Assemble signed Windows application and first installer
         shell: pwsh
         env:
           PROCESSING_MODE: ${{ inputs.processing_mode }}
-          PROCESSING_ACCELERATOR: ${{ inputs.processing_accelerator }}
           KARAOKE_PROCESSING_ARTIFACTS: ${{ runner.temp }}/selected-recipe/artifacts
         run: |
           $ErrorActionPreference = 'Stop'
@@ -166,16 +161,11 @@ jobs:
           switch -Exact -CaseSensitive ($env:PROCESSING_MODE) {
             'playback-only' { $processingFlags = @('--playback-only'); $installerSuffix = '' }
             'processing-ready' {
-              switch -Exact -CaseSensitive ($env:PROCESSING_ACCELERATOR) {
-                'cpu' { $accelerator = 'cpu' }
-                'cuda' { $accelerator = 'cuda' }
-                default { throw 'Unknown processing accelerator.' }
-              }
-              $processingFlags = @('--processing-ready', '--processing-accelerator', $accelerator)
-              $installerSuffix = "-$accelerator"
-              $catalog = "desktop/processing-catalogs/win32-x64-$accelerator.json"
-              if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
-                throw "processing-ready requires the committed $catalog; choose playback-only or commit the generated catalog."
+              $processingFlags = @('--processing-ready'); $installerSuffix = ''
+              foreach ($catalog in @('desktop/processing-catalogs/win32-x64.json', 'desktop/processing-catalogs/win32-x64-cpu.json')) {
+                if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
+                  throw "processing-ready requires the committed $catalog; choose playback-only or commit the generated catalog."
+                }
               }
             }
             default { throw 'Unknown processing mode.' }
@@ -207,7 +197,7 @@ jobs:
           } | Set-Content -Encoding ascii desktop/artifacts/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: windows-signed-${{ inputs.processing_mode }}-${{ inputs.processing_accelerator }}-${{ github.sha }}
+          name: windows-signed-${{ inputs.processing_mode }}-${{ github.sha }}
           path: desktop/artifacts/
           include-hidden-files: true
           if-no-files-found: error

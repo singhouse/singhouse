@@ -13,7 +13,7 @@ import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
-import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, PROCESSING_ARTIFACTS_DIRECTORY, verifyPackagedProcessingArtifacts } from './processing_catalog_gate.mjs'
+import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, PROCESSING_ARTIFACTS_DIRECTORY, verifyPackagedProcessingArtifacts, PACKAGED_CPU_CATALOG_NAME } from './processing_catalog_gate.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -30,7 +30,8 @@ export function packagedApplicationArchivePath(applicationDirectory, platform) {
 // The produced application must carry exactly the gate's validated catalog
 // (processing-ready) or none at all (playback-only). Fails closed.
 export async function verifyPackagedProcessingCatalog({ applicationDirectory, platform, gate }) {
-  assertPackagedProcessingCatalog(gate, await packagedCatalogSha256(packagedApplicationArchivePath(applicationDirectory, platform)))
+  const archive = packagedApplicationArchivePath(applicationDirectory, platform)
+  assertPackagedProcessingCatalog(gate, await packagedCatalogSha256(archive), await packagedCatalogSha256(archive, PACKAGED_CPU_CATALOG_NAME))
   await verifyPackagedProcessingArtifacts(gate, resolve(dirname(packagedReleasePolicyPath(applicationDirectory, platform)), PROCESSING_ARTIFACTS_DIRECTORY))
   return gate
 }
@@ -150,7 +151,8 @@ async function main() {
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   const stagedCatalog = await stageProcessingCatalog({ mode: processing.mode, catalogBytes: processingGate.catalogBytes, catalogSha256: processing.catalogSha256,
-    artifactsDirectory: processingGate.artifactsDirectory, processingArtifacts: processing.processingArtifacts })
+    artifactsDirectory: processingGate.artifactsDirectory, processingArtifacts: processing.processingArtifacts,
+    alternativeCatalogBytes: processingGate.alternativeCatalogBytes })
   await withStagedCatalog(stagedCatalog, () => build({ config: { ...config, files: [...config.files, ...stagedCatalog.files],
     extraResources: [...config.extraResources, ...stagedCatalog.extraResources], publish: null }, publish: 'never',
     targets: platform.createTarget('dir', Arch[nativeManifest.arch]) }))

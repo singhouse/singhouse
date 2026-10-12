@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
-import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName, stageProcessingArtifacts } from './processing_catalog_gate.mjs'
+import { PACKAGED_CATALOG_NAME, PACKAGED_CPU_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName, stageProcessingArtifacts } from './processing_catalog_gate.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const icons = resolve(desktop, 'build/icons')
@@ -51,19 +51,27 @@ if (existsSync(resolve(native, memoryName)) !== existsSync(memorySource)
 // directory (never the tracked source tree, which packaging requires clean) and
 // added as one FileSet to the application build. Packaging then re-reads the
 // produced app.asar and compares digests.
-export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256, artifactsDirectory, processingArtifacts = [] } = {}) {
+export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256, artifactsDirectory, processingArtifacts = [], alternativeCatalogBytes = [] } = {}) {
   if (mode === PLAYBACK_ONLY) {
     if (catalogBytes !== null && catalogBytes !== undefined) throw new Error('Playback-only packaging cannot stage a processing catalog')
     if (processingArtifacts.length) throw new Error('Playback-only packaging cannot stage processing artifacts')
+    if (alternativeCatalogBytes.length) throw new Error('Playback-only packaging cannot stage alternative processing catalogs')
     return { files: [], extraResources: [], cleanup: async () => {}, label: null }
   }
   if (mode !== PROCESSING_READY || !Buffer.isBuffer(catalogBytes)) throw new Error('Processing-ready packaging requires the validated catalog bytes')
   const digest = createHash('sha256').update(catalogBytes).digest('hex')
   if (digest !== catalogSha256) throw new Error('Staged processing catalog differs from the validated source catalog')
+  if (alternativeCatalogBytes.length > 1 || alternativeCatalogBytes.some(entry => entry.name !== PACKAGED_CPU_CATALOG_NAME
+      || !Buffer.isBuffer(entry.catalogBytes) || createHash('sha256').update(entry.catalogBytes).digest('hex') !== entry.catalogSha256)) {
+    throw new Error('Staged alternative processing catalog differs from the validated source catalog')
+  }
   const directory = await mkdtemp(join(tmpdir(), 'singhouse-processing-catalog-'))
   const label = basename(directory)
   const cleanup = () => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  try { await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' }) }
+  try {
+    await writeFile(join(directory, PACKAGED_CATALOG_NAME), catalogBytes, { flag: 'wx' })
+    for (const entry of alternativeCatalogBytes) await writeFile(join(directory, entry.name), entry.catalogBytes, { flag: 'wx' })
+  }
   catch (error) {
     try { await cleanup() } catch (cleanupError) { warnStagingCleanup(label, cleanupError, true) }
     throw error
@@ -71,7 +79,7 @@ export async function stageProcessingCatalog({ mode, catalogBytes, catalogSha256
   let artifacts
   try { artifacts = await stageProcessingArtifacts({ mode, directory: artifactsDirectory, inventory: processingArtifacts }) }
   catch (error) { await cleanup(); throw error }
-  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME] }], extraResources: artifacts.extraResources,
+  return { files: [{ from: directory, to: '.', filter: [PACKAGED_CATALOG_NAME, ...alternativeCatalogBytes.map(entry => entry.name)] }], extraResources: artifacts.extraResources,
     cleanup: async () => {
       const results = await Promise.allSettled([cleanup(), artifacts.cleanup()])
       const failed = results.find(result => result.status === 'rejected')

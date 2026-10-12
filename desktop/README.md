@@ -131,17 +131,26 @@ sees that. Only the exact flags are accepted; forms such as
   (the build output says it is deliberately excluded). Such builds offer
   playback and report local song processing unavailable during setup.
 
-Only the selected target's catalog is ever packaged, as `processing-catalog.json`
-inside `app.asar`; catalogs for other targets, the `processing-catalogs/`
-directory itself, and any stray `desktop/processing-catalog.json` are not. After
-Electron packaging and before identity derivation or the receipt, packaging
+The selected target's default catalog is packaged as `processing-catalog.json`
+inside `app.asar`. Normal Windows and Linux CUDA recipe builds require
+`desktop/processing-catalogs/<platform>-<arch>-cpu.json`, also validated and
+packaged as `processing-catalog-cpu.json`. Both catalogs must match the same
+application, native tools, model policy, and channel trust; a missing, malformed,
+or incompatible CPU alternative stops the build. An alternative cannot
+be paired with a CPU primary catalog. The installed application chooses
+the CPU or CUDA recipe for the detected hardware within the normal setup wizard.
+macOS keeps its single Metal catalog. Catalogs for other targets, the
+`processing-catalogs/` directory itself, and stray desktop-root catalogs are
+excluded. After Electron packaging and before identity derivation or the receipt, packaging
 reads the produced `app.asar` back and fails unless it contains exactly the
-validated catalog bytes (processing-ready) or no catalog (playback-only).
+validated primary and optional CPU catalog bytes (processing-ready) or neither
+catalog (playback-only).
 
 When the selected catalog names flat assets at
 `https://github.com/singhouse/processing-packs/releases/download/<tag>/<sha256>-<filename>`,
 set the build-only `KARAOKE_PROCESSING_ARTIFACTS` environment variable to the
-generated `recipe/artifacts/` directory. Packaging requires every referenced
+generated `recipe/artifacts/` directory, or a directory containing the union of
+the selected CPU and CUDA recipes' exported assets. Packaging requires every referenced
 wheel and notice at its exact release asset basename, with the catalog's size
 and SHA-256. Missing or corrupt inputs, symlinks, hard links, and nonregular
 files stop the build. Unreferenced input files are excluded. The verified inputs
@@ -152,16 +161,16 @@ identity or writing receipts, whose application inventory binds these assets.
 `processing-mode.json` also records the expected asset names, sizes, and hashes
 as `processingArtifacts`. Playback-only builds include no processing assets.
 
-For separate CPU and accelerator installers from the same committed source,
+For an internal build restricted to one processing recipe,
 add `--processing-accelerator cpu`, `cuda`, or `metal` after npm's `--` together
 with `--processing-ready`. This selects the committed
 `desktop/processing-catalogs/<platform>-<arch>-<accelerator>.json` and verifies
 that its runtime matches the selection. Selected builds add the accelerator to
 installer and portable payload filenames. Without this option, the original
-target catalog and filenames remain the default. The selector is a build
-option; the installed application still presents one catalog. Windows signing
-dispatches select CPU or CUDA, and apply the selector only for processing-ready
-builds. Preserve each build's output before packaging the next variant.
+target catalog and normal installer filenames remain the default, with the
+validated CPU alternative required for Windows and Linux CUDA primary catalogs. The
+selector is a build option and is not needed for normal installation. Windows
+signing creates one installer that includes both recipe choices.
 
 Packaging writes `desktop/artifacts/processing-mode.json` next to the receipt
 (created exclusively; an output directory that already holds one is refused
@@ -170,6 +179,8 @@ before building). It records `schema`, `mode`, `releaseId` and
 the latter being the digest of the `app.asar` that carries the catalog),
 `releaseChannel` (the packaged release policy's channel), `catalogSha256`,
 `runtimeLockSha256`, `qualificationScope`, and `target` (`platform`, `arch`);
+when included, `alternativeCatalogs` records the CPU catalog name, hash, runtime
+lock, scope, and accelerator.
 the catalog digests and scope are `null` for playback-only builds. The file is not part
 of the receipt schema, so it sits under any checksum listing of
 `desktop/artifacts/` rather than inside the receipt.
@@ -331,14 +342,16 @@ than assuming they exist. Do not add access-token or OIDC-token output to
 workflow diagnostics.
 
 The dispatch form's `processing_mode` choice selects `playback-only` (the
-default) or `processing-ready`; the latter requires the committed Windows
-catalog for the selected `processing_accelerator` (`cpu` or `cuda`), and the
-workflow stops before native assembly when that file is absent. Processing-ready
-signing also requires the exact successful native recipe `recipe_run_id` and
-`recipe_artifact_id`. The workflow retrieves that recipe artifact into its
-build inputs and passes its `artifacts/` directory through
+default) or `processing-ready`; the latter requires both committed Windows
+default and CPU catalogs, and the workflow stops before native assembly when
+either is absent. Processing-ready signing also requires the exact successful
+native recipe `recipe_run_id` and `recipe_artifact_ids`, a comma-separated pair
+of distinct CPU and CUDA artifact IDs from that run. The workflow retrieves both
+recipe artifacts into a shared build-input directory and passes the combined
+`artifacts/` directory through
 `KARAOKE_PROCESSING_ARTIFACTS`. Packaging checks each required asset's size and
-hash against the committed catalog before including it in the installer.
+hash against the committed catalogs before including it in the single normal
+installer. Setup selects the appropriate recipe after detecting the hardware.
 The uploaded artifact is named
 `windows-signed-<mode>-<commit>`. The choice reaches the build
 script only as an environment variable mapped through a fixed list of flags.
@@ -1344,12 +1357,14 @@ or environment variables. Linux requires a supported system keyring; no
 plaintext fallback exists. Forgetting local credentials works even when the
 keyring cannot decrypt them; it does not revoke remote tokens or stop cloud jobs.
 
-Release builds may supply one catalog per target,
+Release builds supply a primary catalog per target,
 `desktop/processing-catalogs/<platform>-<arch>.json` (for example
 `win32-x64.json` or `darwin-arm64.json`), as part of the application's verified
-inventory; package them with `--processing-ready`, which places only that
-target's file in the application as `processing-catalog.json`. Commit the
-catalog before native assembly: all packaging requires a clean checkout whose
+inventory; package them with `--processing-ready`, which places that
+target's file in the application as `processing-catalog.json`. Normal Windows
+and Linux CUDA recipe builds also require the target's `-cpu.json` catalog,
+packaged as `processing-catalog-cpu.json`, for hardware-based setup selection.
+Commit both catalogs before native assembly: all packaging requires a clean checkout whose
 `HEAD` matches the commit recorded in the native provenance, so a catalog added
 after assembly cannot be packaged. The setup engine never accepts a catalog
 from the renderer or saved preferences. Its schema is:

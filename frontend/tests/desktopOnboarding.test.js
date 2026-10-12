@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, ref } from 'vue'
+import { parse } from '@vue/compiler-sfc'
 import { flushPromises, mount } from '@vue/test-utils'
 import { useDesktopOnboarding } from '../src/composables/useDesktopOnboarding'
 import DesktopOnboarding from '../src/components/DesktopOnboarding.vue'
@@ -1165,7 +1166,10 @@ describe('processing choice summary', () => {
 
 it('uses "tools and models" instead of "pack" in setup copy', () => {
   for (const [name, raw] of [['DesktopOnboarding.vue', onboardingSource], ['DesktopModalSetup.vue', modalSetupSource]]) {
-    const source = raw.replace(/<style[\s\S]*?<\/style>/g, '')
+    const { descriptor, errors } = parse(raw, { filename: name })
+    expect(errors, name).toEqual([])
+    const source = [descriptor.template, descriptor.script, descriptor.scriptSetup, ...descriptor.customBlocks]
+      .filter(Boolean).map(block => block.content).join('\n')
     expect(source, name).not.toMatch(/\bpacks?\b/i)
   }
 })

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
@@ -129,12 +129,32 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
 })
 
 
+test('handoff rejects noncanonical or unsafe executables and invalid argv before launch', { skip: process.platform !== 'linux' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'handoff-inputs-'))
+  try {
+    const executable = join(root, 'application'), linked = join(root, 'linked')
+    writeFileSync(executable, 'fixture', { mode: 0o700 })
+    symlinkSync(executable, linked)
+    for (const execPath of ['relative', executable + '\0', join(root, '.') + '/./application', linked, root]) {
+      await assert.rejects(prepareAppImageHandoff({ execPath, args: [] }))
+    }
+    for (const mode of [0o600, 0o722, 0o777]) {
+      chmodSync(executable, mode)
+      await assert.rejects(prepareAppImageHandoff({ execPath: executable, args: [] }), /Unsafe setup handoff executable/)
+    }
+    for (const args of [undefined, 'argument', [1], ['invalid\0argument']]) {
+      await assert.rejects(prepareAppImageHandoff({ execPath: process.execPath, args }), /Invalid setup handoff arguments/)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('real handoff waits for parent exit and preserves argument boundaries', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'actual-handoff-'))
   let parent
   try {
     const output = join(root, 'arguments.json')
-    const args = ['space value', '$(not a command)', 'quote"value', '--user-data-dir=profile with spaces']
+    const args = ['space value', '$(not a command)', 'quote"value', "single'quote", 'line\nvalue', 'trailing\n',
+      '; exit 99', '', '--user-data-dir=profile with spaces']
     const target = `require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))`
     const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
       await prepareAppImageHandoff({ execPath: process.execPath, args: ${JSON.stringify(['-e', target, output, ...args])} });
