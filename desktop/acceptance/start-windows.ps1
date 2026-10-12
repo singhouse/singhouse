@@ -40,17 +40,30 @@ try {
     $Rules = @($Observed.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
     $ExpectedSids = @($Identity.Value, $SystemSid.Value)
     $ActualSids = @($Rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
-    $Private = $Observed.AreAccessRulesProtected -and
-        $Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $Identity.Value -and
+    $Owned = $Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $Identity.Value
+    $ExpectedInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $Private = $Observed.AreAccessRulesProtected -and $Owned -and
         $Rules.Count -eq 2 -and $ActualSids.Count -eq 2 -and
         -not (@($ActualSids | Where-Object { $_ -notin $ExpectedSids }))
     foreach ($Rule in $Rules) {
-        if ($Rule.AccessControlType -ne 'Allow' -or $Rule.FileSystemRights -ne 'FullControl' -or
-            $Rule.IsInherited -or $Rule.InheritanceFlags -ne 'ContainerInherit,ObjectInherit' -or
-            $Rule.PropagationFlags -ne 'None') { $Private = $false }
+        if ($Rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $Rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $Rule.IsInherited -or $Rule.InheritanceFlags -ne $ExpectedInheritance -or
+            $Rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { $Private = $false }
     }
     if (-not $Private) {
-        throw "Unsafe test profile permissions: $Profile. The profile must be owned by the current user with inheritance disabled and inheritable FullControl for only that user and SYSTEM. Move the existing test profile aside and run again to create a fresh private profile."
+        # Report permission facts without account names or machine-specific SIDs.
+        $RuleDetails = @($Rules | ForEach-Object {
+            $Principal = 'UnexpectedPrincipal'
+            if ($_.IdentityReference.Value -eq $Identity.Value) { $Principal = 'CurrentUser' }
+            if ($_.IdentityReference.Value -eq $SystemSid.Value) { $Principal = 'SYSTEM' }
+            '{0}: Type={1}; Rights={2}; Inheritance={3}; Propagation={4}; Inherited={5}' -f
+                $Principal, $_.AccessControlType, $_.FileSystemRights, $_.InheritanceFlags,
+                $_.PropagationFlags, $_.IsInherited
+        })
+        $AclDetails = 'OwnerIsCurrentUser={0}; Protected={1}; RuleCount={2}; DistinctPrincipalCount={3}; Rules=[{4}]' -f
+            $Owned, $Observed.AreAccessRulesProtected, $Rules.Count, $ActualSids.Count, ($RuleDetails -join ' | ')
+        throw "Unsafe test profile permissions: $Profile. The profile must be owned by the current user with inheritance disabled and inheritable FullControl for only that user and SYSTEM. Move the existing test profile aside and run again to create a fresh private profile. Observed ACL: $AclDetails"
     }
     $Log = Join-Path $Profile 'setup.log'
     Start-Transcript -LiteralPath $Log -Append | Out-Null

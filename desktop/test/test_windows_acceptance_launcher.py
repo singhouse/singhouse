@@ -99,6 +99,10 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
                 before = self.acl()
                 output = self.setup_profile(expect=1)
                 self.assertIn('Unsafe test profile permissions', output)
+                self.assertIn('Observed ACL: OwnerIsCurrentUser=', output)
+                self.assertIn('Protected=', output)
+                self.assertIn('CurrentUser: Type=', output)
+                self.assertIn('SYSTEM: Type=', output)
                 self.assertEqual(self.acl(), before)
                 # Remove a denial before fixture cleanup (including child access).
                 if change == 'deny':
