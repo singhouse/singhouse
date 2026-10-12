@@ -4,21 +4,64 @@ from __future__ import annotations
 
 import ctypes
 import json
+import ntpath
 import os
 import platform
 import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 
-def _run(command: list[str]) -> str:
+def _run(command: list[str], *, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(command, capture_output=True, text=True, timeout=2,
-                            check=True, shell=False)
+                            check=True, shell=False, env=env)
     if len(result.stdout) > 65536:
         raise ValueError("Resource probe output exceeded limit")
     return result.stdout
+
+
+def _windows_program_files() -> str:
+    """Resolve the native Program Files directory without trusting environment input."""
+    class Guid(ctypes.Structure):
+        _fields_ = [("data1", ctypes.c_uint32), ("data2", ctypes.c_uint16),
+                    ("data3", ctypes.c_uint16), ("data4", ctypes.c_ubyte * 8)]
+
+    folder = Guid.from_buffer_copy(uuid.UUID("905e63b6-c1bf-494e-b29c-65b732d3d21a").bytes_le)
+    shell = ctypes.WinDLL("shell32.dll", use_last_error=True)
+    ole = ctypes.WinDLL("ole32.dll", use_last_error=True)
+    resolve = shell.SHGetKnownFolderPath
+    resolve.argtypes = [ctypes.POINTER(Guid), ctypes.c_uint32, ctypes.c_void_p,
+                        ctypes.POINTER(ctypes.c_void_p)]
+    resolve.restype = ctypes.c_int32  # HRESULT is 32 bits, including on Win64.
+    free = ole.CoTaskMemFree
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = None
+    pointer = ctypes.c_void_p()
+    try:
+        if resolve(ctypes.byref(folder), 0, None, ctypes.byref(pointer)) != 0 or not pointer.value:
+            raise OSError("Program Files directory could not be resolved")
+        directory = ctypes.wstring_at(pointer.value)
+        drive, _ = ntpath.splitdrive(directory)
+        if (not re.fullmatch(r"[A-Za-z]:", drive) or not ntpath.isabs(directory)
+                or "\x00" in directory):
+            raise ValueError("Program Files directory is not an absolute local path")
+        return directory
+    finally:
+        if pointer.value:
+            free(pointer)
+
+
+def _windows_driver_environment() -> dict[str, str]:
+    # NVML uses these variables to locate its installed components. Supply them
+    # only to the driver probe, keeping the managed worker environment isolated.
+    directory = _windows_program_files()
+    env = {key: value for key, value in os.environ.items()
+           if key.casefold() not in {"programfiles", "programw6432"}}
+    env.update(ProgramFiles=directory, ProgramW6432=directory)
+    return env
 
 
 def _windows_memory_status():
@@ -80,7 +123,9 @@ def available_vram() -> int | None:
     try:
         # The managed backend intentionally has only bundled audio tools on PATH.
         # Driver observation uses OS installation locations rather than user PATH.
+        probe_env = None
         if platform.system() == "Windows":
+            probe_env = _windows_driver_environment()
             system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
             if not system_root or not Path(system_root).is_absolute():
                 return None
@@ -89,12 +134,14 @@ def available_vram() -> int | None:
             executable = "/usr/bin/nvidia-smi"
         else:
             return None
-        lines = _run([executable, "--query-gpu=memory.free", "--format=csv,noheader,nounits"]).strip().splitlines()
+        command = [executable, "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+        output = _run(command, env=probe_env) if probe_env is not None else _run(command)
+        lines = output.strip().splitlines()
         # Multiple devices are ambiguous: neither summing nor picking the largest
         # establishes the memory of the device the worker will actually use.
         if len(lines) == 1 and re.fullmatch(r"\d+", lines[0].strip()):
             return int(lines[0]) * 1024 * 1024
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
         pass
     return None
 
