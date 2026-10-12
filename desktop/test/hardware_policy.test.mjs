@@ -18,7 +18,7 @@ const result = o => assessHardwarePolicy(o).variants[0]
 
 test('shipped policy makes no unsupported qualification claims', async () => {
   const shipped = JSON.parse(await readFile(new URL('../hardware-policy.json', import.meta.url)))
-  assert.deepEqual(validateHardwarePolicy(shipped).variants, [])
+  assert.ok(validateHardwarePolicy(shipped).variants.every(v => v.status !== 'qualified'))
   assert.equal(assessHardwarePolicy({ policy: shipped }).selectedVariantId, null)
 })
 test('qualified selection exposes measured headroom and does not authorize downloads', () => {
@@ -101,4 +101,140 @@ test('unsupported settings and mismatched accelerator never become selectable', 
   delete o.accelerator
   o.policy.variants[0].settings = { precision: 'int8' }
   assert.equal(result(o).status, 'unsupported')
+})
+
+const candidateOptions = () => {
+  const o = options(), v = o.policy.variants[0]
+  const e = v.evidence
+  v.status = 'candidate'
+  v.admission = { runtimeLockSha256: lock, reference: 'pending-final-acceptance',
+    basisReferences: ['original-resource-budget'], ramBytes: 125, vramBytes: 125,
+    workingDiskBytes: e.workingDiskBytes, downloadBytes: e.downloadBytes,
+    installedBytes: e.installedBytes, unifiedMemory: false }
+  delete v.evidence
+  o.releaseChannel = 'private-test'
+  return o
+}
+
+test('candidate budgets admit normal private setup and execution without qualification claims', () => {
+  const o = candidateOptions()
+  for (const phase of ['setup', 'execution']) {
+    const a = assessHardwarePolicy({ ...o, phase })
+    assert.equal(a.selectedVariantId, 'standard-cuda')
+    assert.equal(a.downloadAuthorized, false)
+    assert.equal(a.variants[0].requirements.ramBytes, 125)
+    assert.equal(a.variants[0].requirements.vramBytes, 125)
+    assert.equal(a.variants[0].requirements.headroomFraction, null)
+    assert.equal(a.variants[0].requirements.acceptancePending, true)
+    assert.deepEqual(a.variants[0].requirements.basisReferences, ['original-resource-budget'])
+    assert.match(a.reason, /final acceptance remains pending/)
+    assert.equal(o.policy.variants[0].status, 'candidate')
+    assert.equal(o.policy.variants[0].evidence, undefined)
+  }
+})
+
+test('candidate cannot be admitted outside private-test or with stale identity or unsupported settings', () => {
+  for (const releaseChannel of [undefined, 'public', 'stable', 'private-smoke']) {
+    const o = candidateOptions(); o.releaseChannel = releaseChannel
+    assert.equal(result(o).status, 'unqualified')
+    assert.equal(assessHardwarePolicy({ ...o, variantId: 'standard-cuda' }).selectedVariantId, null)
+  }
+  const mutations = [o => { o.runtimeLockSha256 = 'b'.repeat(64) },
+    o => { o.hardware.platform = 'win32' }, o => { o.hardware.arch = 'arm64' },
+    o => { o.accelerator = 'cpu' }, o => { o.policy.variants[0].settings = { precision: 'int8' } }]
+  for (const mutate of mutations) {
+    const o = candidateOptions(); mutate(o)
+    assert.equal(assessHardwarePolicy(o).selectedVariantId, null)
+  }
+})
+
+test('candidate retains fresh RAM, GPU inventory, execution VRAM, storage and model checks', () => {
+  const mutations = [o => { o.hardware.totalMemoryBytes = 124 },
+    o => { o.hardware.availableMemoryBytes = 124 }, o => { o.hardware.availableMemoryBytes = null },
+    o => { o.hardware.cudaDevices = [] }, o => { o.hardware.cudaDevices = [{ dedicatedMemoryBytes: 80 }, { dedicatedMemoryBytes: 80 }] },
+    o => { o.hardware.cudaDevices[0].dedicatedMemoryBytes = 124 },
+    o => { o.hardware.unifiedMemory = true },
+    o => { o.phase = 'execution'; o.hardware.cudaDevices[0].availableMemoryBytes = 124 },
+    o => { o.phase = 'execution'; delete o.hardware.cudaDevices[0].availableMemoryBytes },
+    o => { o.diskFreeBytes = null }, o => { o.diskFreeBytes = 9 },
+    o => { o.installedModelIds = []; o.diskFreeBytes = 59 },
+    o => { o.phase = 'execution'; o.installedModelIds = [] }]
+  for (const mutate of mutations) {
+    const o = candidateOptions(); mutate(o)
+    assert.equal(assessHardwarePolicy(o).selectedVariantId, null)
+  }
+  const o = candidateOptions(); o.installedModelIds = []; o.diskFreeBytes = 60
+  assert.equal(result(o).supported, true)
+  assert.equal(result(o).requirements.diskRequiredBytes, 60)
+  assert.equal(result(o).downloadRequired, true)
+})
+
+test('candidate CPU and Metal use direct system budgets with no dedicated VRAM', () => {
+  for (const target of [{ platform: 'linux', arch: 'x64', accelerator: 'cpu', unifiedMemory: false },
+    { platform: 'darwin', arch: 'arm64', accelerator: 'metal', unifiedMemory: true }]) {
+    const o = candidateOptions(), v = o.policy.variants[0]
+    Object.assign(v, target); delete v.unifiedMemory
+    Object.assign(v.admission, { vramBytes: null, unifiedMemory: target.unifiedMemory })
+    Object.assign(o.hardware, target, { cudaDevices: [] })
+    assert.equal(result(o).supported, true)
+    assert.equal(result(o).requirements.vramBytes, null)
+  }
+})
+
+test('candidate admission rejects missing provenance, unsafe budgets, ambiguous qualification and unknown fields', () => {
+  const mutations = [v => { delete v.admission }, v => { v.evidence = {} },
+    v => { v.admission.basisReferences = [] }, v => { v.admission.basisReferences = ['same', 'same'] },
+    v => { v.admission.basisReferences = [' '] }, v => { v.admission.reference = '' },
+    v => { v.admission.runtimeLockSha256 = 'stale' }, v => { v.admission.runtimeLockSha256 = [lock] }, v => { v.admission.extra = true },
+    v => { delete v.admission.downloadBytes }, v => { v.admission.ramBytes = Number.MAX_SAFE_INTEGER + 1 },
+    v => { v.admission.ramBytes = 0 }, v => { v.admission.vramBytes = null },
+    v => { v.admission.unifiedMemory = true }, v => { v.admission.installedBytes = -1 }]
+  for (const mutate of mutations) {
+    const o = candidateOptions(); mutate(o.policy.variants[0])
+    assert.throws(() => validateHardwarePolicy(o.policy), /Invalid hardware policy/)
+  }
+})
+
+
+test('candidate can separately require physical RAM capacity and fresh available RAM', () => {
+  const gib = 1024 ** 3
+  const o = candidateOptions(), v = o.policy.variants[0]
+  Object.assign(v, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(v.admission, { ramBytes: 4 * gib, totalRamBytes: 16 * gib, vramBytes: null, unifiedMemory: true })
+  Object.assign(o.hardware, { platform: 'darwin', arch: 'arm64', unifiedMemory: true,
+    totalMemoryBytes: 16 * gib, availableMemoryBytes: 5 * gib, cudaDevices: [] })
+  for (const phase of ['setup', 'execution']) {
+    o.phase = phase
+    assert.equal(result(o).supported, true)
+    assert.equal(result(o).requirements.totalRamBytes, 16 * gib)
+    assert.equal(result(o).requirements.ramBytes, 4 * gib)
+  }
+  o.hardware.totalMemoryBytes = 8 * gib
+  assert.equal(result(o).status, 'insufficient')
+  o.hardware.totalMemoryBytes = null
+  assert.equal(result(o).status, 'unknown')
+  o.hardware.totalMemoryBytes = 16 * gib
+  o.hardware.availableMemoryBytes = 4 * gib - 1
+  assert.equal(result(o).status, 'insufficient')
+  o.hardware.availableMemoryBytes = null
+  assert.equal(result(o).status, 'unknown')
+  o.hardware.availableMemoryBytes = 5 * gib
+  o.releaseChannel = 'public'
+  assert.equal(result(o).status, 'unqualified')
+  o.releaseChannel = 'private-test'; o.runtimeLockSha256 = 'b'.repeat(64)
+  assert.equal(result(o).status, 'unknown')
+})
+
+test('optional physical RAM floor must be safe, positive and at least the available floor', () => {
+  for (const totalRamBytes of [undefined, null, 0, -1, 124, 125.5, Number.MAX_SAFE_INTEGER + 1, '200']) {
+    const o = candidateOptions(); o.policy.variants[0].admission.totalRamBytes = totalRamBytes
+    assert.throws(() => validateHardwarePolicy(o.policy), /candidate total RAM budget/)
+  }
+  const o = candidateOptions()
+  assert.equal(result(o).supported, true)
+  assert.equal(Object.hasOwn(result(o).requirements, 'totalRamBytes'), false)
+  o.hardware.totalMemoryBytes = 124
+  assert.equal(result(o).status, 'insufficient')
+  const qualified = options()
+  assert.equal(Object.hasOwn(result(qualified).requirements, 'totalRamBytes'), false)
 })

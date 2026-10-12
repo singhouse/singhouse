@@ -450,7 +450,7 @@ export class OnboardingSetup {
     if (installed.installed && !updating) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
       || (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     if (this.catalog?.runtime?.schema === 2 && !hardwareAssessment?.selectedVariantId) {
-      return { ...base, reason: hardwareAssessment?.reason || 'No matching qualified hardware policy is available for this processing recipe.' }
+      return { ...base, reason: hardwareAssessment?.reason || 'No matching qualified hardware policy or eligible private resource envelope is available for this processing recipe.' }
     }
     try {
       const selected = this.selection(installed.models)

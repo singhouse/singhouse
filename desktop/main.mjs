@@ -713,7 +713,7 @@ async function start() {
     const modelPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8'))
     openManagedStores = storeRoot => {
       const directories = managedStoreDirectories(storeRoot)
-      return { processing: new UvRuntimeManager(directories.processing, expectedIdentity, { ...privateMeasurementRuntimeOptions(privateMeasurement.enabled, packaged, releasePolicy), nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv'), progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks }),
+      return { processing: new UvRuntimeManager(directories.processing, expectedIdentity, { ...(packaged ? { bundledArtifactsDirectory: resolve(process.resourcesPath, 'processing-artifacts') } : {}), ...privateMeasurementRuntimeOptions(privateMeasurement.enabled, packaged, releasePolicy), nativeLockSha256: JSON.parse(readFileSync(resolve(nativeDir, 'provenance.json'), 'utf8')).locks?.['native.json'], uvPath: resolve(nativeDir, 'uv', process.platform === 'win32' ? 'uv.exe' : 'uv'), progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks }),
         models: new ModelCache(directories.models, modelPolicy, { progress, lockPython, durabilityHelper }) }
     }
     onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))

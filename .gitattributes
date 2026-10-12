@@ -2,3 +2,5 @@
 desktop/licenses/uv-* -text
 # Packaging compares catalogs byte-for-byte with the generator output.
 desktop/processing-catalogs/*.json -text
+# Keep native tool recipe bindings identical across build platforms.
+desktop/locks/native.json text eol=lf

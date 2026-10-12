@@ -10,10 +10,22 @@ on:
           - playback-only
           - processing-ready
         default: playback-only
+      processing_accelerator:
+        description: Committed processing catalog variant (processing-ready only)
+        type: choice
+        options: [cpu, cuda]
+        default: cuda
+      recipe_run_id:
+        description: Exact successful Windows recipe build run (processing-ready only)
+        type: string
+      recipe_artifact_id:
+        description: Exact selected CPU or CUDA recipe artifact ID (processing-ready only)
+        type: string
 
 permissions:
   contents: read
   id-token: write
+  actions: read
 
 jobs:
   sign-windows:
@@ -122,34 +134,62 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Install-Module -Name TrustedSigning -RequiredVersion 0.5.3 -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
           & ./desktop/build/sign_windows.ps1 -ValidateOnly
+      - name: Validate recipe artifact selection
+        if: inputs.processing_mode == 'processing-ready'
+        shell: pwsh
+        env:
+          RECIPE_RUN_ID: ${{ inputs.recipe_run_id }}
+          RECIPE_ARTIFACT_ID: ${{ inputs.recipe_artifact_id }}
+        run: |
+          if ($env:RECIPE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:RECIPE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw 'Processing-ready signing requires exact numeric recipe run and artifact IDs.'
+          }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.processing_mode == 'processing-ready'
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recipe_run_id }}
+          artifact-ids: ${{ inputs.recipe_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/selected-recipe
       - name: Assemble signed Windows application and first installer
         shell: pwsh
         env:
           PROCESSING_MODE: ${{ inputs.processing_mode }}
+          PROCESSING_ACCELERATOR: ${{ inputs.processing_accelerator }}
+          KARAOKE_PROCESSING_ARTIFACTS: ${{ runner.temp }}/selected-recipe/artifacts
         run: |
           $ErrorActionPreference = 'Stop'
           # The dispatch choice reaches the shell only as data; a fixed mapping
           # selects the packaging flag and anything else stops before assembly.
           switch -Exact -CaseSensitive ($env:PROCESSING_MODE) {
-            'playback-only' { $processingFlag = '--playback-only' }
-            'processing-ready' { $processingFlag = '--processing-ready' }
+            'playback-only' { $processingFlags = @('--playback-only'); $installerSuffix = '' }
+            'processing-ready' {
+              switch -Exact -CaseSensitive ($env:PROCESSING_ACCELERATOR) {
+                'cpu' { $accelerator = 'cpu' }
+                'cuda' { $accelerator = 'cuda' }
+                default { throw 'Unknown processing accelerator.' }
+              }
+              $processingFlags = @('--processing-ready', '--processing-accelerator', $accelerator)
+              $installerSuffix = "-$accelerator"
+              $catalog = "desktop/processing-catalogs/win32-x64-$accelerator.json"
+              if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
+                throw "processing-ready requires the committed $catalog; choose playback-only or commit the generated catalog."
+              }
+            }
             default { throw 'Unknown processing mode.' }
           }
-          # Packaging re-validates the catalog; this only fails before the
-          # lengthy native assembly when the committed catalog is absent.
-          if ($env:PROCESSING_MODE -ceq 'processing-ready' -and
-              -not (Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json' -PathType Leaf)) {
-            throw 'processing-ready requires the committed desktop/processing-catalogs/win32-x64.json; choose playback-only or commit the generated catalog.'
-          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "INSTALLER_SUFFIX=$installerSuffix"
           python desktop/build/assemble.py --target win32-x64 --output desktop/native
           if ($LASTEXITCODE -ne 0) { throw 'Native assembly failed.' }
-          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc $processingFlag
+          npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc @processingFlags
           if ($LASTEXITCODE -ne 0) { throw 'Signed installer packaging failed.' }
       - name: Verify signatures and write final SHA-256 inventory
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $installerPattern = '^' + [regex]::Escape($env:PRODUCT_NAME) + '-[^\\/]+-win-x64\.exe$'
+          $installerPattern = '^' + [regex]::Escape($env:PRODUCT_NAME) + '-[^\\/]+-win-x64' + [regex]::Escape($env:INSTALLER_SUFFIX) + '\.exe$'
           $installers = @(Get-ChildItem -LiteralPath desktop/artifacts -File | Where-Object { $_.Name -match $installerPattern })
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installers.Count)." }
           $applicationExecutable = Join-Path 'desktop/artifacts/win-unpacked' "$env:PRODUCT_NAME.exe"
@@ -167,7 +207,7 @@ jobs:
           } | Set-Content -Encoding ascii desktop/artifacts/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: windows-signed-${{ inputs.processing_mode }}-${{ github.sha }}
+          name: windows-signed-${{ inputs.processing_mode }}-${{ inputs.processing_accelerator }}-${{ github.sha }}
           path: desktop/artifacts/
           include-hidden-files: true
           if-no-files-found: error

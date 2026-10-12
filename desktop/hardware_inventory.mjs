@@ -52,6 +52,27 @@ function nvidiaDevices(output) {
   return result
 }
 
+function macAvailableMemory(output, totalMemory) {
+  if (typeof output !== 'string' || output.length > MAX_OUTPUT || totalMemory === null) return null
+  const lines = output.trim().split(/\r?\n/)
+  const header = /^Mach Virtual Memory Statistics: \(page size of (\d+) bytes\)$/.exec(lines[0])
+  const pageSize = header ? bytes(Number(header[1])) : null
+  if (!pageSize || pageSize < 1024 || pageSize > 65536 || !Number.isInteger(Math.log2(pageSize))) return null
+  const counts = []
+  for (const name of ['Pages free', 'Pages inactive']) {
+    const fields = lines.filter(line => line.startsWith(`${name}:`))
+    if (fields.length !== 1) return null
+    const match = new RegExp(`^${name}:\\s+(\\d+)\\.\\s*$`).exec(fields[0])
+    const count = match ? bytes(Number(match[1])) : null
+    if (count === null) return null
+    counts.push(count)
+  }
+  // Match the backend's conservative observation: exclude active, wired,
+  // compressed, and speculative pages. Impossible observations use the fallback.
+  const available = bytes((counts[0] + counts[1]) * pageSize)
+  return available !== null && available <= totalMemory ? available : null
+}
+
 /** Observed hardware only: no capability promises, minimums, or inference work.
  * getGPUInfo is a zero-argument function returning Electron's basic GPU info.
  * runCommand receives (executable, fixedArguments, execFileOptions), returns stdout.
@@ -67,11 +88,14 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
   // Apple M-series chips include an integrated GPU. Its model is a label only:
   // it does not establish available Metal support, core count, or GPU memory.
   const integratedGpu = unifiedMemory && /^Apple M\d+(?: Pro| Max| Ultra)?$/.test(cpu) ? `${cpu} GPU` : ''
-  const [gpuInfo, nvidiaOutput] = await Promise.all([
+  const totalMemoryBytes = bytes(safely(() => osAdapter.totalmem()))
+  const [gpuInfo, nvidiaOutput, macMemoryOutput] = await Promise.all([
     bounded(getGPUInfo),
     ['linux', 'win32'].includes(platform) ? bounded(() => runCommand('nvidia-smi',
       ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'],
       { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT, shell: false, windowsHide: true, killSignal: 'SIGKILL' })) : null,
+    platform === 'darwin' ? bounded(() => runCommand('/usr/bin/vm_stat', [],
+      { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT, shell: false, killSignal: 'SIGKILL' })) : null,
   ])
   const gpuDevices = electronDevices(gpuInfo, integratedGpu)
   // Keep the NVIDIA driver inventory separate from Chromium's display list.
@@ -88,8 +112,9 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
     platform, arch,
     cpu,
     cpuCount: Array.isArray(cpus) && cpus.length ? cpus.length : null,
-    totalMemoryBytes: bytes(safely(() => osAdapter.totalmem())),
-    availableMemoryBytes: bytes(safely(() => osAdapter.freemem())),
+    totalMemoryBytes,
+    availableMemoryBytes: (platform === 'darwin' ? macAvailableMemory(macMemoryOutput, totalMemoryBytes) : null)
+      ?? bytes(safely(() => osAdapter.freemem())),
     gpu: gpuDevices.map(device => device.name).join(', ') || 'Unknown',
     gpuDevices,
     cudaDevices,

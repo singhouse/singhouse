@@ -270,7 +270,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
               id="local-reason"
               role="status"
             >{{ checkingLocal ? 'Checking your installed processing tools and models. This can take a minute…' : localAvailable ? 'Processing speed depends on your hardware and models.' : plan?.reason || 'Local setup is currently unavailable.' }}</small>
-            <span class="badge" :class="{ experimental: !checkingLocal && localAvailable && hardwareTest }">{{ checkingLocal ? 'Checking…' : localAvailable ? (hardwareTest ? 'Experimental' : 'Recommended') : 'Currently unavailable' }}</span>
+            <span class="badge" :class="{ 'release-candidate': !checkingLocal && localAvailable && hardwareTest }">{{ checkingLocal ? 'Checking…' : localAvailable ? (hardwareTest ? 'Release candidate' : 'Recommended') : 'Currently unavailable' }}</span>
           </button>
           <button
             class="choice"
@@ -409,7 +409,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           >
             <p><strong>{{ variant.label }}</strong>: {{ variant.qualityTradeoff }} {{ variant.reason }}</p>
             <p v-if="variant.requirements">
-              Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              <template v-if="variant.requirements.acceptancePending">
+                Available memory needed: {{ size(variant.requirements.ramBytes) }}
+                <span v-if="variant.requirements.totalRamBytes"> · System memory needed: {{ size(variant.requirements.totalRamBytes) }}</span>
+              </template>
+              <template v-else>
+                Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              </template>
               <span v-if="variant.requirements.vramBytes"> · Dedicated graphics memory: {{ size(variant.requirements.vramBytes) }}</span>.
               Model transfer: {{ size(variant.requirements.transferBytes) }} · Installed: {{ size(variant.requirements.installedBytes) }}.
             </p>
@@ -493,11 +499,11 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           v-if="plan?.qualificationScope === 'hardware-test'"
           role="alert"
         >
-          Experimental hardware test: local processing in this build has not passed a real-song test or release qualification.
+          Release candidate: local processing is ready for your final acceptance test.
           <template v-if="plan?.accelerator === 'cuda'">
             Requires an NVIDIA GPU and a current driver.
           </template>
-          Setup checks the processing runtime on your computer before enabling it. Processing may fail; use this build only for testing.
+          Setup checks the processing runtime on your computer before enabling it.
         </p>
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
@@ -939,5 +945,5 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
 .compact.collapsed{width:auto;max-width:calc(100vw - 40px);padding:0;border-radius:8px;box-shadow:0 4px 18px #0006}.mini{display:flex;align-items:center;gap:10px;padding:6px 8px 6px 12px;font-size:12px;color:#f7e7c8}.mini .name{white-space:nowrap}.mini .name small{color:#8f98a8;font-size:11px;margin-left:4px}.mini progress{width:72px;height:5px;margin:0}.mini button{color:#bbc3d2;font-size:11px;padding:4px}.mini button:hover{color:#f7eee2}.mini button:focus-visible{outline-offset:1px}
 .stages progress,.mini progress{-webkit-appearance:none;appearance:none;border:0;border-radius:3px;background:#2a303c;overflow:hidden}.stages progress::-webkit-progress-bar,.mini progress::-webkit-progress-bar{background:#2a303c;border-radius:3px}.stages progress::-webkit-progress-value,.mini progress::-webkit-progress-value{background:#e23e57;border-radius:3px}.stages progress::-moz-progress-bar,.mini progress::-moz-progress-bar{background:#e23e57;border-radius:3px}.paused progress::-webkit-progress-value{background:#6b7487}.paused progress::-moz-progress-bar{background:#6b7487}
 
-.badge.experimental{background:#3d3220;color:#e9d3ad}
+.badge.release-candidate{background:#3d3220;color:#e9d3ad}
 </style>
