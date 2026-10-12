@@ -25,10 +25,12 @@ async function bounded(fn) {
   } catch { return null } finally { clearTimeout(timer) }
 }
 
-function electronDevices(info) {
-  if (!Array.isArray(info?.gpuDevice)) return []
-  return info.gpuDevice.slice(0, 32).filter(device => device && typeof device === 'object').map(device => ({
-    name: label(device.deviceString) || label(device.vendorString) || 'Unidentified GPU',
+function electronDevices(info, integratedGpu = '') {
+  const devices = Array.isArray(info?.gpuDevice)
+    ? info.gpuDevice.slice(0, 32).filter(device => device && typeof device === 'object') : []
+  if (!devices.length && integratedGpu) devices.push({})
+  return devices.map(device => ({
+    name: label(device.deviceString) || label(device.vendorString) || integratedGpu || 'Unidentified GPU',
     dedicatedMemoryBytes: null, availableMemoryBytes: null,
   }))
 }
@@ -60,14 +62,18 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
   const platform = label(processAdapter.platform) || 'unknown'
   const arch = label(processAdapter.arch) || 'unknown'
   const cpus = safely(() => osAdapter.cpus(), [])
+  const cpu = Array.isArray(cpus) ? label(cpus[0]?.model) || 'Unknown' : 'Unknown'
   const unifiedMemory = platform === 'darwin' && arch === 'arm64'
+  // Apple M-series chips include an integrated GPU. Its model is a label only:
+  // it does not establish available Metal support, core count, or GPU memory.
+  const integratedGpu = unifiedMemory && /^Apple M\d+(?: Pro| Max| Ultra)?$/.test(cpu) ? `${cpu} GPU` : ''
   const [gpuInfo, nvidiaOutput] = await Promise.all([
     bounded(getGPUInfo),
     ['linux', 'win32'].includes(platform) ? bounded(() => runCommand('nvidia-smi',
       ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'],
       { encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT, shell: false, windowsHide: true, killSignal: 'SIGKILL' })) : null,
   ])
-  const gpuDevices = electronDevices(gpuInfo)
+  const gpuDevices = electronDevices(gpuInfo, integratedGpu)
   // Keep the NVIDIA driver inventory separate from Chromium's display list.
   // Display names (and other vendors' VRAM) do not establish a CUDA device.
   const cudaDevices = nvidiaDevices(nvidiaOutput)
@@ -80,7 +86,7 @@ export async function collectHardware({ getGPUInfo = async () => null, osAdapter
   }
   return {
     platform, arch,
-    cpu: Array.isArray(cpus) ? label(cpus[0]?.model) || 'Unknown' : 'Unknown',
+    cpu,
     cpuCount: Array.isArray(cpus) && cpus.length ? cpus.length : null,
     totalMemoryBytes: bytes(safely(() => osAdapter.totalmem())),
     availableMemoryBytes: bytes(safely(() => osAdapter.freemem())),

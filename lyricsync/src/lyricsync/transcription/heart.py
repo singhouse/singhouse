@@ -269,6 +269,8 @@ class HeartTranscriber:
                 )
 
         # Convert to typed result
+        from lyricsync.transcription._heart_words import normalize_heart_words
+
         segments: list[TranscriptionSegment] = []
         for seg in raw.get("segments", []):
             words = [
@@ -280,10 +282,13 @@ class HeartTranscriber:
                 for w in seg.get("words", [])
                 if (w.get("word", w.get("text", ""))).strip()
             ]
+            normalized_words = normalize_heart_words(words)
+            text = seg.get("text", "").replace("＇", "'")
+            words = normalized_words
             segments.append(TranscriptionSegment(
                 start=seg.get("start", 0),
                 end=seg.get("end", 0),
-                text=seg.get("text", ""),
+                text=text,
                 words=words,
             ))
 
@@ -296,5 +301,5 @@ class HeartTranscriber:
         return TranscriptionResult(
             segments=segments,
             language=raw.get("language"),
-            full_text=raw.get("full_text", ""),
+            full_text=raw.get("full_text", "").replace("＇", "'"),
         )

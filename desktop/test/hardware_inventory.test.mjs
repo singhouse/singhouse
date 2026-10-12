@@ -34,6 +34,41 @@ test('Intel Mac and ARM Linux do not imply unified Apple memory', async () => {
   }
 })
 
+test('Apple silicon supplies an integrated GPU label when Electron omits names', async () => {
+  for (const cpu of ['Apple M2', 'Apple M4 Pro', 'Apple M3 Max', 'Apple M2 Ultra']) {
+    for (const gpuInfo of [null, { gpuDevice: [] }, { gpuDevice: [{ deviceString: '', vendorString: '' }] }]) {
+      const result = await collectHardware({ ...base,
+        processAdapter: { platform: 'darwin', arch: 'arm64' },
+        osAdapter: { ...osAdapter, cpus: () => [{ model: cpu }] },
+        getGPUInfo: async () => gpuInfo })
+      assert.equal(result.gpu, `${cpu} GPU`)
+      assert.deepEqual(result.gpuDevices, [{ name: `${cpu} GPU`, dedicatedMemoryBytes: null, availableMemoryBytes: null }])
+      assert.equal(result.unifiedMemory, true)
+      assert.equal(result.videoMemoryBytes, null)
+      assert.equal(result.memoryMinimumBytes, null)
+      assert.deepEqual(result.cudaDevices, [])
+    }
+  }
+})
+
+test('Apple GPU fallback preserves Electron labels and requires an observed Apple chip', async () => {
+  const apple = { ...base, processAdapter: { platform: 'darwin', arch: 'arm64' },
+    osAdapter: { ...osAdapter, cpus: () => [{ model: 'Apple M2' }] } }
+  for (const device of [{ deviceString: 'Observed GPU' }, { vendorString: 'Observed Vendor' }]) {
+    const result = await collectHardware({ ...apple, getGPUInfo: async () => ({ gpuDevice: [device] }) })
+    assert.equal(result.gpu, device.deviceString || device.vendorString)
+  }
+  for (const options of [
+    { processAdapter: { platform: 'darwin', arch: 'x64' } },
+    { processAdapter: { platform: 'linux', arch: 'arm64' } },
+    { osAdapter },
+    { osAdapter: { ...osAdapter, cpus: () => null } },
+  ]) {
+    const result = await collectHardware({ ...apple, ...options, getGPUInfo: async () => ({ gpuDevice: [{}] }) })
+    assert.equal(result.gpu, 'Unidentified GPU')
+  }
+})
+
 test('NVIDIA probe uses bounded fixed execFile arguments on Windows and Linux', async () => {
   for (const platform of ['linux', 'win32']) {
     const result = await collectHardware({ ...base, processAdapter: { platform, arch: 'x64' },
