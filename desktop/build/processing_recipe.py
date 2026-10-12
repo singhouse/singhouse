@@ -19,22 +19,34 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def artifact(path, directory, base_url=None):
+def validate_publication(base_url, layout='directory'):
+    if layout not in ('directory', 'flat'):
+        raise ValueError('Unknown recipe artifact layout')
+    if base_url is not None:
+        url = urlparse(base_url)
+        if (url.scheme != 'https' or not url.hostname or url.username is not None
+                or url.password is not None or not base_url.endswith('/')
+                or url.query or url.fragment or any(char.isspace() for char in base_url)
+                or '\\' in base_url):
+            raise ValueError('Recipe artifact publication requires a credential-free HTTPS directory URL ending in /')
+
+
+def artifact(path, directory, base_url=None, layout='directory'):
     """Keep the original wheel filename below its content-addressed directory."""
-    if base_url is not None and (urlparse(base_url).scheme != 'https' or not base_url.endswith('/')
-                                 or urlparse(base_url).query or urlparse(base_url).fragment):
-        raise ValueError('Recipe artifact publication requires an HTTPS directory URL ending in /')
+    validate_publication(base_url, layout)
     checksum = digest(path)
-    destination = directory / 'artifacts' / checksum / path.name
+    exported = f'{checksum}-{path.name}' if layout == 'flat' else f'{checksum}/{path.name}'
+    destination = directory / 'artifacts' / exported
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, destination)
-    relative = f'{checksum}/{quote(path.name)}'
+    relative = quote(exported, safe='/')
     return dict(filename=path.name, url=base_url + relative if base_url else destination.resolve().as_uri(),
                 size=path.stat().st_size, sha256=checksum)
 
 
-def wheel_records(records, packages, payload, directory, base_url=None):
+def wheel_records(records, packages, payload, directory, base_url=None, layout='directory'):
     """Export built wheels and notices, preserving original upstream wheel URLs."""
+    validate_publication(base_url, layout)
     result = []
     for (wheel, source), package in zip(records, packages, strict=True):
         wheel_hash = digest(wheel)
@@ -43,8 +55,8 @@ def wheel_records(records, packages, payload, directory, base_url=None):
                 raise ValueError('Upstream wheel changed while generating recipe')
             delivery = dict(filename=wheel.name, url=source['url'], size=wheel.stat().st_size, sha256=wheel_hash)
         else:
-            delivery = artifact(wheel, directory, base_url)
-        notices = [artifact(payload / name, directory, base_url) for name in package['notices']]
+            delivery = artifact(wheel, directory, base_url, layout)
+        notices = [artifact(payload / name, directory, base_url, layout) for name in package['notices']]
         result.append(dict(name=package['name'], version=package['version'], **delivery,
                            sourceUrl=source['url'], sourceSha256=source['sha256'],
                            license=package['license'], notices=notices))
