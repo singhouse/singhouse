@@ -409,7 +409,13 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           >
             <p><strong>{{ variant.label }}</strong>: {{ variant.qualityTradeoff }} {{ variant.reason }}</p>
             <p v-if="variant.requirements">
-              Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              <template v-if="variant.requirements.acceptancePending">
+                Available memory needed: {{ size(variant.requirements.ramBytes) }}
+                <span v-if="variant.requirements.totalRamBytes"> · System memory needed: {{ size(variant.requirements.totalRamBytes) }}</span>
+              </template>
+              <template v-else>
+                Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
+              </template>
               <span v-if="variant.requirements.vramBytes"> · Dedicated graphics memory: {{ size(variant.requirements.vramBytes) }}</span>.
               Model transfer: {{ size(variant.requirements.transferBytes) }} · Installed: {{ size(variant.requirements.installedBytes) }}.
             </p>

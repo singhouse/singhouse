@@ -48,7 +48,7 @@ test('Windows signing workflow is manual, private, OIDC-only, and verifies befor
   assert.match(workflow, /Get-AuthenticodeSignature -LiteralPath \$path/)
   assert.doesNotMatch(workflow, new RegExp(`${WINDOWS_SIGNING.account}|${WINDOWS_SIGNING.certificateProfile}`, 'i'))
   assert.doesNotMatch(workflow, /gh release|actions\/create-release|action-gh-release|npm publish|az storage|docker push|publish:/i)
-  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc \$processingFlag\r?\n/)
+  assert.match(workflow, /npm --prefix desktop run package:first-installers -- --signed-release --azure-oidc @processingFlags\r?\n/)
 })
 
 test('Windows signing workflow takes the processing mode as a fixed choice passed as data', async () => {
@@ -61,19 +61,18 @@ test('Windows signing workflow takes the processing mode as a fixed choice passe
   // no expression is interpolated into a shell line.
   assert.match(workflow, new RegExp(['        env:', '          PROCESSING_MODE: \\$\\{\\{ inputs\\.processing_mode \\}\\}'].join(nl)))
   assert.match(workflow, /switch -Exact -CaseSensitive \(\$env:PROCESSING_MODE\) \{/)
-  assert.match(workflow, /'playback-only' \{ \$processingFlag = '--playback-only' \}/)
-  assert.match(workflow, /'processing-ready' \{ \$processingFlag = '--processing-ready' \}/)
-  assert.match(workflow, /default \{ throw 'Unknown processing mode\.' \}/)
-  assert.ok(workflow.indexOf('switch -Exact -CaseSensitive') < workflow.indexOf('python desktop/build/assemble.py'))
-  // processing-ready stops before native assembly when the target catalog is absent.
-  assert.match(workflow, /if \(\$env:PROCESSING_MODE -ceq 'processing-ready' -and\r?\n\s+-not \(Test-Path -LiteralPath 'desktop\/processing-catalogs\/win32-x64\.json' -PathType Leaf\)\) \{\r?\n\s+throw '[^'\r\n]+'/)
-  assert.ok(workflow.indexOf('switch -Exact -CaseSensitive') < workflow.indexOf("Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json'"))
-  assert.ok(workflow.indexOf("Test-Path -LiteralPath 'desktop/processing-catalogs/win32-x64.json'") < workflow.indexOf('python desktop/build/assemble.py'))
-  // The uploaded artifact names the mode it was packaged in.
-  assert.match(workflow, /^          name: windows-signed-\$\{\{ inputs\.processing_mode \}\}-\$\{\{ github\.sha \}\}$/m)
-  assert.doesNotMatch(workflow, /name: windows-signed-\$\{\{ github\.sha \}\}/)
+  assert.match(workflow, /'playback-only' \{ \$processingFlags = @\('--playback-only'\); \$installerSuffix = '' \}/)
+  assert.match(workflow, /switch -Exact -CaseSensitive \(\$env:PROCESSING_ACCELERATOR\)/)
+  assert.match(workflow, /'cpu' \{ \$accelerator = 'cpu' \}/)
+  assert.match(workflow, /'cuda' \{ \$accelerator = 'cuda' \}/)
+  assert.match(workflow, /\$processingFlags = @\('--processing-ready', '--processing-accelerator', \$accelerator\)/)
+  assert.match(workflow, /default \{ throw 'Unknown processing accelerator\.' \}/)
+  assert.match(workflow, /\$catalog = "desktop\/processing-catalogs\/win32-x64-\$accelerator\.json"/)
+  assert.ok(workflow.indexOf('Test-Path -LiteralPath $catalog') < workflow.indexOf('python desktop/build/assemble.py'))
+  assert.match(workflow, /\[regex\]::Escape\(\$env:INSTALLER_SUFFIX\)/)
+  assert.match(workflow, /^          name: windows-signed-\$\{\{ inputs\.processing_mode \}\}-\$\{\{ inputs\.processing_accelerator \}\}-\$\{\{ github\.sha \}\}$/m)
   const expressionLines = workflow.split(/\r?\n/).filter(line => /\$\{\{/.test(line))
-  for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.processing_mode|github\.sha) \}\}$/, line)
+  for (const line of expressionLines) assert.match(line, /^\s+(?:[A-Z_]+|client-id|tenant-id|subscription-id|name): .*\$\{\{ (?:secrets\.[A-Z_]+|inputs\.processing_mode|inputs\.processing_accelerator|github\.sha) \}\}$/, line)
   assert.doesNotMatch(workflow, /npm[^\r\n]*\$\{\{/)
 })
 

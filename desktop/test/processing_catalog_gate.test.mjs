@@ -10,15 +10,15 @@ import { createSetupCatalog, SETUP_MODEL_IDS, validateShippedCatalog } from '../
 import { prepareSetupCatalog } from '../build/setup_catalog.mjs'
 import { assertPackagingMode, packagedApplicationArchivePath, verifyPackagedProcessingCatalog } from '../build/package.mjs'
 import { assertPackagedProcessingCatalog, assertProcessingCatalog, catalogSourceName, packagedCatalogIdentity, packagedCatalogSha256,
-  prepareProcessingGate, processingModeFromArgs, processingModeRecord, readProcessingCatalogInputs } from '../build/processing_catalog_gate.mjs'
+  prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, readProcessingCatalogInputs } from '../build/processing_catalog_gate.mjs'
 
 const sha = value => createHash('sha256').update(value).digest('hex')
 const nativeManifest = { schema: 1, appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', pythonVersion: '3.12.0', platform: 'linux', arch: 'x64', runtimeId: 'f'.repeat(64) }
 
 // Test-only fixture: qualification here is synthetic and never leaves this file.
-function fixture({ platform = 'linux', arch = 'x64', scope = 'full' } = {}) {
+function fixture({ platform = 'linux', arch = 'x64', scope = 'full', accelerator = 'cpu' } = {}) {
   const target = { appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', platform, arch }
-  const runtime = { schema: 1, kind: 'processing', ...target, accelerator: 'cpu', python: 'python', pythonVersion: '3.12',
+  const runtime = { schema: 1, kind: 'processing', ...target, accelerator, python: 'python', pythonVersion: '3.12',
     capabilities: ['transcription', 'separation'], models: [...SETUP_MODEL_IDS],
     modelCapabilities: Object.fromEntries(SETUP_MODEL_IDS.map(id => [id, id === 'heart-transcriptor' ? 'transcription' : 'separation'])),
     probe: { schema: 2, type: 'python-functional-v1', modules: ['audio_separator.separator', 'demucs.separate', 'faster_whisper', 'karaoke_backend.workers.heart_transcriptor', 'lyricsync.transcription.heart'] },
@@ -28,7 +28,7 @@ function fixture({ platform = 'linux', arch = 'x64', scope = 'full' } = {}) {
     sourceCommit: 'a'.repeat(40), packages: [{ name: 'fixture', version: '1', license: 'MIT', sourceUrl: 'https://example.org/package', sha256: sha('package'), notices: ['NOTICE'] }],
     files: runtime.files.map(({ url, ...file }) => file) }
   runtime.provenance = { inputLock: JSON.stringify(lock), lockSha256: sha(JSON.stringify(lock)), sourceCommit: lock.sourceCommit, packages: lock.packages }
-  const qualification = { passed: true, scope, runtimeLockSha256: runtime.provenance.lockSha256, platform, arch, accelerator: 'cpu', evidenceReference: 'fixture-run-1' }
+  const qualification = { passed: true, scope, runtimeLockSha256: runtime.provenance.lockSha256, platform, arch, accelerator, evidenceReference: 'fixture-run-1' }
   const modelPolicy = { schema: 1, allowedHosts: ['example.org'], models: SETUP_MODEL_IDS.map(id => ({ id, files: [{ path: `huggingface/${id}`, url: `https://example.org/${id}`, sha256: sha(id), revision: sha(id), size: 1, executable: false }] })) }
   const locks = { schema: 1, lockSha256: [runtime.provenance.lockSha256] }
   const input = structuredClone({ runtime, qualification, models: SETUP_MODEL_IDS.map(id => ({ id, terms: [{ label: `${id} terms`, url: 'https://example.org/license' }] })) })
@@ -37,6 +37,53 @@ function fixture({ platform = 'linux', arch = 'x64', scope = 'full' } = {}) {
 }
 const bytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
 const source = 'desktop/processing-catalogs/linux-x64.json'
+
+test('accelerator selector is explicit, compatible, and preserved in artifact suffixes', () => {
+  assert.equal(processingAcceleratorFromArgs(['--processing-ready']), undefined)
+  for (const accelerator of ['cpu', 'cuda', 'metal']) {
+    assert.equal(processingAcceleratorFromArgs(['--processing-ready', '--processing-accelerator', accelerator]), accelerator)
+    assert.equal(processingArtifactSuffix(accelerator), `-${accelerator}`)
+  }
+  assert.equal(processingArtifactSuffix(undefined), '')
+  for (const argv of [['--processing-ready', '--processing-accelerator'], ['--processing-ready', '--processing-accelerator', 'rocm'],
+    ['--processing-ready', '--processing-accelerator=cuda'], ['--processing-ready', '--processing-accelerator', 'cpu', '--processing-accelerator', 'cpu'],
+    ['--playback-only', '--processing-accelerator', 'cpu']]) assert.throws(() => assertPackagingMode(argv), /processing-accelerator/)
+  assert.throws(() => assertPackagingMode(['--processing-ready'], 'linux', { npm_config_processing_accelerator: 'cuda' }), /npm consumed/)
+  assert.equal(catalogSourceName({ platform: 'win32', arch: 'x64' }, 'cuda'), 'processing-catalogs/win32-x64-cuda.json')
+  assert.equal(catalogSourceName({ platform: 'darwin', arch: 'arm64' }, 'metal'), 'processing-catalogs/darwin-arm64-metal.json')
+  for (const [platform, arch, accelerator] of [['win32', 'x64', 'metal'], ['darwin', 'arm64', 'cuda'], ['linux', 'arm64', 'cuda'], ['win32', 'arm64', 'cpu']]) {
+    assert.throws(() => catalogSourceName({ platform, arch }, accelerator), /unsupported/)
+  }
+})
+
+test('explicit accelerator selects only its committed catalog and records matching runtime', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'catalog-variants-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const cpu = fixture(), cuda = fixture({ accelerator: 'cuda' })
+  await mkdir(join(root, 'processing-catalogs'))
+  await writeFile(join(root, 'processing-locks.json'), JSON.stringify({ schema: 1, lockSha256: [...cpu.locks.lockSha256, ...cuda.locks.lockSha256] }))
+  await writeFile(join(root, 'models.json'), JSON.stringify(cpu.modelPolicy))
+  await writeFile(join(root, 'processing-catalogs/linux-x64.json'), bytes(cpu.catalog))
+  const prepare = accelerator => prepareProcessingGate({ desktopDir: root, nativeManifest, appVersion: '1', releaseChannel: 'private-test',
+    argv: ['--processing-ready', '--processing-accelerator', accelerator], env: {} })
+  await assert.rejects(prepare('cpu'), /requires desktop\/processing-catalogs\/linux-x64-cpu.json/)
+  await writeFile(join(root, 'processing-catalogs/linux-x64-cpu.json'), bytes(cpu.catalog))
+  await writeFile(join(root, 'processing-catalogs/linux-x64-cuda.json'), bytes(cuda.catalog))
+  for (const [accelerator, f] of [['cpu', cpu], ['cuda', cuda]]) {
+    const gate = await prepare(accelerator)
+    assert.equal(gate.result.accelerator, accelerator)
+    assert.equal(gate.result.runtimeLockSha256, f.catalog.runtime.provenance.lockSha256)
+    assert.equal(gate.result.catalogSha256, sha(bytes(f.catalog)))
+    assert.deepEqual(gate.catalogBytes, bytes(f.catalog))
+    assert.equal(processingModeRecord({ ...gate.result, releaseId: 'a'.repeat(64), electronAppDigest: 'b'.repeat(64), releaseChannel: 'private-test' }).accelerator, accelerator)
+  }
+  await writeFile(join(root, 'processing-catalogs/linux-x64-cuda.json'), bytes(cpu.catalog))
+  await assert.rejects(prepare('cuda'), /does not match requested cuda/)
+  const installer = await readFile(new URL('../build/installer.mjs', import.meta.url), 'utf8')
+  assert.match(installer, /artifactName:.*processingArtifactSuffix\(processingAccelerator\)/)
+  const packager = await readFile(new URL('../build/package.mjs', import.meta.url), 'utf8')
+  assert.match(packager, /win-x64\$\{processingSuffix\}\.exe/)
+  assert.match(packager, /\$\{target\}\$\{processingSuffix\}\.shapp/)
+})
 
 test('processing-ready requires the target catalog the packaged application accepts and reports its digests', () => {
   const { catalog, locks, modelPolicy, identity } = fixture()

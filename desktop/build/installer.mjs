@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { appImageNoticesDirectory } from './appimage_notices.mjs'
 import { assertReleasePolicy } from '../release.mjs'
 import { nativeExecutableSigningExclusions, windowsBuildConfiguration } from '../windows_signing.mjs'
-import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY } from './processing_catalog_gate.mjs'
+import { PACKAGED_CATALOG_NAME, PLAYBACK_ONLY, PROCESSING_READY, processingAcceleratorFromArgs, processingArtifactSuffix, catalogSourceName } from './processing_catalog_gate.mjs'
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const icons = resolve(desktop, 'build/icons')
@@ -23,6 +23,8 @@ const { BRAND_INSTALLED_NAME } = await import(pathToFileURL(resolve(desktop, '..
 const signedRelease = process.argv.includes('--signed-release')
 const manualAzureCli = process.argv.includes('--azure-cli-user')
 const azureOidc = process.argv.includes('--azure-oidc')
+const processingAccelerator = processingAcceleratorFromArgs(process.argv, process.env)
+if (processingAccelerator !== undefined) catalogSourceName(manifest, processingAccelerator)
 if (manifest.appVersion !== pkg.version || !existsSync(resolve(native, 'backend.py'))) {
   throw new Error('Assemble a matching native runtime before creating an installer')
 }
@@ -98,7 +100,7 @@ export default {
   npmRebuild: false,
   // Builds are private test artifacts; publication is a separate operation.
   publish: null,
-  artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
+  artifactName: '${productName}-${version}-${os}-${arch}' + processingArtifactSuffix(processingAccelerator) + '.${ext}',
   linux: {
     extraResources: [{ from: appImageNoticesDirectory, to: 'third-party/appimage', filter: ['**/*'] }],
     target: ['AppImage', 'tar.gz'], category: 'AudioVideo', icon: resolve(icons, 'linux'), syncDesktopName: true,

@@ -194,3 +194,47 @@ test('candidate admission rejects missing provenance, unsafe budgets, ambiguous 
     assert.throws(() => validateHardwarePolicy(o.policy), /Invalid hardware policy/)
   }
 })
+
+
+test('candidate can separately require physical RAM capacity and fresh available RAM', () => {
+  const gib = 1024 ** 3
+  const o = candidateOptions(), v = o.policy.variants[0]
+  Object.assign(v, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(v.admission, { ramBytes: 4 * gib, totalRamBytes: 16 * gib, vramBytes: null, unifiedMemory: true })
+  Object.assign(o.hardware, { platform: 'darwin', arch: 'arm64', unifiedMemory: true,
+    totalMemoryBytes: 16 * gib, availableMemoryBytes: 5 * gib, cudaDevices: [] })
+  for (const phase of ['setup', 'execution']) {
+    o.phase = phase
+    assert.equal(result(o).supported, true)
+    assert.equal(result(o).requirements.totalRamBytes, 16 * gib)
+    assert.equal(result(o).requirements.ramBytes, 4 * gib)
+  }
+  o.hardware.totalMemoryBytes = 8 * gib
+  assert.equal(result(o).status, 'insufficient')
+  o.hardware.totalMemoryBytes = null
+  assert.equal(result(o).status, 'unknown')
+  o.hardware.totalMemoryBytes = 16 * gib
+  o.hardware.availableMemoryBytes = 4 * gib - 1
+  assert.equal(result(o).status, 'insufficient')
+  o.hardware.availableMemoryBytes = null
+  assert.equal(result(o).status, 'unknown')
+  o.hardware.availableMemoryBytes = 5 * gib
+  o.releaseChannel = 'public'
+  assert.equal(result(o).status, 'unqualified')
+  o.releaseChannel = 'private-test'; o.runtimeLockSha256 = 'b'.repeat(64)
+  assert.equal(result(o).status, 'unknown')
+})
+
+test('optional physical RAM floor must be safe, positive and at least the available floor', () => {
+  for (const totalRamBytes of [undefined, null, 0, -1, 124, 125.5, Number.MAX_SAFE_INTEGER + 1, '200']) {
+    const o = candidateOptions(); o.policy.variants[0].admission.totalRamBytes = totalRamBytes
+    assert.throws(() => validateHardwarePolicy(o.policy), /candidate total RAM budget/)
+  }
+  const o = candidateOptions()
+  assert.equal(result(o).supported, true)
+  assert.equal(Object.hasOwn(result(o).requirements, 'totalRamBytes'), false)
+  o.hardware.totalMemoryBytes = 124
+  assert.equal(result(o).status, 'insufficient')
+  const qualified = options()
+  assert.equal(Object.hasOwn(result(qualified).requirements, 'totalRamBytes'), false)
+})

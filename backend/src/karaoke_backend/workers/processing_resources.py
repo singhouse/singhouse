@@ -21,6 +21,39 @@ def _run(command: list[str]) -> str:
     return result.stdout
 
 
+def _windows_memory_status():
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+            (name, ctypes.c_uint64) for name in
+            ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    return status if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
+
+
+def total_ram() -> int | None:
+    """Observe physical memory independently of currently available capacity."""
+    try:
+        system = platform.system()
+        if system == "Linux":
+            fields = [line for line in Path("/proc/meminfo").read_text().splitlines()
+                      if re.match(r"^MemTotal\b", line)]
+            match = re.fullmatch(r"MemTotal:[ \t]+([0-9]+) kB", fields[0]) if len(fields) == 1 else None
+            observed = int(match[1]) * 1024 if match else None
+        elif system == "Windows":
+            status = _windows_memory_status()
+            observed = status.total if status is not None else None
+        elif system == "Darwin":
+            text = _run(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip()
+            observed = int(text) if re.fullmatch(r"[0-9]+", text) else None
+        else:
+            return None
+        return observed if type(observed) is int and 0 < observed <= 2**53 - 1 else None
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def available_ram() -> int | None:
     try:
         system = platform.system()
@@ -29,15 +62,8 @@ def available_ram() -> int | None:
             match = re.search(r"^MemAvailable:\s+(\d+) kB$", text, re.MULTILINE)
             return int(match[1]) * 1024 if match else None
         if system == "Windows":
-            class MemoryStatus(ctypes.Structure):
-                _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
-                    (name, ctypes.c_uint64) for name in
-                    ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]
-            status = MemoryStatus()
-            status.length = ctypes.sizeof(status)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return None
-            return status.available
+            status = _windows_memory_status()
+            return status.available if status is not None else None
         if system == "Darwin":
             text = _run(["/usr/bin/vm_stat"])
             page = re.search(r"page size of (\d+) bytes", text)
@@ -86,7 +112,7 @@ def available_disk() -> int | None:
         return None
 
 
-def enforce_resources(runtime: dict, *, ram_probe=None, vram_probe=None, disk_probe=None) -> None:
+def enforce_resources(runtime: dict, *, ram_probe=None, vram_probe=None, disk_probe=None, total_ram_probe=None) -> None:
     from .managed_processing import InvalidAttestation
     raw = os.environ.get("KARAOKE_DESKTOP_RESOURCE_POLICY_JSON")
     if raw is None:
@@ -102,10 +128,14 @@ def enforce_resources(runtime: dict, *, ram_probe=None, vram_probe=None, disk_pr
                 or value["settings"] != {}):
             invalid("The selected resource policy is invalid or requests unsupported processing settings.")
         requirements = value["requirements"]
-        if (not isinstance(requirements, dict) or set(requirements) != {"ramBytes", "vramBytes", "unifiedMemory", "workingDiskBytes"}
+        required_keys = {"ramBytes", "vramBytes", "unifiedMemory", "workingDiskBytes"}
+        if (not isinstance(requirements, dict) or set(requirements) not in (required_keys, required_keys | {"totalRamBytes"})
                 or any(type(requirements[key]) is not int or not 0 < requirements[key] <= 2**53 - 1 for key in ("ramBytes", "workingDiskBytes"))
                 or type(requirements["unifiedMemory"]) is not bool):
             invalid("The selected resource requirements are incomplete.")
+        if "totalRamBytes" in requirements and (type(requirements["totalRamBytes"]) is not int
+                or not requirements["ramBytes"] <= requirements["totalRamBytes"] <= 2**53 - 1):
+            invalid("The selected physical memory requirement is invalid.")
         cuda = runtime["accelerator"] == "cuda"
         if cuda:
             if requirements["unifiedMemory"] or type(requirements["vramBytes"]) is not int or not 0 < requirements["vramBytes"] <= 2**53 - 1:
@@ -119,6 +149,8 @@ def enforce_resources(runtime: dict, *, ram_probe=None, vram_probe=None, disk_pr
         invalid("The selected resource policy cannot be read.")
     checks = [("system memory", requirements["ramBytes"], ram_probe or available_ram),
               ("storage", requirements["workingDiskBytes"], disk_probe or available_disk)]
+    if "totalRamBytes" in requirements:
+        checks.insert(0, ("physical system memory", requirements["totalRamBytes"], total_ram_probe or total_ram))
     if cuda:
         checks.append(("CUDA memory", requirements["vramBytes"], vram_probe or available_vram))
     for label, required, probe in checks:
@@ -127,6 +159,10 @@ def enforce_resources(runtime: dict, *, ram_probe=None, vram_probe=None, disk_pr
         except Exception:
             observed = None
         if type(observed) is not int or observed < 0:
-            invalid(f"Currently available {label} could not be measured.")
+            invalid(f"The {label} could not be measured.")
+        if label == "physical system memory" and not 0 < observed <= 2**53 - 1:
+            invalid("The physical system memory could not be measured.")
         if observed < required:
-            invalid(f"Currently available {label} is below the measured requirement. Close other applications or free storage.")
+            if label == "physical system memory":
+                invalid("The physical system memory is below the selected requirement.")
+            invalid(f"Currently available {label} is below the selected requirement. Close other applications or free storage.")

@@ -1316,6 +1316,48 @@ it.each(['ready', 'restart', 'progress'])('retains availability when %s restores
   expect(setup.step.value).toBe('choose')
 })
 
+it.each([
+  [true, 16 * 1024 ** 3],
+  [true, undefined],
+  [false, undefined],
+])('shows candidate memory floors or qualified headroom (pending: %s, total: %s)', async (acceptancePending, totalRamBytes) => {
+  const desktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose', choice: 'local' }),
+    preflightSetup: vi.fn().mockResolvedValue({
+      available: true,
+      planId: 'memory-plan',
+      hardwareAssessment: {
+        reason: 'Processing requirements',
+        variants: [{
+          id: 'memory-variant', label: 'Local processing', supported: true,
+          requirements: {
+            acceptancePending, headroomFraction: acceptancePending ? null : 0.25,
+            ramBytes: 4 * 1024 ** 3, totalRamBytes,
+            vramBytes: 2 * 1024 ** 3, transferBytes: 1024 ** 3, installedBytes: 3 * 1024 ** 3,
+          },
+        }],
+      },
+      components: [],
+    }),
+  })
+  globalThis.window.karaokeDesktop = desktop
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  const details = wrapper.find('details').text()
+  if (acceptancePending) {
+    expect(details).toContain('Available memory needed: 4.0 GiB')
+    expect(details).not.toContain('% headroom')
+    expect(details.includes('System memory needed: 16.0 GiB')).toBe(Boolean(totalRamBytes))
+  } else {
+    expect(details).toContain('Memory with 25% headroom: 4.0 GiB')
+    expect(details).not.toContain('Available memory needed:')
+  }
+  expect(details).toContain('Dedicated graphics memory: 2.0 GiB')
+  expect(details).toContain('Model transfer: 1.0 GiB · Installed: 3.0 GiB')
+  expect(desktop.startSetup).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
+
 it('changing hardware selection refreshes consent without starting downloads', async () => {
   const desktop = bridge({ setHardwareSelection: vi.fn().mockResolvedValue({ available: true, planId: 'new-variant' }) })
   const setup = useDesktopOnboarding(desktop)

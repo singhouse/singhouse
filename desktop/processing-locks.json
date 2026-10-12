@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "Existing CPU, Metal and experimental CUDA identities are retained for installed runtimes. Entries in privateTestLockSha256 are trusted only by private-test channel builds. Historical probes do not qualify rebuilt requirements. Linux CPU uv recipe passed installation and functional probes for private measurement. No hardware resource variant is release-qualified.",
+  "status": "Historical identities remain for installed runtimes. Rebuilt 0.1.1 recipes are private-test only and use separate provisional resource admission; final installer acceptance and release qualification remain pending.",
   "lockSha256": [
     "e7980aa680117f6178204d098582c8751eea095c1c77fa782df337a6b93fc9cb",
     "3698438455749d7eda82a36a51d2229cfe755141654661bbcaf0fdce0f370216",
@@ -14,7 +14,12 @@
     "619bcffa681feddaaad1456923a5062cc8b6c2a718c809160b510898b1e90fab",
     "02b751306be6c9e63ab296063b5cde5a239e14e0c07d675d602cd5a64952fd79",
     "8856b362d63dbfcf2bfe1d9251f47a9dbc7a7aeb116796e570f78063fc68942b",
-    "63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3"
+    "63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3",
+    "b090ee67cc75becf224afd000a3bc6edadc0ebefe8a8001852aaec4eff68959b",
+    "d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d",
+    "8ab05bf36a222e3f6a3576b1252042d74067741b357ff41a9f87221f589a2475",
+    "f1eb1e27187082d1bb6b13615660109ba23ba7e672331c820ef7a052b5e68022",
+    "a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18"
   ],
   "privateTestLockSha256": [
     "e1cc796d0ce99ab182083427dddd15eaacffd91a750d397df434ef5d842c6d59",
@@ -23,6 +28,11 @@
     "619bcffa681feddaaad1456923a5062cc8b6c2a718c809160b510898b1e90fab",
     "02b751306be6c9e63ab296063b5cde5a239e14e0c07d675d602cd5a64952fd79",
     "8856b362d63dbfcf2bfe1d9251f47a9dbc7a7aeb116796e570f78063fc68942b",
-    "63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3"
+    "63628452474c50c0ed0f3312f290cd99550d6544e01c60c04c0fcc16dda655e3",
+    "b090ee67cc75becf224afd000a3bc6edadc0ebefe8a8001852aaec4eff68959b",
+    "d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d",
+    "8ab05bf36a222e3f6a3576b1252042d74067741b357ff41a9f87221f589a2475",
+    "f1eb1e27187082d1bb6b13615660109ba23ba7e672331c820ef7a052b5e68022",
+    "a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18"
   ]
 }

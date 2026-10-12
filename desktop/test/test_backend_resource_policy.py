@@ -148,6 +148,33 @@ class CandidateResourceAdmissionTests(unittest.TestCase):
                     check(**capacities)
             check()
 
+    def test_candidate_physical_memory_floor_is_preserved_and_checked_separately(self):
+        from karaoke_backend.workers import processing_resources as resources
+        from karaoke_backend.workers.managed_processing import InvalidAttestation
+        gib = 1024**3
+        manifest, policy = self.fixture('darwin', 'arm64', 'metal')
+        admission = policy['variants'][0]['admission']
+        admission.update(ramBytes=4*gib, totalRamBytes=16*gib)
+        emitted = self.admit(manifest, policy)
+        self.assertEqual(emitted['requirements']['totalRamBytes'], 16*gib)
+        runtime = {'runtimeManifestId': 'b' * 64, 'accelerator': 'metal'}
+        with patch.dict(os.environ, {'KARAOKE_DESKTOP_RESOURCE_POLICY_JSON': json.dumps(emitted)}), \
+                patch.object(resources.platform, 'system', return_value='Darwin'), \
+                patch.object(resources.platform, 'machine', return_value='arm64'):
+            def check(total=16*gib, available=5*gib):
+                resources.enforce_resources(runtime, ram_probe=lambda: available, disk_probe=lambda: 200,
+                                            total_ram_probe=lambda: total)
+            check()
+            with self.assertRaisesRegex(InvalidAttestation, 'physical system memory.*below'):
+                check(total=8*gib)
+            with self.assertRaisesRegex(InvalidAttestation, 'system memory.*below'):
+                check(available=3*gib)
+            check()
+        for total in (None, 0, -1, True, 3*gib, 2**53):
+            admission['totalRamBytes'] = total
+            with self.subTest(total=total), self.assertRaises(RuntimeError):
+                self.admit(manifest, policy)
+
 
 if __name__ == '__main__':
     unittest.main()

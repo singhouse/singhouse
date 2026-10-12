@@ -1059,11 +1059,12 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
     variant = variants[0]
     if variant.get("status") == "candidate":
         admission = variant.get("admission")
+        admission_keys = {"runtimeLockSha256", "reference", "basisReferences", "ramBytes", "vramBytes",
+                          "workingDiskBytes", "downloadBytes", "installedBytes", "unifiedMemory"}
         if (release_channel != "private-test" or variant.get("settings") != {} or "evidence" in variant
                 or any(variant.get(key) != manifest.get(key) for key in ("platform", "arch", "accelerator"))
                 or not isinstance(admission, dict)
-                or set(admission) != {"runtimeLockSha256", "reference", "basisReferences", "ramBytes", "vramBytes",
-                                      "workingDiskBytes", "downloadBytes", "installedBytes", "unifiedMemory"}
+                or set(admission) not in (admission_keys, admission_keys | {"totalRamBytes"})
                 or admission.get("runtimeLockSha256") != manifest["provenance"]["lockSha256"]):
             raise RuntimeError("Selected candidate is not admitted for this private runtime")
         references = admission.get("basisReferences")
@@ -1074,6 +1075,9 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
                 or any(type(admission.get(key)) is not int or not 0 < admission[key] <= 2**53 - 1
                        for key in ("ramBytes", "workingDiskBytes", "downloadBytes", "installedBytes"))):
             raise RuntimeError("Invalid private candidate resource envelope")
+        if "totalRamBytes" in admission and (type(admission["totalRamBytes"]) is not int
+                or not admission["ramBytes"] <= admission["totalRamBytes"] <= 2**53 - 1):
+            raise RuntimeError("Invalid private candidate physical memory requirement")
         vram = admission.get("vramBytes")
         unified = manifest["platform"] == "darwin" and manifest["arch"] == "arm64"
         if (admission.get("unifiedMemory") is not unified
@@ -1084,7 +1088,8 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
         # The worker consumes the same strict contract and rechecks free capacity.
         return {"schema": 1, "runtimeManifestId": runtime_id, "variantId": variant_id,
                 "requirements": {"ramBytes": admission["ramBytes"], "vramBytes": vram,
-                                 "unifiedMemory": unified, "workingDiskBytes": admission["workingDiskBytes"]},
+                                 "unifiedMemory": unified, "workingDiskBytes": admission["workingDiskBytes"],
+                                 **({"totalRamBytes": admission["totalRamBytes"]} if "totalRamBytes" in admission else {})},
                 "settings": {}}
     evidence = variant.get("evidence", {})
     if (variant.get("status") != "qualified" or variant.get("settings") != {}

@@ -41,11 +41,33 @@ export function processingModeFromArgs(argv, env = {}) {
   return named[0].slice(2)
 }
 
+export function processingAcceleratorFromArgs(argv, env = {}, mode) {
+  if (env?.npm_config_processing_accelerator !== undefined) throw new Error('npm consumed --processing-accelerator; pass packaging flags after `--`')
+  const flag = '--processing-accelerator'
+  const selectors = argv.filter(arg => typeof arg === 'string' && arg.startsWith(flag))
+  if (!selectors.length) return undefined
+  if (selectors.length !== 1 || selectors[0] !== flag) throw new Error('Use exactly one --processing-accelerator cpu|cuda|metal')
+  const accelerator = argv[argv.indexOf(flag) + 1]
+  if (!['cpu', 'cuda', 'metal'].includes(accelerator)) throw new Error('--processing-accelerator requires cpu, cuda, or metal')
+  if ((mode ?? processingModeFromArgs(argv, env)) !== PROCESSING_READY) throw new Error('--processing-accelerator requires --processing-ready')
+  return accelerator
+}
+
+export function processingArtifactSuffix(accelerator) {
+  if (accelerator === undefined) return ''
+  if (!['cpu', 'cuda', 'metal'].includes(accelerator)) throw new Error('Invalid processing accelerator')
+  return `-${accelerator}`
+}
+
 // Source catalog for one target, using the native manifest's platform/arch
 // tokens exactly (linux-x64, linux-arm64, darwin-arm64, win32-x64).
-export function catalogSourceName({ platform, arch } = {}) {
+export function catalogSourceName({ platform, arch } = {}, accelerator) {
   if (!/^[a-z0-9]+$/.test(platform ?? '') || !/^[a-z0-9]+$/.test(arch ?? '')) throw new Error('Processing catalog target is invalid')
-  return `${CATALOG_DIRECTORY}/${platform}-${arch}.json`
+  if (accelerator !== undefined && !({ 'win32-x64': ['cpu', 'cuda'], 'linux-x64': ['cpu', 'cuda'],
+    'linux-arm64': ['cpu'], 'darwin-arm64': ['cpu', 'metal'] }[`${platform}-${arch}`] || []).includes(accelerator)) {
+    throw new Error('Processing accelerator is unsupported for this target')
+  }
+  return `${CATALOG_DIRECTORY}/${platform}-${arch}${processingArtifactSuffix(accelerator)}.json`
 }
 
 // The packaged application validates its catalog against the native manifest
@@ -61,10 +83,11 @@ export function packagedCatalogIdentity(nativeManifest, appVersion) {
 // being packaged: the installed application validates the catalog against that
 // channel, so a private-smoke or hardware-test catalog cannot be packaged under
 // any other.
-export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, modelPolicy, releaseChannel, nativeLockSha256 }) {
+export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, modelPolicy, releaseChannel, nativeLockSha256, accelerator }) {
   if (![PROCESSING_READY, PLAYBACK_ONLY].includes(mode)) throw new Error('Invalid processing packaging mode')
   const target = `${identity?.platform}-${identity?.arch}`
-  const source = `desktop/${catalogSourceName(identity)}`
+  const source = `desktop/${catalogSourceName(identity, accelerator)}`
+  if (accelerator !== undefined && mode !== PROCESSING_READY) throw new Error('--processing-accelerator requires --processing-ready')
   const present = catalogBytes !== null && catalogBytes !== undefined
   if (mode === PLAYBACK_ONLY) {
     // A committed catalog for this target is deliberately left out; it is
@@ -83,6 +106,7 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
     if (parsed?.runtime && (parsed.runtime.platform !== identity?.platform || parsed.runtime.arch !== identity?.arch)) {
       throw new Error(`catalog runtime targets ${parsed.runtime.platform}-${parsed.runtime.arch}, not the packaged ${target}`)
     }
+    if (accelerator !== undefined && parsed?.runtime?.accelerator !== accelerator) throw new Error(`Catalog runtime accelerator does not match requested ${accelerator}`)
     // The exact validation the installed application applies at start.
     catalog = validateShippedCatalog(text, { identity, trustedLocks, modelPolicy, releaseChannel })
     if (catalog.runtime.schema === 2 && (!/^[a-f0-9]{64}$/.test(nativeLockSha256 || '')
@@ -97,12 +121,12 @@ export function assertProcessingCatalog({ mode, catalogBytes, identity, locks, m
     throw new Error(`${source} would be rejected by the packaged ${target} application: ${error.message}. ${regenerate(target)}`)
   }
   return { mode, catalogSha256: sha256(catalogBytes), runtimeLockSha256: catalog.runtime.provenance.lockSha256,
-    qualificationScope: catalog.qualification.scope }
+    qualificationScope: catalog.qualification.scope, ...(accelerator === undefined ? {} : { accelerator }) }
 }
 
-export async function readProcessingCatalogInputs(desktopDirectory, target) {
+export async function readProcessingCatalogInputs(desktopDirectory, target, accelerator) {
   const desktop = resolve(desktopDirectory)
-  const name = catalogSourceName(target)
+  const name = catalogSourceName(target, accelerator)
   let catalogBytes = null
   try { catalogBytes = await readFile(resolve(desktop, name)) }
   catch (error) { if (error.code !== 'ENOENT') throw new Error(`Cannot read desktop/${name}: ${error.code || error.message}`) }
@@ -115,9 +139,10 @@ export async function readProcessingCatalogInputs(desktopDirectory, target) {
 // only), and operator notices.
 export async function prepareProcessingGate({ desktopDir, nativeManifest, appVersion, releaseChannel, argv, env, nativeLockSha256 }) {
   const mode = processingModeFromArgs(argv, env)
+  const accelerator = processingAcceleratorFromArgs(argv, env, mode)
   const identity = packagedCatalogIdentity(nativeManifest, appVersion)
-  const inputs = await readProcessingCatalogInputs(desktopDir, identity)
-  const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256, ...inputs })
+  const inputs = await readProcessingCatalogInputs(desktopDir, identity, accelerator)
+  const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256, accelerator, ...inputs })
   const notices = notice ? [notice] : []
   try {
     await lstat(resolve(desktopDir, PACKAGED_CATALOG_NAME))
@@ -160,9 +185,13 @@ export function assertPackagedProcessingCatalog(gate, packagedSha256) {
 // part of the receipt schema; releaseId and electronAppDigest bind it to the
 // derived identity of the application it describes (the digest is that of the
 // app.asar carrying the catalog), and releaseChannel is the packaged policy's.
-export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target }) {
+export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target, accelerator }) {
+  if (accelerator !== undefined) {
+    if (mode !== PROCESSING_READY) throw new Error('Processing accelerator record requires processing-ready mode')
+    catalogSourceName(target, accelerator)
+  }
   if (!/^[0-9a-f]{64}$/.test(releaseId ?? '') || !/^[0-9a-f]{64}$/.test(electronAppDigest ?? '')
       || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel ?? '')) throw new Error('Processing mode record requires the derived release identity and packaged release channel')
   return { schema: 1, mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope,
-    target: { platform: target.platform, arch: target.arch } }
+    target: { platform: target.platform, arch: target.arch }, ...(accelerator === undefined ? {} : { accelerator }) }
 }

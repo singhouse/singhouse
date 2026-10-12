@@ -9,7 +9,8 @@ import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
 import { OnboardingSetup, LOCAL_MODEL_IDS, setupCompleted } from '../onboarding_setup.mjs'
 import { RuntimeManager } from '../runtime_manager.mjs'
-import { channelTrustedLocks } from '../setup_catalog.mjs'
+import { channelTrustedLocks, validateSetupCatalog } from '../setup_catalog.mjs'
+import { validateProcessingRecipe } from '../processing_recipe.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 function fixture(overrides = {}) {
@@ -1100,24 +1101,60 @@ test('CUDA estimates require an admitted, recognized single CUDA device with eno
   assert.equal((await unmeasured.setup.preflight()).available, true)
 })
 
-test('shipped experimental CUDA catalogs provide advisory estimates without changing qualification', async () => {
+test('Release candidate CUDA profiles use shipped admission policies and preserve pending qualification', async () => {
+  const json = async path => JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'))
+  const hardwarePolicy = await json('../hardware-policy.json')
+  const modelPolicy = await json('../models.json')
+  const lockPolicy = await json('../processing-locks.json')
+  const app = await json('../package.json')
+  const backendSource = await readFile(new URL('../../backend/src/karaoke_backend/__init__.py', import.meta.url), 'utf8')
+  const lyricsyncSource = await readFile(new URL('../../lyricsync/pyproject.toml', import.meta.url), 'utf8')
+  const backendVersion = backendSource.match(/__version__\s*=\s*"([^"]+)"/)[1]
+  const lyricsyncVersion = lyricsyncSource.match(/^version\s*=\s*"([^"]+)"/m)[1]
+  const nativeLockSha256 = createHash('sha256').update(await readFile(new URL('../locks/native.json', import.meta.url))).digest('hex')
   for (const platform of ['linux', 'win32']) {
-    const catalog = JSON.parse(await readFile(new URL(`../processing-catalogs/${platform}-x64.json`, import.meta.url), 'utf8'))
-    const { setup } = fixture({ catalog, releaseChannel: 'private-test',
-      hardware: async () => cudaHost('NVIDIA GeForce RTX 3090', 24, { platform }), diskFree: async () => 100 * GiB })
+    const source = await json(`../processing-catalogs/${platform}-x64.json`)
+    const identity = { appVersion: app.version, backendVersion, lyricsyncVersion, platform, arch: 'x64' }
+    const trustedLocks = channelTrustedLocks(lockPolicy, 'private-test')
+    const catalog = validateSetupCatalog(source, { identity, trustedLocks, modelPolicy, releaseChannel: 'private-test' })
+    // Native lock bytes are identical on every target; hash the source directly.
+    validateProcessingRecipe(catalog.runtime, identity, trustedLocks, { nativeLockSha256 })
+    assert.equal(catalog.runtime.schema, 2)
+    assert.equal(catalog.runtime.accelerator, 'cuda')
+    const hardware = cudaHost('NVIDIA GeForce RTX 3090', 24, { platform,
+      unifiedMemory: false, availableMemoryBytes: 24 * GiB })
+    const { setup } = fixture({ catalog, hardwarePolicy, policy: modelPolicy, releaseChannel: 'private-test',
+      hardware: async () => hardware, diskFree: async () => 100 * GiB })
     const plan = await setup.preflight()
-    assert.equal(plan.available, true, platform)
+    assert.equal(plan.available, true, `${platform}: ${plan.reason}`)
     assert.deepEqual(plan.processingEstimate.minutes, [1, 3], platform)
     assert.equal(plan.processingEstimate.evidence, 'extrapolated')
     assert.equal(plan.qualificationScope, 'hardware-test')
     assert.equal(plan.memoryQualification.status, 'unknown')
+    assert.equal(plan.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).requirements.acceptancePending, true)
     assert.equal(catalog.qualification.passed, false)
-    // Release-channel restrictions and the setup disk gate remain authoritative.
+    // Missing legacy measured-memory evidence is honest; the separately bound
+    // candidate resource envelope still controls admission and advisory estimates.
+    hardware.availableMemoryBytes = null
+    let denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'unknown')
+    assert.equal(denied.processingEstimate.minutes, null)
+    hardware.availableMemoryBytes = 1
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'insufficient')
+    hardware.availableMemoryBytes = 24 * GiB
     setup.releaseChannel = 'stable'
-    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.processingEstimate.minutes, null)
     setup.releaseChannel = 'private-test'
     setup.diskFree = async () => 0
-    assert.equal((await setup.preflight()).processingEstimate.minutes, null)
+    denied = await setup.preflight()
+    assert.equal(denied.available, false)
+    assert.equal(denied.processingEstimate.minutes, null)
+    assert.equal(catalog.qualification.passed, false)
   }
 })
 

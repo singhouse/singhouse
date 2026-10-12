@@ -1,12 +1,152 @@
 {
   "schema": 1,
-  "version": "1.0.0",
+  "version": "rc-0.1.1",
   "recipes": [
     {
       "id": "standard-karaoke",
       "label": "Karaoke separation and lyrics",
-      "modelIds": ["heart-transcriptor", "demucs-mdx-extra", "karaoke-roformer"]
+      "modelIds": [
+        "heart-transcriptor",
+        "demucs-mdx-extra",
+        "karaoke-roformer"
+      ]
     }
   ],
-  "variants": []
+  "variants": [
+    {
+      "id": "candidate-linux-x64-cpu",
+      "recipeId": "standard-karaoke",
+      "label": "CPU",
+      "platform": "linux",
+      "arch": "x64",
+      "accelerator": "cpu",
+      "priority": 10,
+      "status": "candidate",
+      "settings": {},
+      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "admission": {
+        "runtimeLockSha256": "b090ee67cc75becf224afd000a3bc6edadc0ebefe8a8001852aaec4eff68959b",
+        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "basisReferences": [
+          "https://github.com/singhouse/singhouse/pull/72",
+          "https://github.com/singhouse/singhouse/issues/117",
+          "Existing bounded-v1 per-model reservations; CPU fallback reservation retained."
+        ],
+        "ramBytes": 17179869184,
+        "vramBytes": null,
+        "workingDiskBytes": 6068872442,
+        "downloadBytes": 5174219199,
+        "installedBytes": 6416530061,
+        "unifiedMemory": false
+      }
+    },
+    {
+      "id": "candidate-linux-x64-cuda",
+      "recipeId": "standard-karaoke",
+      "label": "NVIDIA GPU",
+      "platform": "linux",
+      "arch": "x64",
+      "accelerator": "cuda",
+      "priority": 100,
+      "status": "candidate",
+      "settings": {},
+      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "admission": {
+        "runtimeLockSha256": "d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d",
+        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "basisReferences": [
+          "https://github.com/singhouse/singhouse/pull/72",
+          "https://github.com/singhouse/singhouse/issues/117",
+          "Existing bounded-v1 per-model reservations; CPU fallback reservation retained."
+        ],
+        "ramBytes": 17179869184,
+        "vramBytes": 9663676416,
+        "workingDiskBytes": 12529963560,
+        "downloadBytes": 9112919068,
+        "installedBytes": 12877621179,
+        "unifiedMemory": false
+      }
+    },
+    {
+      "id": "candidate-darwin-arm64-metal",
+      "recipeId": "standard-karaoke",
+      "label": "Apple GPU",
+      "platform": "darwin",
+      "arch": "arm64",
+      "accelerator": "metal",
+      "priority": 100,
+      "status": "candidate",
+      "settings": {},
+      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "admission": {
+        "runtimeLockSha256": "8ab05bf36a222e3f6a3576b1252042d74067741b357ff41a9f87221f589a2475",
+        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "basisReferences": [
+          "https://github.com/singhouse/singhouse/pull/116#issuecomment-6115411344",
+          "Prior Apple M2 16 GiB song acceptance. Physical capacity is retained separately from the provisional available-memory launch floor; neither is a new measured pipeline peak."
+        ],
+        "ramBytes": 4294967296,
+        "totalRamBytes": 17179869184,
+        "vramBytes": null,
+        "workingDiskBytes": 5324498022,
+        "downloadBytes": 4940399294,
+        "installedBytes": 5672155641,
+        "unifiedMemory": true
+      }
+    },
+    {
+      "id": "candidate-win32-x64-cpu",
+      "recipeId": "standard-karaoke",
+      "label": "CPU",
+      "platform": "win32",
+      "arch": "x64",
+      "accelerator": "cpu",
+      "priority": 10,
+      "status": "candidate",
+      "settings": {},
+      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "admission": {
+        "runtimeLockSha256": "f1eb1e27187082d1bb6b13615660109ba23ba7e672331c820ef7a052b5e68022",
+        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "basisReferences": [
+          "https://github.com/singhouse/singhouse/pull/72",
+          "https://github.com/singhouse/singhouse/issues/117",
+          "Existing bounded-v1 per-model reservations; CPU fallback reservation retained."
+        ],
+        "ramBytes": 17179869184,
+        "vramBytes": null,
+        "workingDiskBytes": 5502383643,
+        "downloadBytes": 5019543252,
+        "installedBytes": 5850041262,
+        "unifiedMemory": false
+      }
+    },
+    {
+      "id": "candidate-win32-x64-cuda",
+      "recipeId": "standard-karaoke",
+      "label": "NVIDIA GPU",
+      "platform": "win32",
+      "arch": "x64",
+      "accelerator": "cuda",
+      "priority": 100,
+      "status": "candidate",
+      "settings": {},
+      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "admission": {
+        "runtimeLockSha256": "a6f7f6974088e49ad812571d8492c07414a73ed5187c44674d4cfa8497b88f18",
+        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "basisReferences": [
+          "https://github.com/singhouse/singhouse/pull/72",
+          "https://github.com/singhouse/singhouse/issues/117",
+          "Existing bounded-v1 per-model reservations; CPU fallback reservation retained."
+        ],
+        "ramBytes": 17179869184,
+        "vramBytes": 9663676416,
+        "workingDiskBytes": 9626112243,
+        "downloadBytes": 7780091928,
+        "installedBytes": 9973769862,
+        "unifiedMemory": false
+      }
+    }
+  ]
 }

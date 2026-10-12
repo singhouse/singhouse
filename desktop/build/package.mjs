@@ -13,7 +13,7 @@ import { createReadStream } from 'node:fs'
 import { createAppImageSourceBundle, verifyAppImageNotices } from './appimage_notices.mjs'
 import { regenerateFinalBlockmap } from './final_blockmap.mjs'
 import { appImageSnapshot, assertAppImageSnapshot, prepareAppImageApplication, verifyAppImageApplication, publishAppImageArtifact } from './appimage.mjs'
-import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord } from './processing_catalog_gate.mjs'
+import { assertPackagedProcessingCatalog, packagedCatalogSha256, prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix } from './processing_catalog_gate.mjs'
 
 export function packagedReleasePolicyPath(applicationDirectory, platform) {
   const application = resolve(applicationDirectory)
@@ -73,6 +73,7 @@ export function assertPackagingMode(argv, platform = process.platform, env = pro
   if (signedMacRelease && platform !== 'darwin') throw new Error('--signed-macos-release requires macOS')
   // Every build, signed or not, names its processing mode explicitly.
   const processingMode = processingModeFromArgs(argv, env)
+  processingAcceleratorFromArgs(argv, env, processingMode)
   return { signedRelease, signedMacRelease, manualAzureCli, azureOidc, processingMode }
 }
 
@@ -114,6 +115,7 @@ async function main() {
     releaseChannel: policy.channel, nativeLockSha256: provenance.locks?.['native.json'], argv: process.argv, env: process.env })
   for (const notice of processingGate.notices) console.warn(notice)
   const processing = processingGate.result
+  const processingSuffix = processingArtifactSuffix(processing.accelerator)
   console.log(`Processing catalog: ${processing.mode}${processing.catalogSha256 ? ` (catalog sha256 ${processing.catalogSha256}, runtime lock sha256 ${processing.runtimeLockSha256})` : ''}`)
 
   const output = resolve(config.directories.output)
@@ -186,7 +188,7 @@ async function main() {
     await verifyPackagedProcessingCatalog({ applicationDirectory: application, platform: nativeManifest.platform, gate: processing })
     const identity = await deriveIdentityFromApplication({ applicationDirectory: application, policy, packageLock })
     const target = `${nativeManifest.platform}-${nativeManifest.arch}`
-    const payload = resolve(output, `Singhouse-${identity.appVersion}-${target}.shapp`)
+    const payload = resolve(output, `Singhouse-${identity.appVersion}-${target}${processingSuffix}.shapp`)
     const receipt = `${payload}.receipt.json`
     await createPortablePayload({ sourceDirectory: application, output: payload, identity, platform: nativeManifest.platform, arch: nativeManifest.arch })
     await createReleaseReceipt({
@@ -238,14 +240,14 @@ async function main() {
       if (signedMacRelease) await build({ config: installerConfig, prepackaged, publish: 'never',
         targets: platform.createTarget('zip', Arch[nativeManifest.arch]) })
       if (signedRelease) {
-        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64.exe`)
+        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-win-x64${processingSuffix}.exe`)
         if (!await verifyWindowsAuthenticode(installer, { onDiagnostic: detail => console.error('Installer signature verification:', JSON.stringify(detail)) })) throw new Error('Signed release installer failed Authenticode publisher or timestamp verification')
       }
       await verifyPackagedReleasePolicy({ applicationDirectory: application, platform: nativeManifest.platform, selectedPolicy: policy })
       await verifyInstallerPreservedApplication({ applicationDirectory: application, expectedInventory: installerApplicationInventory })
       if (signedMacRelease) {
-        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.dmg`)
-        const zip = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64.zip`)
+        const installer = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64${processingSuffix}.dmg`)
+        const zip = resolve(output, `Singhouse-${nativeManifest.appVersion}-mac-arm64${processingSuffix}.zip`)
         await signMacDiskImage(installer, macSelection)
         await verifyMacDiskImageApplication(installer, installerApplicationInventory, macModes, macSelection)
         await verifyMacZipApplication(zip, installerApplicationInventory, macModes, macSelection)

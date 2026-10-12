@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "runtimeLockSha256": "02b751306be6c9e63ab296063b5cde5a239e14e0c07d675d602cd5a64952fd79",
-  "evidenceReference": "Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/72; rebound for private acceptance of the integrated uv recipe. Updated runtime resource measurements and release qualification remain pending.",
+  "runtimeLockSha256": "d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d",
+  "evidenceReference": "Prior bound recipe: 02b751306be6c9e63ab296063b5cde5a239e14e0c07d675d602cd5a64952fd79. Original basis: Experimental bounded-v1 budgets retained from Linux measurements in https://github.com/singhouse/singhouse/pull/72; rebound for private acceptance of the integrated uv recipe. Updated runtime resource measurements and release qualification remain pending. Current candidate: d24e39d05bb773523e0bddf86b1e5d37df3c3d54d3c462ca48c5b8e2dfe4da5d; final installer acceptance remains pending. HEART CUDA reservation raised to 9 GiB after the 6,964 MiB peak reported in issue #117; these transferred reservations are not new measurement or qualification evidence.",
   "executionProfile": "bounded-v1",
   "models": {
     "demucs-mdx-extra": {
@@ -39,7 +39,7 @@
       "devices": {
         "cuda": {
           "ramBytes": 10737418240,
-          "vramBytes": 6442450944
+          "vramBytes": 9663676416
         },
         "cpu": {
           "ramBytes": 17179869184

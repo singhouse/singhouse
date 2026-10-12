@@ -30,12 +30,14 @@ export function validateHardwarePolicy(value) {
     if (v.status === 'candidate') {
       const a = v.admission
       const keys = ['runtimeLockSha256', 'reference', 'basisReferences', 'ramBytes', 'vramBytes', 'workingDiskBytes', 'downloadBytes', 'installedBytes', 'unifiedMemory']
+      if (a && Object.hasOwn(a, 'totalRamBytes')) keys.push('totalRamBytes')
       if (v.evidence !== undefined || !a || typeof a !== 'object' || Array.isArray(a)
           || Object.keys(a).length !== keys.length || !keys.every(key => Object.hasOwn(a, key))
           || typeof a.runtimeLockSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.runtimeLockSha256) || !nonempty(a.reference)
           || !Array.isArray(a.basisReferences) || !a.basisReferences.length
           || !a.basisReferences.every(nonempty) || !unique(a.basisReferences)) fail('candidate admission provenance')
       for (const key of ['ramBytes', 'workingDiskBytes', 'downloadBytes', 'installedBytes']) if (!positive(a[key])) fail(`candidate ${key}`)
+      if (Object.hasOwn(a, 'totalRamBytes') && (!positive(a.totalRamBytes) || a.totalRamBytes < a.ramBytes)) fail('candidate total RAM budget')
       if (v.accelerator === 'cuda' ? !positive(a.vramBytes) : a.vramBytes !== null) fail('candidate VRAM budget')
       if (typeof a.unifiedMemory !== 'boolean' || a.unifiedMemory !== (v.platform === 'darwin' && v.arch === 'arm64')) fail('candidate memory architecture')
       continue
@@ -75,13 +77,15 @@ function assessVariant(v, recipe, options) {
   if (!candidate && e.scope !== 'full' && releaseChannel !== 'private-test') return deny('unqualified', 'This variant has not passed public release qualification.')
   if (e.unifiedMemory !== hardware.unifiedMemory) return deny('unknown', 'The observed memory architecture does not match the resource policy.')
   const ramBytes = candidate ? e.ramBytes : Math.ceil(e.peakRamBytes * (1 + e.headroomFraction))
+  const totalRamBytes = candidate && Object.hasOwn(e, 'totalRamBytes') ? e.totalRamBytes : ramBytes
   const vramBytes = candidate ? e.vramBytes : v.accelerator === 'cuda' ? Math.ceil(e.peakVramBytes * (1 + e.headroomFraction)) : null
   result.requirements = { ramBytes, vramBytes, unifiedMemory: e.unifiedMemory, headroomFraction: candidate ? null : e.headroomFraction,
     transferBytes: e.downloadBytes, installedBytes: e.installedBytes, workingDiskBytes: e.workingDiskBytes,
     evidenceReference: e.reference, workload: candidate ? null : e.workload,
-    ...(candidate ? { basisReferences: [...e.basisReferences], acceptancePending: true } : {}) }
+    ...(candidate ? { basisReferences: [...e.basisReferences], acceptancePending: true } : {}),
+    ...(candidate && Object.hasOwn(e, 'totalRamBytes') ? { totalRamBytes } : {}) }
   if (!count(hardware.totalMemoryBytes)) return deny('unknown', 'Total system memory could not be measured.')
-  if (hardware.totalMemoryBytes < ramBytes) return deny('insufficient', 'Total system memory is below the required processing budget.')
+  if (hardware.totalMemoryBytes < totalRamBytes) return deny('insufficient', 'Total system memory is below the required processing budget.')
   if (!count(hardware.availableMemoryBytes)) return deny('unknown', 'Currently available system memory could not be measured.')
   if (hardware.availableMemoryBytes < ramBytes) return deny('insufficient', 'Currently available system memory is below the required processing budget. Close other applications and retry.')
   if (v.accelerator === 'cuda') {

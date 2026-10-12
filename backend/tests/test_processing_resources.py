@@ -130,3 +130,111 @@ def test_windows_cuda_probe_uses_system_directory(monkeypatch):
     monkeypatch.setattr(resources, '_run', lambda command: calls.append(command) or '1024\n')
     assert resources.available_vram() == 1024 * 1024 * 1024
     assert str(calls[0][0]).replace('\\', '/') == '/windows/System32/nvidia-smi.exe'
+
+
+def test_optional_physical_memory_is_rechecked_independently(resource_policy):
+    policy, save = resource_policy
+    policy['requirements']['totalRamBytes'] = 1600
+    save()
+    samples = iter([1600, 800, None, 1600])
+    def execute():
+        resources.enforce_resources({'runtimeManifestId': 'runtime', 'accelerator': 'cpu'},
+                                    ram_probe=lambda: 100, disk_probe=lambda: 50,
+                                    total_ram_probe=lambda: next(samples))
+    execute()
+    with pytest.raises(InvalidAttestation, match='physical system memory.*below'):
+        execute()
+    with pytest.raises(InvalidAttestation, match='physical system memory.*could not be measured'):
+        execute()
+    execute()
+    with pytest.raises(InvalidAttestation, match='system memory.*below'):
+        resources.enforce_resources({'runtimeManifestId': 'runtime', 'accelerator': 'cpu'},
+                                    ram_probe=lambda: 99, disk_probe=lambda: 50,
+                                    total_ram_probe=lambda: 1600)
+
+
+@pytest.mark.parametrize('total', [None, 0, -1, True, 1.5, 99, 2**53, '1600'])
+def test_invalid_physical_floor_rejected(resource_policy, total):
+    policy, save = resource_policy
+    policy['requirements']['totalRamBytes'] = total
+    save()
+    with pytest.raises(InvalidAttestation, match='physical memory requirement'):
+        check()
+
+
+def test_unknown_requirement_rejected_and_legacy_does_not_probe_physical_ram(resource_policy):
+    policy, save = resource_policy
+    resources.enforce_resources({'runtimeManifestId': 'runtime', 'accelerator': 'cpu'},
+                                ram_probe=lambda: 100, disk_probe=lambda: 50,
+                                total_ram_probe=lambda: pytest.fail('No physical floor was specified'))
+    policy['requirements']['unknown'] = 100
+    save()
+    with pytest.raises(InvalidAttestation, match='incomplete'):
+        check()
+
+
+def test_darwin_physical_ram_probe_uses_bounded_fixed_command(monkeypatch):
+    monkeypatch.setattr(resources.platform, 'system', lambda: 'Darwin')
+    commands = []
+    monkeypatch.setattr(resources, '_run', lambda command: commands.append(command) or '17179869184\n')
+    assert resources.total_ram() == 16 * 1024**3
+    assert commands == [['/usr/sbin/sysctl', '-n', 'hw.memsize']]
+    for text in ('N/A', '-1', '0', '16 GB', '1\n2', str(2**53), '17179869184\nnoise'):
+        monkeypatch.setattr(resources, '_run', lambda command: text)
+        assert resources.total_ram() is None
+    def timeout(command):
+        raise subprocess.TimeoutExpired(command, 2)
+    monkeypatch.setattr(resources, '_run', timeout)
+    assert resources.total_ram() is None
+
+
+def test_linux_physical_ram_probe_does_not_confuse_available_ram(monkeypatch):
+    monkeypatch.setattr(resources.platform, 'system', lambda: 'Linux')
+    monkeypatch.setattr(resources.Path, 'read_text', lambda self: 'MemTotal: 1600 kB\nMemAvailable: 500 kB\n')
+    assert resources.total_ram() == 1600 * 1024
+    assert resources.available_ram() == 500 * 1024
+
+
+@pytest.mark.parametrize('text', [
+    'MemTotal: 1600 kB\nMemTotal: 800 kB\n',
+    'MemTotal: 1600 kB\nMemTotal: 1600 kB\n',
+    'MemTotal: 1600 kB\nMemTotal: unknown kB\n',
+    'MemTotal: 9007199254740992 kB\n',
+    'MemTotal: 8796093022208 kB\n',
+    'MemTotal: 0 kB\n', 'MemTotal: -1 kB\n', 'MemTotal: 1600 kB noise\n',
+    'MemAvailable: 500 kB\n',
+])
+def test_linux_physical_ram_rejects_duplicate_malformed_and_overflow_fields(monkeypatch, text):
+    monkeypatch.setattr(resources.platform, 'system', lambda: 'Linux')
+    monkeypatch.setattr(resources.Path, 'read_text', lambda self: text)
+    assert resources.total_ram() is None
+
+
+def test_windows_memory_probes_use_distinct_status_fields(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(resources.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(resources, '_windows_memory_status', lambda: SimpleNamespace(total=1600, available=500))
+    assert resources.total_ram() == 1600
+    assert resources.available_ram() == 500
+    monkeypatch.setattr(resources, '_windows_memory_status', lambda: None)
+    assert resources.total_ram() is None
+    assert resources.available_ram() is None
+
+
+@pytest.mark.parametrize('total', [0, -1, True, 1.5, '1600', 2**53, None])
+def test_windows_physical_memory_rejects_invalid_status_field(monkeypatch, total):
+    from types import SimpleNamespace
+    monkeypatch.setattr(resources.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(resources, '_windows_memory_status', lambda: SimpleNamespace(total=total))
+    assert resources.total_ram() is None
+
+
+@pytest.mark.parametrize('observed', [0, -1, True, 1.5, '1600', 2**53, None])
+def test_physical_memory_callback_observation_fails_closed(resource_policy, observed):
+    policy, save = resource_policy
+    policy['requirements']['totalRamBytes'] = 1600
+    save()
+    with pytest.raises(InvalidAttestation, match='physical system memory.*could not be measured'):
+        resources.enforce_resources({'runtimeManifestId': 'runtime', 'accelerator': 'cpu'},
+                                    ram_probe=lambda: 100, disk_probe=lambda: 50,
+                                    total_ram_probe=lambda: observed)

@@ -137,6 +137,18 @@ directory itself, and any stray `desktop/processing-catalog.json` are not. After
 Electron packaging and before identity derivation or the receipt, packaging
 reads the produced `app.asar` back and fails unless it contains exactly the
 validated catalog bytes (processing-ready) or no catalog (playback-only).
+
+For separate CPU and accelerator installers from the same committed source,
+add `--processing-accelerator cpu`, `cuda`, or `metal` after npm's `--` together
+with `--processing-ready`. This selects the committed
+`desktop/processing-catalogs/<platform>-<arch>-<accelerator>.json` and verifies
+that its runtime matches the selection. Selected builds add the accelerator to
+installer and portable payload filenames. Without this option, the original
+target catalog and filenames remain the default. The selector is a build
+option; the installed application still presents one catalog. Windows signing
+dispatches select CPU or CUDA, and apply the selector only for processing-ready
+builds. Preserve each build's output before packaging the next variant.
+
 Packaging writes `desktop/artifacts/processing-mode.json` next to the receipt
 (created exclusively; an output directory that already holds one is refused
 before building). It records `schema`, `mode`, `releaseId` and
@@ -689,7 +701,10 @@ end-to-end evidence, available resources and configurable headroom. The shipped
 policy can also carry `candidate` variants for the `private-test` channel only.
 Their separate `admission` block binds direct conservative RAM, VRAM and storage
 budgets to the exact runtime lock and target, with a reference and original
-budget `basisReferences`. These budgets do not claim new measurements or passed
+budget `basisReferences`. Optional `totalRamBytes` sets a physical RAM minimum
+separately from the fresh available-memory floor in `ramBytes`; it must be at
+least that floor. Without it, both checks use `ramBytes`. These budgets do not
+claim new measurements or passed
 qualification; final acceptance remains pending. Candidate variants use the
 ordinary setup wizard, consent and functional verification. Other release
 channels reject them. A startup check and fresh checks before local worker
