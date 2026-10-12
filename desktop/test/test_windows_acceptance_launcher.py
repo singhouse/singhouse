@@ -42,9 +42,15 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, expect, result.stdout + result.stderr)
         return result.stdout
 
-    def setup_profile(self, expect=0):
+    def setup_profile(self, expect=0, fresh_permissions=None):
         # Execute the launcher's actual preflight, ending before logging/setup.
         source = LAUNCHER.read_text().split("    $Log = Join-Path $Profile 'setup.log'", 1)[0]
+        if fresh_permissions:
+            anchor = '    # Set-Acl can request privileges'
+            self.assertEqual(source.count(anchor), 1)
+            # Inject creation-time permissions before the actual restriction
+            # code. This reproduces explicit ACEs left by /inheritance:r.
+            source = source.replace(anchor, fresh_permissions + '\n' + anchor)
         source += "\n    Write-Host 'PROFILE_PREFLIGHT_OK'\n} catch { Write-Host $_; exit 1 } finally { $env:PSModulePath = $PreviousModulePath }\n"
         return self.run_script(source, expect=expect)
 
@@ -68,6 +74,39 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
 
     def test_fresh_profile_and_existing_private_profile(self):
         self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
+        before = self.acl()
+        self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
+        self.assertEqual(self.acl(), before)
+
+    def test_fresh_profile_removes_inherited_parent_grants(self):
+        self.profile.parent.mkdir(parents=True)
+        subprocess.run(['icacls.exe', str(self.profile.parent), '/grant',
+                        '*S-1-1-0:(OI)(CI)F'], check=True, capture_output=True)
+        parent_acl = subprocess.check_output(
+            [self.powershell, '-NoProfile', '-Command',
+             '(Get-Acl -LiteralPath $env:PROFILE_TEST_PATH).Sddl'],
+            env=dict(os.environ, PROFILE_TEST_PATH=str(self.profile.parent)), text=True,
+        )
+        self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
+        self.assertNotIn(';;;WD)', self.acl())
+        self.assertEqual(subprocess.check_output(
+            [self.powershell, '-NoProfile', '-Command',
+             '(Get-Acl -LiteralPath $env:PROFILE_TEST_PATH).Sddl'],
+            env=dict(os.environ, PROFILE_TEST_PATH=str(self.profile.parent)), text=True,
+        ), parent_acl)
+
+    def test_fresh_profile_removes_explicit_grant_and_deny_rules(self):
+        permissions = """    & icacls.exe $Profile /grant '*S-1-1-0:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create explicit grant fixture' }
+    & icacls.exe $Profile /deny '*S-1-5-32-546:(OI)(CI)D' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create explicit deny fixture' }
+    & icacls.exe $Profile /deny "*$($Identity.Value):(D)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create current-user deny fixture' }
+"""
+        self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile(fresh_permissions=permissions))
+        self.assertNotIn(';;;WD)', self.acl())
+        self.assertNotIn(';;;BG)', self.acl())
+        self.assertNotIn('(D;', self.acl())
         before = self.acl()
         self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
         self.assertEqual(self.acl(), before)

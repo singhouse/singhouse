@@ -31,10 +31,36 @@ try {
     # only the new directory's owner and DACL using icacls; existing profiles
     # must already be private and are never rewritten by the launcher.
     if (-not $ExistingProfile) {
+        if ((Get-Item -LiteralPath $Profile -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'The newly created test profile must not be a junction or symbolic link'
+        }
         & icacls.exe $Profile /setowner "*$($Identity.Value)" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Could not set the test profile owner (icacls exit $LASTEXITCODE)" }
         & icacls.exe $Profile /inheritance:r /grant:r "*$($Identity.Value):(OI)(CI)F" "*$($SystemSid.Value):(OI)(CI)F" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Could not restrict the test profile permissions (icacls exit $LASTEXITCODE)" }
+        $FreshAcl = Get-Acl -LiteralPath $Profile
+        if (((Get-Item -LiteralPath $Profile -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $FreshAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $Identity.Value) {
+            throw 'The newly created test profile is no longer an ordinary directory owned by the current user'
+        }
+        # Directory creation can add explicit ACEs (including Administrators)
+        # that /inheritance:r leaves intact. Remove them only from this new,
+        # owned profile, then keep the same strict verification for every run.
+        $FreshRules = @($FreshAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $UnexpectedSids = @($FreshRules | ForEach-Object { $_.IdentityReference.Value } |
+            Where-Object { $_ -notin @($Identity.Value, $SystemSid.Value) } | Sort-Object -Unique)
+        foreach ($Sid in $UnexpectedSids) {
+            & icacls.exe $Profile /remove "*$Sid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove unexpected test profile permissions (icacls exit $LASTEXITCODE)" }
+        }
+        $DeniedSids = @($FreshRules | Where-Object {
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny -and
+            $_.IdentityReference.Value -in @($Identity.Value, $SystemSid.Value)
+        } | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+        foreach ($Sid in $DeniedSids) {
+            & icacls.exe $Profile /remove:d "*$Sid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove denied test profile permissions (icacls exit $LASTEXITCODE)" }
+        }
     }
     $Observed = Get-Acl -LiteralPath $Profile
     $Rules = @($Observed.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
