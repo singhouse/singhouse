@@ -686,9 +686,14 @@ Python, native tool versions, exclusions, licenses and application compatibility
 Hardware recommendations come from the separately versioned
 `hardware-policy.json`. Automatic and supported manual selection use measured
 end-to-end evidence, available resources and configurable headroom. The shipped
-policy currently has no qualified variants; new recipe choices stay unavailable
-until target-specific qualification supplies them. A startup check and fresh
-checks before local worker execution enforce the selected resource limits.
+policy can also carry `candidate` variants for the `private-test` channel only.
+Their separate `admission` block binds direct conservative RAM, VRAM and storage
+budgets to the exact runtime lock and target, with a reference and original
+budget `basisReferences`. These budgets do not claim new measurements or passed
+qualification; final acceptance remains pending. Candidate variants use the
+ordinary setup wizard, consent and functional verification. Other release
+channels reject them. A startup check and fresh checks before local worker
+execution enforce the selected resource limits.
 Playback remains available, and changing models requires reviewing setup and
 consenting to their download and terms.
 

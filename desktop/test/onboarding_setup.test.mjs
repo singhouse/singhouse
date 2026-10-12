@@ -1430,3 +1430,58 @@ test('a runtime installed from a private-test-only lock is not activated by a bu
   const again = new RuntimeManager(join(root, 'processing'), archiveIdentity, options('private-test'))
   assert.equal((await again.active()).id, installedId)
 })
+
+// Synthetic runtime managers isolate normal wizard orchestration; real recipe
+// inventory and functional-probe verification remain covered by manager tests.
+function candidateWizardFixture(releaseChannel = 'private-test') {
+  const f = fixture({ releaseChannel, hardware: async () => ({ platform: 'linux', arch: 'x64',
+    unifiedMemory: false, totalMemoryBytes: 200, availableMemoryBytes: 150 }) })
+  const lock = 'a'.repeat(64)
+  Object.assign(f.setup.catalog.runtime, { schema: 2, provenance: { ...f.manifest.provenance, lockSha256: lock },
+    recipe: { installedSize: 10, python: { size: 5, url: 'https://example.org/python' }, wheels: [] } })
+  Object.assign(f.setup.catalog.qualification, { passed: false, scope: 'hardware-test', runtimeLockSha256: lock })
+  f.setup.hardwarePolicy = { schema: 1, version: '1.0.0',
+    recipes: [{ id: 'standard', label: 'Standard', modelIds: LOCAL_MODEL_IDS }],
+    variants: [{ id: 'cpu-candidate', label: 'CPU', recipeId: 'standard', platform: 'linux', arch: 'x64', accelerator: 'cpu',
+      priority: 1, status: 'candidate', qualityTradeoff: 'Existing processing profile.', settings: {},
+      admission: { runtimeLockSha256: lock, reference: 'pending-final-acceptance', basisReferences: ['historical-budget'],
+        ramBytes: 125, vramBytes: null, unifiedMemory: false, workingDiskBytes: 10, downloadBytes: 20, installedBytes: 30 } }] }
+  f.setup.hardwareSelection = { mode: 'automatic', variantId: null, policyVersion: '1.0.0' }
+  return f
+}
+
+test('pending acceptance uses the normal recipe wizard, ordinary consent and functional verification', async () => {
+  const { setup, runtime, cache, calls } = candidateWizardFixture()
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, 'cpu-candidate')
+  assert.equal(plan.hardwareAssessment.variants[0].requirements.acceptancePending, true)
+  assert.equal(plan.qualificationScope, 'hardware-test')
+  assert.deepEqual(calls, [])
+  await setup.start({ planId: plan.planId })
+  assert.deepEqual(calls, [])
+  const status = await start(setup, plan.planId)
+  assert.equal(status.state, 'restart-required')
+  assert.deepEqual(calls, ['runtime', 'models'])
+  setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id, hardwareSelection: setup.hardwareSelection }
+  assert.equal((await setup.preflight()).ready, true)
+  assert.equal(setup.catalog.qualification.passed, false)
+})
+
+test('pending normal wizard fails closed outside private-test or after resources or identity change', async () => {
+  for (const mutate of [setup => { setup.releaseChannel = 'public' },
+    setup => { setup.catalog.runtime.provenance.lockSha256 = 'b'.repeat(64) },
+    setup => { setup.hardware = async () => ({ platform: 'linux', arch: 'x64', unifiedMemory: false,
+      totalMemoryBytes: 200, availableMemoryBytes: 124 }) },
+    setup => { setup.diskFree = async () => 9 }]) {
+    const { setup, calls } = candidateWizardFixture()
+    mutate(setup)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    await start(setup, plan.planId)
+    assert.deepEqual(calls, [])
+  }
+  const { setup, runtime } = candidateWizardFixture()
+  runtime.probe = async () => ({ capabilitiesReady: false })
+  assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
+})

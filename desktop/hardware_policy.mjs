@@ -20,11 +20,24 @@ export function validateHardwarePolicy(value) {
         || !['linux', 'win32', 'darwin'].includes(v.platform) || !['x64', 'arm64'].includes(v.arch)
         || !['cpu', 'cuda', 'metal'].includes(v.accelerator) || !count(v.priority)) fail('variant target')
     if (v.accelerator === 'metal' && (v.platform !== 'darwin' || v.arch !== 'arm64')) fail('Metal target')
-    if (!['qualified', 'unqualified'].includes(v.status) || !nonempty(v.qualityTradeoff)) fail('variant status or quality')
+    if (!['qualified', 'unqualified', 'candidate'].includes(v.status) || !nonempty(v.qualityTradeoff)) fail('variant status or quality')
     if (!v.settings || typeof v.settings !== 'object' || Array.isArray(v.settings)
         || Object.values(v.settings).some(x => !['string', 'number', 'boolean'].includes(typeof x) || (typeof x === 'number' && !Number.isFinite(x)))) fail('settings')
     if (v.status === 'unqualified') {
       if (!nonempty(v.reason)) fail('unqualified reason')
+      continue
+    }
+    if (v.status === 'candidate') {
+      const a = v.admission
+      const keys = ['runtimeLockSha256', 'reference', 'basisReferences', 'ramBytes', 'vramBytes', 'workingDiskBytes', 'downloadBytes', 'installedBytes', 'unifiedMemory']
+      if (v.evidence !== undefined || !a || typeof a !== 'object' || Array.isArray(a)
+          || Object.keys(a).length !== keys.length || !keys.every(key => Object.hasOwn(a, key))
+          || typeof a.runtimeLockSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.runtimeLockSha256) || !nonempty(a.reference)
+          || !Array.isArray(a.basisReferences) || !a.basisReferences.length
+          || !a.basisReferences.every(nonempty) || !unique(a.basisReferences)) fail('candidate admission provenance')
+      for (const key of ['ramBytes', 'workingDiskBytes', 'downloadBytes', 'installedBytes']) if (!positive(a[key])) fail(`candidate ${key}`)
+      if (v.accelerator === 'cuda' ? !positive(a.vramBytes) : a.vramBytes !== null) fail('candidate VRAM budget')
+      if (typeof a.unifiedMemory !== 'boolean' || a.unifiedMemory !== (v.platform === 'darwin' && v.arch === 'arm64')) fail('candidate memory architecture')
       continue
     }
     const e = v.evidence
@@ -53,28 +66,31 @@ function assessVariant(v, recipe, options) {
   const deny = (status, reason) => ({ ...result, status, reason })
   if (Object.keys(v.settings).length) return deny('unsupported', 'This processing variant requests settings that this version cannot apply.')
   if (options.accelerator && v.accelerator !== options.accelerator) return deny('unsupported', 'This variant requires a different processing accelerator.')
-  if (v.status !== 'qualified') return deny('unqualified', v.reason)
-  if (v.platform !== hardware.platform || v.arch !== hardware.arch) return deny('unsupported', 'This variant was qualified for a different platform or architecture.')
-  const e = v.evidence
-  if (e.runtimeLockSha256 !== runtimeLockSha256) return deny('unknown', 'Memory evidence does not match the selected processing runtime.')
-  if (e.scope !== 'full' && releaseChannel !== 'private-test') return deny('unqualified', 'This variant has not passed public release qualification.')
-  if (e.unifiedMemory !== hardware.unifiedMemory) return deny('unknown', 'The observed memory architecture does not match the evidence.')
-  const ramBytes = Math.ceil(e.peakRamBytes * (1 + e.headroomFraction))
-  const vramBytes = v.accelerator === 'cuda' ? Math.ceil(e.peakVramBytes * (1 + e.headroomFraction)) : null
-  result.requirements = { ramBytes, vramBytes, unifiedMemory: e.unifiedMemory, headroomFraction: e.headroomFraction,
+  const candidate = v.status === 'candidate'
+  if (v.status !== 'qualified' && !candidate) return deny('unqualified', v.reason)
+  if (candidate && releaseChannel !== 'private-test') return deny('unqualified', 'Final acceptance is pending; this resource envelope is available only in private-test builds.')
+  if (v.platform !== hardware.platform || v.arch !== hardware.arch) return deny('unsupported', 'This variant targets a different platform or architecture.')
+  const e = candidate ? v.admission : v.evidence
+  if (e.runtimeLockSha256 !== runtimeLockSha256) return deny('unknown', 'The resource policy does not match the selected processing runtime.')
+  if (!candidate && e.scope !== 'full' && releaseChannel !== 'private-test') return deny('unqualified', 'This variant has not passed public release qualification.')
+  if (e.unifiedMemory !== hardware.unifiedMemory) return deny('unknown', 'The observed memory architecture does not match the resource policy.')
+  const ramBytes = candidate ? e.ramBytes : Math.ceil(e.peakRamBytes * (1 + e.headroomFraction))
+  const vramBytes = candidate ? e.vramBytes : v.accelerator === 'cuda' ? Math.ceil(e.peakVramBytes * (1 + e.headroomFraction)) : null
+  result.requirements = { ramBytes, vramBytes, unifiedMemory: e.unifiedMemory, headroomFraction: candidate ? null : e.headroomFraction,
     transferBytes: e.downloadBytes, installedBytes: e.installedBytes, workingDiskBytes: e.workingDiskBytes,
-    evidenceReference: e.reference, workload: e.workload }
+    evidenceReference: e.reference, workload: candidate ? null : e.workload,
+    ...(candidate ? { basisReferences: [...e.basisReferences], acceptancePending: true } : {}) }
   if (!count(hardware.totalMemoryBytes)) return deny('unknown', 'Total system memory could not be measured.')
-  if (hardware.totalMemoryBytes < ramBytes) return deny('insufficient', 'Total system memory is below the measured requirement including headroom.')
+  if (hardware.totalMemoryBytes < ramBytes) return deny('insufficient', 'Total system memory is below the required processing budget.')
   if (!count(hardware.availableMemoryBytes)) return deny('unknown', 'Currently available system memory could not be measured.')
-  if (hardware.availableMemoryBytes < ramBytes) return deny('insufficient', 'Currently available system memory is below the measured requirement. Close other applications and retry.')
+  if (hardware.availableMemoryBytes < ramBytes) return deny('insufficient', 'Currently available system memory is below the required processing budget. Close other applications and retry.')
   if (v.accelerator === 'cuda') {
     const devices = hardware.cudaDevices
     if (hardware.unifiedMemory || !Array.isArray(devices) || devices.length !== 1 || !count(devices[0].dedicatedMemoryBytes)) return deny('unknown', 'An unambiguous CUDA device and its dedicated memory could not be measured.')
-    if (devices[0].dedicatedMemoryBytes < vramBytes) return deny('insufficient', 'Dedicated GPU memory is below the measured requirement including headroom.')
+    if (devices[0].dedicatedMemoryBytes < vramBytes) return deny('insufficient', 'Dedicated GPU memory is below the required processing budget.')
     if (phase === 'execution') {
       if (!count(devices[0].availableMemoryBytes)) return deny('unknown', 'Currently available CUDA memory could not be measured.')
-      if (devices[0].availableMemoryBytes < vramBytes) return deny('insufficient', 'Currently available CUDA memory is below the measured requirement. Close GPU applications and retry.')
+      if (devices[0].availableMemoryBytes < vramBytes) return deny('insufficient', 'Currently available CUDA memory is below the required processing budget. Close GPU applications and retry.')
     }
   }
   if (!count(diskFreeBytes)) return deny('unknown', 'Available storage could not be measured.')
@@ -83,10 +99,10 @@ function assessVariant(v, recipe, options) {
   result.requirements.diskRequiredBytes = diskRequired
   if (diskFreeBytes < diskRequired) return deny('insufficient', 'Available storage is below the required installation and processing space.')
   if (phase === 'execution' && missingModelIds.length) return deny('setup-required', 'Required models are missing. Review setup and consent before downloading them.')
-  return { ...result, status: 'supported', supported: true, reason: 'Observed resources meet the measured requirements for this variant.' }
+  return { ...result, status: 'supported', supported: true, reason: candidate ? 'Observed resources meet the release-owned resource budget; final acceptance remains pending.' : 'Observed resources meet the measured requirements for this variant.' }
 }
 
-/** Manual overrides select only qualified, resource-supported variants. Caller must
+/** Manual overrides select only eligible, resource-supported variants. Caller must
  * obtain fresh observations for execution and separately enforce setup consent. */
 export function assessHardwarePolicy(options) {
   const policy = validateHardwarePolicy(options.policy)
@@ -101,7 +117,7 @@ export function assessHardwarePolicy(options) {
   const selected = options.variantId ? variants.find(v => v.id === options.variantId && v.supported) : variants.find(v => v.supported)
   return { policyVersion: policy.version, recipeId, mode: options.variantId ? 'manual' : 'automatic',
     selectedVariantId: selected?.id || null, status: selected ? 'supported' : 'unavailable', variants,
-    reason: selected?.reason || (options.variantId ? 'The selected variant is not currently supported. Choose a supported variant or review setup.' : 'No qualified variant meets the observed resources. Playback remains available.'),
+    reason: selected?.reason || (options.variantId ? 'The selected variant is not currently supported. Choose a supported variant or review setup.' : 'No eligible processing variant meets the observed resources. Playback remains available.'),
     downloadAuthorized: false }
 }
 

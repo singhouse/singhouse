@@ -1048,11 +1048,44 @@ def verify_processing_recipe(directory: Path, identifier: str, store: Path,
 
 def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
                                policy: dict, release_channel: str = "") -> dict:
-    """Bind worker resource limits to a qualified variant from the shipped policy."""
+    """Bind worker limits to the shipped qualification or private admission policy."""
+    if (not isinstance(policy, dict) or type(policy.get("schema")) is not int or policy["schema"] != 1
+            or not isinstance(policy.get("variants"), list)
+            or any(not isinstance(value, dict) for value in policy["variants"])):
+        raise RuntimeError("Choose a qualified processing option in setup")
     variants = [v for v in policy.get("variants", []) if v.get("id") == variant_id]
-    if policy.get("schema") != 1 or len(variants) != 1:
+    if len(variants) != 1:
         raise RuntimeError("Choose a qualified processing option in setup")
     variant = variants[0]
+    if variant.get("status") == "candidate":
+        admission = variant.get("admission")
+        if (release_channel != "private-test" or variant.get("settings") != {} or "evidence" in variant
+                or any(variant.get(key) != manifest.get(key) for key in ("platform", "arch", "accelerator"))
+                or not isinstance(admission, dict)
+                or set(admission) != {"runtimeLockSha256", "reference", "basisReferences", "ramBytes", "vramBytes",
+                                      "workingDiskBytes", "downloadBytes", "installedBytes", "unifiedMemory"}
+                or admission.get("runtimeLockSha256") != manifest["provenance"]["lockSha256"]):
+            raise RuntimeError("Selected candidate is not admitted for this private runtime")
+        references = admission.get("basisReferences")
+        if (not isinstance(admission.get("reference"), str) or not admission["reference"].strip()
+                or not isinstance(references, list) or not references
+                or any(not isinstance(value, str) or not value.strip() for value in references)
+                or len(set(references)) != len(references)
+                or any(type(admission.get(key)) is not int or not 0 < admission[key] <= 2**53 - 1
+                       for key in ("ramBytes", "workingDiskBytes", "downloadBytes", "installedBytes"))):
+            raise RuntimeError("Invalid private candidate resource envelope")
+        vram = admission.get("vramBytes")
+        unified = manifest["platform"] == "darwin" and manifest["arch"] == "arm64"
+        if (admission.get("unifiedMemory") is not unified
+                or (manifest["accelerator"] == "cuda" and (type(vram) is not int or not 0 < vram <= 2**53 - 1))
+                or (manifest["accelerator"] != "cuda" and vram is not None)):
+            raise RuntimeError("Private candidate memory architecture differs")
+        # These are release-owned admission budgets, not measured qualification.
+        # The worker consumes the same strict contract and rechecks free capacity.
+        return {"schema": 1, "runtimeManifestId": runtime_id, "variantId": variant_id,
+                "requirements": {"ramBytes": admission["ramBytes"], "vramBytes": vram,
+                                 "unifiedMemory": unified, "workingDiskBytes": admission["workingDiskBytes"]},
+                "settings": {}}
     evidence = variant.get("evidence", {})
     if (variant.get("status") != "qualified" or variant.get("settings") != {}
             or any(variant.get(key) != manifest.get(key) for key in ("platform", "arch", "accelerator"))
@@ -1117,6 +1150,16 @@ def channel_trusted_locks(policy: dict, release_channel: str | None) -> list[str
     if not isinstance(private_only, list) or any(lock not in locks for lock in private_only):
         raise RuntimeError("Invalid application processing trust policy")
     return list(locks) if release_channel == "private-test" else [lock for lock in locks if lock not in private_only]
+
+
+def native_release_channel(native: Path, requested: str | None = None) -> str:
+    """Release scope comes from the bundled policy, never a caller override."""
+    value = json.loads(_safe_regular_file(native.parent / "release.json").read_text(encoding="utf-8"))
+    if (not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] != 1
+            or not isinstance(value.get("channel"), str) or not value["channel"]
+            or (requested is not None and requested != value["channel"])):
+        raise RuntimeError("Processing release channel differs from the bundled release policy")
+    return value["channel"]
 
 
 def processing_environment(runtime: Path, identity: dict, processing: Path | None,
@@ -1640,6 +1683,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
                                              processing_probe, processing_id, models_id, resource_variant)
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
+    if native and (release_channel is not None or resource_variant or private_test_resource_measurement):
+        release_channel = native_release_channel(native, release_channel)
     private_modal = None
     if desktop_config_stdin:
         if not native:
@@ -1678,8 +1723,7 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
                                                           processing_id=processing_id, models_id=models_id, resource_variant=resource_variant, processing_root=processing_root,
-                                                          release_channel=release_channel or (json.loads((native.parent / "release.json").read_text()).get("channel", "")
-                                                                           if resource_variant or private_test_resource_measurement else ""),
+                                                          release_channel=release_channel or "",
                                                           private_test_resource_measurement=private_test_resource_measurement))
             if native and lyrics_lookup:
                 environment["KARAOKE_LRCLIB"] = "1"
