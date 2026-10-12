@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync, chmodSync, copyFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
@@ -9,6 +9,15 @@ import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 import { setupRelaunchOptions, relaunchForSetup, verifiedSetupAppImageRuntime, prepareAppImageHandoff } from '../setup_relaunch.mjs'
 import { restartForSetup } from '../onboarding_state.mjs'
+
+function protectedNode(root) {
+  // CI toolcache Node may be writable by another account. Copy its actual
+  // binary into this test's owned directory; never chmod the installed Node.
+  const executable = join(root, 'node fixture')
+  copyFileSync(realpathSync(process.execPath), executable)
+  chmodSync(executable, 0o700)
+  return realpathSync(executable)
+}
 
 test('AppImage setup relaunch validates outer image bytes and preserves every argument', () => {
   const root = mkdtempSync(join(tmpdir(), 'setup-relaunch-'))
@@ -132,6 +141,7 @@ test('daemonized keeper must bind the exact FUSE connection, lifetime pipe and o
 test('handoff rejects noncanonical or unsafe executables and invalid argv before launch', { skip: process.platform !== 'linux' }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'handoff-inputs-'))
   try {
+    const node = protectedNode(root)
     const executable = join(root, 'application'), linked = join(root, 'linked')
     writeFileSync(executable, 'fixture', { mode: 0o700 })
     symlinkSync(executable, linked)
@@ -142,8 +152,17 @@ test('handoff rejects noncanonical or unsafe executables and invalid argv before
       chmodSync(executable, mode)
       await assert.rejects(prepareAppImageHandoff({ execPath: executable, args: [] }), /Unsafe setup handoff executable/)
     }
+    // An executable owned by another non-root user is rejected independently
+    // of its safe mode. Root ownership is intentionally trusted by the guard.
+    const owner = statSync(node).uid
+    if (owner !== 0) {
+      const uid = mock.method(process, 'getuid', () => owner + 1)
+      try {
+        await assert.rejects(prepareAppImageHandoff({ execPath: node, args: [] }), /Unsafe setup handoff executable/)
+      } finally { uid.mock.restore() }
+    }
     for (const args of [undefined, 'argument', [1], ['invalid\0argument']]) {
-      await assert.rejects(prepareAppImageHandoff({ execPath: process.execPath, args }), /Invalid setup handoff arguments/)
+      await assert.rejects(prepareAppImageHandoff({ execPath: node, args }), /Invalid setup handoff arguments/)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
@@ -152,6 +171,7 @@ test('real handoff waits for parent exit and preserves argument boundaries', { s
   const root = mkdtempSync(join(tmpdir(), 'actual-handoff-'))
   let parent
   try {
+    const node = protectedNode(root)
     const output = join(root, 'arguments.json')
     const args = ['space value', '$(not a command)', 'quote"value', "single'quote", 'line\nvalue', 'trailing\n',
       '; exit 99', '', '--user-data-dir=profile with spaces']
@@ -160,7 +180,7 @@ test('real handoff waits for parent exit and preserves argument boundaries', { s
       await prepareAppImageHandoff({ execPath: process.execPath, args: ${JSON.stringify(['-e', target, output, ...args])} });
       process.send('ready');
       process.on('message', () => process.exit(0));`
-    parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    parent = spawn(node, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
     await once(parent, 'message')
     assert.equal(existsSync(output), false, 'new application must not race the old singleton')
     const exited = once(parent, 'exit')
@@ -177,8 +197,9 @@ test('real handoff waits for parent exit and preserves argument boundaries', { s
 test('handoff abort and shutdown deadline cancel the helper without launching', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'cancel-handoff-'))
   try {
+    const node = protectedNode(root)
     const output = join(root, 'must-not-exist')
-    const selected = { execPath: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(output)}, 'bad')`] }
+    const selected = { execPath: node, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(output)}, 'bad')`] }
     const already = new AbortController(); already.abort()
     await assert.rejects(prepareAppImageHandoff(selected, { signal: already.signal }), { name: 'AbortError' })
     const pending = new AbortController()
@@ -199,11 +220,12 @@ test('handoff starts after an unreaped owner has become a zombie', { skip: proce
   const root = mkdtempSync(join(tmpdir(), 'zombie-handoff-'))
   let parent
   try {
+    const node = protectedNode(root)
     const output = join(root, 'launched')
     const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
       await prepareAppImageHandoff({ execPath: process.execPath, args: ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(output)}, 'ready')`)}] });
       process.exit(0);`
-    parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: 'ignore' })
+    parent = spawn(node, ['--input-type=module', '-e', source], { stdio: 'ignore' })
     const exited = once(parent, 'exit')
     // Blocking this launcher's event loop deliberately prevents libuv from
     // reaping the owner. A separate Node observer checks /proc without waitpid.
@@ -220,7 +242,7 @@ test('handoff starts after an unreaped owner has become a zombie', { skip: proce
       if (!zombie) throw new Error('owner was not deliberately held unreaped');
       if (!fs.existsSync(process.argv[2])) throw new Error('handoff waited for reaping rather than exit');
     `
-    const result = spawnSync(process.execPath, ['-e', observer, String(parent.pid), output], { encoding: 'utf8', timeout: 8000 })
+    const result = spawnSync(node, ['-e', observer, String(parent.pid), output], { encoding: 'utf8', timeout: 8000 })
     assert.equal(result.status, 0, result.stderr || result.error?.message)
     await exited
   } finally {
@@ -234,6 +256,7 @@ for (const mode of ['abort', 'deadline']) {
     const root = mkdtempSync(join(tmpdir(), 'cancelled-owner-'))
     let parent
     try {
+      const node = protectedNode(root)
       const output = join(root, 'must-not-launch')
       const source = `import { prepareAppImageHandoff } from ${JSON.stringify(new URL('../setup_relaunch.mjs', import.meta.url).href)};
         const controller = new AbortController();
@@ -244,7 +267,7 @@ for (const mode of ['abort', 'deadline']) {
           ${mode === 'abort' ? 'controller.abort();' : 'await new Promise(resolve => setTimeout(resolve, 100));'}
           process.exit(0);
         });`
-      parent = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+      parent = spawn(node, ['--input-type=module', '-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
       await once(parent, 'message')
       const exited = once(parent, 'exit')
       parent.send('exit')
