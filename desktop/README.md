@@ -660,6 +660,14 @@ continues to export `recipe/artifacts/<full-sha256>/<original-filename>`.
 The builder exports files only; publication and download verification are
 separate release steps.
 
+The Windows acceptance workflow's manual recipes phase accepts
+`release_assets: true` to export CPU and CUDA recipes in this flat layout.
+Their publication directories are fixed to
+`https://github.com/singhouse/processing-packs/releases/download/rc-<full-source-commit>-win-<accelerator>/`.
+The default remains bundled acceptance transport. Neither mode publishes
+assets or establishes song or hardware qualification; packaging still requires
+the exact recipe lock to be independently committed to the trust policy.
+
 The release bundles the exact uv executable pinned in `locks/native.json`.
 The installer keeps verified artifacts and uv's cache under the chosen
 processing root, creates an environment at its final versioned path, verifies

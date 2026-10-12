@@ -5,6 +5,7 @@ import json
 import shutil
 import hashlib
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -37,7 +38,22 @@ def prepare(work):
     return python, env, cache
 
 
+def recipe_publication(source_commit, accelerator, *, release_assets=False, artifact_base_url=None):
+    if not re.fullmatch(r'[0-9a-f]{40}', source_commit) or accelerator not in ('cpu', 'cuda'):
+        raise ValueError('Recipe publication requires the full source commit and Windows accelerator')
+    if release_assets:
+        if artifact_base_url is not None:
+            raise ValueError('Release asset mode uses its fixed publication directory')
+        return 'flat', f'https://github.com/singhouse/processing-packs/releases/download/rc-{source_commit}-win-{accelerator}/'
+    if not artifact_base_url:
+        raise ValueError('Bundled recipe transport requires --artifact-base-url')
+    return 'directory', artifact_base_url
+
+
 def recipe(args):
+    source_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    layout, base_url = recipe_publication(source_commit, args.accelerator,
+                                          release_assets=args.release_assets, artifact_base_url=args.artifact_base_url)
     work = args.work.resolve()
     python, env, cache = prepare(work)
     subprocess.run([str(python), str(ROOT / 'desktop/build/build_processing.py'),
@@ -45,12 +61,13 @@ def recipe(args):
                     '--build-requirements', str(LOCKS / 'processing-build.txt'),
                     '--target', 'win32-x64', '--accelerator', args.accelerator,
                     '--output', str(work / 'build'), '--cache', str(cache),
-                    '--artifact-base-url', args.artifact_base_url], cwd=ROOT, env=env, check=True)
+                    '--artifact-base-url', base_url, '--artifact-layout', layout], cwd=ROOT, env=env, check=True)
     manifest_path = work / 'build/recipe/manifest.json'
     manifest = json.loads(manifest_path.read_text())
     evidence = dict(schema=1, target='win32-x64', accelerator=args.accelerator,
-                    sourceCommit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                    sourceCommit=source_commit,
                     manifestSha256=digest(manifest_path), lockSha256=manifest['provenance']['lockSha256'],
+                    artifactLayout=layout, artifactBaseUrl=base_url,
                     qualification='Dependency inventory only; no models, GPU probe, or song qualification')
     (work / 'build/recipe/build-evidence.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(json.dumps(evidence, indent=2))
@@ -135,7 +152,10 @@ if __name__ == '__main__':
         command.add_argument('--work', type=Path, required=True)
         command.add_argument('--accelerator', choices=['cpu', 'cuda'], required=True)
         if phase == 'recipe':
-            command.add_argument('--artifact-base-url', required=True)
+            publication = command.add_mutually_exclusive_group(required=True)
+            publication.add_argument('--artifact-base-url')
+            publication.add_argument('--release-assets', action='store_true',
+                                     help='Export flat assets for the fixed source-bound processing-packs release URL')
         else:
             command.add_argument('--recipe', type=Path, required=True)
     args = parser.parse_args()
