@@ -54,23 +54,36 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
         source += "\n    Write-Host 'PROFILE_PREFLIGHT_OK'\n} catch { Write-Host $_; exit 1 } finally { $env:PSModulePath = $PreviousModulePath }\n"
         return self.run_script(source, expect=expect)
 
-    def acl(self):
-        command = "$a = Get-Acl -LiteralPath $env:PROFILE_TEST_PATH; $a.Sddl"
-        return subprocess.check_output(
-            [self.powershell, '-NoProfile', '-Command', command],
-            env=dict(os.environ, PROFILE_TEST_PATH=str(self.profile)), text=True,
-        ).strip()
+    def run_command(self, command, **environment):
+        # Fixture helpers also start Windows PowerShell from a PowerShell 7
+        # workflow host. Isolate built-in modules and fail on read errors;
+        # otherwise a failed Get-Acl assignment can misleadingly return "".
+        prefix = (
+            "$ErrorActionPreference = 'Stop'; "
+            "$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules'); "
+            "Import-Module ([IO.Path]::Combine($PSHOME, "
+            "'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1')) "
+            "-ErrorAction Stop; "
+        )
+        result = subprocess.run(
+            [self.powershell, '-NoProfile', '-Command', prefix + command],
+            env=dict(os.environ, **environment), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    def acl(self, path=None):
+        result = self.run_command('(Get-Acl -LiteralPath $env:PROFILE_TEST_PATH).Sddl',
+                                  PROFILE_TEST_PATH=str(path or self.profile))
+        self.assertTrue(result.startswith('O:'), result)
+        return result
 
     def icacls(self, *args):
         subprocess.run(['icacls.exe', str(self.profile), *args], check=True,
                        capture_output=True, text=True)
 
     def current_sid(self):
-        return subprocess.check_output(
-            [self.powershell, '-NoProfile', '-Command',
-             '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
-            text=True,
-        ).strip()
+        return self.run_command('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value')
 
     def test_fresh_profile_and_existing_private_profile(self):
         self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
@@ -82,18 +95,10 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
         self.profile.parent.mkdir(parents=True)
         subprocess.run(['icacls.exe', str(self.profile.parent), '/grant',
                         '*S-1-1-0:(OI)(CI)F'], check=True, capture_output=True)
-        parent_acl = subprocess.check_output(
-            [self.powershell, '-NoProfile', '-Command',
-             '(Get-Acl -LiteralPath $env:PROFILE_TEST_PATH).Sddl'],
-            env=dict(os.environ, PROFILE_TEST_PATH=str(self.profile.parent)), text=True,
-        )
+        parent_acl = self.acl(self.profile.parent)
         self.assertIn('PROFILE_PREFLIGHT_OK', self.setup_profile())
         self.assertNotIn(';;;WD)', self.acl())
-        self.assertEqual(subprocess.check_output(
-            [self.powershell, '-NoProfile', '-Command',
-             '(Get-Acl -LiteralPath $env:PROFILE_TEST_PATH).Sddl'],
-            env=dict(os.environ, PROFILE_TEST_PATH=str(self.profile.parent)), text=True,
-        ), parent_acl)
+        self.assertEqual(self.acl(self.profile.parent), parent_acl)
 
     def test_fresh_profile_removes_explicit_grant_and_deny_rules(self):
         permissions = """    & icacls.exe $Profile /grant '*S-1-1-0:(OI)(CI)F' | Out-Null
@@ -121,7 +126,19 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
                 if change == 'extra-reader':
                     self.icacls('/grant', '*S-1-1-0:(OI)(CI)R')
                 elif change == 'missing-inheritance':
+                    # /grant:r can preserve the existing ACE's inheritance
+                    # scope. Remove the old grant before adding a folder-only one.
+                    self.icacls('/remove:g', sid)
                     self.icacls('/grant:r', sid + ':F')
+                    flags = self.run_command(
+                        '$a = Get-Acl -LiteralPath $env:PROFILE_TEST_PATH; '
+                        '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; '
+                        '$a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | '
+                        'Where-Object { $_.IdentityReference.Value -eq $sid } | '
+                        'ForEach-Object { [int]$_.InheritanceFlags }',
+                        PROFILE_TEST_PATH=str(self.profile),
+                    )
+                    self.assertEqual(flags, '0')
                 elif change == 'limited-system':
                     self.icacls('/grant:r', '*S-1-5-18:(OI)(CI)R')
                 elif change == 'deny':
@@ -148,9 +165,25 @@ class WindowsAcceptanceLauncherTests(unittest.TestCase):
                     self.icacls('/remove:d', '*S-1-1-0')
 
     def test_declining_consent_explains_cancellation(self):
-        output = self.run_script(LAUNCHER.read_text(), stdin='NO\n\n')
+        source = LAUNCHER.read_text()
+        anchor = "$ErrorActionPreference = 'Stop'"
+        self.assertEqual(source.count(anchor), 1)
+        # Read-Host's native prompt is not printed for redirected stdin. Observe
+        # the actual calls while supplying declined consent and the closing Enter.
+        observer = '''
+function Read-Host {
+    param([string]$Prompt)
+    Write-Host ("READ_HOST: " + $Prompt)
+    if ($Prompt -eq 'Press Enter to close') { return '' }
+    return 'NO'
+}
+'''
+        source = source.replace(anchor, anchor + observer)
+        output = self.run_script(source)
         self.assertIn('Cancelled. Nothing was installed or downloaded.', output)
-        self.assertIn('Press Enter to close', output)
+        self.assertIn('READ_HOST: Press Enter to close', output)
+        redirected_output = self.run_script(LAUNCHER.read_text(), stdin='NO\n\n')
+        self.assertIn('Cancelled. Nothing was installed or downloaded.', redirected_output)
         self.assertFalse((self.profile / 'windows-acceptance.json').exists())
         self.assertEqual(sorted(p.name for p in self.profile.iterdir()), ['setup.log'])
 
