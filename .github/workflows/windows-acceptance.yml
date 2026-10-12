@@ -23,6 +23,10 @@ on:
     paths:
       - '.github/workflows/windows-acceptance.yml'
       - 'desktop/build/windows_acceptance.py'
+      - 'desktop/build/verify_acceptance_artifact.py'
+      - 'desktop/test/test_verify_acceptance_artifact.py'
+      - 'desktop/acceptance/start-windows.ps1'
+      - 'desktop/test/test_windows_acceptance_launcher.py'
 permissions:
   contents: read
   actions: read
@@ -48,6 +52,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Check delivered-artifact validation and native launcher preflight
+        run: python -m unittest discover -s desktop/test -p 'test_*acceptance*.py' -v
       # These HTTPS URLs are stable identities for bundled local transport.
       # No processing-pack release is created or published by this workflow.
       - name: Build exact native dependency inventory
@@ -60,6 +66,7 @@ jobs:
         with:
           name: windows-recipe-${{ matrix.accelerator }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/acceptance-${{ matrix.accelerator }}/build/recipe/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -107,9 +114,22 @@ jobs:
           --accelerator "${{ matrix.accelerator }}"
           --recipe "${{ runner.temp }}/selected-recipe"
       - uses: actions/upload-artifact@v4
+        id: acceptance-upload
         with:
           name: windows-acceptance-${{ matrix.accelerator }}-${{ github.sha }}
           path: ${{ runner.temp }}/application-${{ matrix.accelerator }}/bundle/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+      - name: Download the delivered application artifact
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.acceptance-upload.outputs.artifact-id }}
+          path: ${{ runner.temp }}/delivered-${{ matrix.accelerator }}
+          merge-multiple: true
+      - name: Verify delivered files against the assembled checksums
+        run: >-
+          python desktop/build/verify_acceptance_artifact.py
+          --bundle "${{ runner.temp }}/delivered-${{ matrix.accelerator }}"
+          --checksums "${{ runner.temp }}/application-${{ matrix.accelerator }}/bundle/SHA256SUMS"
