@@ -272,6 +272,22 @@ test('only a processing-ready build maps its validated catalog onto the packaged
     }, { warn: () => assert.fail('no warning expected') }), 'built')
     await assert.rejects(readdir(fileSet.from), /ENOENT/)
 
+    const cpuBytes = Buffer.from('{"schema":2,"accelerator":"cpu"}\n')
+    const cpu = { name: 'processing-catalog-cpu.json', catalogBytes: cpuBytes,
+      catalogSha256: createHash('sha256').update(cpuBytes).digest('hex') }
+    await assert.rejects(stageProcessingCatalog({ mode: 'playback-only', alternativeCatalogBytes: [cpu] }), /cannot stage alternative/)
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256,
+      alternativeCatalogBytes: [{ ...cpu, catalogSha256: 'b'.repeat(64) }] }), /alternative processing catalog differs/)
+    await assert.rejects(stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256,
+      alternativeCatalogBytes: [{ ...cpu, name: '../outside.json' }] }), /alternative processing catalog differs/)
+    const unified = await stageProcessingCatalog({ mode: 'processing-ready', catalogBytes, catalogSha256, alternativeCatalogBytes: [cpu] })
+    await withStagedCatalog(unified, async () => {
+      assert.deepEqual(unified.files[0].filter, ['processing-catalog.json', 'processing-catalog-cpu.json'])
+      assert.deepEqual(await readFile(resolve(unified.files[0].from, cpu.name)), cpuBytes)
+      assert.deepEqual(await readFile(resolve(unified.files[0].from, 'processing-catalog.json')), catalogBytes)
+    })
+    await assert.rejects(readdir(unified.files[0].from), /ENOENT/)
+
     // Cleanup failures warn (temporary directory name only) and never replace a build result or error.
     const locked = Object.assign(new Error(`EBUSY: resource busy, rmdir '${tmpdir()}/x'`), { code: 'EBUSY' })
     const staged = (cleanupError) => ({ label: 'singhouse-processing-catalog-abc', cleanup: async () => { if (cleanupError) throw cleanupError } })

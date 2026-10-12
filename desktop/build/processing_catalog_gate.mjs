@@ -12,6 +12,7 @@ export const PLAYBACK_ONLY = 'playback-only'
 // The path main.mjs reads inside app.asar. Source catalogs live one per target
 // under CATALOG_DIRECTORY and are mapped onto this name only when packaged.
 export const PACKAGED_CATALOG_NAME = 'processing-catalog.json'
+export const PACKAGED_CPU_CATALOG_NAME = 'processing-catalog-cpu.json'
 export const CATALOG_DIRECTORY = 'processing-catalogs'
 export const PROCESSING_ARTIFACTS_DIRECTORY = 'processing-artifacts'
 const MODE_FLAGS = [`--${PROCESSING_READY}`, `--${PLAYBACK_ONLY}`]
@@ -224,7 +225,24 @@ export async function prepareProcessingGate({ desktopDir, nativeManifest, appVer
   const identity = packagedCatalogIdentity(nativeManifest, appVersion)
   const inputs = await readProcessingCatalogInputs(desktopDir, identity, accelerator)
   const { notice, ...facts } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256, accelerator, ...inputs })
-  const processingArtifacts = mode === PROCESSING_READY ? processingArtifactInventory(JSON.parse(inputs.catalogBytes)) : []
+  const primary = mode === PROCESSING_READY ? JSON.parse(inputs.catalogBytes) : null
+  const alternativeCatalogs = [], alternativeCatalogBytes = []
+  if (primary?.runtime.schema === 2 && accelerator === undefined && ['win32', 'linux'].includes(identity.platform)) {
+    const alternative = await readProcessingCatalogInputs(desktopDir, identity, 'cpu')
+    if (alternative.catalogBytes === null && primary.runtime.accelerator === 'cuda') {
+      throw new Error(`Normal CUDA installer requires desktop/${catalogSourceName(identity, 'cpu')} for CPU hardware`)
+    }
+    if (alternative.catalogBytes !== null) {
+      if (primary.runtime.accelerator !== 'cuda') throw new Error('Alternate CPU catalog requires a CUDA primary catalog')
+      const { notice: _notice, ...validated } = assertProcessingCatalog({ mode, identity, releaseChannel, nativeLockSha256,
+        accelerator: 'cpu', ...alternative, locks: inputs.locks, modelPolicy: inputs.modelPolicy })
+      if (JSON.parse(alternative.catalogBytes).runtime.schema !== 2) throw new Error('Alternate CPU catalog must use a processing recipe')
+      alternativeCatalogs.push({ name: PACKAGED_CPU_CATALOG_NAME, catalogSha256: validated.catalogSha256,
+        runtimeLockSha256: validated.runtimeLockSha256, qualificationScope: validated.qualificationScope, accelerator: 'cpu' })
+      alternativeCatalogBytes.push({ name: PACKAGED_CPU_CATALOG_NAME, catalogBytes: alternative.catalogBytes, catalogSha256: validated.catalogSha256 })
+    }
+  }
+  const processingArtifacts = primary ? processingArtifactInventory([primary, ...alternativeCatalogBytes.map(entry => JSON.parse(entry.catalogBytes))]) : []
   const artifactsDirectory = processingArtifacts.length ? env?.KARAOKE_PROCESSING_ARTIFACTS : undefined
   if (processingArtifacts.length && (typeof artifactsDirectory !== 'string' || !artifactsDirectory.trim())) throw new Error('Processing-ready packaging requires KARAOKE_PROCESSING_ARTIFACTS for the catalog release assets')
   for (const asset of processingArtifacts) await verifyProcessingArtifact(resolve(artifactsDirectory), asset)
@@ -233,7 +251,9 @@ export async function prepareProcessingGate({ desktopDir, nativeManifest, appVer
     await lstat(resolve(desktopDir, PACKAGED_CATALOG_NAME))
     notices.push(`desktop/${PACKAGED_CATALOG_NAME} is not a catalog source and is never packaged; catalogs are read only from desktop/${CATALOG_DIRECTORY}/<platform>-<arch>.json.`)
   } catch (error) { if (error.code !== 'ENOENT') throw error }
-  return { result: { ...facts, target: { platform: identity.platform, arch: identity.arch }, ...(processingArtifacts.length ? { processingArtifacts } : {}) },
+  return { result: { ...facts, target: { platform: identity.platform, arch: identity.arch }, ...(processingArtifacts.length ? { processingArtifacts } : {}),
+    ...(alternativeCatalogs.length ? { alternativeCatalogs } : {}) },
+    ...(alternativeCatalogs.length ? { alternativeCatalogBytes } : {}),
     ...(artifactsDirectory ? { artifactsDirectory } : {}), catalogBytes: mode === PROCESSING_READY ? inputs.catalogBytes : null, notices }
 }
 
@@ -241,21 +261,22 @@ export async function prepareProcessingGate({ desktopDir, nativeManifest, appVer
 // null when the archive contains no such entry. Anything other than a regular
 // file at that name fails closed. @electron/asar is a locked build dependency,
 // loaded only here so dependency-free test runs can import this module.
-export async function packagedCatalogSha256(archivePath) {
+export async function packagedCatalogSha256(archivePath, name = PACKAGED_CATALOG_NAME) {
+  if (![PACKAGED_CATALOG_NAME, PACKAGED_CPU_CATALOG_NAME].includes(name)) throw new Error('Invalid packaged processing catalog name')
   const { extractFile, statFile, uncache } = await import('@electron/asar')
   uncache(archivePath)
   try {
     let entry
-    try { entry = statFile(archivePath, PACKAGED_CATALOG_NAME, false) }
+    try { entry = statFile(archivePath, name, false) }
     catch (error) { if (/was not found in this archive/.test(error.message)) return null; throw error }
-    if ('files' in entry || 'link' in entry) throw new Error(`Packaged ${PACKAGED_CATALOG_NAME} is not a regular file`)
-    return sha256(extractFile(archivePath, PACKAGED_CATALOG_NAME, false))
+    if ('files' in entry || 'link' in entry) throw new Error(`Packaged ${name} is not a regular file`)
+    return sha256(extractFile(archivePath, name, false))
   } finally { uncache(archivePath) }
 }
 
 // packagedSha256 is the observed digest of the catalog inside the produced
 // application, or null when the application contains none.
-export function assertPackagedProcessingCatalog(gate, packagedSha256) {
+export function assertPackagedProcessingCatalog(gate, packagedSha256, packagedCpuSha256 = null) {
   if (gate?.mode === PROCESSING_READY) {
     if (!/^[0-9a-f]{64}$/.test(gate.catalogSha256 ?? '')) throw new Error('Processing-ready gate result has no validated catalog digest')
     if (!packagedSha256) throw new Error(`Processing-ready packaging produced an application without ${PACKAGED_CATALOG_NAME}`)
@@ -263,6 +284,11 @@ export function assertPackagedProcessingCatalog(gate, packagedSha256) {
   } else if (gate?.mode === PLAYBACK_ONLY) {
     if (packagedSha256 !== null) throw new Error(`Playback-only packaging produced an application containing ${PACKAGED_CATALOG_NAME}`)
   } else throw new Error('Packaged processing catalog check requires a gate result')
+  const alternatives = gate.alternativeCatalogs ?? []
+  if (alternatives.length > 1 || alternatives.some(entry => entry.name !== PACKAGED_CPU_CATALOG_NAME || entry.accelerator !== 'cpu'
+      || !/^[0-9a-f]{64}$/.test(entry.catalogSha256 ?? ''))
+      || (alternatives.length && gate.mode !== PROCESSING_READY)) throw new Error('Invalid alternative processing catalog gate result')
+  if (packagedCpuSha256 !== (alternatives[0]?.catalogSha256 ?? null)) throw new Error(`Packaged ${PACKAGED_CPU_CATALOG_NAME} differs from the validated alternative catalog selection`)
   return gate
 }
 
@@ -270,7 +296,7 @@ export function assertPackagedProcessingCatalog(gate, packagedSha256) {
 // part of the receipt schema; releaseId and electronAppDigest bind it to the
 // derived identity of the application it describes (the digest is that of the
 // app.asar carrying the catalog), and releaseChannel is the packaged policy's.
-export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target, accelerator, processingArtifacts }) {
+export function processingModeRecord({ mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope, target, accelerator, processingArtifacts, alternativeCatalogs }) {
   if (accelerator !== undefined) {
     if (mode !== PROCESSING_READY) throw new Error('Processing accelerator record requires processing-ready mode')
     catalogSourceName(target, accelerator)
@@ -279,5 +305,5 @@ export function processingModeRecord({ mode, releaseId, releaseChannel, electron
       || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(releaseChannel ?? '')) throw new Error('Processing mode record requires the derived release identity and packaged release channel')
   return { schema: 1, mode, releaseId, releaseChannel, electronAppDigest, catalogSha256, runtimeLockSha256, qualificationScope,
     target: { platform: target.platform, arch: target.arch }, ...(accelerator === undefined ? {} : { accelerator }),
-    ...(processingArtifacts?.length ? { processingArtifacts } : {}) }
+    ...(processingArtifacts?.length ? { processingArtifacts } : {}), ...(alternativeCatalogs?.length ? { alternativeCatalogs } : {}) }
 }

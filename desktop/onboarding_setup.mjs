@@ -212,11 +212,14 @@ export class OnboardingSetup {
 
   // releaseChannel is the validated release policy's channel; it decides
   // whether private-smoke or hardware-test qualification is acceptable.
-  constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
+  constructor({ runtime, cache, policy, catalog = null, alternativeCatalogs = [], catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
     hardwarePolicy = null, loadHardwareSelection = async () => null, saveHardwareSelection = async () => {},
     installLocation = null, loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
     Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, installLocation, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
+    this.primaryCatalog = this.catalog
+    if (!Array.isArray(alternativeCatalogs)) throw new Error('Invalid alternative processing catalogs')
+    this.alternativeCatalogs = structuredClone(alternativeCatalogs)
     this.hardwarePolicy = hardwarePolicy && validateHardwarePolicy(hardwarePolicy)
     this.loadHardwareSelection = loadHardwareSelection
     this.saveHardwareSelection = saveHardwareSelection
@@ -229,10 +232,11 @@ export class OnboardingSetup {
     this.restoring = null
     this.check = null
     this.runtimeUpdateRequested = false
+    this.hardwareSelectionPersistence = null
   }
 
   // A running or paused attempt keeps its stores until it finishes or stops.
-  storesLocked() { return Boolean(this.operation) || this.state.state === 'paused' }
+  storesLocked() { return Boolean(this.operation) || Boolean(this.hardwareSelectionPersistence) || this.state.state === 'paused' }
 
   // Later installs and repairs use these stores; existing files stay where they are.
   useStores({ runtime, cache, installLocation }) {
@@ -280,7 +284,7 @@ export class OnboardingSetup {
 
   async requestRuntimeUpdate() {
     await this.getStatus()
-    if (this.operation) throw new Error('Wait for setup to finish before reviewing an update.')
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before reviewing an update.')
     this.runtimeUpdateRequested = true
     await this.update({})
     return this.preflight()
@@ -288,7 +292,7 @@ export class OnboardingSetup {
 
   async setHardwareSelection(value) {
     await this.getStatus()
-    if (this.operation) throw new Error('Wait for setup to finish before changing processing options.')
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
     if (!this.hardwarePolicy) throw new Error('Hardware selection is unavailable in this release.')
     if (!value || !['automatic', 'manual'].includes(value.mode)
         || (value.mode === 'manual' && !this.hardwarePolicy.variants.some(v => v.id === value.variantId))) {
@@ -298,12 +302,29 @@ export class OnboardingSetup {
       policyVersion: this.hardwarePolicy.version }
     if (next.mode === 'manual') {
       const current = await this.preflight()
-      if (!current.hardwareAssessment?.variants.some(v => v.id === next.variantId && v.supported)) {
-        throw new Error('This processing variant is not supported by the current qualification and resources.')
+      const variant = current.hardwareAssessment?.variants.find(v => v.id === next.variantId)
+      if (!variant?.supported) {
+        throw new Error(variant?.status === 'update-required' ? variant.reason : 'This processing variant is not supported by the current qualification and resources.')
       }
     }
-    await this.saveHardwareSelection(next)
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
+    const installed = await this.installed()
+    if (this.storesLocked()) throw new Error('Wait for setup to finish before changing processing options.')
+    const definition = next.mode === 'manual' ? this.hardwarePolicy.variants.find(variant => variant.id === next.variantId) : null
+    const targetLock = (definition?.admission || definition?.evidence)?.runtimeLockSha256
+    const target = [this.primaryCatalog, ...this.alternativeCatalogs].find(catalog =>
+      catalog?.runtime?.provenance?.lockSha256 === targetLock && catalog.runtime.accelerator === definition?.accelerator)
+    if (installed.installed && target && (installed.runtime.recipeId || installed.runtime.id) !== hash(target.runtime)) {
+      throw new Error('This manual option uses a different installed processing recipe. Choose Automatic and review the runtime update before changing recipes.')
+    }
+    // Publish the new preference before persistence yields, so concurrent consent
+    // must revalidate its plan against this selection.
+    const previous = this.hardwareSelection
     this.hardwareSelection = next
+    this.hardwareSelectionPersistence = Promise.resolve().then(() => this.saveHardwareSelection(next))
+    try { await this.hardwareSelectionPersistence }
+    catch (error) { this.hardwareSelection = previous; throw error }
+    finally { this.hardwareSelectionPersistence = null }
     return this.preflight()
   }
 
@@ -334,9 +355,8 @@ export class OnboardingSetup {
     return { runtime, models, installed, ready, restartRequired: installed && !ready }
   }
 
-  selection(active) {
+  selection(active, catalog = this.catalog) {
     if (this.catalogError) throw new Error(this.catalogError)
-    const catalog = this.catalog
     if (!catalog || ![1, 2].includes(catalog.schema) || !catalog.runtime) throw new Error('Local song processing is not available in this version yet. You can still play your existing karaoke files.')
     const runtime = this.runtime.validate(structuredClone(catalog.runtime))
     const q = catalog.qualification
@@ -412,6 +432,49 @@ export class OnboardingSetup {
     }
   }
 
+  assessCatalogChoices(hardware, freeBytes, installed) {
+    const catalogs = this.alternativeCatalogs.length ? [this.primaryCatalog, ...this.alternativeCatalogs] : [this.catalog]
+    const evaluate = catalog => {
+      const assessment = this.hardwarePolicy ? assessHardwarePolicy({ policy: this.hardwarePolicy, hardware,
+        runtimeLockSha256: catalog?.runtime?.provenance?.lockSha256, accelerator: catalog?.runtime?.accelerator,
+        releaseChannel: this.releaseChannel, variantId: this.hardwareSelection?.variantId,
+        installedModelIds: installed.models?.manifest.models || [], diskFreeBytes: freeBytes }) : null
+      let eligible = Boolean(assessment?.selectedVariantId)
+      if (eligible) {
+        try { this.selection(installed.models, catalog) } catch { eligible = false }
+      }
+      return { catalog, assessment, eligible }
+    }
+    const choices = catalogs.map(evaluate)
+    // A reviewed attempt keeps its catalog through running, pause and resume.
+    // Fresh preflights may prefer eligible CUDA, then CPU; Metal is unchanged.
+    if (!this.storesLocked() && this.alternativeCatalogs.length) {
+      const order = { cuda: 0, cpu: 1, metal: 2 }
+      const eligible = choices.filter(choice => choice.eligible).sort((a, b) =>
+        (order[a.catalog.runtime.accelerator] ?? 3) - (order[b.catalog.runtime.accelerator] ?? 3))
+      this.catalog = eligible[0]?.catalog || this.primaryCatalog
+    }
+    const selected = choices.find(choice => choice.catalog === this.catalog) || evaluate(this.catalog)
+    if (!selected.assessment || !this.alternativeCatalogs.length) return selected.assessment
+    // Each variant's own catalog supplies its status; a CPU choice must not be
+    // hidden by the CUDA catalog's intentional accelerator/lock mismatch.
+    const variants = selected.assessment.variants.map(variant => {
+      const definition = this.hardwarePolicy.variants.find(value => value.id === variant.id)
+      const lock = (definition.admission || definition.evidence)?.runtimeLockSha256
+      const owner = choices.find(choice => choice.catalog?.runtime?.accelerator === definition.accelerator
+        && choice.catalog.runtime.provenance.lockSha256 === lock)
+      const assessed = owner?.assessment.variants.find(value => value.id === variant.id) || variant
+      if (installed.installed && owner && (installed.runtime.recipeId || installed.runtime.id) !== hash(owner.catalog.runtime)) {
+        // These entries also drive the manual picker. Automatic can propose a
+        // consented recipe update; manual overrides stay on the installed recipe.
+        return { ...assessed, supported:false, status:'update-required',
+          reason:'This manual option uses a different installed processing recipe. Choose Automatic and review the runtime update before changing recipes.' }
+      }
+      return assessed
+    })
+    return { ...selected.assessment, variants }
+  }
+
   async preflight({ signal, advisory = true } = {}) {
     await this.getStatus()
     const offlineDirectory = this.#offlineModelsDirectory
@@ -429,6 +492,11 @@ export class OnboardingSetup {
     } else installed = await this.installed({ signal, advisory })
     const hardware = await this.hardware()
     signal?.throwIfAborted()
+    let freeBytes = null
+    try { freeBytes = this.diskFree ? await this.diskFree() : null } catch { /* reported as unknown */ }
+    signal?.throwIfAborted()
+    if (!Number.isSafeInteger(freeBytes)) freeBytes = null
+    const hardwareAssessment = this.assessCatalogChoices(hardware, freeBytes, installed)
     const updateAvailable = Boolean(installed.installed && this.catalog?.runtime
       && (installed.runtime.recipeId || installed.runtime.id) !== hash(this.catalog.runtime))
     const updating = updateAvailable && this.runtimeUpdateRequested
@@ -436,14 +504,6 @@ export class OnboardingSetup {
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const estimateOptions = { cudaEstimateAllowed: qualificationStatusMatches(this.catalog?.qualification)
       && !qualificationScopeError(this.catalog?.qualification?.scope, this.releaseChannel) }
-    let freeBytes = null
-    try { freeBytes = this.diskFree ? await this.diskFree() : null } catch { /* reported as unknown */ }
-    signal?.throwIfAborted()
-    if (!Number.isSafeInteger(freeBytes)) freeBytes = null
-    const hardwareAssessment = this.hardwarePolicy ? assessHardwarePolicy({ policy: this.hardwarePolicy, hardware,
-      runtimeLockSha256: this.catalog?.runtime?.provenance?.lockSha256, accelerator: this.catalog?.runtime?.accelerator, releaseChannel: this.releaseChannel,
-      variantId: this.hardwareSelection?.variantId, installedModelIds: installed.models?.manifest.models || [],
-      diskFreeBytes: freeBytes }) : null
     const base = { ...memoryFields, hardwareAssessment, hardwareSelection: this.hardwareSelection, available: false, ready: installed.ready && !updating, restartRequired: installed.restartRequired && !updating, hardware, updateAvailable,
       processingEstimate: processingEstimate(null), installLocation: this.installLocation ?? null, freeBytes,
       qualificationScope: this.qualificationScope(), accelerator: planAccelerator(installed.installed && !updating ? installed.runtime.manifest : this.catalog?.runtime), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
@@ -499,6 +559,7 @@ export class OnboardingSetup {
 
   async start({ consent, planId } = {}) {
     await this.getStatus()
+    if (this.hardwareSelectionPersistence) await this.hardwareSelectionPersistence
     if (this.operation) return this.getStatus()
     if (consent !== true) return this.getStatus()
     // Reserve immediately, before preflight yields, so concurrent starts share

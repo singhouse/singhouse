@@ -16,13 +16,16 @@ test('main.mjs validates the shipped catalog with the packaged release channel',
   const block = source.slice(start, end)
 
   const calls = block.match(/validateShippedCatalog\(/g) ?? []
-  assert.equal(calls.length, 1, 'exactly one shared shipped-catalog validation')
+  assert.equal(calls.length, 1, 'one shared validation path for both shipped catalogs')
   const call = block.slice(block.indexOf('validateShippedCatalog('), block.indexOf('})', block.indexOf('validateShippedCatalog(')))
-  assert.match(call, /validateShippedCatalog\(catalogText, \{/)
+  assert.match(call, /validateShippedCatalog\(text, \{/)
   assert.match(call, /releaseChannel: releasePolicy\.channel,/)
+  assert.match(block, /catalog = validateCatalog\(catalogText\)/)
+  assert.match(block, /const cpu = validateCatalog\(readFileSync\(cpuCatalogPath, 'utf8'\)\)/)
+  assert.match(block, /processingManager\.validate\(value\.runtime\)/)
 
   const construct = source.slice(end, source.indexOf('})', end))
-  assert.match(construct, /\bcatalog, catalogError, releaseChannel: releasePolicy\.channel,/)
+  assert.match(construct, /\bcatalog, alternativeCatalogs, catalogError, releaseChannel: releasePolicy\.channel,/)
 
   // releasePolicy is the packaged policy, assigned exactly once at startup.
   assert.equal((source.match(/\breleasePolicy = /g) ?? []).length, 1)

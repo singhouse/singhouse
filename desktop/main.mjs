@@ -795,21 +795,33 @@ async function start() {
   if (packaged) {
     const catalogPath = resolve(desktopDir, 'processing-catalog.json')
     // This is shipped application policy, never a renderer-selected URL or file.
-    let catalog = null, catalogError, catalogText = null
+    let catalog = null, alternativeCatalogs = [], catalogError, catalogText = null
     const rejectCatalog = () => { catalogError = 'The processing installation catalog could not be verified. Playback remains available; install a verified application update to repair setup.' }
     try { if (existsSync(catalogPath)) catalogText = readFileSync(catalogPath, 'utf8') }
     catch { rejectCatalog(); console.error('Could not read the processing installation catalog.') }
     // The same validation the packaging gate applied to this exact catalog.
     if (catalogText !== null) {
       try {
-        catalog = validateShippedCatalog(catalogText, {
-          identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
-          releaseChannel: releasePolicy.channel,
-        })
-      } catch (error) { rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
+        const validateCatalog = text => {
+          const value = validateShippedCatalog(text, {
+            identity: expectedIdentity, trustedLocks: processingManager.trustedLocks, modelPolicy: modelCache.policy,
+            releaseChannel: releasePolicy.channel,
+          })
+          processingManager.validate(value.runtime)
+          return value
+        }
+        catalog = validateCatalog(catalogText)
+        const cpuCatalogPath = resolve(desktopDir, 'processing-catalog-cpu.json')
+        if (existsSync(cpuCatalogPath)) {
+          const cpu = validateCatalog(readFileSync(cpuCatalogPath, 'utf8'))
+          if (!['linux', 'win32'].includes(expectedIdentity.platform) || catalog.runtime.accelerator !== 'cuda'
+              || cpu.runtime.accelerator !== 'cpu') throw new Error('Invalid alternate processing target')
+          alternativeCatalogs = [cpu]
+        }
+      } catch (error) { catalog = null; alternativeCatalogs = []; rejectCatalog(); console.error(`Processing installation catalog rejected: ${error.message}`) }
     }
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
-      policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel,
+      policy: modelCache.policy, catalog, alternativeCatalogs, catalogError, releaseChannel: releasePolicy.channel,
       hardwarePolicy: validateHardwarePolicy(JSON.parse(readFileSync(resolve(desktopDir, 'hardware-policy.json'), 'utf8'))),
       loadHardwareSelection: async () => (await onboardingState.read())?.hardwareSelection,
       saveHardwareSelection: selection => onboardingState.save('hardwareSelection', selection),

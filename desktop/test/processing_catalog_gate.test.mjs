@@ -13,7 +13,7 @@ import { inspectApplicationInventory } from '../build/release_receipt.mjs'
 import { assertPackagingMode, packagedApplicationArchivePath, verifyPackagedProcessingCatalog } from '../build/package.mjs'
 import { assertPackagedProcessingCatalog, assertProcessingCatalog, catalogSourceName, packagedCatalogIdentity, packagedCatalogSha256,
   prepareProcessingGate, processingModeFromArgs, processingModeRecord, processingAcceleratorFromArgs, processingArtifactSuffix, readProcessingCatalogInputs,
-  processingArtifactInventory, stageProcessingArtifacts, verifyPackagedProcessingArtifacts } from '../build/processing_catalog_gate.mjs'
+  processingArtifactInventory, stageProcessingArtifacts, verifyPackagedProcessingArtifacts, PACKAGED_CPU_CATALOG_NAME } from '../build/processing_catalog_gate.mjs'
 
 const sha = value => createHash('sha256').update(value).digest('hex')
 const nativeManifest = { schema: 1, appVersion: '1', backendVersion: '1', lyricsyncVersion: '1', pythonVersion: '3.12.0', platform: 'linux', arch: 'x64', runtimeId: 'f'.repeat(64) }
@@ -42,6 +42,110 @@ function fixture({ platform = 'linux', arch = 'x64', scope = 'full', accelerator
 }
 const bytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
 const source = 'desktop/processing-catalogs/linux-x64.json'
+
+function recipeFixture({ platform = 'linux', arch = 'x64', accelerator = 'cpu', scope = 'hardware-test' } = {}) {
+  const f = fixture({ platform, arch, accelerator })
+  const { files: _files, provenance: _provenance, ...runtime } = f.catalog.runtime
+  runtime.schema = 2
+  runtime.python = platform === 'win32' ? 'env/Scripts/python.exe' : 'env/bin/python'
+  runtime.pythonVersion = '3.12.14'
+  runtime.probe.modules.sort()
+  const artifact = (content, filename) => ({ filename, url: `https://github.com/singhouse/processing-packs/releases/download/fixture/${sha(content)}-${filename}`, size: content.length, sha256: sha(content) })
+  runtime.recipe = { schema: 1, nativeTools: { nativeLockSha256: 'c'.repeat(64), ffmpegRelease: '7.1.1' },
+    python: { url: 'https://example.org/python.tar.gz', size: 1, sha256: sha('python'), version: runtime.pythonVersion, archive: 'tar.gz', member: 'python/bin/python3' },
+    uv: { version: '0.12.8', sha256: 'a'.repeat(64) },
+    wheels: [{ ...artifact(`wheel-${accelerator}`, 'fixture-1-py3-none-any.whl'), name: 'fixture', version: '1',
+      sourceUrl: 'https://example.org/source', sourceSha256: sha('source'), license: 'MIT', notices: [artifact('shared notice', '000.txt')] }],
+    installedSize: 100, files: [{ path: runtime.python, size: 1, sha256: sha('installed'), executable: true }] }
+  const sourceCommit = 'a'.repeat(40), packages = [{ name: 'fixture', sourceUrl: 'https://example.org/source' }]
+  const inputLock = JSON.stringify({ ...runtime, kind: 'processing-input', sourceCommit, packages })
+  runtime.provenance = { inputLock, lockSha256: sha(inputLock), sourceCommit, packages }
+  const qualification = { ...f.catalog.qualification, accelerator, scope, passed: scope !== 'hardware-test', runtimeLockSha256: sha(inputLock) }
+  const locks = { schema: 1, lockSha256: [sha(inputLock)], privateTestLockSha256: [sha(inputLock)] }
+  const catalog = createSetupCatalog({ runtime, qualification, models: f.input.models }, {
+    identity: f.target, trustedLocks: locks.lockSha256, modelPolicy: f.modelPolicy, releaseChannel: 'private-test' })
+  return { ...f, catalog, locks }
+}
+
+test('normal Windows and Linux recipe builds validate and bundle CPU alternatives with a deduplicated asset union', async t => {
+  for (const platform of ['win32', 'linux']) {
+    const root = await mkdtemp(join(tmpdir(), 'unified-catalog-')); t.after(() => rm(root, { recursive: true, force: true }))
+    const primary = recipeFixture({ platform, accelerator: 'cuda' }), cpu = recipeFixture({ platform })
+    const catalogs = join(root, 'processing-catalogs'), assets = join(root, 'assets')
+    await mkdir(catalogs); await mkdir(assets)
+    const locks = { schema: 1, lockSha256: [...primary.locks.lockSha256, ...cpu.locks.lockSha256], privateTestLockSha256: [...primary.locks.lockSha256, ...cpu.locks.lockSha256] }
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify(locks))
+    await writeFile(join(root, 'models.json'), JSON.stringify(primary.modelPolicy))
+    const primaryPath = join(catalogs, `${platform}-x64.json`), cpuPath = join(catalogs, `${platform}-x64-cpu.json`)
+    await writeFile(primaryPath, bytes(primary.catalog)); await writeFile(cpuPath, bytes(cpu.catalog))
+    await writeFile(join(catalogs, `${platform}-x64-cuda.json`), bytes(primary.catalog))
+    const inventory = processingArtifactInventory([primary.catalog, cpu.catalog])
+    assert.equal(inventory.length, 3, 'shared notice bundled once alongside distinct CPU and CUDA wheels')
+    for (const [content, filename] of [['shared notice', '000.txt'], ['wheel-cpu', 'fixture-1-py3-none-any.whl'], ['wheel-cuda', 'fixture-1-py3-none-any.whl']]) {
+      await writeFile(join(assets, `${sha(content)}-${filename}`), content)
+    }
+    const prepare = (argv = ['--processing-ready'], overrides = {}) => prepareProcessingGate({ desktopDir: root,
+      nativeManifest: { ...nativeManifest, platform }, appVersion: '1', nativeLockSha256: 'c'.repeat(64),
+      releaseChannel: 'private-test', argv, env: { KARAOKE_PROCESSING_ARTIFACTS: assets }, ...overrides })
+    const gate = await prepare()
+    assert.deepEqual(gate.result.processingArtifacts, inventory)
+    assert.equal(gate.result.accelerator, undefined)
+    assert.equal(processingArtifactSuffix(gate.result.accelerator), '')
+    assert.equal(gate.result.alternativeCatalogs[0].name, PACKAGED_CPU_CATALOG_NAME)
+    assert.equal(gate.result.alternativeCatalogs[0].catalogSha256, sha(bytes(cpu.catalog)))
+    assert.deepEqual(gate.alternativeCatalogBytes[0].catalogBytes, bytes(cpu.catalog))
+    assert.equal(processingModeRecord({ ...gate.result, releaseId: 'a'.repeat(64), electronAppDigest: 'b'.repeat(64), releaseChannel: 'private-test' }).alternativeCatalogs[0].runtimeLockSha256, cpu.catalog.runtime.provenance.lockSha256)
+    const explicit = await prepare(['--processing-ready', '--processing-accelerator', 'cuda'])
+    assert.equal(explicit.result.alternativeCatalogs, undefined)
+    assert.deepEqual(explicit.result.processingArtifacts, processingArtifactInventory(primary.catalog))
+    await writeFile(cpuPath, '{ invalid')
+    await assert.rejects(prepare(), /not JSON/)
+    assert.equal((await prepare(['--processing-ready', '--processing-accelerator', 'cuda'])).result.accelerator, 'cuda')
+    assert.equal((await prepare(['--playback-only'])).alternativeCatalogBytes, undefined)
+    await rm(cpuPath)
+    await assert.rejects(prepare(), /Normal CUDA installer requires.*cpu.json/)
+    await writeFile(cpuPath, bytes(cpu.catalog))
+    await writeFile(primaryPath, bytes(cpu.catalog))
+    await assert.rejects(prepare(), /requires a CUDA primary/)
+    await rm(cpuPath)
+    assert.equal((await prepare()).result.alternativeCatalogs, undefined, 'plain CPU recipe can remain single-catalog')
+    await writeFile(primaryPath, bytes(primary.catalog))
+    for (const [candidate, pattern] of [[primary.catalog, /accelerator does not match requested cpu/],
+      [recipeFixture({ platform: platform === 'win32' ? 'linux' : 'win32' }).catalog, /catalog runtime targets/],
+      [{ ...cpu.catalog, qualification: { ...cpu.catalog.qualification, passed: true } }, /qualification evidence/]]) {
+      await writeFile(cpuPath, bytes(candidate))
+      await assert.rejects(prepare(), pattern)
+    }
+    await writeFile(cpuPath, bytes(cpu.catalog))
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify(primary.locks))
+    await assert.rejects(prepare(), /not trusted/)
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify(locks))
+    await assert.rejects(prepare(undefined, { nativeLockSha256: 'd'.repeat(64) }), /native tools differ/)
+    await assert.rejects(prepare(undefined, { releaseChannel: 'stable' }), /not trusted|private-test/)
+    await writeFile(primaryPath, bytes(recipeFixture({ platform, accelerator: 'cuda', scope: 'full' }).catalog))
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify({ schema: 1, lockSha256: locks.lockSha256 }))
+    await assert.rejects(prepare(undefined, { releaseChannel: 'stable' }), /cpu.json.*private-test/)
+    await writeFile(primaryPath, bytes(primary.catalog))
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify(locks))
+    await rm(join(assets, `${sha('wheel-cpu')}-fixture-1-py3-none-any.whl`))
+    await assert.rejects(prepare(), /ENOENT/)
+  }
+})
+
+test('legacy and macOS builds ignore alternate CPU catalog sources', async t => {
+  for (const [platform, arch, f] of [['linux', 'x64', fixture()], ['darwin', 'arm64', recipeFixture({ platform: 'darwin', arch: 'arm64', accelerator: 'metal' })]]) {
+    const root = await mkdtemp(join(tmpdir(), 'single-catalog-')); t.after(() => rm(root, { recursive: true, force: true }))
+    await mkdir(join(root, 'processing-catalogs')); await mkdir(join(root, 'assets'))
+    await writeFile(join(root, 'processing-locks.json'), JSON.stringify(f.locks))
+    await writeFile(join(root, 'models.json'), JSON.stringify(f.modelPolicy))
+    await writeFile(join(root, `processing-catalogs/${platform}-${arch}.json`), bytes(f.catalog))
+    await writeFile(join(root, `processing-catalogs/${platform}-${arch}-cpu.json`), 'invalid excluded alternative')
+    for (const [content, filename] of [['shared notice', '000.txt'], ['wheel-metal', 'fixture-1-py3-none-any.whl']]) await writeFile(join(root, 'assets', `${sha(content)}-${filename}`), content)
+    const gate = await prepareProcessingGate({ desktopDir: root, nativeManifest: { ...nativeManifest, platform, arch }, appVersion: '1',
+      releaseChannel: 'private-test', nativeLockSha256: 'c'.repeat(64), argv: ['--processing-ready'], env: { KARAOKE_PROCESSING_ARTIFACTS: join(root, 'assets') } })
+    assert.equal(gate.result.alternativeCatalogs, undefined)
+  }
+})
 
 test('release asset inventory accepts exact source identities and deduplicates notices', () => {
   const contents = 'notice', hash = sha(contents)
@@ -413,6 +517,10 @@ test('post-package verification reads the produced app.asar on every platform la
   const without = await pack('without', { 'processing-catalogs/linux-x64.json': catalogBytes, 'nested/processing-catalog.json': catalogBytes })
   const altered = await pack('altered', { 'processing-catalog.json': Buffer.concat([catalogBytes, Buffer.from(' ')]) })
   const directory = await pack('directory', { 'processing-catalog.json': 'directory' })
+  const cpuBytes = bytes(fixture({ accelerator: 'cpu' }).catalog)
+  const unified = await pack('unified', { 'processing-catalog.json': catalogBytes, 'processing-catalog-cpu.json': cpuBytes })
+  const changedCpu = await pack('changed-cpu', { 'processing-catalog.json': catalogBytes, 'processing-catalog-cpu.json': Buffer.concat([cpuBytes, Buffer.from(' ')]) })
+  const unifiedGate = { ...ready, alternativeCatalogs: [{ name: PACKAGED_CPU_CATALOG_NAME, accelerator: 'cpu', catalogSha256: sha(cpuBytes) }] }
   for (const platform of ['linux', 'win32', 'darwin']) {
     assert.equal(await packagedCatalogSha256(packagedApplicationArchivePath(withCatalog[platform], platform)), ready.catalogSha256)
     assert.equal(await packagedCatalogSha256(packagedApplicationArchivePath(without[platform], platform)), null)
@@ -423,6 +531,11 @@ test('post-package verification reads the produced app.asar on every platform la
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: altered[platform], platform, gate: ready }), /differs from the validated source/)
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: directory[platform], platform, gate: playback }), /not a regular file/)
     await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: join(root, 'missing', platform), platform, gate: playback }), /ENOENT/)
+    assert.equal(await verifyPackagedProcessingCatalog({ applicationDirectory: unified[platform], platform, gate: unifiedGate }), unifiedGate)
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: withCatalog[platform], platform, gate: unifiedGate }), /alternative catalog selection/)
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: changedCpu[platform], platform, gate: unifiedGate }), /alternative catalog selection/)
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: unified[platform], platform, gate: ready }), /alternative catalog selection/)
+    await assert.rejects(verifyPackagedProcessingCatalog({ applicationDirectory: unified[platform], platform, gate: playback }), /Playback-only/)
     const content = 'bundled wheel', asset = { name: `${sha(content)}-fixture.whl`, sha256: sha(content), size: content.length }
     const bundledGate = { ...ready, processingArtifacts: [asset] }
     const artifacts = join(packagedApplicationArchivePath(withCatalog[platform], platform), '..', 'processing-artifacts')

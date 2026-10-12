@@ -1522,3 +1522,198 @@ test('pending normal wizard fails closed outside private-test or after resources
   runtime.probe = async () => ({ capabilitiesReady: false })
   assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
 })
+
+function unifiedWizardFixture(hardwareChanges = {}) {
+  const f = candidateWizardFixture()
+  const cpu = f.setup.catalog
+  const cuda = structuredClone(cpu)
+  cuda.runtime.accelerator = 'cuda'
+  cuda.runtime.provenance.lockSha256 = 'b'.repeat(64)
+  Object.assign(cuda.qualification, { accelerator:'cuda', runtimeLockSha256:'b'.repeat(64) })
+  const cpuVariant = f.setup.hardwarePolicy.variants[0]
+  const cudaVariant = structuredClone(cpuVariant)
+  Object.assign(cudaVariant, { id:'cuda-candidate', label:'CUDA', accelerator:'cuda', priority:2 })
+  Object.assign(cudaVariant.admission, { runtimeLockSha256:'b'.repeat(64), ramBytes:150, vramBytes:100 })
+  f.setup.hardwarePolicy.variants.push(cudaVariant)
+  f.setup.primaryCatalog = cuda; f.setup.catalog = cuda; f.setup.alternativeCatalogs = [cpu]
+  const hardware = { platform:'linux', arch:'x64', unifiedMemory:false,
+    totalMemoryBytes:200, availableMemoryBytes:175,
+    cudaDevices:[{ name:'NVIDIA fixture', dedicatedMemoryBytes:125 }], ...hardwareChanges }
+  f.setup.hardware = async () => hardware
+  const probe = f.runtime.probe
+  f.runtime.probe = async (...args) => ({ ...await probe(...args), accelerator:f.runtime.value?.manifest.accelerator || 'cpu' })
+  return { ...f, cpu, cuda, hardware }
+}
+
+test('unified installer automatically selects resource-eligible CUDA or CPU without hardware', async () => {
+  for (const [hardware, accelerator] of [[{}, 'cuda'], [{ cudaDevices:[] }, 'cpu'],
+    [{ cudaDevices:undefined }, 'cpu'], [{ cudaDevices:[{ dedicatedMemoryBytes:99 }] }, 'cpu'],
+    [{ availableMemoryBytes:140 }, 'cpu']]) {
+    const { setup, calls } = unifiedWizardFixture(hardware)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, true, plan.reason)
+    assert.equal(plan.accelerator, accelerator)
+    assert.equal(plan.hardwareAssessment.selectedVariantId, `${accelerator}-candidate`)
+    assert.deepEqual(calls, [])
+    assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+    assert.equal(setup.catalog.runtime.accelerator, accelerator)
+    assert.deepEqual(calls, ['runtime', 'models'])
+  }
+})
+
+test('unified selection leaves unknown and insufficient shared resources unavailable', async () => {
+  for (const hardware of [{ availableMemoryBytes:null }, { totalMemoryBytes:null }, { availableMemoryBytes:124 }]) {
+    const { setup, calls } = unifiedWizardFixture(hardware)
+    const plan = await setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+    await start(setup, plan.planId)
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('manual unified variant selects its matching catalog and invalidates prior consent', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const automatic = await setup.preflight()
+  const manual = await setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  assert.equal(manual.accelerator, 'cpu')
+  assert.equal(manual.hardwareAssessment.selectedVariantId, 'cpu-candidate')
+  assert.notEqual(manual.planId, automatic.planId)
+  assert.equal((await start(setup, automatic.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, manual.planId)).state, 'restart-required')
+})
+
+test('unified installer preserves a verified installed CPU runtime until explicit update consent', async () => {
+  const { setup, runtime, cache, calls } = unifiedWizardFixture({ cudaDevices:[] })
+  await start(setup, (await setup.preflight()).planId)
+  setup.loaded = { runtimeId:runtime.value.id, modelsId:cache.value.id, hardwareSelection:setup.hardwareSelection }
+  const installed = runtime.value
+  calls.length = 0
+  setup.hardware = async () => ({ platform:'linux', arch:'x64', unifiedMemory:false,
+    totalMemoryBytes:200, availableMemoryBytes:175, cudaDevices:[{ dedicatedMemoryBytes:125 }] })
+  const ordinary = await setup.preflight()
+  assert.equal(ordinary.ready, true)
+  assert.equal(ordinary.accelerator, 'cpu')
+  assert.equal(ordinary.updateAvailable, true)
+  assert.equal(ordinary.runtimeTransferRequired, false)
+  assert.equal(runtime.value, installed)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.accelerator, 'cuda')
+  assert.equal(update.runtimeTransferRequired, true)
+  assert.equal(runtime.value, installed)
+  await setup.start({ planId:update.planId })
+  assert.deepEqual(calls, [])
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.deepEqual(calls, ['runtime'])
+  assert.equal(runtime.value.manifest.accelerator, 'cuda')
+})
+
+test('reviewed catalog cannot switch during consent, active setup or pause', async () => {
+  const { setup, hardware, runtime, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  // Losing the GPU after review does not silently install a different CPU plan.
+  hardware.cudaDevices = []
+  assert.equal((await start(setup, plan.planId)).state, 'error')
+  assert.deepEqual(calls, [])
+  const cpuPlan = await setup.preflight()
+  assert.equal(cpuPlan.accelerator, 'cpu')
+  hardware.cudaDevices = [{ dedicatedMemoryBytes:125 }]
+  runtime.install = async (_value, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once:true })
+  })
+  await setup.start({ consent:true, planId:cpuPlan.planId })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal((await setup.preflight()).accelerator, 'cpu')
+  await assert.rejects(setup.setHardwareSelection({ mode:'manual', variantId:'cuda-candidate' }), /Wait for setup/)
+  await setup.pause()
+  assert.equal(setup.state.state, 'paused')
+  assert.equal((await setup.preflight()).accelerator, 'cpu')
+  await assert.rejects(setup.requestRuntimeUpdate(), /Wait for setup/)
+  await setup.stop()
+  assert.equal((await setup.preflight()).accelerator, 'cuda')
+})
+
+
+test('consent waits for a concurrent hardware preference save and rejects the previous recipe plan', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  let releaseSave
+  setup.saveHardwareSelection = async () => new Promise(resolve => { releaseSave = resolve })
+  const changed = setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  while (!releaseSave) await new Promise(resolve => setImmediate(resolve))
+  const attempt = start(setup, plan.planId)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(calls, [])
+  assert.equal(setup.operation, null)
+  releaseSave()
+  await changed
+  assert.equal((await attempt).state, 'error')
+  assert.deepEqual(calls, [])
+})
+
+test('a failed preference save restores selection and cannot authorize pending consent', async () => {
+  const { setup, calls } = unifiedWizardFixture()
+  const plan = await setup.preflight()
+  const previous = setup.hardwareSelection
+  let rejectSave
+  setup.saveHardwareSelection = async () => new Promise((_resolve, reject) => { rejectSave = reject })
+  const changed = setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' })
+  while (!rejectSave) await new Promise(resolve => setImmediate(resolve))
+  const attempt = start(setup, plan.planId)
+  const changeRejected = assert.rejects(changed, /fixture save failed/)
+  const startRejected = assert.rejects(attempt, /fixture save failed/)
+  await new Promise(resolve => setImmediate(resolve))
+  rejectSave(new Error('fixture save failed'))
+  await Promise.all([changeRejected, startRejected])
+  assert.equal(setup.hardwareSelection, previous)
+  assert.deepEqual(calls, [])
+})
+
+async function installedUnifiedCuda() {
+  const f = unifiedWizardFixture()
+  await start(f.setup, (await f.setup.preflight()).planId)
+  f.setup.loaded = { runtimeId:f.runtime.value.id, modelsId:f.cache.value.id, hardwareSelection:f.setup.hardwareSelection }
+  f.calls.length = 0
+  const preferences = []
+  f.setup.saveHardwareSelection = async value => preferences.push(structuredClone(value))
+  return { ...f, preferences }
+}
+
+test('installed CUDA rejects cross-recipe manual CPU without changing readiness or preferences', async () => {
+  const { setup, runtime, calls, preferences } = await installedUnifiedCuda()
+  const original = runtime.value, effective = setup.hardwareSelection
+  const plan = await setup.preflight()
+  const cpuOption = plan.hardwareAssessment.variants.find(variant => variant.id === 'cpu-candidate')
+  assert.equal(cpuOption.supported, false)
+  assert.equal(cpuOption.status, 'update-required')
+  assert.match(cpuOption.reason, /Choose Automatic and review the runtime update/)
+  await assert.rejects(setup.setHardwareSelection({ mode:'manual', variantId:'cpu-candidate' }), /different installed processing recipe/)
+  setup.cancel()
+  assert.equal(setup.hardwareSelection, effective)
+  assert.equal((await setup.preflight()).ready, true)
+  assert.equal(runtime.value, original)
+  assert.deepEqual(preferences, [])
+  assert.deepEqual(calls, [])
+})
+
+test('automatic CPU resource fallback updates an installed CUDA recipe through normal consent', async () => {
+  const { setup, runtime, hardware, calls } = await installedUnifiedCuda()
+  const original = runtime.value
+  hardware.cudaDevices = []
+  const ordinary = await setup.preflight()
+  assert.equal(ordinary.ready, true)
+  assert.equal(ordinary.accelerator, 'cuda')
+  assert.equal(ordinary.updateAvailable, true)
+  assert.equal(runtime.value, original)
+  const update = await setup.requestRuntimeUpdate()
+  assert.equal(update.accelerator, 'cpu')
+  assert.equal(update.runtimeTransferRequired, true)
+  await setup.start({ planId:update.planId })
+  assert.deepEqual(calls, [])
+  assert.equal(runtime.value, original)
+  assert.equal((await start(setup, update.planId)).state, 'restart-required')
+  assert.equal(runtime.value.manifest.accelerator, 'cpu')
+  assert.equal(setup.hardwareSelection.mode, 'automatic')
+  assert.deepEqual(calls, ['runtime'])
+})
