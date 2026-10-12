@@ -23,26 +23,73 @@ try {
         if ($Ancestor -eq [IO.Path]::GetPathRoot($Ancestor)) { break }
     }
     # Restrict only this dedicated profile, never its parent or an existing app profile.
-    New-Item -ItemType Directory -Path $Profile -Force | Out-Null
+    $ExistingProfile = Test-Path -LiteralPath $Profile
+    if (-not $ExistingProfile) { New-Item -ItemType Directory -Path $Profile | Out-Null }
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $Acl = New-Object Security.AccessControl.DirectorySecurity
-    $Acl.SetOwner($Identity)
-    $Acl.SetAccessRuleProtection($true, $false)
-    foreach ($Sid in @($Identity, $SystemSid)) {
-        $Rule = New-Object Security.AccessControl.FileSystemAccessRule($Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $Acl.AddAccessRule($Rule)
+    # Set-Acl can request privileges unavailable to an unelevated user. Apply
+    # only the new directory's owner and DACL using icacls; existing profiles
+    # must already be private and are never rewritten by the launcher.
+    if (-not $ExistingProfile) {
+        if ((Get-Item -LiteralPath $Profile -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'The newly created test profile must not be a junction or symbolic link'
+        }
+        & icacls.exe $Profile /setowner "*$($Identity.Value)" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not set the test profile owner (icacls exit $LASTEXITCODE)" }
+        & icacls.exe $Profile /inheritance:r /grant:r "*$($Identity.Value):(OI)(CI)F" "*$($SystemSid.Value):(OI)(CI)F" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not restrict the test profile permissions (icacls exit $LASTEXITCODE)" }
+        $FreshAcl = Get-Acl -LiteralPath $Profile
+        if (((Get-Item -LiteralPath $Profile -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $FreshAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $Identity.Value) {
+            throw 'The newly created test profile is no longer an ordinary directory owned by the current user'
+        }
+        # Directory creation can add explicit ACEs (including Administrators)
+        # that /inheritance:r leaves intact. Remove them only from this new,
+        # owned profile, then keep the same strict verification for every run.
+        $FreshRules = @($FreshAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $UnexpectedSids = @($FreshRules | ForEach-Object { $_.IdentityReference.Value } |
+            Where-Object { $_ -notin @($Identity.Value, $SystemSid.Value) } | Sort-Object -Unique)
+        foreach ($Sid in $UnexpectedSids) {
+            & icacls.exe $Profile /remove "*$Sid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove unexpected test profile permissions (icacls exit $LASTEXITCODE)" }
+        }
+        $DeniedSids = @($FreshRules | Where-Object {
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny -and
+            $_.IdentityReference.Value -in @($Identity.Value, $SystemSid.Value)
+        } | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+        foreach ($Sid in $DeniedSids) {
+            & icacls.exe $Profile /remove:d "*$Sid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove denied test profile permissions (icacls exit $LASTEXITCODE)" }
+        }
     }
-    Set-Acl -LiteralPath $Profile -AclObject $Acl
     $Observed = Get-Acl -LiteralPath $Profile
     $Rules = @($Observed.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-    if (-not $Observed.AreAccessRulesProtected -or $Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $Identity.Value -or $Rules.Count -ne 2) {
-        throw 'Could not establish private test profile permissions'
-    }
+    $ExpectedSids = @($Identity.Value, $SystemSid.Value)
+    $ActualSids = @($Rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+    $Owned = $Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $Identity.Value
+    $ExpectedInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $Private = $Observed.AreAccessRulesProtected -and $Owned -and
+        $Rules.Count -eq 2 -and $ActualSids.Count -eq 2 -and
+        -not (@($ActualSids | Where-Object { $_ -notin $ExpectedSids }))
     foreach ($Rule in $Rules) {
-        if ($Rule.IdentityReference.Value -notin @($Identity.Value, $SystemSid.Value) -or $Rule.AccessControlType -ne 'Allow' -or $Rule.FileSystemRights -ne 'FullControl') {
-            throw 'Unexpected permissions on the private test profile'
-        }
+        if ($Rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $Rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $Rule.IsInherited -or $Rule.InheritanceFlags -ne $ExpectedInheritance -or
+            $Rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { $Private = $false }
+    }
+    if (-not $Private) {
+        # Report permission facts without account names or machine-specific SIDs.
+        $RuleDetails = @($Rules | ForEach-Object {
+            $Principal = 'UnexpectedPrincipal'
+            if ($_.IdentityReference.Value -eq $Identity.Value) { $Principal = 'CurrentUser' }
+            if ($_.IdentityReference.Value -eq $SystemSid.Value) { $Principal = 'SYSTEM' }
+            '{0}: Type={1}; Rights={2}; Inheritance={3}; Propagation={4}; Inherited={5}' -f
+                $Principal, $_.AccessControlType, $_.FileSystemRights, $_.InheritanceFlags,
+                $_.PropagationFlags, $_.IsInherited
+        })
+        $AclDetails = 'OwnerIsCurrentUser={0}; Protected={1}; RuleCount={2}; DistinctPrincipalCount={3}; Rules=[{4}]' -f
+            $Owned, $Observed.AreAccessRulesProtected, $Rules.Count, $ActualSids.Count, ($RuleDetails -join ' | ')
+        throw "Unsafe test profile permissions: $Profile. The profile must be owned by the current user with inheritance disabled and inheritable FullControl for only that user and SYSTEM. Move the existing test profile aside and run again to create a fresh private profile. Observed ACL: $AclDetails"
     }
     $Log = Join-Path $Profile 'setup.log'
     Start-Transcript -LiteralPath $Log -Append | Out-Null
@@ -70,7 +117,11 @@ try {
             Write-Host 'Model terms: https://huggingface.co/HeartMuLa/HeartTranscriptor-oss'
             Write-Host 'https://github.com/facebookresearch/demucs | https://github.com/nomadkaraoke/python-audio-separator'
             Write-Host 'CPU and CUDA keep separate test libraries. No existing library is changed.'
-            if ((Read-Host 'Install these tools and download these models? Type YES to continue') -cne 'YES') { exit 0 }
+            if ((Read-Host 'Install these tools and download these models? Type YES to continue') -cne 'YES') {
+                Write-Host 'Cancelled. Nothing was installed or downloaded. Run this launcher again and type YES to continue.'
+                if (-not $DependenciesOnly) { Read-Host 'Press Enter to close' | Out-Null }
+                exit 0
+            }
         }
         $env:ELECTRON_RUN_AS_NODE = '1'
         $SetupArguments = @((Join-Path $PSScriptRoot 'windows-bootstrap.mjs'), '--bundle', $Bundle, '--profile', $Profile, '--accelerator', $Accelerator)
