@@ -13,8 +13,11 @@
 
 ---
 
-<!-- Optional: Drop a 16:9 screenshot or GIF of HostShell + Popout Stage here -->
-<!-- <p align="center"><img src="docs/images/hero-stage-mixer.png" width="850" alt="Singhouse Host & Stage"></p> -->
+<p align="center">
+  <img src="docs/images/host-live.webp" width="850" alt="Singhouse host view: library, live lyrics, and the Up Next singer queue">
+  <br>
+  <sub>Shown with synthetic demo songs and singers. <a href="https://sing.house#watch">Watch the tour on sing.house</a>.</sub>
+</p>
 
 **Singhouse** is a self-hosted karaoke suite—available as a native desktop app or a FastAPI + Vue 3 web server—that turns the music files you already own into **live, multi-stem karaoke tracks** with **word-level synchronized lyrics**, a **real-time Web Audio mixer**, **±12 semitone key shift**, and a **second-screen projector stage**.
 
