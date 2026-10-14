@@ -8,7 +8,7 @@ mixing, key shift, and a popout projector display.
 
 AI models automatically separate vocals and generate timed lyrics from imported audio.
 
-**[Download v0.1.0](https://github.com/singhouse/singhouse/releases/tag/v0.1.0)**
+**[Download v0.1.1](https://github.com/singhouse/singhouse/releases/tag/v0.1.1)**
 · [Installation guide](docs/install-desktop.md)
 · [Documentation](#documentation)
 
@@ -37,9 +37,9 @@ AI models automatically separate vocals and generate timed lyrics from imported 
 
 | Platform | Download from the release page |
 | --- | --- |
-| Windows 11, x64 | [.exe installer](https://github.com/singhouse/singhouse/releases/tag/v0.1.0) |
-| macOS 14+, Apple silicon | [.dmg installer](https://github.com/singhouse/singhouse/releases/tag/v0.1.0) |
-| Linux, x64 | [AppImage or archive](https://github.com/singhouse/singhouse/releases/tag/v0.1.0) |
+| Windows 11, x64 | [.exe installer](https://github.com/singhouse/singhouse/releases/tag/v0.1.1) |
+| macOS 14+, Apple silicon | [.dmg installer](https://github.com/singhouse/singhouse/releases/tag/v0.1.1) |
+| Linux, x64 | [AppImage or archive](https://github.com/singhouse/singhouse/releases/tag/v0.1.1) |
 
 The desktop app bundles Python and FFmpeg. See the
 [installation guide](docs/install-desktop.md) for system requirements and installation
