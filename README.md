@@ -33,9 +33,9 @@ Evaluated on the 20-song Jamendo benchmark (plain reference lyrics, local config
 | Pipeline | Median Error | Within 0.1s | Within 0.2s | Gross Error (>1s) |
 | --- | ---: | ---: | ---: | ---: |
 | **Singhouse (`lyricsync` CTC Fusion)** | **41 ms** | **86.3%** | **95.5%** | **1.4%** |
-| Nightingale (`wav2vec2` CTC, same stem) | 52 ms | 73.5% | 86.4% | 6.2% |
+| Single-model `wav2vec2` CTC *(Nightingale, same stem)* | 52 ms | 73.5% | 86.4% | 6.2% |
 | Singhouse Legacy (`Heart` + NW only) | 93 ms | 52.5% | 73.0% | 11.1% |
-| `karaoke-gen` (local Whisper fallback) | 103 ms | 48.8% | 70.3% | 15.2% |
+| Whisper-medium ASR + word mapping *(`karaoke-gen` local fallback)* | 103 ms | 48.8% | 70.3% | 15.2% |
 
 On a separate 55-song multi-voice set using plain LRCLIB lyrics, CTC fusion improved `<0.1s` accuracy from **47.9% to 69.9%** (55/55 songs improved), matching the sub-100ms timing tier of commercial cloud APIs like AudioShake entirely locally. See **[`lyricsync/ALIGNMENT.md`](lyricsync/ALIGNMENT.md)** for full benchmarks and methodology.
 
