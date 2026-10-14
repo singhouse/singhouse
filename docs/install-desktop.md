@@ -1,93 +1,67 @@
-# Install singhouse Core
+# Installing Singhouse Desktop
 
-singhouse is a desktop application for a karaoke library you already have. The
-installer includes the app, its private local backend, Python, and FFmpeg. You
-do not need Docker or a system Python installation. AI model files are separate
-downloads that require your consent; prepared media playback does not require
-an AI pack.
+Singhouse Desktop is a self-contained application for managing and hosting your karaoke library. The installer bundles the app, its local backend server, Python, and FFmpeg—you do not need Docker or a system Python installation.
 
-## Before installing
+* **Playing existing karaoke files** (MP3+G, CD+G, or already-separated tracks) works immediately after install.
+* **Generating karaoke tracks from standard audio** requires downloading the AI processing runtime and model weights. The in-app setup wizard will prompt for your consent and show download sizes before fetching anything.
 
-Download the installer and checksum only from the release page. Compare the
-SHA-256 value before opening it:
+## 1. Verify Your Download (Recommended)
 
-```sh
-# Linux
-sha256sum /path/to/download
+Download the installer and its `.sha256` checksum file from the [Releases page](https://github.com/singhouse/singhouse/releases). Before opening the installer, you can verify that the download matches the published checksum:
 
-# macOS
-shasum -a 256 /path/to/download
-```
-
-On Windows, in PowerShell:
+**Windows (PowerShell):**
 
 ```powershell
 Get-FileHash -Algorithm SHA256 C:\path\to\download
 ```
 
-The release notes identify whether each installer is signed. An unsigned
-Windows or macOS installer can warn or be blocked. A
-checksum confirms the bytes match the published candidate; it does not replace
-platform code signing.
+**macOS:**
 
-Follow only the per-application choices your operating system presents for the
-download whose checksum you verified. If your system or organization does not
-offer a per-application approval, stop and use a supported installation method
-approved by its administrator. Do not turn off SmartScreen, Gatekeeper,
-antivirus, the Electron sandbox, or other system-wide protections.
+```sh
+shasum -a 256 /path/to/download
+```
 
-Exact warning text and permitted actions vary by OS version and policy. The
-release notes will record the behavior observed with each actual downloaded
-candidate. They must not promise an override that was not tested.
+**Linux:**
 
-## Windows 11 x86-64
+```sh
+sha256sum /path/to/download
+```
 
-1. Verify the installer checksum.
-2. Run the per-user installer.
-3. Record any SmartScreen or organization-policy message. Proceed only when
-   Windows offers an acceptable per-application action.
-4. Launch singhouse from the installed shortcut.
+> **Note on OS Security Warnings:** Release notes specify whether each platform artifact is signed. If you are installing an unsigned build or a newly signed release that hasn't built download reputation yet, Windows SmartScreen or macOS Gatekeeper may display a warning prompt. Verify the SHA-256 checksum above, then use your operating system's standard per-application approval prompt to launch it. Never disable SmartScreen, Gatekeeper, antivirus, or the Electron sandbox globally.
 
-Windows ARM is not supported by this release.
+## 2. Platform Installation
 
-## macOS 14 or newer on Apple silicon
+### Windows 11 (x64)
 
-1. Verify the DMG checksum.
-2. Open the DMG and copy Singhouse to Applications.
-3. Launch it and record any Gatekeeper message. Proceed only when macOS offers
-   an acceptable per-application action for the verified copy.
+1. Run the downloaded `.exe` installer and select a per-user installation directory.
+2. Launch **Singhouse** from the Start Menu or Desktop shortcut.
 
-Intel Macs are not supported by this release.
+*(Note: Windows on ARM is not currently supported.)*
 
-## Linux x86-64 and ARM64
+### macOS 14+ (Apple Silicon)
 
-Verify the AppImage or archive checksum before launch. The Ubuntu 24.04
-baseline and each announced distribution require a qualification result. An
-ARM64 build alone does not establish Asahi support.
+1. Open the downloaded `.dmg` image and drag **Singhouse** into your `Applications` folder.
+2. Launch **Singhouse** from `Applications`.
 
-For an AppImage:
+*(Note: Intel Macs are not supported.)*
+
+### Linux (x64 and ARM64)
+
+Make the AppImage executable and run it directly:
 
 ```sh
 chmod u+x Singhouse-*.AppImage
 ./Singhouse-*.AppImage
 ```
 
-If the host cannot run AppImages, use the release archive when one is supplied.
-Do not disable the Electron sandbox. AppImage update and standalone-recovery
-support remains unavailable unless the release notes explicitly report that
-outer-image verification passed for that candidate.
+* If your system lacks FUSE/AppImage host integration, extract and run the `.tar.gz` release archive instead.
+* Do not pass `--no-sandbox`—Singhouse requires a working Electron sandbox and will refuse to start if sandboxing is disabled.
+* Note: ARM64 builds are tested against Ubuntu 24.04 ARM64; Asahi Linux support is tracked separately.
 
-## Data and uninstall
+## 3. Where Your Data Lives & Uninstalling
 
-The library, uploads, stems, models, settings, and recovery state live in the
-per-user application-data directory, separate from installed application
-files. Back up the complete directory while singhouse is closed before an
-upgrade or operating-system migration.
+Singhouse stores your SQLite database, imported audio, separated stems, downloaded AI models, and `settings.json` inside your OS per-user application data directory (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` on Linux)—completely separate from the installed application binaries.
 
-The normal uninstaller is intended to retain user data. Confirm the behavior
-in the release's platform qualification matrix before depending on it. Removing
-the application-data directory is a separate, destructive action; make a
-backup first.
-
-After installation, import only media you are entitled to use. See
-`support-diagnostics.md` for safe information to collect when startup fails.
+* **Upgrading or Migrating:** Close Singhouse completely and back up your application-data directory before migrating machines or downgrading versions.
+* **Uninstalling:** Uninstalling the application removes the program binaries while leaving your library and model cache intact. If you want to permanently remove your library and downloaded models, delete the application-data folder manually after backing up anything you want to keep.
+* **Troubleshooting:** If Singhouse fails to start or a processing job errors out, see [Support Diagnostics](support-diagnostics.md) for how to capture a clean log.

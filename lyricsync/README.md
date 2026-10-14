@@ -1,25 +1,21 @@
 # lyricsync
 
-Word-level lyrics transcription and alignment library. Takes an audio file and optional reference lyrics, runs ASR transcription, aligns the result to the reference text, and returns per-word timestamps.
+Standalone word-level lyrics transcription and acoustic alignment library for Python. Given a vocal audio file and optional reference lyrics, `lyricsync` segments voiced regions, runs ASR transcription, aligns words to your reference text using phonetic dynamic programming, and optionally refines every word boundary against the vocal audio using multi-model CTC acoustic fusion.
 
-This README is the API reference. For the design behind it — what each pipeline
-stage does, where the thresholds come from, and why — see
-[ALIGNMENT.md](ALIGNMENT.md).
+For a deep dive into the pipeline stages, scoring thresholds, and CTC voter architecture, see **[ALIGNMENT.md](ALIGNMENT.md)**.
 
-## Install
+## Installation
 
 ```bash
-pip install -e .                          # base (numpy only)
+pip install -e .                          # Base (numpy only)
 pip install -e ".[whisper]"               # + faster-whisper backend
-pip install -e ".[whisper,metaphone]"     # + phonetic matching
-pip install -e ".[all]"                   # everything
+pip install -e ".[whisper,metaphone]"     # + Double Metaphone phonetic matching
+pip install -e ".[all]"                   # All optional dependencies
 ```
 
-PCM WAV audio uses the built-in reader. Reading MP3, FLAC, AAC/M4A, or Opus/Vorbis WebM audio for VAD
-and alignment also requires `ffmpeg` on `PATH`. Compressed files are decoded in a
-temporary directory without changing the source.
+PCM WAV files use the built-in reader. Reading MP3, FLAC, AAC/M4A, or Opus/Vorbis audio requires `ffmpeg` on `PATH`.
 
-## Quick start
+## Quick Start
 
 ```python
 from lyricsync import AsyncPipeline, PipelineConfig
@@ -30,117 +26,42 @@ pipeline = AsyncPipeline(
     config=PipelineConfig(),
 )
 
-# With synced (LRC) lyrics — best results
+# 1. With plain reference lyrics (recommended)
 result = await pipeline.run(
-    audio_path="vocals.wav",
-    synced_lyrics="[00:01.00]When you were here before\n[00:03.50]Couldn't look you in the eye",
-)
-
-# With plain lyrics
-result = await pipeline.run(
-    audio_path="vocals.wav",
+    audio_path="lead_vocals.wav",
     plain_lyrics="When you were here before\nCouldn't look you in the eye",
 )
 
-# No reference lyrics — raw transcription only
-result = await pipeline.run(audio_path="vocals.wav")
+# 2. With LRC line-anchored lyrics
+result = await pipeline.run(
+    audio_path="lead_vocals.wav",
+    synced_lyrics="[00:01.00]When you were here before\n[00:03.50]Couldn't look you in the eye",
+)
+
+# 3. Raw transcription only (no reference lyrics)
+result = await pipeline.run(audio_path="lead_vocals.wav")
 ```
 
-## Synchronous usage
+### Synchronous Usage & Alignment-Only
 
 ```python
 from lyricsync import SyncPipeline
 from lyricsync.transcription import FasterWhisperTranscriber
 
-pipeline = SyncPipeline(transcriber=FasterWhisperTranscriber(model="large-v3"))
-result = pipeline.run(audio_path="vocals.wav", plain_lyrics="...")
-```
+transcriber = FasterWhisperTranscriber(model="large-v3")
+pipeline = SyncPipeline(transcriber=transcriber)
 
-## Custom transcriber
+# Full synchronous run
+result = pipeline.run(audio_path="lead_vocals.wav", plain_lyrics="...")
 
-Any object with a `transcribe(audio_path, language=None) -> TranscriptionResult` method works:
-
-```python
-class MyTranscriber:
-    def transcribe(self, audio_path, language=None):
-        return TranscriptionResult(segments=[...], language="en")
-
-pipeline = SyncPipeline(transcriber=MyTranscriber())
-```
-
-## Alignment-only (skip transcription)
-
-```python
-transcription = transcriber.transcribe("vocals.wav")
+# Alignment-only (reuse a cached TranscriptionResult)
+transcription = transcriber.transcribe("lead_vocals.wav")
 result = pipeline.align_only(whisper_result=transcription, plain_lyrics="...")
 ```
 
-## Using individual components
+## CTC Acoustic Re-Timing (Optional)
 
-```python
-from lyricsync.alignment import NeedlemanWunschAligner, LrcAnchoredAligner, parse_lrc
-from lyricsync.alignment.matching import word_match_score, normalize
-from lyricsync.audio import rms_vad_segments, read_wav_mono
-
-# Use an aligner directly
-aligner = NeedlemanWunschAligner()
-result = aligner.align(whisper_words, PlainLyricsReference(lines=["hello world"]))
-
-# Parse LRC
-lrc_lines = parse_lrc("[00:01.00]Hello world\n[00:03.50]Test")
-
-# Check word similarity
-score = word_match_score("night", "nite")  # 0.5 (phonetic match)
-
-# Segment audio with VAD
-samples, sr = read_wav_mono("vocals.wav")
-segments = rms_vad_segments(samples, sr)
-```
-
-## Configuration
-
-All thresholds are configurable via frozen dataclasses:
-
-```python
-from lyricsync import PipelineConfig
-from lyricsync._config import VadConfig, MatchConfig
-
-config = PipelineConfig(
-    vad=VadConfig(onset_threshold=0.05, max_segment_duration=20.0),
-    matching=MatchConfig(gap_penalty=-1.0),
-)
-pipeline = SyncPipeline(transcriber=..., config=config)
-```
-
-`VadConfig.max_segment_duration=None` (the default) means auto: VAD splits at
-a 30 s ceiling and expects a device-aware decoder to re-split longer slices to
-fit the available memory. Callers without such a decoder should pass an
-explicit value, such as `max_segment_duration=15.0`.
-
-## Alignment methods
-
-| Method | When | Description |
-|--------|------|-------------|
-| LRC-anchored | `synced_lyrics` provided | Uses LRC line timestamps as anchors, aligns per-word within each line |
-| LRC-distributed | LRC + poor whisper quality | Falls back to even word distribution within each LRC line's window |
-| Needleman-Wunsch | `plain_lyrics` only | DP alignment of whisper words to reference text with 3-tier scoring |
-| Whisper-only | No reference lyrics | Returns raw transcription timestamps |
-
-## Transcription backends
-
-| Backend | Class | Install |
-|---------|-------|---------|
-| faster-whisper | `FasterWhisperTranscriber(model="large-v3")` | `lyricsync[whisper]` |
-| HeartTranscriptor | `HeartTranscriber(python_path=..., script_path=...)` | Requires separate torch venv |
-
-## Acoustic re-timing (optional)
-
-An optional final stage re-times every word of the result against the vocal
-audio. It runs several CTC acoustic models in a separate Python environment
-that has `torch` and `torchaudio` (and, for the optional phoneme voter,
-`transformers`, `phonemizer` and the `espeak-ng` program), fuses their word
-times with the existing timing, and rewrites only word `start`/`end` — text,
-word count and line structure never change.
+When enabled, a final stage force-aligns every word against the vocal audio (plus any `extra_audio_paths` such as backing vocals, summed) using an ensemble of CTC acoustic models (`HuBERT-Large`, `wav2vec2-Large`, `HuBERT-XLarge`, and an optional `wav2vec2` espeak phoneme voter) in a PyTorch environment:
 
 ```python
 from lyricsync import CtcFusionAligner, PipelineConfig, SyncPipeline
@@ -151,62 +72,36 @@ pipeline = SyncPipeline(
     config=PipelineConfig(acoustic_alignment=True),
     acoustic_aligner=aligner,
 )
-# extra_audio_paths (e.g. a backing-vocal stem) are summed with audio_path
-result = pipeline.run("vocals.wav", plain_lyrics=lyrics, extra_audio_paths=["backing.wav"])
+
+result = pipeline.run(
+    "lead_vocals.wav",
+    plain_lyrics=lyrics,
+    extra_audio_paths=["backing_vocals.wav"],
+)
 print(result.metadata.extra["acoustic_alignment"])
 ```
 
-- Needs CUDA by default; pass `allow_cpu=True` to run on the CPU (slow).
-- Model weights (about 1.3 GB per large model, 3.6 GB for the extra-large
-  one) download on first use into the processing environment's torch hub and
-  Hugging Face caches. Models load one at a time.
-- Any failure (worker error, timeout, cancel, missing models, CUDA absent,
-  fewer than two character models) keeps the existing timing; the reason is
-  recorded in `metadata.extra["acoustic_alignment"]`, alongside the models
-  used and skipped, the boundary parameters and the indices of words whose
-  voters disagree (`flagged_words`: flat word indices across `result.lines` in
-  line order; flagged words are still re-timed, the flag is informational).
-- Boundary parameters: `PipelineConfig.acoustic_start_shift` (-0.02 s),
-  `acoustic_join_gap` (0.0 s), `acoustic_tail_extend` (0.2 s),
-  `acoustic_flag_threshold` (0.2 s).
+* **Hardware:** Uses CUDA by default (~9s per 4-minute song on an RTX 3090); pass `allow_cpu=True` for CPU fallback.
+* **Text Invariance:** Only word `start` and `end` times are updated; reference words and line breaks never change.
+* **Confidence Flags:** Words where two or more voters disagree with the fused start by more than `acoustic_flag_threshold` (`0.2s`) are listed in `metadata.extra["acoustic_alignment"]["flagged_words"]`.
+* **Boundary Tuning:** Configurable via `PipelineConfig` (`acoustic_start_shift=-0.02`, `acoustic_join_gap=0.0`, `acoustic_tail_extend=0.2`, `acoustic_flag_threshold=0.2`).
 
-## Word matching scoring
+## Configuration
 
-The 3-tier matching strategy (used by Needleman-Wunsch and LRC-anchored alignment):
+All pipeline thresholds are exposed via frozen dataclasses (`VadConfig`, `MatchConfig`, `PostProcessConfig`) inside `PipelineConfig`:
 
-1. **Exact** (score: +2.0) — normalized exact match
-2. **Enhanced Levenshtein** (score: +1.0 or 0.0) — fuzzy string similarity with first-letter boost and length ratio blending
-3. **Double Metaphone** (score: +0.5) — phonetic matching for sound-alikes ("night"/"nite", "through"/"thru")
+```python
+from lyricsync import PipelineConfig
+from lyricsync._config import VadConfig, MatchConfig
 
-## Architecture
-
+config = PipelineConfig(
+    vad=VadConfig(onset_threshold=0.05, max_segment_duration=15.0),
+    matching=MatchConfig(gap_penalty=-0.5),
+)
 ```
-audio_path
-    │
-    ▼
-┌──────────────┐
-│  Transcriber  │  (faster-whisper, HeartTranscriptor, or custom)
-└──────┬───────┘
-       │ TranscriptionResult
-       ▼
-┌──────────────┐
-│  Post-process │  hallucination filter, word extraction
-└──────┬───────┘
-       │ List[TimedWord]
-       ▼
-┌──────────────┐
-│   Aligner    │  (LrcAnchoredAligner or NeedlemanWunschAligner)
-└──────┬───────┘
-       │ SyncResult
-       ▼
-  segments + lines + metadata
-```
+
+(Note: `VadConfig.max_segment_duration` defaults to `None` in the library API—which splits at a 30s ceiling and lets device-aware decoders re-split longer slices to fit VRAM. Callers using a custom decoder without internal chunking should pass `max_segment_duration=15.0` explicitly.)
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-`lyricsync` is dual-licensed. The project it ships with is AGPL-3.0-only;
-this package is additionally offered under MIT so it can be used
-independently, without the AGPL's obligations. Use it under either, at your
-option.
+Dual-licensed under **MIT** ([`LICENSE`](LICENSE)) and **AGPL-3.0-only**. `lyricsync` has no dependency on the rest of Singhouse and may be used standalone under the MIT License.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
-# check_core_neutrality.sh — assert no vendor-specific identifiers, brand
-# literals, premium leaks, or private-infra strings sit where they must not.
+# check_core_neutrality.sh — assert no vendor-specific identifiers, retired
+# brand names, premium leaks, or private-infra strings sit where they must not.
 #
 # Usage: tools/check_core_neutrality.sh [repo-root]
 # Default repo-root is the parent of this script's parent (the worktree).
@@ -22,12 +22,12 @@
 # guard; present-but-untracked entries warn, since untracked files never
 # ship anyway).
 #
-# PATTERN SUPPLEMENT: two checks below (brand, private-infra) OR additional
-# match alternatives onto their built-in default from an optional data file,
+# PATTERN SUPPLEMENT: the private-infra check ORs additional match
+# alternatives onto its built-in default from an optional data file,
 # tools/private-patterns.txt, keyed by check. When that file is absent the
-# built-in default is what runs. The vendor check has no built-in default: its
-# names come only from that file, and without it the check reports itself off
-# rather than passing as if it had looked. The file is loaded once, reported,
+# built-in default is what runs. The vendor and retired-brand checks have no
+# built-in default: their names come only from that file, and without it each
+# check reports itself off rather than passing as if it had looked. The file is loaded once, reported,
 # and validated before any check consumes it — see the load block below.
 #
 # The script must run BOTH from this repo root AND from a repo root where
@@ -413,138 +413,36 @@ else
   echo "OK: no premium rotation markers in core frontend/src"
 fi
 
-# --- Brand indirection gate ---
-# Every brand-identifying string lives in exactly two modules —
-# frontend/src/brand.js and backend/src/karaoke_backend/branding.py — and
-# everything else reads from them. A hit here means a brand literal was
-# hardcoded somewhere it cannot be swapped from one place. The product name is
-# the built-in default; the pattern supplement (key `brand`) adds any further
-# names to ban, so a rename cannot re-scatter literals either.
+# --- Retired-brand gate ---
+# The public product name is settled and may appear in any file. What must not
+# ship is a retired or private name: those come only from the pattern
+# supplement (key `brand`), and are banned from ALL tracked files — docs,
+# READMEs, configs, scripts, tests, lyricsync, and whatever is tracked here
+# under premium/ — minus the keep-private list. Without the supplement there
+# are no names to look for, and the check reports itself off rather than
+# passing as if it had looked.
 #
-# Scope is ALL tracked files — docs, READMEs, configs, scripts, tests,
-# lyricsync, and whatever is tracked here under premium/ — minus the
-# keep-private list. Premium is in scope on its own merits (it ships to
-# customers as a wheel; a brand literal there re-scatters just as silently),
-# but "in scope" reaches only what this repo tracks — see the note in the
-# header before reading a pass here as premium coverage.
-#
-# Enumerated exceptions ONLY:
-#   - frontend/src/brand.js                   — the frontend source of truth
-#   - backend/src/karaoke_backend/branding.py — the backend source of truth
-#   - tools/check_core_neutrality.sh          — this script (self-exempt)
-#   - README.md, PROJECT_DOCS.md              — the product name (singhouse)
-#     is settled and allowed in the two root docs
-#   - desktop/                                — product-delivery code and
-#     packaging must name the installed public product. This is a content-level
-#     exception for the built-in public name only: private/supplement names
-#     remain checked, and desktop stays in every vendor, infra, and leak gate.
-#   - seven named release/setup documents under docs/ — user-facing instructions
-#     that must name the installed product. This is the same content-level
-#     exception as desktop: exact paths, public name only, every other gate live.
-# NOTE (residual risk): the allowlist is per-FILE for the WHOLE brand
-# pattern — an allowlisted file is exempt from every alternative, not just the
-# product name, so the allowlisted docs must stay free of the supplement's
-# alternatives by discipline; this gate cannot see one inside them.
-#
-# ADDRESS EXEMPTION. The pattern matches the product name as a bare
-# SUBSTRING, so it also fires inside the repository URL — where those letters
-# are an ADDRESS, not a brand literal. Rebranding changes the presentation
-# layer, not stable package identifiers or the public source address; it no
-# more creates a different GitHub URL than a different `karaoke_backend`
-# package name. Without this, the two
-# package manifests cannot carry the `[project.urls]` / `repository` field
-# every published package has, and the only other way out is widening the
-# per-file allowlist — which by the NOTE above would also blind those files to
-# private supplement names. The exemption is therefore by CONTENT and applies
-# to every file equally.
-#
-# Applied by stripping the exempt substring from a candidate line and
-# re-testing what remains, NOT by dropping the line: a line carrying the URL
-# *and* a genuine brand literal still fails, and the reported hit is the
-# ORIGINAL line, not the stripped residue. Built-in rather than
-# supplement-sourced, because it must hold identically in the public repo,
-# where tools/private-patterns.txt does not exist and the pattern degrades to
-# the built-in alternative alone.
-#
-# DELIBERATELY NARROW — this exempts the repository, and nothing else. Not
-# exempt, and each would be its own ruling: `api.github.com/repos/...`,
-# `raw.githubusercontent.com/...`, the Pages host, `/orgs/` paths, and any
-# renamed owner. If one of those is ever genuinely needed, widen THIS constant
-# after deciding it; do NOT reach for the per-file allowlist, which is per-file
-# for the whole pattern and would also exempt private supplement names.
-BRAND_PATTERN="$(join_pattern 'singhouse' "$BRAND_PRIVATE")"
-validate_ere "the brand pattern" "$BRAND_PATTERN"
-BRAND_EXEMPT='github\.com[:/]singhouse/singhouse'
-validate_ere "the brand address exemption" "$BRAND_EXEMPT"
-
-# ONE regex engine, both times. An earlier revision re-tested the survivor in
-# awk, which ran the brand pattern through TWO engines while validate_ere only
-# ever exercised grep's — and every divergence there fails OPEN. A supplement
-# alternative valid for `grep -E` but different in awk (`\b`, or any uppercase
-# alternative against awk's case-SENSITIVE `~`) gets matched by grep and then
-# silently discarded; one that is FATAL to awk empties the pipeline, which the
-# `|| true` below swallows and the check reports as a green "no hits". Testing
-# the residue with `grep -qiE` leaves nothing to diverge. The subject is folded
-# with `tr` rather than a `sed //I` flag or bash's `${x,,}`, both of which are
-# non-portable, and this gate ships to strangers' machines.
-brand_survives_exemption() {
-  local residue
-  residue=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E "s|$BRAND_EXEMPT||g")
-  grep -qiE -- "${2:-$BRAND_PATTERN}" <<<"$residue"
-}
-
-# Prove the filter before trusting it: the product name must survive it, and
-# the repository URL alone must not. Either way round, a regression here stops
-# the gate loudly instead of reporting a green "no hits" — which is the whole
-# failure mode the single-engine rewrite above exists to prevent, and it
-# deserves an assertion rather than only a comment.
-if ! brand_survives_exemption 'singhouse'; then
-  echo "FAIL: brand self-test — the product name no longer matches its own pattern"
-  exit 1
-fi
-if brand_survives_exemption 'https://github.com/singhouse/singhouse'; then
-  echo "FAIL: brand self-test — the repository URL is no longer exempted"
-  exit 1
-fi
-
-BRAND_ALLOW='^frontend/src/brand\.js$|^backend/src/karaoke_backend/branding\.py$|^tools/check_core_neutrality\.sh$|^README\.md$|^PROJECT_DOCS\.md$'
+# Hits are labelled with printf, not `sed "s|^|$f:|"`: a filename containing
+# | & or a backslash is data to printf and syntax to sed.
+[ -z "$BRAND_PRIVATE" ] || validate_ere "the retired-brand pattern" "$BRAND_PRIVATE"
 BRAND_HITS=$(git -C "$REPO_ROOT" -c core.quotePath=false ls-files \
-  | grep -vE "$BRAND_ALLOW" \
+  | grep -vE '^tools/check_core_neutrality\.sh$' \
   | keep_private_filter \
   | while IFS= read -r f; do
       [ -f "$REPO_ROOT/$f" ] || continue
-      # Contributor documentation may name the product directly. Only the public
-      # name is permitted: supplement alternatives remain checked, even when
-      # they contain the public name as a substring.
-      file_brand_pattern="$BRAND_PATTERN"
-      case "$f" in
-        CONTRIBUTING.md)
-          [ -n "$BRAND_PRIVATE" ] || continue
-          file_brand_pattern="$BRAND_PRIVATE"
-          ;;
-        docs/install-desktop.md|docs/modal.md|docs/release-notes-draft.md|docs/release-qualification.md|docs/support-diagnostics.md|docs/asahi-local-test.md|docs/release-checklist.md)
-          [ -n "$BRAND_PRIVATE" ] || continue
-          file_brand_pattern="$BRAND_PRIVATE"
-          ;;
-        desktop/*)
-          [ -n "$BRAND_PRIVATE" ] || continue
-          file_brand_pattern="$BRAND_PRIVATE"
-          ;;
-      esac
-      grep -inE -- "$BRAND_PATTERN" "$REPO_ROOT/$f" 2>/dev/null \
-        | while IFS= read -r hit; do
-            # printf, not `sed "s|^|$f:|"`: a filename containing | & or a
-            # backslash is data to printf and syntax to sed.
-            if brand_survives_exemption "$hit" "$file_brand_pattern"; then printf '%s:%s\n' "$f" "$hit"; fi
-          done
+      [ -n "$BRAND_PRIVATE" ] || continue
+      grep -inE -- "$BRAND_PRIVATE" "$REPO_ROOT/$f" 2>/dev/null \
+        | while IFS= read -r hit; do printf '%s:%s\n' "$f" "$hit"; done
     done || true)
 
 if [ -n "$BRAND_HITS" ]; then
-  echo "FAIL: brand literals outside the brand modules:"
+  echo "FAIL: retired brand names in tracked files:"
   echo "$BRAND_HITS"
   FAIL=1
+elif [ -z "$BRAND_PRIVATE" ]; then
+  echo "OK: retired-brand check off (no brand: names loaded)"
 else
-  echo "OK: no brand literals outside the brand modules (allowlist: 5)"
+  echo "OK: no retired brand names in tracked files"
 fi
 
 # --- Private-infra literals in ANY tracked file ---

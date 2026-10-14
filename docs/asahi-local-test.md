@@ -1,10 +1,10 @@
-# Asahi Linux local qualification
+# Asahi Linux (ARM64) Local Qualification Runbook
 
-Run this procedure only with a versioned Linux ARM64 candidate, its release
-receipt, and its published SHA-256. If those files are not supplied, record the
-test as untested; a historical prototype is not a release candidate.
+Run this procedure on physical Apple Silicon hardware running Asahi Linux using a versioned `linux-arm64` release candidate, its `.shapp.receipt.json`, and its published SHA-256 checksum.
 
-Before launch, record:
+## 1. Pre-Test System Inventory
+
+Use a clean user account (or empty application-data root) without system Python developer caches. Record hardware, kernel, page size, and display/audio configuration, and verify the artifact checksum:
 
 ```sh
 uname -a
@@ -15,44 +15,26 @@ free -h
 df -h .
 printf 'desktop=%s session=%s\n' "$XDG_CURRENT_DESKTOP" "$XDG_SESSION_TYPE"
 lspci -nn 2>/dev/null || true
-```
 
-Record the Apple hardware model, RAM, kernel, distribution release, desktop
-and session type, external display resolution/connection, audio output and
-connection, and available disk. Hash the exact download and compare it
-character for character with the supplied checksum:
-
-```sh
 sha256sum /path/to/Singhouse-linux-arm64-download
 ```
 
-Use a new local user or equivalent clean application-data root. Do not install
-system Python or populate developer caches. Disconnect networking before the
-first prepared-media test.
+(If both an AppImage and a `.tar.gz` archive are supplied, test each artifact separately.)
 
-1. Install or extract the candidate and launch it normally. Record any loader,
-   sandbox, AppImage, page-size, or permissions message.
-2. Import user-owned prepared media and confirm playback, visible timed words,
-   and audible output. Quit, relaunch offline, and confirm the library and
-   settings remain.
-3. Attempt a second simultaneous launch and confirm it does not create a second
-   library owner. Interrupt one startup, then relaunch and confirm recovery.
-4. Run four continuous hours at 1080p. Move only the host to an inactive
-   workspace for at least 15 seconds while the projector stays visible. Repeat
-   with host minimization. Exercise seek, pause/resume, track transitions,
-   projector close/reopen, fullscreen, physical display reconnect, audio output
-   selection, and physical audio reconnect.
-5. Record every audible dropout, frozen projector frame, crash, or catch-up
-   jump with wall-clock time and the action immediately before it.
-6. Uninstall application files using the candidate's documented method. Confirm
-   whether the library remains. Reinstall the same candidate and verify the
-   retained library. Do not delete retained data until it is backed up.
+## 2. Verification Steps
 
-If an AppImage is supplied, test it separately from the archive. AppImage
-updates and standalone recovery remain unqualified unless the candidate also
-supplies and passes outer-image anchor verification. Do not infer that archive
-success proves AppImage recovery.
+Disconnect networking before starting step 1 to verify offline prepared-media operation:
 
-Return the command output, artifact checksum, application logs, exact result
-for every step, and photos or local notes sufficient to establish physical
-audio/display connections. Redact private media names and paths before sharing.
+1. **Launch & Sandbox Check:** Extract or run the candidate normally. Record any dynamic loader, 16K page-size, AppImage/FUSE, or Electron sandbox messages.
+2. **Offline Prepared Playback:** Import user-owned prepared karaoke media. Confirm audible output, synchronized word highlighting, and stem controls. Quit, relaunch offline, and verify library and settings persistence.
+3. **Single-Instance Lock & Recovery:** Attempt to launch a second instance simultaneously and confirm `owner.lock` refuses it cleanly. Interrupt a startup, relaunch, and confirm normal recovery.
+4. **4-Hour 1080p Physical Show Test:** Run continuous 1080p playback with an external projector/display connected for **4 hours**:
+   * Move the host window to an inactive workspace for ≥ 15s while keeping the projector visible.
+   * Minimize and restore the host window.
+   * Exercise seek, pause/resume, track transitions, projector close/reopen, fullscreen toggle, physical display unplug/replug, audio output selector changes, and physical audio unplug/replug.
+   * Log the wall-clock time and preceding action for any audio dropout, frame freeze, or catch-up jump.
+5. **Uninstall & Reinstall Retention:** Remove the application binaries using the documented method, verify the user library remains intact in application data, reinstall the candidate, and confirm the existing library loads cleanly.
+
+## 3. Evidence Package
+
+Attach the command outputs from Step 1, artifact SHA-256, captured terminal logs (redacting personal paths and media titles), step-by-step pass/fail results, and notes/photos confirming physical display and audio connections.
