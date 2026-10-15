@@ -133,6 +133,7 @@ export function catalogLimitations(summary) {
   const scope = summary.qualification.scope
   if (scope === undefined) limitations.push('The packaged catalog declares no qualification scope; it is not marked as full qualification')
   else if (scope === 'hardware-test') limitations.push('The packaged runtime is an unqualified hardware-test candidate; real-song processing and release qualification have not passed')
+  else if (scope === 'accepted') limitations.push('The packaged runtime passed operator acceptance with release-owned resource budgets; measured full release qualification has not been recorded')
   else if (scope !== 'full') limitations.push(`The packaged catalog qualification scope is ${JSON.stringify(scope)}, not full`)
   return limitations
 }
@@ -233,17 +234,28 @@ export function assertWizardPlan(plan, summary, expectedLock) {
 // runtime) must also name that installed size right after the exact
 // retrieval size, in the renderer's size format.
 export const formatSize = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${Math.ceil(bytes / 1024 ** 2)} MiB`
-// The warning a hardware-test catalog's consent screen must show, and the
-// device requirement it states exactly when the plan's runtime is CUDA.
-export const HARDWARE_TEST_WARNING = 'Experimental hardware test: local processing in this build has not passed a real-song test or release qualification.'
+// The qualification notice each catalog scope's consent screen must show, as
+// DesktopOnboarding.vue renders it. `full` and `accepted` show none, and no
+// screen may show another scope's notice. NVIDIA_REQUIREMENT is stated exactly
+// when a hardware-test, accepted or full plan's runtime is CUDA.
+export const HARDWARE_TEST_WARNING = 'Release candidate: local processing is ready for your final acceptance test.'
+export const PRIVATE_SMOKE_NOTICE = 'Private test build: local processing in this build passed a single-song smoke test only. It has not completed full release qualification.'
+export const SCOPE_NOTICES = Object.freeze({ 'hardware-test': HARDWARE_TEST_WARNING, 'private-smoke': PRIVATE_SMOKE_NOTICE })
 export const NVIDIA_REQUIREMENT = 'Requires an NVIDIA GPU and a current driver.'
-// `catalog` is the packaged catalog summary. A hardware-test catalog must reach
-// consent with that scope on the plan and its warning visible on the screen.
+const NVIDIA_REQUIREMENT_SCOPES = ['hardware-test', 'accepted', 'full']
+// `catalog` is the packaged catalog summary. A scoped catalog must reach
+// consent with that scope on the plan and exactly its own notice on the screen.
 export function assertConsentText(text, plan, formatted, catalog) {
   const normalized = normalizeText(text)
-  if (catalog?.qualification?.scope === 'hardware-test') {
-    assert.equal(plan.qualificationScope, 'hardware-test', 'Setup plan does not carry the catalog\'s hardware-test scope')
-    assert.ok(normalized.includes(HARDWARE_TEST_WARNING), 'Consent screen omits the hardware-test warning')
+  const scope = catalog?.qualification?.scope
+  if (scope !== undefined && scope !== 'full') {
+    assert.equal(plan.qualificationScope, scope, `Setup plan does not carry the catalog's ${scope} scope`)
+  }
+  for (const [noticeScope, notice] of Object.entries(SCOPE_NOTICES)) {
+    if (noticeScope === scope) assert.ok(normalized.includes(notice), `Consent screen omits the ${scope} notice`)
+    else assert.ok(!normalized.includes(notice), `Consent screen shows the ${noticeScope} notice for a ${scope ?? 'unscoped'} catalog`)
+  }
+  if (NVIDIA_REQUIREMENT_SCOPES.includes(scope)) {
     assert.equal(plan.accelerator, catalog.target?.accelerator, 'Setup plan accelerator differs from the catalog runtime')
     if (plan.accelerator === 'cuda') assert.ok(normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen omits the NVIDIA GPU requirement')
     else assert.ok(!normalized.includes(NVIDIA_REQUIREMENT), 'Consent screen states an NVIDIA GPU requirement for a non-CUDA runtime')

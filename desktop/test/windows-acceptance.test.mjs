@@ -29,7 +29,7 @@ test('model selection refuses incomplete upstream policy', () => {
 })
 
 
-test('bootstrap rejects recipes absent from the packaged private trust list before installation', async () => {
+test('bootstrap rejects recipes absent from the packaged trust list before installation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'windows-acceptance-trust-'))
   try {
     const native = join(root, 'app', 'resources', 'native')

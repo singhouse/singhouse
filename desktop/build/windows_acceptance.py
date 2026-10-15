@@ -75,8 +75,10 @@ def recipe(args):
 
 def validate_recipe(manifest, trust, accelerator, native_lock_sha256):
     lock_hash = manifest['provenance']['lockSha256']
-    if lock_hash not in trust['privateTestLockSha256'] or lock_hash not in trust['lockSha256']:
-        raise ValueError('Recipe must be independently pinned in the committed private-test trust policy')
+    # Acceptance bundles are private-test builds, which trust every committed
+    # lock: a release candidate (private-test only) or an accepted recipe.
+    if not isinstance(trust.get('lockSha256'), list) or lock_hash not in trust['lockSha256']:
+        raise ValueError('Recipe must be independently pinned in the committed processing trust policy')
     if hashlib.sha256(manifest['provenance']['inputLock'].encode()).hexdigest() != lock_hash:
         raise ValueError('Recipe input lock hash mismatch')
     if (manifest['platform'], manifest['arch'], manifest['accelerator']) != ('win32', 'x64', accelerator):

@@ -635,7 +635,7 @@ class IsolationTests(unittest.TestCase):
                         {"schema": 1, "lockSha256": [shared], "privateTestLockSha256": [candidate]}):
             with self.assertRaisesRegex(RuntimeError, "Invalid application processing trust policy"):
                 backend.channel_trusted_locks(invalid, "private-test")
-        # The shipped policy keeps every hardware-test lock out of non-private-test trust.
+        # The shipped policy keeps every private-test-only lock out of non-private-test trust.
         shipped = json.loads(Path(__file__).with_name("processing-locks.json").read_text())
         for lock in shipped.get("privateTestLockSha256", []):
             self.assertIn(lock, backend.channel_trusted_locks(shipped, "private-test"))

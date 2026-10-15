@@ -1048,7 +1048,14 @@ def verify_processing_recipe(directory: Path, identifier: str, store: Path,
 
 def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
                                policy: dict, release_channel: str = "") -> dict:
-    """Bind worker limits to the shipped qualification or private admission policy."""
+    """Bind worker limits to the shipped qualification or release-owned admission policy.
+
+    ``qualified`` variants carry measured evidence. ``candidate`` and ``accepted``
+    variants carry release-owned admission budgets under the same strict contract:
+    a candidate awaits operator acceptance and is admitted only by private-test
+    builds, while an accepted variant passed operator acceptance and is admitted
+    on every channel.
+    """
     if (not isinstance(policy, dict) or type(policy.get("schema")) is not int or policy["schema"] != 1
             or not isinstance(policy.get("variants"), list)
             or any(not isinstance(value, dict) for value in policy["variants"])):
@@ -1057,16 +1064,18 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
     if len(variants) != 1:
         raise RuntimeError("Choose a qualified processing option in setup")
     variant = variants[0]
-    if variant.get("status") == "candidate":
+    if variant.get("status") in ("candidate", "accepted"):
+        candidate = variant["status"] == "candidate"
         admission = variant.get("admission")
         admission_keys = {"runtimeLockSha256", "reference", "basisReferences", "ramBytes", "vramBytes",
                           "workingDiskBytes", "downloadBytes", "installedBytes", "unifiedMemory"}
-        if (release_channel != "private-test" or variant.get("settings") != {} or "evidence" in variant
+        if ((candidate and release_channel != "private-test") or variant.get("settings") != {} or "evidence" in variant
                 or any(variant.get(key) != manifest.get(key) for key in ("platform", "arch", "accelerator"))
                 or not isinstance(admission, dict)
                 or set(admission) not in (admission_keys, admission_keys | {"totalRamBytes"})
                 or admission.get("runtimeLockSha256") != manifest["provenance"]["lockSha256"]):
-            raise RuntimeError("Selected candidate is not admitted for this private runtime")
+            raise RuntimeError("Selected candidate is not admitted for this private runtime" if candidate
+                               else "Selected processing option is not admitted for this runtime")
         references = admission.get("basisReferences")
         if (not isinstance(admission.get("reference"), str) or not admission["reference"].strip()
                 or not isinstance(references, list) or not references
@@ -1074,17 +1083,18 @@ def processing_resource_policy(manifest: dict, runtime_id: str, variant_id: str,
                 or len(set(references)) != len(references)
                 or any(type(admission.get(key)) is not int or not 0 < admission[key] <= 2**53 - 1
                        for key in ("ramBytes", "workingDiskBytes", "downloadBytes", "installedBytes"))):
-            raise RuntimeError("Invalid private candidate resource envelope")
+            raise RuntimeError("Invalid processing admission resource envelope")
         if "totalRamBytes" in admission and (type(admission["totalRamBytes"]) is not int
                 or not admission["ramBytes"] <= admission["totalRamBytes"] <= 2**53 - 1):
-            raise RuntimeError("Invalid private candidate physical memory requirement")
+            raise RuntimeError("Invalid processing admission physical memory requirement")
         vram = admission.get("vramBytes")
         unified = manifest["platform"] == "darwin" and manifest["arch"] == "arm64"
         if (admission.get("unifiedMemory") is not unified
                 or (manifest["accelerator"] == "cuda" and (type(vram) is not int or not 0 < vram <= 2**53 - 1))
                 or (manifest["accelerator"] != "cuda" and vram is not None)):
-            raise RuntimeError("Private candidate memory architecture differs")
-        # These are release-owned admission budgets, not measured qualification.
+            raise RuntimeError("Processing admission memory architecture differs")
+        # These are release-owned admission budgets, not measured qualification,
+        # whether the variant awaits or has passed operator acceptance.
         # The worker consumes the same strict contract and rechecks free capacity.
         return {"schema": 1, "runtimeManifestId": runtime_id, "variantId": variant_id,
                 "requirements": {"ramBytes": admission["ramBytes"], "vramBytes": vram,

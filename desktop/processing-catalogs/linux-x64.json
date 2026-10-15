@@ -202746,13 +202746,13 @@
     "schema": 2
   },
   "qualification": {
-    "passed": false,
-    "scope": "hardware-test",
+    "passed": true,
+    "scope": "accepted",
     "runtimeLockSha256": "6fe8d6ceb88c7c17ecc47dccbf37ddb4e36d745387be6290d1802258f3523c52",
     "platform": "linux",
     "arch": "x64",
     "accelerator": "cuda",
-    "evidenceReference": "rc-0.1.1-final-platform-acceptance-pending"
+    "evidenceReference": "v0.1.1-operator-acceptance-2026-10-14"
   },
   "models": [
     {

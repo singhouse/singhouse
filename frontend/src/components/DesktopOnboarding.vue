@@ -15,6 +15,20 @@ const dialog = ref(null)
 let poll
 let unmounted = false
 const hardwareTest = computed(() => plan.value?.qualificationScope === 'hardware-test')
+// Accepted and full-qualification CUDA plans state the device requirement as
+// neutral information; hardware-test plans include it in their own notice.
+const nvidiaRequirement = computed(() => ['accepted', 'full'].includes(plan.value?.qualificationScope) && plan.value?.accelerator === 'cuda')
+// One memory sentence per variant row, its parts joined by the row separator.
+// Release-owned admission budgets (pending or accepted) state direct floors;
+// measured qualification states its headroom.
+function memoryNeeds(requirements) {
+  const parts = requirements.acceptancePending || requirements.accepted
+    ? [`Available memory needed: ${size(requirements.ramBytes)}`,
+      ...(requirements.totalRamBytes ? [`System memory needed: ${size(requirements.totalRamBytes)}`] : [])]
+    : [`Memory with ${Math.round(requirements.headroomFraction * 100)}% headroom: ${size(requirements.ramBytes)}`]
+  if (requirements.vramBytes) parts.push(`Dedicated graphics memory: ${size(requirements.vramBytes)}`)
+  return parts.join(' · ')
+}
 // An explicitly opened check owns its screen until the choice is ready.
 // Background checks remain compact without closing the parent's setup request.
 const compact = computed(() => step.value === 'checking' ? !props.open : ['progress', 'restart', 'ready', 'error'].includes(step.value))
@@ -409,14 +423,7 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
           >
             <p><strong>{{ variant.label }}</strong>: {{ variant.qualityTradeoff }} {{ variant.reason }}</p>
             <p v-if="variant.requirements">
-              <template v-if="variant.requirements.acceptancePending">
-                Available memory needed: {{ size(variant.requirements.ramBytes) }}
-                <span v-if="variant.requirements.totalRamBytes"> · System memory needed: {{ size(variant.requirements.totalRamBytes) }}</span>
-              </template>
-              <template v-else>
-                Memory with {{ Math.round(variant.requirements.headroomFraction * 100) }}% headroom: {{ size(variant.requirements.ramBytes) }}
-              </template>
-              <span v-if="variant.requirements.vramBytes"> · Dedicated graphics memory: {{ size(variant.requirements.vramBytes) }}</span>.
+              {{ memoryNeeds(variant.requirements) }}.
               Model transfer: {{ size(variant.requirements.transferBytes) }} · Installed: {{ size(variant.requirements.installedBytes) }}.
             </p>
           </div>
@@ -504,6 +511,9 @@ onUnmounted(() => { unmounted = true; clearInterval(poll) })
             Requires an NVIDIA GPU and a current driver.
           </template>
           Setup checks the processing runtime on your computer before enabling it.
+        </p>
+        <p v-if="nvidiaRequirement">
+          Requires an NVIDIA GPU and a current driver.
         </p>
         <dl class="facts">
           <div><dt>Transfer size</dt><dd>{{ size(transferBytes) }}</dd></div>
