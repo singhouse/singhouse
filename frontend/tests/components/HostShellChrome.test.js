@@ -201,3 +201,31 @@ describe('HostShell chrome', () => {
     expect(wrapper.find('.popout-btn--display').attributes('aria-expanded')).toBe('false')
   })
 })
+
+describe('HostShell sidebar width', () => {
+  const handle = () => wrapper.find('.sidebar__resize')
+
+  it('opens at 400px by default and keeps the 300px minimum', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
+    mountShell()
+    await flushPromises()
+    expect(handle().attributes('aria-valuenow')).toBe('400')
+    expect(handle().attributes('aria-valuemin')).toBe('300')
+    expect(wrapper.find('.sidebar').attributes('style')).toContain('width: 400px')
+
+    await handle().trigger('keydown', { key: 'Home' })
+    expect(handle().attributes('aria-valuenow')).toBe('300')
+  })
+
+  it('keeps a saved width, and double-click resets to the new default', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
+    localStorage.setItem('karaoke:sidebarWidth', '320')
+    mountShell()
+    await flushPromises()
+    expect(handle().attributes('aria-valuenow')).toBe('320')
+
+    await handle().trigger('dblclick')
+    expect(handle().attributes('aria-valuenow')).toBe('400')
+    expect(localStorage.getItem('karaoke:sidebarWidth')).toBe('400')
+  })
+})

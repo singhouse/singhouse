@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <template>
-  <div class="song-list">
+  <div ref="rootEl" class="song-list" :class="{ 'song-list--col-resizing': colResizing }">
     <!-- Header / Filter bar -->
     <div class="song-list__header">
       <!-- The sidebar's one header row. The shell fills `lead` (brand mark /
@@ -118,6 +118,20 @@
           <span v-if="f.count !== undefined" class="filter-count">{{ f.count }}</span>
         </button>
       </div>
+      <!-- Compact rows have no column headers, so the sort lives here. -->
+      <div v-if="compact && !store.loading && store.filteredSongs.length" class="sort-row">
+        <span>{{ sortedSongs.length }} {{ sortedSongs.length === 1 ? 'song' : 'songs' }}</span>
+        <label>Sort
+          <select
+            class="sort-select"
+            aria-label="Sort library"
+            :value="sortKey"
+            @change="setSort($event.target.value)"
+          >
+            <option v-for="opt in SORT_OPTIONS" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
+          </select>
+        </label>
+      </div>
     </div>
 
     <!-- Loading skeleton -->
@@ -138,21 +152,23 @@
       <p>{{ store.songs.length === 0 ? 'Upload songs to get started' : 'No songs match this filter' }}</p>
     </div>
 
-    <!-- Song table -->
+    <!-- Song table. The list never scrolls sideways: when the panel is
+         narrower than the chosen columns need, rows fall back to a compact
+         two-line layout (title over artist) with the same actions button. -->
     <div v-else class="song-list__body">
       <div class="lib-table">
-        <!-- Sortable header -->
-        <div class="lib-head" role="row" :style="gridStyle">
+        <!-- Sortable header; separators between columns drag their widths. -->
+        <div v-if="!compact" ref="headEl" class="lib-head" role="row" :style="gridStyle">
           <span class="lib-cell lib-cell--dot" />
           <button
-            v-for="col in visibleColumns"
+            v-for="(col, i) in visibleColumns"
             :key="col.key"
             class="lib-th"
             :class="[`lib-th--${col.key}`, { 'lib-th--sorted': sortKey === col.key }]"
             role="columnheader"
             :aria-sort="sortKey === col.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'"
             :title="`Sort by ${col.label}`"
-            @click="toggleSort(col.key)"
+            @click="onHeaderClick(col.key)"
           >
             <span class="lib-th__label">{{ col.label }}</span>
             <svg
@@ -163,8 +179,16 @@
             >
               <polyline :points="sortDir === 'asc' ? '6 15 12 9 18 15' : '6 9 12 15 18 9'"/>
             </svg>
+            <span
+              v-if="i < visibleColumns.length - 1"
+              class="lib-th__resize"
+              :data-col="col.key"
+              aria-hidden="true"
+              @pointerdown.stop.prevent="startColResize($event, i)"
+              @click.stop
+            />
           </button>
-          <span class="lib-cell lib-cell--actions" />
+          <span class="lib-cell lib-cell--more" />
         </div>
 
         <TransitionGroup name="list">
@@ -173,8 +197,9 @@
             :key="song.id"
             class="song-item"
             role="row"
-            :style="gridStyle"
+            :style="compact ? null : gridStyle"
             :class="{
+              'song-item--compact': compact,
               'song-item--active': store.currentSong?.id === song.id,
               'song-item--disabled': song.status !== 'ready',
               'song-item--draggable': song.status === 'ready'
@@ -187,8 +212,16 @@
               <span class="song-item__dot" :class="`dot--${song.status}`" />
             </div>
 
-            <div v-if="isVisible('title')" class="lib-cell lib-cell--title">
+            <div v-if="compact || isVisible('title')" class="lib-cell lib-cell--title">
               <p class="song-item__title">
+                <template v-if="store.currentSong?.id === song.id">
+                  <svg
+                    class="song-item__playing"
+                    width="10" height="10" viewBox="0 0 24 24"
+                    fill="var(--c-primary)" aria-hidden="true"
+                  ><polygon points="5,3 19,12 5,21"/></svg>
+                  <span class="sr-only">Now playing: </span>
+                </template>
                 <!-- Songs that came in with their own karaoke video play a
                      picture on the projector instead of the canvas lyrics.
                      Marked inline with the title so it survives whatever
@@ -204,9 +237,9 @@
                   <path d="M7 4v16M17 4v16M2 12h20"/>
                 </svg>{{ song.title || song.filename || 'Unknown Title' }}
                 <!-- A job the host started from Song tools. Rides with the
-                     title, not the hover-revealed actions: the whole reason to
-                     show it here is that the panel may be closed or pointed at
-                     a different song. -->
+                     title, not the row menu: the whole reason to show it here
+                     is that the panel may be closed or pointed at a different
+                     song. -->
                 <span
                   v-if="jobMark(song.id)"
                   class="song-item__job"
@@ -229,81 +262,116 @@
                   · {{ song.message }}
                 </span>
               </p>
+              <p v-else-if="compact" class="song-item__line2">{{ song.artist || 'Unknown Artist' }}</p>
             </div>
 
-            <div v-if="isVisible('artist')" class="lib-cell lib-cell--artist">
-              <span class="song-item__artist">{{ song.artist || 'Unknown Artist' }}</span>
-            </div>
-
-            <div v-if="isVisible('duration')" class="lib-cell lib-cell--duration">
-              <span class="song-item__duration">{{ formatDuration(song.duration) }}</span>
-            </div>
-
-            <div v-if="isVisible('added')" class="lib-cell lib-cell--added">
-              <span class="song-item__added">{{ formatDate(song.created_at) }}</span>
-            </div>
-
-            <div v-if="isVisible('status')" class="lib-cell lib-cell--status">
-              <Badge v-if="song.status !== 'ready' && song.status !== 'done'" :variant="song.status">
-                <span v-if="song.status === 'processing'" class="spinner inline-spinner" />
-                {{ song.status === 'processing' && song.phase ? phaseLabel(song.phase) : song.status }}
-              </Badge>
-              <span v-else class="song-item__status-ok">ready</span>
-            </div>
-
-            <div class="lib-cell lib-cell--actions song-item__actions" @click.stop>
-              <button
-                v-if="store.currentSong?.id === song.id"
-                class="action-btn action-btn--active"
-                title="Now playing"
+            <template v-if="compact">
+              <div
+                class="song-item__meta"
+                :class="{ 'song-item__meta--time': song.status === 'ready' && !!song.duration }"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="var(--c-primary)">
-                  <polygon points="5,3 19,12 5,21"/>
-                </svg>
-              </button>
-              <button
-                v-if="features.cdgExportEnabled && song.status === 'ready'"
-                class="action-btn action-btn--export"
-                title="Export CD+G"
-                aria-label="Export CD+G"
-                @click="exportTarget = song"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M12 15V4"/>
-                  <polyline points="7 9 12 4 17 9"/>
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                </svg>
-              </button>
-              <!-- Offered for EVERY status: a processing song's progress and
-                   a failed song's error (and its retry) are the two states
-                   that most need a way in, and neither can be loaded onto the
-                   deck to reach a mixer. -->
-              <button
-                class="action-btn action-btn--tools"
-                :class="{ 'action-btn--active': songTools.songId === song.id }"
-                title="Song tools"
-                aria-label="Song tools"
-                @click="songTools.toggle(song.id)"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <circle cx="5" cy="12" r="1.6"/>
-                  <circle cx="12" cy="12" r="1.6"/>
-                  <circle cx="19" cy="12" r="1.6"/>
-                </svg>
-              </button>
-              <button
-                class="action-btn action-btn--delete"
-                title="Delete song"
-                aria-label="Delete song"
-                @click="deleteTarget = song"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="3 6 5 6 21 6"/>
-                  <path d="M19 6l-1 14H6L5 6"/>
-                  <path d="M10 11v6M14 11v6"/>
-                  <path d="M9 6V4h6v2"/>
-                </svg>
-              </button>
+                <Badge v-if="song.status === 'failed'" variant="failed">Failed</Badge>
+                <span v-else-if="song.status === 'ready' && song.duration" class="song-item__duration">
+                  {{ formatDuration(song.duration) }}
+                </span>
+              </div>
+            </template>
+            <template v-else>
+              <div v-if="isVisible('artist')" class="lib-cell lib-cell--artist">
+                <span class="song-item__artist">{{ song.artist || 'Unknown Artist' }}</span>
+              </div>
+
+              <div v-if="isVisible('duration')" class="lib-cell lib-cell--duration">
+                <span class="song-item__duration">{{ formatDuration(song.duration) }}</span>
+              </div>
+
+              <div v-if="isVisible('added')" class="lib-cell lib-cell--added">
+                <span class="song-item__added">{{ formatDate(song.created_at) }}</span>
+              </div>
+
+              <div v-if="isVisible('status')" class="lib-cell lib-cell--status">
+                <Badge v-if="song.status !== 'ready' && song.status !== 'done'" :variant="song.status">
+                  <span v-if="song.status === 'processing'" class="spinner inline-spinner" />
+                  {{ song.status === 'processing' && song.phase ? phaseLabel(song.phase) : song.status }}
+                </Badge>
+                <span v-else class="song-item__status-ok">ready</span>
+              </div>
+            </template>
+
+            <!-- The row's one always-visible action: a menu holding Song
+                 tools, Export and Delete. Song tools is offered for EVERY
+                 status: a processing song's progress and a failed song's error
+                 (and its retry) are the two states that most need a way in,
+                 and neither can be loaded onto the deck to reach a mixer. -->
+            <div class="lib-cell lib-cell--more" @click.stop>
+              <PopoverMenu role="menu" align="end" :label="`Actions for ${songName(song)}`">
+                <template #trigger="{ toggle, attrs, open }">
+                  <button
+                    type="button"
+                    class="more-btn"
+                    :class="{ 'more-btn--open': open }"
+                    title="Song actions"
+                    :aria-label="`Actions for ${songName(song)}`"
+                    v-bind="attrs"
+                    @click="toggle"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="5" cy="12" r="1.7"/>
+                      <circle cx="12" cy="12" r="1.7"/>
+                      <circle cx="19" cy="12" r="1.7"/>
+                    </svg>
+                  </button>
+                </template>
+                <template #default="{ close }">
+                  <p class="ui-menu__section">{{ songName(song) }}</p>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="ui-menu__item row-menu__tools"
+                    @click="close(); songTools.toggle(song.id)"
+                  >
+                    <span class="ui-menu__icon" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/>
+                        <circle cx="16" cy="6" r="2"/>
+                        <circle cx="10" cy="12" r="2"/>
+                        <circle cx="18" cy="18" r="2"/>
+                      </svg>
+                    </span>Song tools…
+                  </button>
+                  <button
+                    v-if="features.cdgExportEnabled && song.status === 'ready'"
+                    type="button"
+                    role="menuitem"
+                    class="ui-menu__item row-menu__export"
+                    @click="close(); exportTarget = song"
+                  >
+                    <span class="ui-menu__icon" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 15V4"/>
+                        <polyline points="7 9 12 4 17 9"/>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      </svg>
+                    </span>Export CD+G…
+                  </button>
+                  <hr class="ui-menu__sep" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="ui-menu__item ui-menu__item--danger row-menu__delete"
+                    @click="close(); deleteTarget = song"
+                  >
+                    <span class="ui-menu__icon" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"/>
+                        <path d="M19 6l-1 14H6L5 6"/>
+                        <path d="M10 11v6M14 11v6"/>
+                        <path d="M9 6V4h6v2"/>
+                      </svg>
+                    </span>Delete song…
+                  </button>
+                </template>
+              </PopoverMenu>
             </div>
           </div>
         </TransitionGroup>
@@ -413,17 +481,22 @@ const filters = computed(() => [
 ])
 
 // ─── Columns ────────────────────────────────────────────────────────────────
-// `width` feeds the grid template. Title is locked visible: it is the row's
-// identity, and a library with every label switched off is not a useful view.
+// Title is locked visible: it is the row's identity, and a library with every
+// label switched off is not a useful view. Title always flexes to take the
+// remaining room. Artist flexes too until the host drags its width; the other
+// columns are fixed at `width` px (also draggable). `min` is the narrowest a
+// column renders and what the fit check below counts for a flexing column.
 const COLUMNS = [
-  { key: 'title',    label: 'Title',    width: 'minmax(120px, 2fr)', locked: true },
-  { key: 'artist',   label: 'Artist',   width: 'minmax(90px, 1fr)' },
-  { key: 'duration', label: 'Time',     width: '52px' },
-  { key: 'added',    label: 'Added',    width: '74px' },
-  { key: 'status',   label: 'Status',   width: '80px' },
+  { key: 'title',    label: 'Title',  min: 120, flex: '2fr', locked: true },
+  { key: 'artist',   label: 'Artist', min: 90,  flex: '1fr', resizeMin: 60 },
+  { key: 'duration', label: 'Time',   min: 40,  width: 52 },
+  { key: 'added',    label: 'Added',  min: 56,  width: 74 },
+  { key: 'status',   label: 'Status', min: 56,  width: 80 },
 ]
+const MAX_COL_WIDTH = 480
 
 const COLUMNS_KEY = 'karaoke:libraryColumns'
+const COLUMN_WIDTHS_KEY = 'karaoke:libraryColumnWidths'
 const SORT_KEY = 'karaoke:librarySort'
 const DEFAULT_VISIBLE = ['title', 'artist', 'duration']
 
@@ -462,10 +535,177 @@ watch(visible, (v) => {
 // Render columns in declared order, not click order.
 const visibleColumns = computed(() => COLUMNS.filter(c => isVisible(c.key)))
 
+// ─── Column widths ──────────────────────────────────────────────────────────
+// Dragged widths in px, keyed by column. Title has none: it flexes.
+function resizeMin(col) { return col.resizeMin ?? col.min }
+function clampColWidth(col, w) {
+  return Math.round(Math.min(MAX_COL_WIDTH, Math.max(resizeMin(col), w)))
+}
+
+function loadWidths() {
+  const out = {}
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLUMN_WIDTHS_KEY))
+    if (raw && typeof raw === 'object') {
+      for (const col of COLUMNS) {
+        const w = Number(raw[col.key])
+        if (!col.locked && Number.isFinite(w) && w > 0) out[col.key] = clampColWidth(col, w)
+      }
+    }
+  } catch { /* fall through to defaults */ }
+  return out
+}
+
+const colWidths = ref(loadWidths())
+
+function saveWidths() {
+  try { localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(colWidths.value)) } catch { /* non-fatal */ }
+}
+
+function colPx(col) {
+  return colWidths.value[col.key] ?? col.width ?? null
+}
+
+function colTrack(col) {
+  const px = colPx(col)
+  return px != null ? `${px}px` : `minmax(${col.min}px, ${col.flex})`
+}
+
+const MORE_TRACK = 28
+const DOT_TRACK = 14
+const GRID_GAP = 8            // .song-item gap: 0.5rem
+const ROW_CHROME = 22         // row padding (2 × 0.6rem) + 1px borders
+const SCROLLBAR = 8           // the vertical scrollbar (6px webkit, thin in Firefox)
+
 const gridStyle = computed(() => ({
-  // Actions track fits four 24px buttons plus the row's 0.25rem gaps.
-  gridTemplateColumns: ['14px', ...visibleColumns.value.map(c => c.width), '112px'].join(' '),
+  gridTemplateColumns: [
+    `${DOT_TRACK}px`, ...visibleColumns.value.map(colTrack), `${MORE_TRACK}px`,
+  ].join(' '),
 }))
+
+// The narrowest list that shows the chosen columns without clipping.
+function colFitPx(col) { return colPx(col) ?? col.min }
+const columnsFitWidth = computed(() => {
+  const cols = visibleColumns.value
+  const tracks = cols.reduce((sum, c) => sum + colFitPx(c), 0)
+  return ROW_CHROME + SCROLLBAR + DOT_TRACK + tracks + MORE_TRACK + GRID_GAP * (cols.length + 1)
+})
+
+// The widest `col` can be while the columns still fit the measured list.
+// Unmeasured lists impose no limit beyond MAX_COL_WIDTH.
+function maxFittingWidth(col) {
+  if (!(listWidth.value > 0)) return MAX_COL_WIDTH
+  return listWidth.value - (columnsFitWidth.value - colFitPx(col))
+}
+
+// A width saved on a wider panel must not lock this one into compact rows:
+// on the first measure, shrink oversize saved widths (right to left) until
+// the columns fit, but never below what the column would take by default.
+// In memory only; the saved preference is untouched until the next drag.
+function fitSavedWidths() {
+  const next = { ...colWidths.value }
+  for (const col of [...visibleColumns.value].reverse()) {
+    const w = next[col.key]
+    if (w == null) continue
+    const excess = columnsFitWidth.value - listWidth.value
+    if (excess <= 0) break
+    const floor = Math.min(w, col.width ?? col.min)
+    next[col.key] = Math.max(floor, w - excess)
+    colWidths.value = { ...next }
+  }
+}
+
+// Separator i sits on the right edge of visible column i. Dragging it moves
+// that edge: a fixed column grows with the pointer; the flexing title instead
+// gives its room to (or takes it from) the column to its right.
+const headEl = ref(null)
+let colDrag = null
+let colDragEndedAt = -Infinity
+const colResizing = ref(false)
+// The layout in force when a drag started; held until it ends so a drag
+// never flips the list between columns and compact rows.
+const heldCompact = ref(null)
+
+function measuredWidth(key) {
+  const el = headEl.value?.querySelector(`.lib-th--${key}`)
+  return el ? el.getBoundingClientRect().width : 0
+}
+
+function startColResize(e, i) {
+  const cols = visibleColumns.value
+  const left = cols[i]
+  const target = left.locked ? cols[i + 1] : left
+  if (!target) return
+  const start = colPx(target) ?? Math.max(target.min, measuredWidth(target.key))
+  colDrag = { col: target, sign: target === left ? 1 : -1, startX: e.clientX, start, moved: false }
+  heldCompact.value = compact.value
+  colResizing.value = true
+  window.addEventListener('pointermove', onColResizeMove)
+  window.addEventListener('pointerup', stopColResize)
+}
+
+function onColResizeMove(e) {
+  if (!colDrag) return
+  const dx = e.clientX - colDrag.startX
+  if (dx !== 0) colDrag.moved = true
+  const col = colDrag.col
+  const wanted = clampColWidth(col, colDrag.start + colDrag.sign * dx)
+  // Never wider than the list leaves room for; never under the column's floor.
+  const w = Math.max(resizeMin(col), Math.min(wanted, Math.floor(maxFittingWidth(col))))
+  colWidths.value = { ...colWidths.value, [col.key]: w }
+}
+
+function stopColResize() {
+  window.removeEventListener('pointermove', onColResizeMove)
+  window.removeEventListener('pointerup', stopColResize)
+  // A drag that ends over a header must not also count as a sort click.
+  if (colDrag?.moved) {
+    colDragEndedAt = performance.now()
+    saveWidths()
+  }
+  colDrag = null
+  heldCompact.value = null
+  colResizing.value = false
+}
+
+onUnmounted(() => {
+  window.removeEventListener('pointermove', onColResizeMove)
+  window.removeEventListener('pointerup', stopColResize)
+})
+
+function onHeaderClick(key) {
+  if (performance.now() - colDragEndedAt < 300) return
+  toggleSort(key)
+}
+
+// ─── Layout ─────────────────────────────────────────────────────────────────
+// The panel is user-resizable, so the layout follows the list's own measured
+// width rather than the viewport. Unmeasured (or hidden, width 0) keeps the
+// columns.
+const rootEl = ref(null)
+const listWidth = ref(0)
+let resizeObs = null
+
+const compact = computed(() => {
+  if (heldCompact.value !== null) return heldCompact.value
+  return listWidth.value > 0 && listWidth.value < columnsFitWidth.value
+})
+
+let savedWidthsFitted = false
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined' || !rootEl.value) return
+  resizeObs = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    if (!entry) return
+    listWidth.value = entry.contentRect?.width ?? 0
+    if (!savedWidthsFitted && listWidth.value > 0) {
+      savedWidthsFitted = true
+      fitSavedWidths()
+    }
+  })
+  resizeObs.observe(rootEl.value)
+})
+onUnmounted(() => { resizeObs?.disconnect(); resizeObs = null })
 
 // ─── Library menu ──────────────────────────────────────────────────────────
 // 'menu' | 'columns' — which face the ⋯ popover shows; reset on close.
@@ -507,6 +747,20 @@ function toggleSort(key) {
     // Text reads best A→Z; time and recency read best largest-first.
     sortDir.value = (key === 'title' || key === 'artist' || key === 'status') ? 'asc' : 'desc'
   }
+}
+
+// Compact rows have no column headers, so a select carries the sort there.
+const SORT_OPTIONS = [
+  { key: 'added',    label: 'Recently added' },
+  { key: 'title',    label: 'Title' },
+  { key: 'artist',   label: 'Artist' },
+  { key: 'duration', label: 'Time' },
+  { key: 'status',   label: 'Status' },
+]
+
+function setSort(key) {
+  if (key === sortKey.value || !SORT_OPTIONS.some(o => o.key === key)) return
+  toggleSort(key)
 }
 
 watch([sortKey, sortDir], () => {
@@ -605,6 +859,10 @@ function jobMark(songId) {
   return null
 }
 
+function songName(song) {
+  return song.title || song.filename || 'Unknown Title'
+}
+
 async function doDelete() {
   if (deleteTarget.value) {
     await store.deleteSong(deleteTarget.value.id)
@@ -634,7 +892,9 @@ function onDragStart(ev, song) {
 </script>
 
 <style scoped>
-.song-list { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.song-list { display: flex; flex-direction: column; height: 100%; overflow: hidden; container: lib / inline-size; }
+.song-list--col-resizing { cursor: col-resize; user-select: none; }
+.song-list--col-resizing * { cursor: col-resize !important; }
 .song-list__header { flex-shrink: 0; padding: 0 0 0.5rem; }
 .song-list__bar {
   display: flex; align-items: center; gap: 0.4rem;
@@ -652,6 +912,14 @@ function onDragStart(ev, song) {
 .song-list__title svg,
 .song-list__count { flex: none; }
 .song-list__title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* At the narrowest panels the word gives way rather than reading "LIBR…";
+   the icon and count stay, and the name stays for screen readers. */
+@container lib (max-width: 300px) {
+  .song-list__title-text {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+}
 .song-list__spacer { flex: 1; min-width: 0; }
 
 /* ── Library ⋯ menu ─────────────────────────────────────────────────────── */
@@ -734,7 +1002,7 @@ function onDragStart(ev, song) {
 }
 .search-clear:hover { color: white; background: rgba(255,255,255,0.08); }
 
-.filter-tabs { display: flex; gap: 0.25rem; }
+.filter-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .filter-tab {
   display: flex; align-items: center; gap: 0.3rem;
   padding: 0.25rem 0.55rem; border-radius: 0.4rem;
@@ -746,10 +1014,10 @@ function onDragStart(ev, song) {
 .filter-tab--active { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
 .filter-count { font-size: 0.7rem; opacity: 0.7; }
 
-/* The body scrolls both ways: the sidebar is drag-resizable down to 300px,
-   and a host with every column switched on can out-run that width. */
-.song-list__body { flex: 1; overflow-y: auto; overflow-x: auto; position: relative; }
-.lib-table { display: flex; flex-direction: column; gap: 0.25rem; min-width: min-content; }
+/* Never sideways: the layout switches to compact rows rather than letting
+   the chosen columns out-run the panel. */
+.song-list__body { flex: 1; overflow-y: auto; overflow-x: hidden; position: relative; scrollbar-width: thin; }
+.lib-table { display: flex; flex-direction: column; gap: 0.25rem; }
 .song-list__empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; color: rgba(255,255,255,0.25); font-size: 0.875rem; text-align: center; padding: 2rem; }
 .song-skeleton { height: 44px; border-radius: 0.5rem; background: rgba(255,255,255,0.04); }
 
@@ -774,7 +1042,19 @@ function onDragStart(ev, song) {
 }
 .lib-th:hover { color: rgba(255,255,255,0.7); }
 .lib-th--sorted { color: var(--c-primary); }
+.lib-th { position: relative; overflow: visible; }
 .lib-th__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Column separator, centred in the 0.5rem gap after its header. */
+.lib-th__resize {
+  position: absolute; top: -2px; bottom: -2px; right: calc(-0.25rem - 4px);
+  width: 9px; cursor: col-resize; z-index: 1;
+  display: flex; justify-content: center;
+}
+.lib-th__resize::before {
+  content: ""; width: 1px; height: 100%;
+  background: rgba(255,255,255,0.14); transition: background 0.15s;
+}
+.lib-th__resize:hover::before { background: rgba(255,255,255,0.6); }
 .lib-th__caret { flex-shrink: 0; }
 .lib-th--duration, .lib-th--added { justify-content: flex-end; text-align: right; }
 
@@ -785,10 +1065,14 @@ function onDragStart(ev, song) {
   border: 1px solid transparent; transition: background 0.18s, border-color 0.18s;
   background: rgba(255,255,255,0.03); position: relative;
 }
-.song-item:hover:not(.song-item--disabled) { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); }
+.song-item:hover:not(.song-item--disabled),
+.song-item:focus-within:not(.song-item--disabled) { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); }
 .song-item--active { background: var(--c-primary-bg); border-color: var(--c-primary-border); }
 .song-item--active .song-item__title { color: var(--c-primary); }
-.song-item--disabled { cursor: default; opacity: 0.7; }
+.song-item--disabled { cursor: default; }
+/* Dim what cannot be played, not the actions button that still works. */
+.song-item--disabled > .lib-cell:not(.lib-cell--more),
+.song-item--disabled > .song-item__meta { opacity: 0.7; }
 .song-item--draggable { cursor: grab; }
 .song-item--draggable:active { cursor: grabbing; }
 
@@ -797,7 +1081,7 @@ function onDragStart(ev, song) {
 .lib-cell--dot { justify-content: center; }
 .lib-cell--duration, .lib-cell--added { justify-content: flex-end; }
 .lib-cell--status { justify-content: flex-start; overflow: hidden; }
-.lib-cell--actions { justify-content: flex-end; gap: 0.25rem; }
+.lib-cell--more { justify-content: flex-end; }
 
 .song-item__dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .dot--ready { background: var(--c-success); box-shadow: 0 0 6px rgba(242, 207, 122,0.6); }
@@ -805,7 +1089,13 @@ function onDragStart(ev, song) {
 .dot--failed { background: var(--c-error); }
 .dot--uploading { background: var(--c-info); }
 
-.song-item__title { width: 100%; font-size: 0.875rem; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Title and artist run slightly smaller and tighter so more of each fits at
+   realistic panel widths. */
+.song-item__title,
+.song-item__artist,
+.song-item__line2 { letter-spacing: -0.015em; }
+.song-item__title { width: 100%; margin: 0; font-size: 0.82rem; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-item__playing { vertical-align: -1px; margin-right: 0.3rem; }
 .song-item__video-mark {
   flex-shrink: 0;
   vertical-align: -1px;
@@ -813,32 +1103,46 @@ function onDragStart(ev, song) {
   color: var(--text-muted);
 }
 .song-item--active .song-item__video-mark { color: var(--c-primary); }
-.song-item__sub { width: 100%; font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.song-item__artist { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-item__sub { width: 100%; margin: 0; font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-item__artist { font-size: 0.76rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .song-item__phase { color: var(--c-warning); font-weight: 500; }
 .song-item__phase-pct { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .song-item__phase-msg { color: var(--text-muted); }
 .song-item__duration, .song-item__added { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--text-muted); white-space: nowrap; }
 .song-item__status-ok { font-size: 0.72rem; color: var(--c-success); opacity: 0.75; }
 
-.song-item__actions { opacity: 0; transition: opacity 0.15s; }
-.song-item:hover .song-item__actions { opacity: 1; }
-.song-item--active .song-item__actions { opacity: 1; }
+/* ── Compact two-line row ───────────────────────────────────────────────── */
+.song-item--compact { grid-template-columns: 14px minmax(0, 1fr) auto 28px; padding: 0.4rem 0.35rem 0.4rem 0.6rem; }
+.song-item__line2 { width: 100%; margin: 0; font-size: 0.75rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-item__meta { display: flex; align-items: center; justify-content: flex-end; }
+/* The time drops out before the title is squeezed. */
+@container lib (max-width: 250px) { .song-item__meta--time { display: none; } }
 
-.action-btn {
-  width: 24px; height: 24px; border-radius: var(--radius-sm);
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg-glass); border: 1px solid var(--border-subtle);
-  cursor: pointer; color: var(--text-secondary); transition: all 0.15s;
-  flex-shrink: 0;
+.sort-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  margin: 0.4rem 0 0; font-size: 0.72rem; color: var(--text-muted);
 }
-.action-btn:hover { background: var(--bg-glass-active); color: white; }
-.action-btn--delete:hover { background: var(--c-error-bg); border-color: var(--c-error-border); color: var(--c-error); }
-.action-btn--tools:hover { background: var(--c-primary-bg); border-color: var(--c-primary-border); color: var(--c-primary); }
-.action-btn--export:hover { background: var(--c-primary-bg); border-color: var(--c-primary-border); color: var(--c-primary); }
-.action-btn--active { background: var(--c-primary-bg); border-color: var(--c-primary-border); cursor: default; }
-.action-btn .spinner { animation: spin 0.8s linear infinite; }
+.sort-row label { display: inline-flex; align-items: center; gap: 0.3rem; }
+.sort-select {
+  font: inherit; font-size: 0.72rem; color: var(--text-secondary);
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.3rem;
+}
+.sort-select option { background: #171b25; }
+
+/* ── Row actions button ─────────────────────────────────────────────────── */
+.more-btn {
+  width: 28px; height: 28px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  background: transparent; border: 1px solid var(--border-subtle);
+  color: var(--text-secondary); cursor: pointer; flex-shrink: 0; transition: all 0.15s;
+}
+.more-btn:hover,
+.more-btn--open { background: var(--c-primary-bg); border-color: var(--c-primary-border); color: var(--c-primary); }
+.more-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+.song-item--active .more-btn { border-color: var(--c-primary-border); }
 @keyframes spin { to { transform: rotate(360deg); } }
+
 
 .inline-spinner { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; border: 1px solid currentColor; border-top-color: transparent; }
 
