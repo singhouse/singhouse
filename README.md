@@ -35,7 +35,7 @@ Evaluated on the 20-song Jamendo benchmark (plain reference lyrics):
 | **Singhouse (`lyricsync` CTC Fusion)** | 41 ms | 86.3% | 95.5% | 1.4% |
 | Commercial cloud alignment *(AudioShake API, full mix)* | 44 ms | 85.2% | 96.2% | 1.2% |
 | Single-model `wav2vec2` CTC *(Nightingale, same stem)* | 52 ms | 73.5% | 86.4% | 6.2% |
-| Whisper-medium ASR + word mapping *(`karaoke-gen` local fallback)* | 103 ms | 48.8% | 70.3% | 15.2% |
+| Whisper-medium ASR + word mapping | 103 ms | 48.8% | 70.3% | 15.2% |
 
 See **[`lyricsync/ALIGNMENT.md`](lyricsync/ALIGNMENT.md)** for full benchmarks and methodology and additional evals.
 
