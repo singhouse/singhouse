@@ -94,7 +94,10 @@ Signs all Mach-O binaries with hardened runtime and secure timestamps, notarizes
 
 Requires a native Windows x64 host, PowerShell 7, and the `TrustedSigning` module (`Install-Module TrustedSigning -RequiredVersion 0.5.3 -Repository PSGallery -Scope CurrentUser`). Signs with Azure account `singhouse-signing`, profile `singhouse` (`PublicTrust`) in `centralus` (`https://cus.codesigning.azure.net`), verifying the certificate subject (`Bones Consulting LLC`) and RFC 3161 timestamps on both `Singhouse.exe`, the NSIS installer, and the generated uninstaller.
 
-* **Option A — GitHub Actions OIDC (Recommended CI Path):** Dispatched manually using the `windows-signing` GitHub environment (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID` environment secrets) and `--azure-oidc`.
+* **Option A — GitHub Actions OIDC (Recommended CI Path):** Dispatched manually using the `windows-signing` GitHub environment and `--azure-oidc`. Configure
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_SUBSCRIPTION_ID` as
+environment secrets on the `windows-signing` environment itself,
+not as repository or organization secrets.
 * **Option B — Interactive Azure CLI:**
 
   ```powershell
