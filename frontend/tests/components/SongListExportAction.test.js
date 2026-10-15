@@ -108,19 +108,20 @@ describe('export action gating', () => {
 
     const card = document.body.querySelector('.modal-card')
     expect(card).not.toBeNull()
-    expect(card.textContent).toContain('Export CD+G')
+    expect(card.querySelector('h3').textContent).toBe('Export')
     expect(card.textContent).toContain('Ready Song')
-    expect(getSettings).toHaveBeenCalled()
+    expect(getSettings).not.toHaveBeenCalled()
   })
 })
 
 describe('vocabulary', () => {
-  it('renders no banned verb anywhere in the list or the open dialog', async () => {
+  it('renders no banned verb in the list or the open dialog outside the folder label', async () => {
     wrapper = await mountList()
     await exportButtons()[0].trigger('click')
     await flushPromises()
 
-    expect(wrapper.html()).not.toMatch(/download/i)
-    expect(document.body.innerHTML).not.toMatch(/download/i)
+    const label = "Where your browser saves files"
+    expect(wrapper.html().replaceAll(label, '')).not.toMatch(/download/i)
+    expect(document.body.innerHTML.replaceAll(label, '')).not.toMatch(/download/i)
   })
 })

@@ -176,6 +176,15 @@ def _find_audio(stems_dir: Path, audio: Optional[str]) -> Optional[Path]:
     return None
 
 
+def missing_stem_message(audio: Optional[str]) -> str:
+    """The refusal shown when the requested (or any) stem is missing."""
+    if audio == "karaoke":
+        return "No karaoke mix found for this song; try Instrumental"
+    if audio == "instrumental":
+        return "No instrumental stem found for this song; try Karaoke mix"
+    return "No audio stem found for this song"
+
+
 async def _resolve_word_sync(
     db: AsyncSession, song: Song, lyrics_set_id: Optional[int]
 ) -> str:
@@ -352,15 +361,7 @@ async def export_song(
 
     audio_path = _find_audio(_stems_dir(song), audio)
     if fmt == "mp3g" and audio_path is None:
-        if audio == "karaoke":
-            raise ExportConflict(
-                "No karaoke mix found for this song; try Instrumental"
-            )
-        if audio == "instrumental":
-            raise ExportConflict(
-                "No instrumental stem found for this song; try Karaoke mix"
-            )
-        raise ExportConflict("No audio stem found for this song")
+        raise ExportConflict(missing_stem_message(audio))
 
     duration: Optional[float] = None
     if audio_path is not None:

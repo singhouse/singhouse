@@ -2,61 +2,185 @@
 <template>
   <Modal
     :visible="!!song"
-    title="Export CD+G"
-    :confirmLabel="busy ? 'Exporting…' : 'Export'"
-    confirmVariant="primary"
-    :closable="!busy"
+    size="md"
+    :closable="false"
     @close="onClose"
-    @confirm="doExport"
   >
-    <span class="export-form">
-      <span class="export-form__song">{{ songLabel }}</span>
+    <div class="modal__header">
+      <h3>Export</h3>
+      <button
+        v-if="!busy"
+        class="modal__close"
+        aria-label="Close"
+        @click="onClose"
+      >
+        &times;
+      </button>
+    </div>
 
-      <span class="export-field">
-        <span class="export-field__label">Format</span>
-        <label class="toggle-opt">
-          <input type="radio" value="mp3g" v-model="format" :disabled="busy" />
-          <span>MP3+G (.zip)</span>
-        </label>
-        <label class="toggle-opt">
-          <input type="radio" value="cdg" v-model="format" :disabled="busy" />
-          <span>CD+G only (.cdg)</span>
-        </label>
-      </span>
+    <div
+      v-if="running"
+      class="modal__body"
+    >
+      <div class="export-progress">
+        <span class="export-progress__line">{{ progressLine }}</span>
+        <div
+          class="export-progress__bar"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="progressPercent"
+        >
+          <span :style="{ width: `${progressPercent}%` }" />
+        </div>
+      </div>
+    </div>
 
-      <span v-if="format === 'mp3g'" class="export-field">
-        <span class="export-field__label">Audio</span>
-        <label class="toggle-opt">
-          <input type="radio" value="karaoke" v-model="audio" :disabled="busy" />
-          <span>Karaoke mix</span>
-        </label>
-        <label class="toggle-opt">
-          <input type="radio" value="instrumental" v-model="audio" :disabled="busy" />
-          <span>Instrumental</span>
-        </label>
-      </span>
+    <div
+      v-else-if="savedPath"
+      class="modal__body"
+    >
+      <span
+        class="export-saved"
+        :title="savedPath"
+      >{{ savedPath }}</span>
+    </div>
 
-      <span class="export-field">
-        <label class="toggle-opt">
+    <div
+      v-else
+      class="modal__body"
+    >
+      <div class="export-form">
+        <span class="export-form__song">{{ songLabel }}</span>
+
+        <fieldset
+          class="export-group"
+          :disabled="busy"
+        >
+          <legend>Format</legend>
+          <div class="export-opts">
+            <label
+              v-for="opt in FORMATS"
+              :key="opt.value"
+              class="export-opt"
+            >
+              <input
+                v-model="format"
+                type="radio"
+                name="export-format"
+                :value="opt.value"
+              >
+              <span class="export-opt__text"><b>{{ opt.label }}</b><span>{{ opt.detail }}</span></span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset
+          class="export-group"
+          :disabled="busy"
+        >
+          <legend>Audio</legend>
+          <div class="export-opts">
+            <label
+              v-for="opt in AUDIO"
+              :key="opt.value"
+              class="export-opt"
+            >
+              <input
+                v-model="audio"
+                type="radio"
+                name="export-audio"
+                :value="opt.value"
+              >
+              <span class="export-opt__text"><b>{{ opt.label }}</b><span>{{ opt.detail }}</span></span>
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="export-field">
+          <span class="export-field__label">Save to</span>
+          <span class="export-path">
+            <input
+              class="export-path__input"
+              type="text"
+              readonly
+              :value="folderLabel"
+              :title="folderTitle"
+              aria-label="Save to folder"
+            >
+            <Button
+              v-if="desktop"
+              variant="ghost"
+              class="export-path__browse"
+              :disabled="busy"
+              @click="chooseFolder"
+            >Browse…</Button>
+          </span>
+        </div>
+
+        <span
+          v-if="error"
+          class="export-error"
+        >{{ error }}</span>
+      </div>
+    </div>
+
+    <div class="modal__footer">
+      <template v-if="running">
+        <Button
+          variant="ghost"
+          class="export-cancel"
+          @click="cancelRun"
+        >
+          Cancel
+        </Button>
+      </template>
+      <template v-else-if="savedPath">
+        <Button
+          variant="primary"
+          @click="onClose"
+        >
+          Done
+        </Button>
+      </template>
+      <template v-else>
+        <label class="toggle-opt export-defaults">
           <input
+            v-model="saveDefaults"
             type="checkbox"
-            :checked="cardChecked"
-            :disabled="busy || settingsLoading"
-            @change="onCardToggle($event.target.checked)"
-          />
-          <span>Include attribution card</span>
+            :disabled="busy"
+          >
+          <span>Save as defaults</span>
         </label>
-      </span>
-
-      <span v-if="error" class="export-error">{{ error }}</span>
-    </span>
+        <Button
+          variant="ghost"
+          :disabled="busy"
+          @click="onClose"
+        >
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          class="export-confirm"
+          :disabled="busy"
+          @click="doExport"
+        >
+          {{ busy ? 'Exporting…' : 'Export' }}
+        </Button>
+      </template>
+    </div>
   </Modal>
 </template>
 
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import Modal from '@/components/ui/Modal.vue'
-import { exportApi } from '@/api/client'
+import Button from '@/components/ui/Button.vue'
+import { exportApi, songApi } from '@/api/client'
+import { normalizeWordSync } from '@/stage/adapter.mjs'
+import { applyVoiceLayout } from '@/utils/voiceLayout.js'
+import { useHostSettings } from '@/stores/hostSettings'
+import { renderVideo } from '@/export/videoRender.js'
 
 const props = defineProps({
   song: { type: Object, default: null },
@@ -64,56 +188,112 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
-const format = ref('mp3g')
+const FORMATS = [
+  { value: 'video', label: 'Video', detail: '720p MP4' },
+  { value: 'mp3g', label: 'MP3+G (.zip)', detail: 'For traditional karaoke software' },
+]
+const AUDIO = [
+  { value: 'karaoke', label: 'Karaoke mix', detail: 'Instrumental and backing vocals' },
+  { value: 'instrumental', label: 'Instrumental', detail: 'Instrumental only' },
+]
+const DEFAULTS_KEY = 'karaoke:exportDefaults'
+const BROWSER_FOLDER = "Where your browser saves files"
+const REMUX_POLL_MS = 1000
+
+const bridge = globalThis.window?.karaokeDesktop
+const desktop = bridge?.isDesktop === true && typeof bridge.exportSong === 'function' ? bridge : null
+
+const format = ref('video')
 const audio = ref('karaoke')
-const cardChecked = ref(true)
-const settingsLoading = ref(false)
+const folder = ref({ path: '', label: '' })
+const saveDefaults = ref(false)
 const busy = ref(false)
 const error = ref('')
+const savedPath = ref('')
+// Video export in progress: 'frames' while rendering, 'remux' while the
+// song's own video is prepared; '' otherwise.
+const running = ref('')
+const progress = ref(0)
+let openGeneration = 0
+let runController = null
+let runSession = null
+
+const hostSettings = useHostSettings()
 
 const songLabel = computed(() =>
   props.song ? (props.song.title || props.song.filename || 'Untitled') : ''
 )
+const progressPercent = computed(() => Math.round(Math.min(1, Math.max(0, progress.value)) * 100))
+const progressLine = computed(() =>
+  running.value === 'remux' ? 'Preparing video…' : `Rendering video… ${progressPercent.value}%`
+)
+// The host sends both the folder and its display form; neither is ever sent
+// back.
+const folderLabel = computed(() => (desktop ? folder.value.label : BROWSER_FOLDER))
+const folderTitle = computed(() => (desktop ? folder.value.path : BROWSER_FOLDER))
 
-// Re-arm the form each time the modal opens for a song. The attribution-card
-// preference is server-side, so it is fetched fresh (checked by default while
-// the answer is in flight).
+function applyDefaults(value) {
+  if (FORMATS.some(f => f.value === value?.format)) format.value = value.format
+  if (AUDIO.some(a => a.value === value?.audio)) audio.value = value.audio
+  if (desktop && typeof value?.folder === 'string') {
+    folder.value = { path: value.folder, label: typeof value.label === 'string' ? value.label : value.folder }
+  }
+}
+
+function readBrowserDefaults() {
+  try { return JSON.parse(localStorage.getItem(DEFAULTS_KEY)) } catch { return null }
+}
+
+// Electron prefixes errors thrown in the main process; show only the reason.
+function bridgeMessage(e) {
+  return String(e?.message || '').replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, '')
+}
+
+// Re-arm the form each time the modal opens for a song.
 watch(
   () => props.song,
   async (song) => {
     if (!song) return
-    format.value = 'mp3g'
+    const generation = ++openGeneration
+    format.value = 'video'
     audio.value = 'karaoke'
+    folder.value = { path: '', label: '' }
+    saveDefaults.value = false
     error.value = ''
+    savedPath.value = ''
     busy.value = false
-    cardChecked.value = true
-    settingsLoading.value = true
+    if (!desktop) {
+      applyDefaults(readBrowserDefaults())
+      return
+    }
     try {
-      const res = await exportApi.getSettings()
-      if (typeof res.data?.attribution_card === 'boolean') {
-        cardChecked.value = res.data.attribution_card
-      }
-    } catch {
-      // Leave the checked default; the server applies its stored setting
-      // either way, and the export itself never sends an override.
-    } finally {
-      settingsLoading.value = false
+      const value = await desktop.getExportDefaults()
+      if (generation === openGeneration) applyDefaults(value)
+    } catch (e) {
+      if (generation === openGeneration) error.value = bridgeMessage(e) || 'Could not load export defaults'
     }
   },
   { immediate: true },
 )
 
-// Persist on toggle — optimistic, reverted if the server refuses. The export
-// request itself carries no card flag; the stored setting is the authority.
-async function onCardToggle(checked) {
-  const previous = cardChecked.value
-  cardChecked.value = checked
+async function chooseFolder() {
+  if (busy.value || !desktop) return
+  error.value = ''
   try {
-    await exportApi.setSettings(checked)
+    const chosen = await desktop.chooseExportFolder()
+    applyDefaults({ folder: chosen?.folder, label: chosen?.label })
   } catch (e) {
-    cardChecked.value = previous
-    error.value = e?.message ? `Could not save setting: ${e.message}` : 'Could not save setting'
+    error.value = bridgeMessage(e) || 'Could not choose a folder'
   }
+}
+
+// Called only after the file was saved. The export itself succeeded, so a
+// failure to remember the choice is not reported as an export failure.
+async function persistDefaults(value) {
+  try {
+    if (desktop) await desktop.saveExportDefaults(value)
+    else localStorage.setItem(DEFAULTS_KEY, JSON.stringify(value))
+  } catch { /* non-fatal */ }
 }
 
 // Prefer the RFC 5987 encoded form, then the plain quoted one; fall back to a
@@ -147,46 +327,208 @@ async function describeFailure(e) {
   return { status, message: e?.message || '' }
 }
 
+async function saveInBrowser(song) {
+  const res = await exportApi.exportSong(song.id, {
+    format: format.value,
+    audio: audio.value,
+    card: true,
+  })
+  saveBlob(res, `export-song-${song.id}.zip`)
+}
+
+function saveBlob(res, fallback) {
+  const disposition = typeof res.headers?.get === 'function'
+    ? res.headers.get('content-disposition')
+    : res.headers?.['content-disposition']
+  const filename = filenameFromDisposition(disposition, fallback)
+
+  // The anchor must be in the document for the programmatic click to
+  // navigate everywhere, and the object URL must outlive the click —
+  // an immediate revoke can abort the save in some browsers.
+  const url = URL.createObjectURL(res.data)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
+function isAbort(e) {
+  return e?.name === 'AbortError' || e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED'
+}
+
+function abortable(signal) {
+  if (signal.aborted) throw new DOMException('Export cancelled', 'AbortError')
+}
+
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms)
+    function done() {
+      signal.removeEventListener('abort', stop)
+      resolve()
+    }
+    function stop() {
+      clearTimeout(timer)
+      reject(new DOMException('Export cancelled', 'AbortError'))
+    }
+    signal.addEventListener('abort', stop, { once: true })
+  })
+}
+
+function stageModelFor(detail) {
+  const data = detail?.word_sync
+  if (!data || !(data.lines || data.segments)) return null
+  try {
+    return applyVoiceLayout(normalizeWordSync(data), data)
+  } catch {
+    return null
+  }
+}
+
+async function waitForRemux(session, signal) {
+  for (;;) {
+    abortable(signal)
+    const { data } = await exportApi.videoStatus(session)
+    if (data?.state === 'ready') return
+    if (data?.state === 'failed' || data?.state === 'cancelled') throw new Error('Video export failed')
+    await wait(REMUX_POLL_MS, signal)
+  }
+}
+
+async function exportVideo(song) {
+  const controller = new AbortController()
+  const signal = controller.signal
+  runController = controller
+  progress.value = 0
+  const choice = audio.value
+  const { data: opened } = await exportApi.openVideo(song.id, { audio: choice })
+  runSession = opened.session
+  running.value = opened.mode === 'remux' ? 'remux' : 'frames'
+  abortable(signal)
+  if (opened.mode === 'remux') {
+    if (!opened.ready) await waitForRemux(runSession, signal)
+  } else {
+    const { data: detail } = await songApi.get(song.id)
+    abortable(signal)
+    await renderVideo({
+      session: runSession,
+      frameCount: opened.frames_expected,
+      model: stageModelFor(detail),
+      backdrop: hostSettings.backdrop,
+      audioUrl: detail?.stems?.[choice] || null,
+      api: {
+        putFrames: (session, index, frames, options) => exportApi.putVideoFrames(session, index, frames, options),
+        cancel: session => exportApi.cancelVideo(session),
+      },
+      onProgress: fraction => { progress.value = fraction },
+      signal,
+    })
+    abortable(signal)
+    await exportApi.finishVideo(runSession)
+  }
+  abortable(signal)
+  let path = ''
+  if (desktop) {
+    const result = await desktop.writeVideoExport({ session: runSession })
+    abortable(signal)
+    path = result?.path || folderTitle.value
+  } else {
+    const res = await exportApi.videoFile(runSession)
+    abortable(signal)
+    saveBlob(res, `export-song-${song.id}.mp4`)
+  }
+  return path
+}
+
+// Remove the server-side session; failures are left to its own cleanup.
+function dropSession() {
+  const session = runSession
+  runSession = null
+  if (session) exportApi.cancelVideo(session).catch(() => {})
+}
+
+function cancelRun() {
+  if (!running.value || !runController) return
+  runController.abort()
+  // Deleting the session also stops a finish or file fetch already under way.
+  dropSession()
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && running.value) {
+    event.preventDefault()
+    cancelRun()
+  }
+}
+
+watch(running, (value) => {
+  if (value) window.addEventListener('keydown', onKeydown)
+  else window.removeEventListener('keydown', onKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  if (running.value) cancelRun()
+})
+
 async function doExport() {
   if (busy.value || !props.song) return
+  const song = props.song
   busy.value = true
   error.value = ''
+  const choice = { format: format.value, audio: audio.value }
+  const remember = saveDefaults.value
   try {
-    const res = await exportApi.exportSong(props.song.id, {
-      format: format.value,
-      audio: format.value === 'mp3g' ? audio.value : undefined,
-    })
-
-    const fallback = `export-song-${props.song.id}.${format.value === 'cdg' ? 'cdg' : 'zip'}`
-    const disposition = typeof res.headers?.get === 'function'
-      ? res.headers.get('content-disposition')
-      : res.headers?.['content-disposition']
-    const filename = filenameFromDisposition(disposition, fallback)
-
-    // The anchor must be in the document for the programmatic click to
-    // navigate everywhere, and the object URL must outlive the click —
-    // an immediate revoke can abort the save in some browsers.
-    const url = URL.createObjectURL(res.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 10_000)
-
-    emit('close')
+    if (choice.format === 'video') {
+      const path = await exportVideo(song)
+      dropSession()
+      if (remember) await persistDefaults(choice)
+      if (desktop) savedPath.value = path
+      else emit('close')
+    } else if (desktop) {
+      const result = await desktop.exportSong({ songId: song.id, ...choice })
+      if (remember) await persistDefaults(choice)
+      savedPath.value = result?.path || folderTitle.value
+    } else {
+      await saveInBrowser(song)
+      if (remember) await persistDefaults(choice)
+      emit('close')
+    }
   } catch (e) {
-    const { status, message } = await describeFailure(e)
-    // A status means the server answered with a detail worth showing verbatim
-    // (not ready, no word sync, capability not installed). Anything else is
-    // transport-level: name the operation, then whatever axios knows.
-    error.value = status && message
-      ? message
-      : (message ? `Export failed: ${message}` : 'Export failed')
+    if (choice.format === 'video') {
+      const cancelled = runController?.signal.aborted || isAbort(e)
+      dropSession()
+      if (!cancelled) error.value = await videoFailure(e)
+    } else if (desktop) {
+      const message = bridgeMessage(e)
+      error.value = message || 'Export failed'
+    } else {
+      const { status, message } = await describeFailure(e)
+      // A status means the server answered with a detail worth showing
+      // verbatim (not ready, no word sync, capability not installed).
+      // Anything else is transport-level: name the operation, then whatever
+      // axios knows.
+      error.value = status && message
+        ? message
+        : (message ? `Export failed: ${message}` : 'Export failed')
+    }
   } finally {
     busy.value = false
+    running.value = ''
+    runController = null
   }
+}
+
+async function videoFailure(e) {
+  const bridged = bridgeMessage(e)
+  if (desktop && bridged && !e?.status && !e?.response) return bridged
+  const { status, message } = await describeFailure(e)
+  return status && message
+    ? message
+    : (message ? `Export failed: ${message}` : 'Export failed')
 }
 
 function onClose() {
@@ -196,6 +538,40 @@ function onClose() {
 </script>
 
 <style scoped>
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+.modal__header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: white;
+}
+.modal__close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0 0.25rem;
+  line-height: 1;
+}
+.modal__close:hover { color: white; }
+.modal__body {
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.5;
+  margin: 0 0 1.25rem;
+}
+.modal__footer {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  align-items: center;
+}
 .export-form {
   display: flex;
   flex-direction: column;
@@ -209,19 +585,93 @@ function onClose() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.export-group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.export-group legend,
+.export-field__label {
+  padding: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4);
+}
+.export-group legend { margin: 0 0 0.35rem; }
+.export-field__label { min-width: 3.2rem; }
+.export-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+@media (max-width: 520px) {
+  .export-opts { grid-template-columns: 1fr; }
+}
+.export-opt {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+}
+.export-opt:hover { background: rgba(255, 255, 255, 0.05); }
+.export-opt:has(input:checked) {
+  border-color: var(--c-primary-border);
+  background: var(--c-primary-bg);
+}
+.export-group:disabled .export-opt { cursor: default; }
+.export-opt input { accent-color: var(--c-primary, #e23e57); margin: 0.2rem 0 0; }
+.export-opt__text b {
+  display: block;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.88);
+  font-weight: 600;
+}
+.export-opt__text span {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
 .export-field {
   display: flex;
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
 }
-.export-field__label {
-  min-width: 3.2rem;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.4);
+.export-path {
+  display: flex;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+}
+.export-path__input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.8);
+  font-family: inherit;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  padding: 0.3rem 0.45rem;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.export-path__input:focus { outline: none; border-color: var(--c-primary-border); }
+.export-path .export-path__browse { padding: 0.3rem 0.65rem; font-size: 0.75rem; }
+.export-saved {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-primary, #fff);
+  overflow-wrap: anywhere;
 }
 .toggle-opt {
   display: flex;
@@ -231,8 +681,31 @@ function onClose() {
   color: rgba(255, 255, 255, 0.7);
   cursor: pointer;
 }
-.toggle-opt input { accent-color: var(--c-primary, #e23e57); cursor: inherit; }
+.toggle-opt input { accent-color: var(--c-primary, #e23e57); cursor: inherit; margin: 0; }
 .toggle-opt input:disabled { cursor: default; }
+.export-defaults { margin-right: auto; }
+.export-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.export-progress__line {
+  font-size: 0.85rem;
+  color: var(--text-primary, #fff);
+  font-variant-numeric: tabular-nums;
+}
+.export-progress__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.export-progress__bar span {
+  display: block;
+  height: 100%;
+  background: var(--c-primary, #e23e57);
+  transition: width 0.2s ease;
+}
 .export-error {
   font-size: 0.75rem;
   color: var(--c-error, #fb7f5c);

@@ -37,7 +37,7 @@ export function hasAnalysers() {
   return !!_analysers
 }
 
-const ZERO_FRAME = Object.freeze({
+export const ZERO_FRAME = Object.freeze({
   level: 0,
   bands: Object.freeze({ bass: 0, mid: 0, treble: 0 }),
   beat: 0,
@@ -69,17 +69,30 @@ export function sample(source = 'mix') {
 
   an.getByteFrequencyData(sc.freq)
   an.getByteTimeDomainData(sc.wave)
+  return analyseFrame(sc, sc.freq, sc.wave)
+}
+
+// Smoothing state for analyseFrame(), one per independent stream of frames.
+export function createAnalysisState() {
+  return { level: 0, bass: 0, mid: 0, treble: 0, beat: 0, prevBass: 0 }
+}
+
+// The band maths for one analyser reading: byte frequency data `freq` and
+// byte time-domain data `wave` in, the visualizer frame out. Pure apart from
+// the smoothing carried in `state` between successive frames.
+export function analyseFrame(state, freq, wave) {
+  const sc = state
 
   // Band split. Bins are linear in frequency and musical energy skews low, so
   // bass is a small slice of bins but carries most of the felt pulse. Mean per
   // slice, normalised to 0..1.
-  const n = sc.freq.length
+  const n = freq.length
   const bassEnd = Math.max(1, Math.floor(n * 0.08))
   const midEnd = Math.max(bassEnd + 1, Math.floor(n * 0.40))
   let bassSum = 0, midSum = 0, trebSum = 0
-  for (let i = 0; i < bassEnd; i++) bassSum += sc.freq[i]
-  for (let i = bassEnd; i < midEnd; i++) midSum += sc.freq[i]
-  for (let i = midEnd; i < n; i++) trebSum += sc.freq[i]
+  for (let i = 0; i < bassEnd; i++) bassSum += freq[i]
+  for (let i = bassEnd; i < midEnd; i++) midSum += freq[i]
+  for (let i = midEnd; i < n; i++) trebSum += freq[i]
   const bass = bassSum / (bassEnd * 255)
   const mid = midSum / ((midEnd - bassEnd) * 255)
   const treble = trebSum / ((n - midEnd) * 255)
@@ -87,11 +100,11 @@ export function sample(source = 'mix') {
   // Overall level from time-domain RMS — perceptually steadier than a bin mean,
   // and already reflects post-gain/mute output.
   let sq = 0
-  for (let i = 0; i < sc.wave.length; i++) {
-    const v = (sc.wave[i] - 128) / 128
+  for (let i = 0; i < wave.length; i++) {
+    const v = (wave[i] - 128) / 128
     sq += v * v
   }
-  const rms = Math.sqrt(sq / sc.wave.length)
+  const rms = Math.sqrt(sq / wave.length)
   const level = Math.min(1, rms * 1.8) // headroom scale; RMS rarely nears 1
 
   // Attack-fast / release-slow smoothing: a hit reads immediately, the glow
@@ -111,7 +124,7 @@ export function sample(source = 'mix') {
     level: sc.level,
     bands: { bass: sc.bass, mid: sc.mid, treble: sc.treble },
     beat: Math.min(1, sc.beat),
-    freq: sc.freq,
-    waveform: sc.wave,
+    freq,
+    waveform: wave,
   }
 }
