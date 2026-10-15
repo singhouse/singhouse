@@ -6,6 +6,10 @@ be switched on. Re-transcribe and re-align can ask for it too, and importing
 the ingest orchestrator to borrow one callback would drag the whole
 separation pipeline — and its module-level worker imports — into handlers that
 never separate anything.
+
+``make_progress_message_callback`` is the same bridge for any other stage
+that runs inside the blocking pipeline thread (the acoustic word-timing
+stage reports through it).
 """
 
 from __future__ import annotations
@@ -35,9 +39,22 @@ def make_correction_progress_callback(
     loop: asyncio.AbstractEventLoop,
 ):
     """Bridge lyricsync's executor-thread callback to the async DB engine."""
+    progress = make_progress_message_callback(job_id, worker_id, loop)
 
     def correction_progress(ri: int, total: int) -> None:
-        message = f"LLM correction: region {ri + 1}/{total}"
+        progress(f"LLM correction: region {ri + 1}/{total}")
+
+    return correction_progress
+
+
+def make_progress_message_callback(
+    job_id: str,
+    worker_id: str,
+    loop: asyncio.AbstractEventLoop,
+):
+    """Bridge a pipeline-thread ``progress(message)`` call to the job row."""
+
+    def progress(message: str) -> None:
         future = asyncio.run_coroutine_threadsafe(
             _persist_correction_progress(job_id, worker_id, message),
             loop,
@@ -51,9 +68,7 @@ def make_correction_progress_callback(
         except Exception as exc:
             future.cancel()
             logger.warning(
-                "Could not persist LLM correction progress for job %s: %s",
-                job_id,
-                exc,
+                "Could not persist progress for job %s: %s", job_id, exc,
             )
 
-    return correction_progress
+    return progress
