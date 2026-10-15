@@ -143,7 +143,7 @@ python3 desktop/build/build_processing.py \
   --cache /path/to/build-cache --output /path/to/new-processing-build
 ```
 
-(Add `--artifact-layout flat --artifact-base-url https://...` when exporting `<sha256>-<filename>` assets for GitHub Releases. Legacy `.pack.gz` archive packs can still be built or re-hosted via `desktop/build/assemble_processing.py` during migration.)
+(Add `--artifact-layout flat --artifact-base-url https://...` when exporting `<sha256>-<filename>` assets for GitHub Releases.)
 
 ### Generating a Setup Catalog (`setup_catalog.mjs`)
 
