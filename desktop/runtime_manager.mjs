@@ -495,6 +495,11 @@ export async function durableReplace(lockPython, durabilityHelper, source, desti
   })
 }
 
+// The processing and model stores share one install root.
+export function managedStoreDirectories(root) {
+  return { processing: join(root, 'processing'), models: join(root, 'model-cache') }
+}
+
 export class RuntimeManager {
   constructor(root, identity, { fetchImpl = globalThis.fetch, diskFree, progress = () => {}, lockPython,
     durabilityHelper, nativeBin, nativeRuntimeId = null, directorySync = syncDirectory, activationHook = async () => {}, trustedLocks = [] } = {}) {

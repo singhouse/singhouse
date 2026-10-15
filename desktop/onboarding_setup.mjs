@@ -185,6 +185,12 @@ function processingEstimate(runtime, hardware = {}, { cudaEstimateAllowed = fals
   return { level, label, minutes: [...tier.minutes], basis: tier.basis, evidence: tier.evidence }
 }
 
+// A run that finished and verified its installation, whether it is already
+// loaded or needs reopening.
+export function setupCompleted(status) {
+  return status?.phase === 'complete' && ['ready', 'restart-required'].includes(status.state)
+}
+
 // Catalog, policy, and qualification are release-owned inputs. Never populate
 // these from renderer messages, persisted progress, or an unsigned remote feed.
 export class OnboardingSetup {
@@ -201,14 +207,25 @@ export class OnboardingSetup {
   // releaseChannel is the validated release policy's channel; it decides
   // whether private-smoke qualification evidence is acceptable.
   constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
-    loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
-    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
+    installLocation = null, loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
+    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, installLocation, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
     this.state = initial()
     this.operation = null
     this.controller = null
+    this.pausing = false
+    this.consentedPlanId = null
     this.restoring = null
     this.check = null
+  }
+
+  // A running or paused attempt keeps its stores until it finishes or stops.
+  storesLocked() { return Boolean(this.operation) || this.state.state === 'paused' }
+
+  // Later installs and repairs use these stores; existing files stay where they are.
+  useStores({ runtime, cache, installLocation }) {
+    if (this.storesLocked()) throw new Error('Wait for the current setup operation before changing the install location.')
+    Object.assign(this, { runtime, cache, installLocation })
   }
 
   async getStatus() {
@@ -230,7 +247,7 @@ export class OnboardingSetup {
     // checkpoint to be checked again.
     if (previous?.state === 'restart-required' || (previous?.state === 'error' && previous.phase === 'verification')) {
       this.state = { ...initial(), state: 'checking', phase: 'verification', message: 'Checking your local processing setup…' }
-    } else if (previous && ['running', 'error', 'cancelled'].includes(previous.state)) {
+    } else if (previous && ['running', 'paused', 'error', 'cancelled'].includes(previous.state)) {
       this.state = { ...initial(), state: 'cancelled', message: 'Setup was interrupted. Retry to verify and resume saved files.', retryable: true }
     }
   }
@@ -369,8 +386,13 @@ export class OnboardingSetup {
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const estimateOptions = { cudaEstimateAllowed: qualificationStatusMatches(this.catalog?.qualification)
       && !qualificationScopeError(this.catalog?.qualification?.scope, this.releaseChannel) }
+    let freeBytes = null
+    try { freeBytes = this.diskFree ? await this.diskFree() : null } catch { /* reported as unknown */ }
+    signal?.throwIfAborted()
+    if (!Number.isSafeInteger(freeBytes)) freeBytes = null
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+      processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null,
+      installLocation: this.installLocation ?? null, freeBytes }
     if (installed.installed) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
       || hash(installed.runtime.manifest) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
@@ -393,8 +415,7 @@ export class OnboardingSetup {
       // still need space.
       const runtimeReserve = !runtimeNeeded ? 0 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
       const diskRequiredBytes = runtimeReserve + modelBytes * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
-      const diskFreeBytes = this.diskFree ? await this.diskFree() : null
-      signal?.throwIfAborted()
+      const diskFreeBytes = freeBytes
       const runtimeSources = runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
       const components = [
         ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, installedBytes: runtimeInstalledBytes, sourceMode: 'catalog',
@@ -419,21 +440,57 @@ export class OnboardingSetup {
     // Reserve immediately, before preflight yields, so concurrent starts share
     // the same attempt and cannot open two installs.
     this.controller = new AbortController()
+    this.pausing = false
+    // Resuming a paused attempt repeats its consented request. The plan id
+    // can change once the runtime has activated (its component is no longer
+    // offered), so the recorded consent is accepted for this attempt only.
+    const resuming = this.state.state === 'paused' && this.consentedPlanId !== null && planId === this.consentedPlanId
+    if (!resuming) this.consentedPlanId = planId ?? null
     const signal = this.controller.signal
-    this.operation = this.run(planId, signal).finally(() => { this.operation = null; this.controller = null })
+    this.operation = this.run(planId, signal, { resuming }).finally(() => { this.operation = null; this.controller = null; this.pausing = false })
     return this.getStatus()
   }
 
   cancel() { this.controller?.abort() }
 
-  async run(planId, signal) {
+  // Stops the running attempt but keeps every partially transferred file;
+  // starting again with the same plan resumes from the saved bytes.
+  async pause() {
+    await this.getStatus()
+    const operation = this.operation
+    if (!operation) return this.getStatus()
+    this.pausing = true
+    this.controller.abort()
+    await operation
+    return this.getStatus()
+  }
+
+  // Stops setup for good: a running attempt is cancelled as before, and a
+  // paused one returns to idle. Saved partial files are left for a later
+  // attempt; the installers have no separate discard operation.
+  async stop() {
+    await this.getStatus()
+    if (this.operation) {
+      const operation = this.operation
+      this.controller.abort()
+      await operation
+      return this.getStatus()
+    }
+    if (this.state.state !== 'paused') return this.getStatus()
+    this.consentedPlanId = null
+    return this.update({ ...initial(), stage: undefined, progress: undefined, error: undefined })
+  }
+
+  async run(planId, signal, { resuming = false } = {}) {
     const originalRuntimeProgress = this.runtime.progress, originalModelProgress = this.cache.progress
     try {
-      await this.update({ state: 'running', phase: 'preflight', message: 'Verifying the complete local setup.', error: undefined, progress: undefined, retryable: false })
+      // A resumed attempt keeps showing the stage it was paused in.
+      await this.update({ state: 'running', phase: 'preflight', message: 'Verifying the complete local setup.', error: undefined, progress: undefined, retryable: false,
+        stage: this.state.state === 'paused' && this.state.stage ? this.state.stage : 'retrieve' })
       const plan = await this.preflight({ signal, advisory: false })
       signal.throwIfAborted()
       if (!plan.available) throw new Error(plan.reason)
-      if (plan.planId !== planId) throw new Error('The setup plan changed. Review the complete installation plan again.')
+      if (plan.planId !== planId && !resuming) throw new Error('The setup plan changed. Review the complete installation plan again.')
       if (!plan.ready && !plan.restartRequired) {
         const active = await this.installed({ signal })
         const selected = this.selection(active.models)
@@ -446,8 +503,13 @@ export class OnboardingSetup {
         ]) {
           signal.throwIfAborted()
           if (existing?.id === hash(manifest)) continue
-          await this.update({ phase, message: phase === 'runtime' ? 'Installing the local processing runtime.' : 'Installing separation and Heart model files.' })
-          manager.progress = progress => { this.state.progress = progress; this.notify(structuredClone(this.state)) }
+          await this.update({ phase, stage: phase === 'runtime' ? 'retrieve' : 'models',
+            message: phase === 'runtime' ? 'Installing the local processing runtime.' : 'Installing separation and Heart model files.' })
+          manager.progress = progress => {
+            this.state.progress = progress
+            if (phase === 'runtime') this.state.stage = progress?.phase === 'extract' ? 'unpack' : 'retrieve'
+            this.notify(structuredClone(this.state))
+          }
           if (phase === 'models' && this.#offlineModelsDirectory !== null) {
             try { await this.cache.installFromDirectory(manifest, this.#offlineModelsDirectory, { prefix: '', signal }) }
             catch (error) {
@@ -458,13 +520,19 @@ export class OnboardingSetup {
         }
       }
       signal.throwIfAborted()
-      await this.update({ phase: 'verification', message: 'Verifying all local processing components.', progress: undefined })
+      await this.update({ phase: 'verification', stage: 'verify', message: 'Verifying all local processing components.', progress: undefined })
       const result = await this.installed({ signal })
       signal.throwIfAborted()
       if (!result.installed) throw new Error('Complete local processing verification failed. Retry setup to repair the saved files.')
-      await this.update({ state: result.ready ? 'ready' : 'restart-required', phase: 'complete',
+      this.consentedPlanId = null
+      await this.update({ state: result.ready ? 'ready' : 'restart-required', phase: 'complete', stage: 'complete',
         message: result.ready ? 'Local processing is ready.' : REOPEN_MESSAGE, restartRequired: result.restartRequired })
     } catch (error) {
+      if (signal.aborted && this.pausing) {
+        // The last progress stays visible beside the paused stage.
+        await this.update({ state: 'paused', phase: 'paused', message: 'Setup paused.', error: undefined, retryable: true, restartRequired: false })
+        return
+      }
       await this.update({ state: signal.aborted ? 'cancelled' : 'error', phase: 'paused', progress: undefined,
         message: signal.aborted ? 'Setup cancelled. Retry to resume saved files.' : error.message,
         error: signal.aborted ? undefined : error.message, retryable: true, restartRequired: false })

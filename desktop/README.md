@@ -1454,9 +1454,10 @@ consent screen is accepted; `harnessUsedAdvancedRoute` is always `false`; and
 
 Two recovery exercises are available; choose at most one:
 
-- `--interrupt-runtime-retrieval` cancels setup from the wizard's own controls
+- `--interrupt-runtime-retrieval` pauses setup from the wizard's own controls
   once at least 5% of the runtime has transferred, records the partial bytes
-  kept on disk, and retries with "Review setup and retry". Start the pack server
+  kept on disk, checks the paused state, and resumes through the same control.
+  Start the pack server
   with `--throttle-bytes-per-second` so the 5% point is observable.
 - `--expect-retrieval-failure-then-retry` expects the pack server's
   `--fail-after-bytes` failure: setup reaches its error screen during runtime

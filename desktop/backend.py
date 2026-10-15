@@ -859,15 +859,22 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
                            model_policy: dict | None = None,
                            trusted_locks: list[str] | None = None, *,
                            processing_id: str | None = None,
-                           models_id: str | None = None) -> dict[str, str]:
+                           models_id: str | None = None,
+                           processing_root: Path | None = None) -> dict[str, str]:
     """Recheck selected immutable files before giving workers executable paths."""
     # Keep inventory access, parent containment, attestation equality, and the
     # interpreter paths inherited by managed workers in one Windows namespace.
     # Do not resolve here: that would hide symbolic links from verification.
+    if processing_root is not None and not processing_root.is_absolute():
+        raise RuntimeError("Invalid managed processing path")
     if os.name == "nt":
         runtime = _windows_extended_path(runtime)
         processing = _windows_extended_path(processing) if processing is not None else None
         models = _windows_extended_path(models) if models is not None else None
+        processing_root = _windows_extended_path(processing_root) if processing_root is not None else None
+    # Stores live under the install root chosen by the parent; by default the
+    # directory holding the backend runtime.
+    store_root = runtime.parent if processing_root is None else processing_root
     env = {"KARAOKE_PROCESSING_MEMORY_JSON": "", "KARAOKE_PROCESSING_PYTHON": "", "KARAOKE_DEMUCS_PYTHON": "",
            "KARAOKE_PROCESSING_ACCELERATOR": "",
            "KARAOKE_AUDIO_SEPARATOR_DEVICE": "",
@@ -886,7 +893,7 @@ def processing_environment(runtime: Path, identity: dict, processing: Path | Non
         # The parent passes the full manifest digest as the identity. The
         # directory may be named by that digest or by its first 16 characters;
         # either way the manifest is checked against the full digest.
-        expected_parent = runtime.parent / store / "packs"
+        expected_parent = store_root / store / "packs"
         if (directory.parent != expected_parent or not isinstance(identifier, str)
                 or not re.fullmatch(r"[a-f0-9]{64}", identifier)
                 or directory.name not in (identifier, identifier[:16])):
@@ -1332,7 +1339,8 @@ def desktop_lyrics_lookup_endpoint(control_token):
 def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native: Path | None = None,
         processing: Path | None = None, models: Path | None = None, processing_probe: dict | None = None,
         desktop_config_stdin: bool = False, processing_id: str | None = None,
-        models_id: str | None = None, lyrics_lookup: bool = False) -> None:
+        models_id: str | None = None, lyrics_lookup: bool = False,
+        processing_root: Path | None = None) -> None:
     tree_job = own_process_tree() if native else None
     identity = validate_native(native) if native else None
     private_modal = None
@@ -1372,7 +1380,8 @@ def run(root: Path | None, demo: bool, runtime_path: Path | None = None, native:
             environment = persistent_environment(runtime, origin, password, native) if native else isolated_environment(runtime, origin, password)
             if native:
                 environment.update(processing_environment(runtime, identity, processing, models, processing_probe,
-                                                          processing_id=processing_id, models_id=models_id))
+                                                          processing_id=processing_id, models_id=models_id,
+                                                          processing_root=processing_root))
             if native and lyrics_lookup:
                 environment["KARAOKE_LRCLIB"] = "1"
             os.environ.clear()
@@ -1550,6 +1559,7 @@ if __name__ == "__main__":
     parser.add_argument("--runtime", type=Path, help="Empty private directory created by the parent")
     parser.add_argument("--processing", type=Path, help="Verified installed processing pack selected by the desktop parent")
     parser.add_argument("--processing-id", help="Full manifest identity of the selected processing pack")
+    parser.add_argument("--processing-root", type=Path, help="Install root holding the processing and model stores (default: the runtime's parent)")
     parser.add_argument("--models", type=Path, help="Verified upstream model cache selected by the desktop parent")
     parser.add_argument("--models-id", help="Full manifest identity of the selected model cache")
     parser.add_argument("--processing-probe", type=json.loads, help="Interpreter identity attested by the parent after its fixed runtime probe")
@@ -1586,7 +1596,7 @@ if __name__ == "__main__":
             raise SystemExit(launch_recovery_kit(Path(kit), manifest_hash, target_platform, target_arch, arguments))
         else:
             run(args.root, args.demo, args.runtime, args.native, args.processing, args.models, args.processing_probe, args.desktop_config_stdin,
-                args.processing_id, args.models_id, args.lyrics_lookup)
+                args.processing_id, args.models_id, args.lyrics_lookup, args.processing_root)
     except Exception as error:
         print(f"Desktop backend failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

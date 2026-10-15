@@ -353,7 +353,7 @@ const requestPath = url => url.split('?')[0]
 // A retry is classified only from the source server's request log. Polling
 // observations are recorded as supplementary context, never as proof.
 // `path` is the URL path of the interrupted runtime file; `after` is the
-// ISO time of the interruption (cancel click or injected failure); `size` is
+// ISO time of the interruption (pause click or injected failure); `size` is
 // that file's catalog size, when known. A `resumed` classification requires
 // the first request after the interruption to carry `Range: bytes=N-` (N > 0),
 // receive 206 and be logged `complete`, its served byte count to equal
@@ -616,7 +616,7 @@ export function assertPostRestart({ settled, readiness, installed, installedMode
 }
 
 // Setup has started once status leaves `idle` and differs from what it was
-// before the install click (a retry starts from `cancelled` or `error`).
+// before the install click (a retry starts from `paused`, `cancelled` or `error`).
 export function setupStarted(before, status) {
   if (!status || status.state === 'idle') return false
   if (status.state === 'running') return true
@@ -765,10 +765,14 @@ export async function waitForSetupStart(read, { before, timeoutMs, interval = 25
   throw new Error(`Setup did not start within ${Math.round(timeoutMs / 1000)} s of the install click (status ${status?.state ?? 'missing'})`)
 }
 
-export async function cancelFromUi(page) {
-  const details = control(page, 'onboarding-setup-controls')
-  if (await details.getAttribute('open') === null) await details.locator('summary').click()
-  await control(page, 'onboarding-cancel').click()
+// The progress card's Pause control switches to Resume in place.
+export async function pauseFromUi(page) {
+  await control(page, 'onboarding-pause').click()
+}
+
+export async function resumeFromUi(page, { timeoutMs }) {
+  await waitForIdle(page, { timeoutMs })
+  await control(page, 'onboarding-pause').click()
 }
 
 export async function retryFromUi(page, { timeoutMs }) {

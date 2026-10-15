@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
-import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
+import { OnboardingSetup, LOCAL_MODEL_IDS, setupCompleted } from '../onboarding_setup.mjs'
 import { RuntimeManager } from '../runtime_manager.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -71,6 +71,70 @@ test('CUDA device presence alone does not establish dedicated VRAM or override u
     assert.equal(plan.available, false)
     assert.equal(plan.memoryQualification.status, 'unknown')
   }
+})
+test('preflight reports the install location and the free space of its volume', async () => {
+  const { setup } = fixture({ installLocation: '/data/karaoke-tools', diskFree: async () => 5e10 })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/karaoke-tools')
+  assert.equal(plan.freeBytes, 5e10)
+  assert.equal(plan.diskFreeBytes, 5e10)
+  const unknown = fixture({ diskFree: async () => { throw new Error('statfs failed') } })
+  const blocked = await unknown.setup.preflight()
+  assert.equal(blocked.installLocation, null)
+  assert.equal(blocked.freeBytes, null)
+  assert.equal(blocked.available, false)
+  assert.match(blocked.reason, /could not be checked/)
+})
+test('a changed install location sends the next install to the new stores and is refused while setup runs', async () => {
+  const { setup, runtime, cache, calls } = fixture({ installLocation: '/data/first' })
+  const moved = fixture()
+  setup.useStores({ runtime: moved.runtime, cache: moved.cache, installLocation: '/data/second' })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/second')
+  assert.equal((await setup.start({ consent: true, planId: plan.planId })).state, 'running')
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  await setup.operation
+  assert.deepEqual(calls, [])
+  assert.deepEqual(moved.calls, ['runtime', 'models'])
+  assert.equal(runtime.value, undefined)
+  assert.equal(cache.value, undefined)
+  assert.ok(moved.runtime.value && moved.cache.value)
+  assert.equal(setup.storesLocked(), false)
+  setup.state = { ...setup.state, state: 'paused' }
+  assert.equal(setup.storesLocked(), true)
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  assert.equal(setup.installLocation, '/data/second')
+})
+test('a finished run counts as completed whether it is already loaded or needs reopening', async () => {
+  const first = fixture()
+  const reopen = await start(first.setup, (await first.setup.preflight()).planId)
+  assert.equal(reopen.state, 'restart-required')
+  assert.equal(setupCompleted(reopen), true)
+  // A run whose installed identities equal the loaded ones ends ready.
+  const second = fixture()
+  const plan = await second.setup.preflight()
+  const loaded = fixture()
+  await start(loaded.setup, (await loaded.setup.preflight()).planId)
+  second.setup.loaded = { runtimeId: loaded.runtime.value.id, modelsId: loaded.cache.value.id }
+  const ready = await start(second.setup, plan.planId)
+  assert.equal(ready.state, 'ready')
+  assert.equal(ready.phase, 'complete')
+  assert.equal(setupCompleted(ready), true)
+  for (const status of [{ state: 'ready', phase: 'preflight' }, { state: 'error', phase: 'complete' }, { state: 'paused', phase: 'retrieve' }, null]) {
+    assert.equal(setupCompleted(status), false)
+  }
+})
+test('the desktop host settles the install location on any completed run and re-reads the store after menu consent', async () => {
+  const main = await readFile(new URL('../main.mjs', import.meta.url), 'utf8')
+  assert.match(main, /if \(setupCompleted\(await onboardingSetup\.getStatus\(\)\)\) await installCompleted\(\)/)
+  const menu = main.slice(main.indexOf('async function installProcessing()'), main.indexOf('async function start()'))
+  const consent = menu.indexOf('if (consent.response !== 1 || quitting) return')
+  assert.ok(consent > 0)
+  const after = menu.slice(consent)
+  assert.match(after, /operationGate\.active \|\| processingOperation/)
+  assert.match(after, /const current = manifest\.kind === 'models' \? modelCache : processingManager/)
+  assert.match(after, /await current\.install\(manifest/)
+  assert.doesNotMatch(after, /await manager\.install/)
 })
 test('low disk and missing weight terms block the complete setup', async () => {
   const { setup } = fixture({ diskFree: async () => 1 })
@@ -523,9 +587,161 @@ test('full setup installs an archive-form runtime catalog through the runtime ma
   assert.equal((await setup.preflight()).ready, true)
 })
 
+test('pausing keeps the partial transfer and resuming continues it with a range request', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'onboarding-pause-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { manifest, parts, urls } = archiveRuntime(archiveEntries)
+  const held = 10
+  const requests = []
+  let hold = true
+  const fetchImpl = async (url, options) => {
+    const index = urls.indexOf(String(url))
+    requests.push({ index, range: options.headers?.Range ?? null })
+    const bytes = parts[index]
+    if (index === 1 && hold) {
+      hold = false
+      // Delivers the first bytes, then waits until the attempt is stopped.
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new Uint8Array(bytes.subarray(0, held)))
+        options.signal.addEventListener('abort', () => controller.error(new Error('aborted')), { once: true })
+      } }))
+    }
+    const range = /^bytes=(\d+)-$/.exec(options.headers?.Range ?? '')
+    if (range) {
+      const start = Number(range[1])
+      return new Response(bytes.subarray(start), { status: 206, headers: { 'content-range': `bytes ${start}-${bytes.length - 1}/${bytes.length}` } })
+    }
+    return new Response(bytes)
+  }
+  const runtime = new RuntimeManager(join(root, 'processing'), archiveIdentity, { fetchImpl,
+    lockPython: process.platform === 'win32' ? 'python.exe' : 'python3',
+    durabilityHelper: fileURLToPath(new URL('../backend.py', import.meta.url)),
+    trustedLocks: [manifest.provenance.lockSha256], diskFree: async () => 1e12 })
+  runtime.probe = async () => ({ schema: 2, accelerator: 'cpu', hardwareAvailable: true, pythonVersion: '3.12.14', backendVersion: '0.1.0', lyricsyncVersion: '0.1.0',
+    capabilities: manifest.capabilities, components: Object.fromEntries(manifest.probe.modules.map(module => [module, '1'])),
+    capabilitiesReady: true, verifiedCapabilities: manifest.capabilities,
+    checks: { deviceTensor: true, nativeAudio: true, transcription: true, separation: true } })
+  const { setup, calls, saved } = fixture({ runtime })
+  setup.catalog.runtime = manifest
+  setup.catalog.qualification.runtimeLockSha256 = manifest.provenance.lockSha256
+  const stages = []
+  let reachedHold
+  const holding = new Promise(resolve => { reachedHold = resolve })
+  setup.notify = state => {
+    if (state.stage && stages.at(-1) !== state.stage) stages.push(state.stage)
+    if (state.progress?.part === 2 && state.progress.received === held) reachedHold()
+  }
+  const plan = await setup.preflight()
+  assert.equal(plan.available, true, plan.reason)
+  await setup.start({ consent: true, planId: plan.planId })
+  await holding
+  const paused = await setup.pause()
+  assert.equal(setup.operation, null)
+  assert.equal(paused.state, 'paused')
+  assert.equal(paused.message, 'Setup paused.')
+  assert.equal(paused.stage, 'retrieve')
+  assert.equal(paused.retryable, true)
+  assert.equal(paused.error, undefined)
+  assert.deepEqual([paused.progress.part, paused.progress.parts, paused.progress.received], [2, 2, held])
+  assert.equal(saved.at(-1).state, 'paused')
+  assert.deepEqual(calls, [])
+
+  // Resuming is the same start request; the held part continues from its saved bytes.
+  const status = await start(setup, plan.planId)
+  assert.equal(status.state, 'restart-required', status.error)
+  assert.equal(status.stage, 'complete')
+  assert.deepEqual(requests, [{ index: 0, range: null }, { index: 1, range: null }, { index: 1, range: `bytes=${held}-` }])
+  assert.deepEqual(calls, ['models'])
+  assert.deepEqual(stages, ['retrieve', 'unpack', 'models', 'verify', 'complete'])
+})
+
+for (const stage of ['models', 'verify']) {
+  test(`a setup paused in the ${stage} stage resumes with its original consented request`, async () => {
+    const { setup, runtime, cache, calls } = fixture()
+    let entered, hold = true
+    const reached = new Promise(resolve => { entered = resolve })
+    const waitForAbort = signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+    if (stage === 'models') {
+      const install = cache.install
+      cache.install = async (value, options) => {
+        if (!hold) return install(value, options)
+        hold = false; entered(); await waitForAbort(options.signal)
+      }
+    } else {
+      const probe = runtime.probe
+      runtime.probe = async (active, options = {}) => {
+        if (setup.state.stage !== 'verify' || !hold) return probe(active, options)
+        hold = false; entered(); await waitForAbort(options.signal)
+      }
+    }
+    const plan = await setup.preflight()
+    await setup.start({ consent: true, planId: plan.planId })
+    await reached
+    const paused = await setup.pause()
+    assert.equal(paused.state, 'paused')
+    assert.equal(paused.stage, stage)
+    // The activated runtime is no longer offered, so a fresh plan differs.
+    assert.notEqual((await setup.preflight()).planId, plan.planId)
+    const status = await start(setup, plan.planId)
+    assert.equal(status.state, 'restart-required', status.message)
+    assert.equal(status.stage, 'complete')
+    assert.deepEqual(calls, ['runtime', 'models'])
+    assert.equal(setup.consentedPlanId, null)
+  })
+}
+
+test('a recorded consent is honoured only while paused and is cleared by stopping', async () => {
+  async function pausedInModels() {
+    const context = fixture()
+    let entered
+    const reached = new Promise(resolve => { entered = resolve })
+    context.cache.install = async (_, { signal }) => {
+      entered(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+    }
+    const plan = await context.setup.preflight()
+    await context.setup.start({ consent: true, planId: plan.planId })
+    await reached
+    assert.equal((await context.setup.pause()).state, 'paused')
+    return { ...context, plan }
+  }
+  // A different request is not the paused attempt, and once that attempt has
+  // ended the original request is checked against a fresh plan again.
+  const first = await pausedInModels()
+  assert.match((await start(first.setup, 'other')).message, /setup plan changed/)
+  assert.match((await start(first.setup, first.plan.planId)).message, /setup plan changed/)
+  // Stopping a paused attempt forgets its consent.
+  const second = await pausedInModels()
+  assert.equal((await second.setup.stop()).state, 'idle')
+  assert.equal(second.setup.consentedPlanId, null)
+  assert.match((await start(second.setup, second.plan.planId)).message, /setup plan changed/)
+})
+
+test('stopping a paused setup returns to idle; stopping a running one still cancels', async () => {
+  const { setup, runtime } = fixture()
+  let entered
+  const started = () => new Promise(resolve => { entered = resolve })
+  runtime.install = async (_, { signal }) => { entered(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) }
+  const plan = await setup.preflight()
+  let running = started()
+  await setup.start({ consent: true, planId: plan.planId })
+  await running
+  assert.equal((await setup.pause()).state, 'paused')
+  // Pausing or stopping with nothing running leaves the state alone.
+  assert.equal((await setup.pause()).state, 'paused')
+  const stopped = await setup.stop()
+  assert.equal(stopped.state, 'idle')
+  assert.equal(stopped.stage, undefined)
+  assert.equal(stopped.progress, undefined)
+  assert.equal((await setup.stop()).state, 'idle')
+  running = started()
+  await setup.start({ consent: true, planId: plan.planId })
+  await running
+  assert.equal((await setup.stop()).state, 'cancelled')
+})
+
 // ---- Restored checkpoints ---------------------------------------------------
 test('each restored checkpoint kind maps to its workflow state without proving readiness', async () => {
-  for (const [saved, state, phase = 'paused'] of [['running', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
+  for (const [saved, state, phase = 'paused'] of [['running', 'cancelled'], ['paused', 'cancelled'], ['error', 'cancelled'], ['cancelled', 'cancelled'],
     ['restart-required', 'checking', 'complete'], ['error', 'checking', 'verification'], ['ready', 'idle'], ['idle', 'idle'], [undefined, 'idle']]) {
     const { setup, saved: writes } = fixture({ load: async () => saved && { schema: 1, state: saved, phase } })
     const status = await setup.getStatus()
