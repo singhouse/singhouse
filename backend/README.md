@@ -170,15 +170,16 @@ accumulates their uploads until they are deleted.
 
 ## Acoustic Word Timing
 
-When a song is synced against lyrics (plain or synced/LRC, on ingest,
-re-transcribe and re-align), a final stage re-times every word against the
+Whenever a song is synced — with plain or synced/LRC lyrics, or without
+lyrics, where the transcriber's own words are used — on ingest, re-transcribe
+and re-align, a final stage re-times every word against the
 vocal audio. It runs several CTC acoustic models (HuBERT-Large, wav2vec2-Large,
 HuBERT-XLarge and, when available, a phoneme model) in the same processing
 Python as Heart transcription, and fuses their word times with the existing
 ones. Only word `start`/`end` change — the text, word count and lines never do.
 The models hear the lead-vocals stem plus a sibling `backing_vocals.*` stem
-when there is one (a full `vocals.*` stem is used alone). Runs without a lyrics
-reference are not re-timed.
+when there is one (a full `vocals.*` stem is used alone). Without lyrics, the
+transcribed words are re-timed and their text is left as transcribed.
 
 | Variable | Default | Meaning |
 |---|---|---|

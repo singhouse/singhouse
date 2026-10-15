@@ -81,7 +81,8 @@ ACOUSTIC_TIMEOUT_ENV = "KARAOKE_ACOUSTIC_ALIGNMENT_TIMEOUT"
 # Generous because the first run downloads the model weights (~7.5 GB)
 # inside the worker call; a warm run takes a small fraction of this.
 ACOUSTIC_DEFAULT_TIMEOUT = 3600
-ACOUSTIC_REF_MODES = frozenset({"plain", "synced"})
+# "none" re-times the transcriber's own words; their text is unchanged.
+ACOUSTIC_REF_MODES = frozenset({"plain", "synced", "none"})
 ACOUSTIC_PROGRESS_MESSAGE = (
     "Aligning words to the vocals (the first run downloads the models)"
 )
