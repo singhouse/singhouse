@@ -979,3 +979,55 @@ async def test_retry_changed_format_retires_stale_audio_only_after_success(
     assert not old_audio.exists()
     assert video_import_job.resolve_stem(stems, "instrumental").name == f"instrumental.{next_format}"
     assert not (UPLOADS_DIR / upload_name).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg/ffprobe not on PATH")
+@pytest.mark.parametrize("extension,codec,mime", [
+    ("m4a", "aac", "audio/mp4"),
+    ("webm", "libopus", "audio/webm"),
+    ("webm", "libvorbis", "audio/webm"),
+])
+async def test_retained_audio_streaming_and_completed_retry(
+    client, tmp_path, monkeypatch, extension, codec, mime
+):
+    """Already-produced audio survives crash recovery and remains seekable."""
+    source = tmp_path / f"tone.{extension}"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1", "-c:a", codec, str(source),
+    ], check=True, timeout=30)
+    expected = source.read_bytes()
+    real_run = subprocess.run
+    calls = _install_fake_media_tools(monkeypatch)
+    submitted = (await _submit(client)).json()
+    song_id, job_id = submitted["song_id"], submitted["job_id"]
+    stems = STEMS_DIR / str(song_id)
+    stems.mkdir(parents=True, exist_ok=True)
+    stem = stems / f"instrumental.{extension}"
+    stem.write_bytes(expected)
+    (stems / "video.mp4").write_bytes(FAKE_VIDEO_BYTES)
+    upload = UPLOADS_DIR / queue.payload_of(await _job(job_id))["upload_name"]
+    upload.unlink()
+    assert video_import_job.completed_video_name(stems) == "video.mp4"
+    assert await run_queued_jobs_once() == 1
+    assert (await _song(song_id)).status == "ready"
+    assert not any(command[0] == "ffmpeg" for command in calls)
+    detail = (await client.get(f"/api/songs/{song_id}")).json()
+    assert detail["stems"]["instrumental"].endswith(stem.name)
+    url = f"/api/songs/{song_id}/stems/{stem.name}"
+    audio = await client.get(url)
+    assert audio.status_code == 200
+    assert audio.headers["content-type"] == mime
+    assert audio.content == expected
+    partial = await client.get(url, headers={"Range": "bytes=5-19"})
+    assert partial.status_code == 206
+    assert partial.headers["content-range"] == f"bytes 5-19/{len(expected)}"
+    assert partial.content == expected[5:20]
+    # Decode the actual HTTP response, ensuring the playback payload is intact.
+    returned = tmp_path / f"returned.{extension}"
+    returned.write_bytes(audio.content)
+    decoded = real_run([
+        "ffmpeg", "-v", "error", "-i", str(returned), "-f", "s16le", "pipe:1",
+    ], check=True, stdout=subprocess.PIPE, timeout=30).stdout
+    assert len(decoded) >= 48000 * 2

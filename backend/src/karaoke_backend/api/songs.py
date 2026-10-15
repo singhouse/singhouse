@@ -744,7 +744,7 @@ async def get_stem_file(
     Valid filenames are the recognized stem basenames actually present on disk
     for this song: `instrumental`, `karaoke`, `lead_vocals`, `backing_vocals`
     (numbered variants `lead_vocals_<N>`/`backing_vocals_<N>` included), or
-    any `vocal_<id>` per-voice stem, in `.mp3`, `.flac` or `.wav`.
+    any `vocal_<id>` per-voice stem, in `.mp3`, `.m4a`, `.webm`, `.flac` or `.wav`.
     """
     # Reject path traversal before anything else — the allowlist below is
     # basenames only, but a malformed filename should 400 regardless of song.
@@ -780,7 +780,10 @@ async def get_stem_file(
         )
 
     stem_path = stems_dir / filename
-    media_type = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav"}[Path(filename).suffix]
+    media_type = {
+        ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".webm": "audio/webm",
+        ".flac": "audio/flac", ".wav": "audio/wav",
+    }[Path(filename).suffix]
     return FileResponse(
         path=str(stem_path),
         media_type=media_type,

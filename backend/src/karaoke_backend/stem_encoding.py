@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from karaoke_backend.workers.modal_worker import _await_subprocess
-from karaoke_backend.stem_layout import allowed_stem_filenames
+from karaoke_backend.stem_layout import STEM_EXTS, allowed_stem_filenames
 
 PLAYABLE_BASES = ("lead_vocals", "backing_vocals", "instrumental", "karaoke")
 
@@ -67,5 +67,5 @@ async def finalize_stems(stems_dir: Path, bases=None) -> None:
     for source in sources:
         source.unlink()
         # Do not let a previous failed attempt shadow the selected output.
-        for suffix in {".mp3", ".flac"} - {f".{format}"}:
+        for suffix in set(STEM_EXTS) - {".wav", f".{format}"}:
             source.with_suffix(suffix).unlink(missing_ok=True)

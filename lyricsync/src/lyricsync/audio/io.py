@@ -11,7 +11,7 @@ import numpy as np
 
 
 def read_wav_mono(path: str) -> Tuple[np.ndarray, int]:
-    """Return mono float32 samples and sample rate from WAV, MP3, or FLAC.
+    """Return mono float32 samples and sample rate from WAV, MP3, FLAC, M4A, or WebM.
 
     PCM WAV keeps its native reader. Compressed stems require ffmpeg on PATH;
     decode to a temporary file to avoid buffering a second full audio stream
@@ -19,7 +19,7 @@ def read_wav_mono(path: str) -> Tuple[np.ndarray, int]:
     source sample rate, so VAD and alignment share playback's sample timeline.
     The historical function name remains compatible with existing callers.
     """
-    if Path(path).suffix.lower() not in {".mp3", ".flac"}:
+    if Path(path).suffix.lower() not in {".mp3", ".flac", ".m4a", ".webm"}:
         return _read_pcm_wav(path)
     with tempfile.TemporaryDirectory(prefix="lyricsync-audio-") as directory:
         decoded = Path(directory) / "decoded.wav"
@@ -32,7 +32,7 @@ def read_wav_mono(path: str) -> Tuple[np.ndarray, int]:
                 check=True, timeout=600,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError("ffmpeg is required to read MP3 and FLAC audio") from exc
+            raise RuntimeError("ffmpeg is required to read compressed audio") from exc
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise ValueError("Could not decode audio for transcription or alignment") from exc
         return _read_pcm_wav(str(decoded))
