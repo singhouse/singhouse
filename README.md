@@ -28,13 +28,13 @@ Self-hosted karaoke for your own music library — local stem separation (CUDA /
 
 Singhouse's bundled [`lyricsync`](lyricsync/) library (MIT / AGPL) pairs music-tuned transcription with a **4-model CTC Viterbi aligner** (`HuBERT-Large`, `wav2vec2-Large`, `HuBERT-XLarge`, and a `wav2vec2` phoneme voter) and inter-word filler states so words never drift across instrumental breaks.
 
-Evaluated on the 20-song Jamendo benchmark (plain reference lyrics, local configurations):
+Evaluated on the 20-song Jamendo benchmark (plain reference lyrics):
 
 | Pipeline | Median Error | Within 0.1s | Within 0.2s | Gross Error (>1s) |
 | --- | ---: | ---: | ---: | ---: |
-| **Singhouse (`lyricsync` CTC Fusion)** | **41 ms** | **86.3%** | **95.5%** | **1.4%** |
+| **Singhouse (`lyricsync` CTC Fusion)** | 41 ms | 86.3% | 95.5% | 1.4% |
+| Commercial cloud alignment *(AudioShake API, full mix)* | 44 ms | 85.2% | 96.2% | 1.2% |
 | Single-model `wav2vec2` CTC *(Nightingale, same stem)* | 52 ms | 73.5% | 86.4% | 6.2% |
-| Singhouse Legacy (`Heart` + NW only) | 93 ms | 52.5% | 73.0% | 11.1% |
 | Whisper-medium ASR + word mapping *(`karaoke-gen` local fallback)* | 103 ms | 48.8% | 70.3% | 15.2% |
 
 On a separate 55-song multi-voice set using plain LRCLIB lyrics, CTC fusion improved `<0.1s` accuracy from **47.9% to 69.9%** (55/55 songs improved), matching the sub-100ms timing tier of commercial cloud APIs like AudioShake entirely locally. See **[`lyricsync/ALIGNMENT.md`](lyricsync/ALIGNMENT.md)** for full benchmarks and methodology.
