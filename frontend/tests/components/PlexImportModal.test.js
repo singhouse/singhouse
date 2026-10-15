@@ -37,7 +37,9 @@ vi.mock('@/stores/songs', () => ({
   useSongsStore: () => ({ fetchSongs: (...a) => fetchSongs(...a) }),
 }))
 
+import { h } from 'vue'
 import PlexImportModal from '@/components/PlexImportModal.vue'
+import Modal from '@/components/ui/Modal.vue'
 
 const SETTINGS = {
   url: 'http://plex.lan:32400',
@@ -518,5 +520,33 @@ describe('PlexImportModal', () => {
     await mountModal()
     expect(wrapper.text()).toContain('Import from your Plex library')
     expect(wrapper.text().toLowerCase()).not.toContain('down' + 'load')
+  })
+})
+
+describe('inside the shared dialog', () => {
+  it('is named by its heading and held open while settings save', async () => {
+    let finish
+    setSettings.mockReturnValue(new Promise((r) => { finish = r }))
+    const onClose = vi.fn()
+    wrapper = mount(Modal, {
+      props: { visible: true, size: 'lg', onClose },
+      slots: { default: () => h(PlexImportModal) },
+      global: { stubs: { teleport: true } },
+    })
+    await flushPromises()
+    await flushPromises()
+    const dialog = wrapper.find('dialog')
+    expect(wrapper.find(`#${dialog.attributes('aria-labelledby')}`).text()).toBe('Import from your Plex library')
+
+    await wrapper.find('input[type="text"]').setValue('http://other.lan:32400')
+    await wrapper.findAll('.plex-btn')[0].trigger('click')
+    await dialog.trigger('keydown', { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+
+    finish({ data: { ...SETTINGS } })
+    await flushPromises()
+    await dialog.trigger('keydown', { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 })

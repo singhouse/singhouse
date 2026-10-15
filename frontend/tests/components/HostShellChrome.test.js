@@ -3,7 +3,7 @@
 //
 // HostShell's consolidated chrome: no sidebar footer; backend health
 // as a dot on the brand mark plus an offline banner; the brand mark opens the
-// account/status popover (identity + exit); `+ Add` holds Upload and Plex;
+// account/status popover (identity + exit); `+ Add` holds Add files and Plex;
 // the Display popover in the stage tools holds Backdrop / Reacts-to and, only
 // when the route exists, the projector link.
 
@@ -115,13 +115,14 @@ describe('HostShell chrome', () => {
     expect(wrapper.text()).toContain('Backend online')
   })
 
-  it('+ Add opens the upload and Plex modals', async () => {
+  it('+ Add opens the add-files and Plex modals', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
     mountShell()
     await flushPromises()
     await wrapper.find('.add-btn').trigger('click')
     const items = () => wrapper.findAll('[role="menuitem"]')
-    expect(items().map(b => b.text())).toEqual(['⤒Upload files…', '🎞Import from Plex…'])
+    expect(items().map(b => b.text())).toEqual(['Add files…', '🎞Import from Plex…'])
+    expect(items()[0].find('.ui-menu__icon svg').exists()).toBe(true)
 
     await items()[0].trigger('click')
     expect(wrapper.find('.upload-zone-stub').exists()).toBe(true)
@@ -129,6 +130,24 @@ describe('HostShell chrome', () => {
     await wrapper.find('.add-btn').trigger('click')
     await items()[1].trigger('click')
     expect(wrapper.find('.plex-stub').exists()).toBe(true)
+  })
+
+  it('the add-files dialog is named Add files and Escape closes it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true })))
+    mountShell()
+    await flushPromises()
+    await wrapper.find('.add-btn').trigger('click')
+    await wrapper.findAll('[role="menuitem"]')[0].trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('dialog.modal-overlay')
+    expect(dialog.attributes('role')).toBe('dialog')
+    expect(wrapper.find(`#${dialog.attributes('aria-labelledby')}`).text()).toBe('Add files')
+
+    await dialog.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('dialog.modal-overlay').exists()).toBe(false)
+    expect(wrapper.find('.upload-zone-stub').exists()).toBe(false)
   })
 
   it('preserves desktop setup in the account menu and collapsed rail', async () => {

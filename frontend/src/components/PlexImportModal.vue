@@ -174,7 +174,7 @@
 // The token is write-only from here. The server never returns it, so the
 // field's placeholder ("Token set") is the only readback there is, and leaving
 // it blank on save means "keep the one you have".
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { prepareHeart } from '@/composables/useHeartSetup'
 import { plexApi } from '@/api/client'
 import { useFeaturesStore } from '@/stores/features'
@@ -210,6 +210,11 @@ const importing = ref(false)
 const loadingTracks = ref(false)
 const error = ref('')
 const notice = ref('')
+
+// Hold the surrounding dialog open while settings save or an import is sent.
+const modal = inject('ui-modal', null)
+const busyToken = Symbol('plex')
+watch(() => saving.value || importing.value, (on) => modal?.setBusy(busyToken, on))
 
 const envManaged = computed(() => settings.value.source === 'env')
 const selectedCount = computed(() => selected.value.size)
@@ -499,7 +504,7 @@ async function onImport() {
 
 // The debounce can outlive the dialog — a timer that fires after the modal is
 // gone touches refs nobody is watching, and in a test it leaks into the next one.
-onUnmounted(() => { dialogActive = false; clearTimeout(filterTimer) })
+onUnmounted(() => { dialogActive = false; clearTimeout(filterTimer); modal?.setBusy(busyToken, false) })
 
 onMounted(async () => {
   features.load()

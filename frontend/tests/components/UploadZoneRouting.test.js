@@ -23,7 +23,9 @@ vi.mock('@/api/client', () => ({
   featuresApi: { get: vi.fn(async () => ({ data: { llm_paging: false } })) },
 }))
 
+import { h } from 'vue'
 import UploadZone from '@/components/UploadZone.vue'
+import Modal from '@/components/ui/Modal.vue'
 import { useSongsStore } from '@/stores/songs'
 import { useFeaturesStore } from '@/stores/features'
 
@@ -113,6 +115,31 @@ it.each([false, true])('protects a pending setup from duplicate submit and remov
   complete({ installed: true, restartRequired: false })
   await flushPromises()
   expect(store.uploadSong).toHaveBeenCalledTimes(remove ? 0 : 1)
+})
+
+it('holds the surrounding dialog open while a file is being handed off', async () => {
+  wrapper.unmount()
+  let complete
+  window.karaokeDesktop = { isDesktop: true, prepareHeart: vi.fn(() => new Promise(resolve => { complete = resolve })) }
+  const onClose = vi.fn()
+  wrapper = mount(Modal, {
+    props: { visible: true, size: 'lg', onClose },
+    slots: { default: () => h(UploadZone) },
+    global: { stubs: { teleport: true } },
+  })
+  await flushPromises()
+  const escape = () => wrapper.find('dialog').trigger('keydown', { key: 'Escape' })
+
+  await drop(file('song.mp3', 'audio/mpeg'))
+  await wrapper.find('.btn-upload').trigger('click')
+  await escape()
+  expect(onClose).not.toHaveBeenCalled()
+  expect(wrapper.find('.modal__close').element.disabled).toBe(true)
+
+  complete({ installed: true, restartRequired: false })
+  await flushPromises()
+  await escape()
+  expect(onClose).toHaveBeenCalledTimes(1)
 })
 
 describe('a dropped file reaches the route its type and container name', () => {

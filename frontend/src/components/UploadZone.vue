@@ -229,7 +229,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject, watch, onUnmounted } from 'vue'
 import { useFeaturesStore } from '@/stores/features'
 import { useSongsStore } from '@/stores/songs'
 import { isRoutableUpload, routeUpload, validateUpload } from '@/utils/uploadRouting'
@@ -251,6 +251,12 @@ const optLlmPaging = ref(false)
 const optLyrics = ref('')
 const pasteOpen = ref(false)
 let dragCounter = 0
+
+// Hold the surrounding dialog open while a file is being handed off.
+const modal = inject('ui-modal', null)
+const busyToken = Symbol('upload')
+watch(() => pendingFiles.value.some(p => p.submitting), (on) => modal?.setBusy(busyToken, on))
+onUnmounted(() => modal?.setBusy(busyToken, false))
 
 // Route choice, allowlists and size caps all live in @/utils/uploadRouting —
 // the two ingest routes each have a server-side allowlist behind them and the

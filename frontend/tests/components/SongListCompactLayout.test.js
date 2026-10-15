@@ -188,15 +188,17 @@ describe('compact layout', () => {
     expect(wrapper.find('.lib-head').exists()).toBe(true)
   })
 
-  it('keeps the sort reachable without headers, outside the scrolling list', async () => {
+  it('keeps the sort reachable without headers, in the filter popover', async () => {
     wrapper = await mountList()
-    expect(wrapper.find('.sort-row').exists()).toBe(false)
     await setListWidth(276)
-    expect(wrapper.find('.song-list__header .sort-row').exists()).toBe(true)
-    expect(wrapper.find('.song-list__body .sort-row').exists()).toBe(false)
-    const select = wrapper.find('select.sort-select')
-    expect(select.element.value).toBe('added')
-    await select.setValue('title')
+    expect(wrapper.find('.lib-head').exists()).toBe(false)
+    await wrapper.find('.filter-btn').trigger('click')
+    await flushPromises()
+    const select = document.querySelector('select.sort-select')
+    expect(select.value).toBe('added')
+    select.value = 'title'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
     const titles = wrapper.findAll('.song-item__title').map(n => n.text())
     expect(titles).toEqual(['Broken Sample', 'Busy Sample', 'Paper Lantern'])
     expect(JSON.parse(localStorage.getItem('karaoke:librarySort'))).toEqual({ key: 'title', dir: 'asc' })
