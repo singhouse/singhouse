@@ -7,7 +7,7 @@
       :class="{ 'sidebar--collapsed': sidebarCollapsed, 'sidebar--resizing': isResizing }"
       :style="sidebarCollapsed ? null : { width: sidebarWidth + 'px', minWidth: sidebarWidth + 'px' }"
     >
-      <!-- Collapsed rail: the mark (status dot included) + upload. The
+      <!-- Collapsed rail: the mark (status dot included) + add files. The
            expanded header row lives in SongList's bar, below. -->
       <template v-if="sidebarCollapsed">
         <div class="sidebar__brand">
@@ -25,10 +25,12 @@
           <button
             type="button"
             class="nav-icon nav-icon--upload"
-            title="Upload"
-            aria-label="Upload files"
+            title="Add files"
+            aria-label="Add files"
             @click="uploadOpen = true"
-          >☁️</button>
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </button>
         </div>
         <button v-if="desktopSetupAvailable" type="button" class="nav-icon" title="Set up song processing" aria-label="Set up song processing" @click="onboardingOpen = true">⚙</button>
       </template>
@@ -102,7 +104,7 @@
               </template>
               <template #default="{ close }">
                 <button type="button" role="menuitem" class="ui-menu__item" @click="close(); uploadOpen = true">
-                  <span class="ui-menu__icon" aria-hidden="true">⤒</span>Upload files…
+                  <span class="ui-menu__icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>Add files…
                 </button>
                 <!-- Import from a Plex media server the host runs themselves.
                      Host affordance only: it reads the operator's own server
@@ -112,6 +114,21 @@
                 </button>
               </template>
             </PopoverMenu>
+            <!-- Settings: the host's display settings (backdrop and what it
+                 reacts to), the same popover as Display on the stage. -->
+            <button
+              type="button"
+              ref="settingsBtn"
+              class="settings-btn"
+              :class="{ 'settings-btn--open': displayMenu?.isOpen }"
+              title="Settings"
+              aria-label="Settings"
+              aria-haspopup="dialog"
+              :aria-expanded="displayMenu?.isOpen ? 'true' : 'false'"
+              @click="openSettings"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
           </template>
 
           <template #trail>
@@ -196,7 +213,7 @@
           <div class="stage-tools">
             <!-- Display settings: what the host tunes once per venue, not
                  per song — hence a popover rather than always-on controls. -->
-            <PopoverMenu align="end" label="Display settings">
+            <PopoverMenu ref="displayMenu" align="end" label="Display settings" @close="onDisplayClose">
               <template #trigger="{ toggle, attrs, open }">
                 <button
                   type="button"
@@ -266,15 +283,31 @@
             >⛶</button>
           </div>
 
+          <!-- Once the library has had songs, the welcome is about the
+               library; the three steps are for a first-time empty one. -->
           <Transition name="fade">
-            <div v-if="!store.currentSong" class="welcome">
+            <div v-if="!store.currentSong && libraryLoaded && libraryStarted" class="welcome">
               <BrandLogo :size="96" class="welcome__logo" />
-              <p class="welcome__sub">Upload a song or select from your library to begin</p>
+              <p class="welcome__sub">Add more songs, or pick one on the left.</p>
+              <button type="button" class="btn btn-primary welcome__cta" @click="uploadOpen = true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                Add files
+              </button>
+              <button
+                v-if="processingNeedsSetup"
+                type="button"
+                class="welcome__setup"
+                @click="onboardingOpen = true"
+              ><span aria-hidden="true">⚙</span>Set up song processing</button>
+            </div>
+            <div v-else-if="!store.currentSong && libraryLoaded" class="welcome">
+              <BrandLogo :size="96" class="welcome__logo" />
+              <p class="welcome__sub">Add a song or select from your library to begin</p>
 
               <div class="welcome__steps">
                 <div class="welcome__step">
                   <span class="step-num">1</span>
-                  <span>Upload an audio file (MP3, FLAC, WAV) or a karaoke video</span>
+                  <span>Add an audio file (MP3, FLAC, WAV) or a karaoke video</span>
                 </div>
                 <div class="welcome__step">
                   <span class="step-num">2</span>
@@ -287,7 +320,8 @@
               </div>
 
               <button type="button" class="btn btn-primary welcome__cta" @click="uploadOpen = true">
-                ☁️ Upload a Song
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                Add files
               </button>
             </div>
           </Transition>
@@ -362,14 +396,14 @@
       />
     </aside>
 
-    <DesktopOnboarding v-if="desktopSetupAvailable" :open="onboardingOpen" @background="onboardingOpen = false" @lyrics-saved="features.load({ force: true })" @open="onboardingOpen = true" @close="onboardingOpen = false" @add-song="openOnboardingImport" />
-    <!-- Upload modal. Lives inside HostShell so AudioPlayer keeps playing
-         while the user uploads — opening it does not unmount the player. -->
+    <DesktopOnboarding v-if="desktopSetupAvailable" :open="onboardingOpen" @background="onOnboardingAway" @lyrics-saved="features.load({ force: true })" @open="onboardingOpen = true" @close="onOnboardingAway" @add-song="openOnboardingImport" />
+    <!-- Add-files modal. Lives inside HostShell so AudioPlayer keeps playing
+         while files are added — opening it does not unmount the player. -->
     <Modal :visible="uploadOpen" size="lg" @close="uploadOpen = false">
       <div class="upload-modal">
         <div class="upload-modal__title">
           <span class="title-icon">☁️</span>
-          <h2>Upload</h2>
+          <h2>Add files</h2>
         </div>
         <UploadZone />
       </div>
@@ -384,7 +418,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSongsStore } from '@/stores/songs'
 import { useSongToolsStore } from '@/stores/songTools'
@@ -771,15 +805,81 @@ const onboardingOpen = ref(false)
 let stopSetupListener
 function openOnboardingImport() { onboardingOpen.value = false; uploadOpen.value = true }
 function showProcessingSetup() { onboardingOpen.value = true }
+// The saved setup step; 'ready' once song processing has been set up. Null
+// until read, and always null outside the desktop app, which has no setup.
+const setupStep = ref(null)
+const processingNeedsSetup = computed(() =>
+  desktopSetupAvailable && setupStep.value !== null && setupStep.value !== 'ready',
+)
+async function readSetupState() {
+  const preferences = await window.karaokeDesktop.getOnboardingState()
+  setupStep.value = preferences?.step ?? 'welcome'
+  return preferences
+}
 onMounted(async () => {
   if (!desktopSetupAvailable) return
   stopSetupListener = window.karaokeDesktop.onOpenSetup?.(showProcessingSetup)
   try {
-    const preferences = await window.karaokeDesktop.getOnboardingState()
+    const preferences = await readSetupState()
     onboardingOpen.value = preferences.skipped !== true && preferences.step !== 'ready'
   } catch { /* Development desktop keeps its explicitly configured environment. */ }
 })
+// Setup may have finished while it was open or running in the background.
+function onOnboardingAway() {
+  onboardingOpen.value = false
+  readSetupState().catch(() => {})
+}
 onBeforeUnmount(() => stopSetupListener?.())
+
+// The welcome switches from the first-time steps once the library has had a
+// song or an import has started, and stays switched (a search that matches
+// nothing, or deleting every song, is not a first run). Neither panel shows
+// until the first library load has answered. The remembered flag is kept per
+// host identity.
+const libraryLoaded = ref(false)
+const libraryStartedKey = computed(() => {
+  const id = session.identity?.id
+  return id != null ? `karaoke:libraryStarted:${id}` : 'karaoke:libraryStarted'
+})
+const startedKeys = ref(new Set())   // also held in memory, for blocked storage
+function readStarted(key) {
+  if (startedKeys.value.has(key)) return true
+  try { return localStorage.getItem(key) === '1' } catch { return false }
+}
+const libraryStarted = computed(() =>
+  store.songs.length > 0 || store.uploads.length > 0 || readStarted(libraryStartedKey.value),
+)
+// Written only once the identity probe has settled, so a flag is never filed
+// under the plain key just because the identity had not arrived yet.
+const identitySettled = computed(() => !['unknown', 'loading'].includes(session.status))
+watch(
+  [() => store.songs.length + store.uploads.length, libraryStartedKey, identitySettled],
+  ([n, key, settled]) => {
+    if (n <= 0 || !settled || startedKeys.value.has(key)) return
+    startedKeys.value = new Set([...startedKeys.value, key])
+    try { localStorage.setItem(key, '1') } catch { /* non-fatal */ }
+  },
+  { immediate: true },
+)
+
+// The sidebar's Settings button opens the stage's Display settings popover,
+// and focus goes back to the Settings button when that popover closes.
+const displayMenu = ref(null)
+const settingsBtn = ref(null)
+let settingsFromGear = false
+function openSettings() {
+  settingsFromGear = true
+  displayMenu.value?.open()
+}
+async function onDisplayClose() {
+  if (!settingsFromGear) return
+  settingsFromGear = false
+  // The popover hands focus to its own trigger when it restores focus at all
+  // (Escape, Tab out); an outside click leaves focus where it landed.
+  await nextTick()
+  const displayTrigger = document.querySelector('.popout-btn--display')
+  if (document.activeElement === displayTrigger) settingsBtn.value?.focus()
+}
 const plexOpen = ref(false)
 
 const MIN_PANEL_WIDTH = 300
@@ -913,6 +1013,7 @@ onMounted(async () => {
   // seed the session store here for the sidebar identity + Lock affordance.
   if (session.status === 'unknown') session.probe()
   await store.fetchSongs()
+  libraryLoaded.value = true
   checkApiHealth()
   healthInterval = setInterval(checkApiHealth, 30000)
   // No queue polling here: whichever panel is mounted owns its own lifecycle,
@@ -1028,6 +1129,17 @@ async function checkApiHealth() {
 .add-btn--open { background: rgba(226,62,87,0.22); border-color: rgba(226,62,87,0.55); }
 .add-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
 .caret { opacity: 0.6; font-size: 0.6rem; }
+
+.settings-btn {
+  flex: none;
+  width: 30px; height: 30px; padding: 0; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent;
+  color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+}
+.settings-btn:hover { background: var(--bg-glass-hover); color: white; }
+.settings-btn--open { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
+.settings-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
 
 .offline-banner {
   display: flex; align-items: center; gap: 0.45rem;
@@ -1290,7 +1402,19 @@ async function checkApiHealth() {
   color: var(--c-primary); font-size: 0.75rem; font-weight: 700;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.welcome__cta { margin-top: 0.5rem; padding: 0.7rem 1.75rem; font-size: 1rem; }
+.welcome__cta {
+  margin-top: 0.5rem; padding: 0.7rem 1.75rem; font-size: 1rem;
+  display: inline-flex; align-items: center; gap: 0.5rem;
+}
+.welcome__setup {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  margin-top: -0.25rem; padding: 0.3rem 0.6rem;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: rgba(255,255,255,0.5); font-family: inherit; font-size: 0.85rem; font-weight: 500;
+  cursor: pointer; transition: color 0.15s, background 0.15s;
+}
+.welcome__setup:hover { color: white; background: rgba(255,255,255,0.05); }
+.welcome__setup:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
 
 .upload-modal__title {
   display: flex; align-items: center; gap: 0.6rem;
