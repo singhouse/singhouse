@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Private acceptance admission retains resource limits without qualification claims."""
+"""Release-owned admission budgets retain resource limits without measured qualification claims."""
 import importlib.util
 import json
 import os
@@ -175,6 +175,74 @@ class CandidateResourceAdmissionTests(unittest.TestCase):
             with self.subTest(total=total), self.assertRaises(RuntimeError):
                 self.admit(manifest, policy)
 
+
+class AcceptedResourceAdmissionTests(unittest.TestCase):
+    """Operator-accepted budgets are admitted on every channel under the candidate contract."""
+
+    def fixture(self, platform='linux', arch='x64', accelerator='cpu'):
+        manifest, policy = CandidateResourceAdmissionTests.fixture(self, platform, arch, accelerator)
+        variant = policy['variants'][0]
+        variant.update(id='accepted-option', status='accepted')
+        variant['admission']['reference'] = 'operator-acceptance-fixture'
+        return manifest, policy
+
+    def admit(self, manifest, policy, channel='stable'):
+        return backend.processing_resource_policy(manifest, 'b' * 64, 'accepted-option', policy, channel)
+
+    def test_accepted_budgets_are_admitted_on_every_channel_with_the_same_contract(self):
+        for channel in ('stable', 'beta', '', None, 'private-test'):
+            for target in [('linux', 'x64', 'cpu'), ('win32', 'x64', 'cuda'), ('darwin', 'arm64', 'metal')]:
+                with self.subTest(channel=channel, target=target):
+                    manifest, policy = self.fixture(*target)
+                    result = self.admit(manifest, policy, channel)
+                    self.assertEqual(result, {'schema': 1, 'runtimeManifestId': 'b' * 64, 'variantId': 'accepted-option',
+                                              'requirements': {'ramBytes': 100,
+                                                               'vramBytes': 50 if target[2] == 'cuda' else None,
+                                                               'workingDiskBytes': 200,
+                                                               'unifiedMemory': target[0] == 'darwin'},
+                                              'settings': {}})
+        manifest, policy = self.fixture('darwin', 'arm64', 'metal')
+        policy['variants'][0]['admission'].update(ramBytes=4, totalRamBytes=16)
+        self.assertEqual(self.admit(manifest, policy)['requirements']['totalRamBytes'], 16)
+
+    def test_accepted_keeps_strict_identity_and_budget_checks(self):
+        mutations = [lambda v: v.update(platform='win32'), lambda v: v.update(accelerator='cuda'),
+                     lambda v: v.update(settings={'batch': 1}), lambda v: v.update(status='Accepted'),
+                     lambda v: v['admission'].update(runtimeLockSha256='c' * 64),
+                     lambda v: v.update(evidence={}), lambda v: v['admission'].update(reference=' '),
+                     lambda v: v['admission'].update(basisReferences=[]), lambda v: v['admission'].update(ramBytes=0),
+                     lambda v: v['admission'].update(vramBytes=50), lambda v: v['admission'].update(unifiedMemory=True),
+                     lambda v: v['admission'].update(totalRamBytes=50), lambda v: v['admission'].update(extra=1),
+                     lambda v: v.pop('admission')]
+        for mutate in mutations:
+            manifest, policy = self.fixture()
+            mutate(policy['variants'][0])
+            with self.subTest(mutate=mutate), self.assertRaises(RuntimeError):
+                self.admit(manifest, policy)
+
+    def test_shipped_policy_admits_accepted_and_keeps_candidates_private(self):
+        desktop = Path(__file__).parents[1]
+        shipped = json.loads((desktop / 'hardware-policy.json').read_text())
+        locks = json.loads((desktop / 'processing-locks.json').read_text())
+        public = backend.channel_trusted_locks(locks, 'stable')
+        for variant in shipped['variants']:
+            status = variant['status']
+            with self.subTest(variant=variant['id']):
+                if status != 'qualified':
+                    self.assertNotIn('evidence', variant)
+                if status not in ('candidate', 'accepted'):
+                    continue
+                lock = variant['admission']['runtimeLockSha256']
+                manifest = {key: variant[key] for key in ('platform', 'arch', 'accelerator')}
+                manifest['provenance'] = {'lockSha256': lock}
+                if status == 'candidate':
+                    self.assertNotIn(lock, public)
+                    with self.assertRaises(RuntimeError):
+                        backend.processing_resource_policy(manifest, 'b' * 64, variant['id'], shipped, 'stable')
+                    continue
+                self.assertIn(lock, public)
+                result = backend.processing_resource_policy(manifest, 'b' * 64, variant['id'], shipped, 'stable')
+                self.assertEqual(result['requirements']['ramBytes'], variant['admission']['ramBytes'])
 
 if __name__ == '__main__':
     unittest.main()

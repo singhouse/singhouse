@@ -196962,13 +196962,13 @@
     "schema": 2
   },
   "qualification": {
-    "passed": false,
-    "scope": "hardware-test",
+    "passed": true,
+    "scope": "accepted",
     "runtimeLockSha256": "647235dc2d101accf5326421f1ee6cc89cca5430d4b19bc304184ddf793267a8",
     "platform": "linux",
     "arch": "x64",
     "accelerator": "cpu",
-    "evidenceReference": "rc-0.1.1-final-platform-acceptance-pending"
+    "evidenceReference": "v0.1.1-operator-acceptance-2026-10-14"
   },
   "models": [
     {

@@ -191703,13 +191703,13 @@
     "schema": 2
   },
   "qualification": {
-    "passed": false,
-    "scope": "hardware-test",
+    "passed": true,
+    "scope": "accepted",
     "runtimeLockSha256": "2a5229022f65b22fcd66ca234bba9ef204bf03a52812134bcd6e7a1d76ec65fe",
     "platform": "win32",
     "arch": "x64",
     "accelerator": "cpu",
-    "evidenceReference": "rc-0.1.1-final-platform-acceptance-pending"
+    "evidenceReference": "v0.1.1-operator-acceptance-2026-10-14"
   },
   "models": [
     {

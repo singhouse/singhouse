@@ -191937,13 +191937,13 @@
     "schema": 2
   },
   "qualification": {
-    "passed": false,
-    "scope": "hardware-test",
+    "passed": true,
+    "scope": "accepted",
     "runtimeLockSha256": "b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280",
     "platform": "win32",
     "arch": "x64",
     "accelerator": "cuda",
-    "evidenceReference": "rc-0.1.1-final-platform-acceptance-pending"
+    "evidenceReference": "v0.1.1-operator-acceptance-2026-10-14"
   },
   "models": [
     {

@@ -184384,13 +184384,13 @@
     "schema": 2
   },
   "qualification": {
-    "passed": false,
-    "scope": "hardware-test",
+    "passed": true,
+    "scope": "accepted",
     "runtimeLockSha256": "3a639910342376f34ef5b0847bb34c1ef3f3bf1f8c56f30faa6b93e0896c9ef6",
     "platform": "darwin",
     "arch": "arm64",
     "accelerator": "metal",
-    "evidenceReference": "rc-0.1.1-final-platform-acceptance-pending"
+    "evidenceReference": "v0.1.1-operator-acceptance-2026-10-14"
   },
   "models": [
     {

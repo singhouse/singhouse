@@ -200,6 +200,45 @@ test('hardware-test is explicitly unqualified, private-test only, and retains lo
   }
 })
 
+test('accepted is a passed scope accepted on every channel and retains lock and target validation', () => {
+  const { input, options } = fixture()
+  input.qualification.scope = 'accepted'
+  input.qualification.evidenceReference = 'v0.1.1-operator-acceptance-2026-10-14'
+  for (const releaseChannel of [undefined, 'private-test', 'stable', 'beta', 'core-private-test']) {
+    const catalog = createSetupCatalog(input, { ...options, releaseChannel })
+    assert.deepEqual(catalog.qualification, input.qualification)
+    assert.deepEqual(validateSetupCatalog(catalog, { ...options, releaseChannel }), catalog)
+    assert.equal(qualificationScopeError('accepted', releaseChannel), null)
+  }
+  for (const passed of [false, undefined, null, 1, 'true']) {
+    const invalid = structuredClone(input); invalid.qualification.passed = passed
+    for (const releaseChannel of ['private-test', 'stable']) {
+      assert.throws(() => createSetupCatalog(invalid, { ...options, releaseChannel }), /passed qualification/)
+    }
+  }
+  for (const scope of ['Accepted', 'accepted ', 'operator-accepted']) {
+    const invalid = structuredClone(input); invalid.qualification.scope = scope
+    assert.throws(() => createSetupCatalog(invalid, { ...options, releaseChannel: 'stable' }), /qualification must state its scope as "full", "accepted", "private-smoke", or "hardware-test"/)
+  }
+  assert.throws(() => createSetupCatalog(input, { ...options, trustedLocks: [] }), /not trusted/)
+  for (const mutate of [q => { q.runtimeLockSha256 = 'b'.repeat(64) }, q => { q.platform = 'win32' }, q => { delete q.evidenceReference }]) {
+    const invalid = structuredClone(input); mutate(invalid.qualification)
+    assert.throws(() => createSetupCatalog(invalid, { ...options, releaseChannel: 'stable' }), /qualification evidence/)
+  }
+})
+
+test('CLI generates accepted catalogs for non-private release channels', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'setup-catalog-')); t.after(() => rm(root, { recursive: true, force: true }))
+  const { input, options } = fixture(); input.qualification.scope = 'accepted'
+  const entries = { runtime: input.runtime, qualification: input.qualification, terms: input.models, identity: options.identity,
+    locks: { lockSha256: options.trustedLocks }, models: options.modelPolicy }
+  const args = []
+  for (const [key, value] of Object.entries(entries)) { const path = join(root, `${key}.json`); await writeFile(path, JSON.stringify(value)); args.push(`--${key}`, path) }
+  const output = join(root, 'processing-catalog.json')
+  await prepareSetupCatalog([...args, '--output', output, '--release', await releaseFile(root, 'stable')])
+  assert.deepEqual(JSON.parse(await readFile(output, 'utf8')).qualification, input.qualification)
+})
+
 test('private-test-only runtime locks are trusted only by private-test channel builds', () => {
   const [shared, candidate] = ['a'.repeat(64), 'b'.repeat(64)]
   const policy = { schema: 1, lockSha256: [shared, candidate], privateTestLockSha256: [candidate] }
@@ -214,13 +253,32 @@ test('private-test-only runtime locks are trusted only by private-test channel b
   }
 })
 
-test('every committed hardware-test catalog lock is trusted only by private-test builds', () => {
+test('committed catalog locks follow their scope: private-only scopes stay private-test only, accepted scopes are trusted everywhere', () => {
   const policy = JSON.parse(readFileSync(new URL('../processing-locks.json', import.meta.url), 'utf8'))
+  const modelPolicy = JSON.parse(readFileSync(new URL('../models.json', import.meta.url), 'utf8'))
   const directory = new URL('../processing-catalogs/', import.meta.url)
-  for (const name of readdirSync(directory).filter(file => file.endsWith('.json'))) {
-    const { qualification } = JSON.parse(readFileSync(new URL(name, directory), 'utf8'))
-    if (qualification?.scope !== 'hardware-test') continue
-    assert.ok(policy.privateTestLockSha256?.includes(qualification.runtimeLockSha256), `${name} lock must be private-test only`)
-    assert.equal(channelTrustedLocks(policy, 'stable').includes(qualification.runtimeLockSha256), false)
+  const publicLocks = new Set()
+  const names = readdirSync(directory).filter(file => file.endsWith('.json'))
+  assert.ok(names.length > 0)
+  for (const name of names) {
+    const text = readFileSync(new URL(name, directory), 'utf8')
+    const catalog = JSON.parse(text)
+    const { qualification, runtime } = catalog
+    if (['hardware-test', 'private-smoke'].includes(qualification?.scope)) {
+      assert.ok(policy.privateTestLockSha256?.includes(qualification.runtimeLockSha256), `${name} lock must be private-test only`)
+      assert.equal(channelTrustedLocks(policy, 'stable').includes(qualification.runtimeLockSha256), false)
+      continue
+    }
+    assert.ok(['full', 'accepted'].includes(qualification?.scope), name)
+    assert.equal(qualification.passed, true, name)
+    publicLocks.add(qualification.runtimeLockSha256)
+    // A catalog accepted on every channel must not be blocked by private-only lock trust.
+    assert.equal(policy.privateTestLockSha256?.includes(qualification.runtimeLockSha256) ?? false, false, `${name} lock must be trusted on every channel`)
+    const identity = Object.fromEntries(['appVersion', 'backendVersion', 'lyricsyncVersion', 'platform', 'arch'].map(key => [key, runtime[key]]))
+    for (const releaseChannel of ['stable', 'private-test']) {
+      const validated = validateSetupCatalog(catalog, { identity, trustedLocks: channelTrustedLocks(policy, releaseChannel), modelPolicy, releaseChannel })
+      assert.equal(`${JSON.stringify(validated, null, 2)}\n`, text, `${name} is the generator's canonical output`)
+    }
   }
+  for (const lock of policy.privateTestLockSha256 ?? []) assert.equal(publicLocks.has(lock), false)
 })

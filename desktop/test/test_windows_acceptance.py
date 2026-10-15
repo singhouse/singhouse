@@ -79,9 +79,15 @@ class WindowsAcceptanceTests(unittest.TestCase):
                 self.assertEqual(evidence['artifactBaseUrl'], expected_url)
                 self.assertIn('no models, GPU probe, or song qualification', evidence['qualification'])
 
-    def test_independent_private_trust_is_required(self):
-        with self.assertRaisesRegex(ValueError, 'independently pinned'):
-            validate_recipe(self.manifest, dict(lockSha256=[self.lock], privateTestLockSha256=[]), 'cpu', self.native_hash)
+    def test_independently_pinned_trust_is_required(self):
+        # Accepted recipes are pinned without being private-test only.
+        self.assertEqual(validate_recipe(self.manifest, dict(lockSha256=[self.lock], privateTestLockSha256=[]),
+                                         'cpu', self.native_hash), self.lock)
+        self.assertEqual(validate_recipe(self.manifest, dict(lockSha256=[self.lock]), 'cpu', self.native_hash), self.lock)
+        for trust in (dict(lockSha256=[], privateTestLockSha256=[]), dict(lockSha256=['c' * 64], privateTestLockSha256=['c' * 64]),
+                      dict(privateTestLockSha256=[self.lock])):
+            with self.subTest(trust=trust), self.assertRaisesRegex(ValueError, 'independently pinned'):
+                validate_recipe(self.manifest, trust, 'cpu', self.native_hash)
 
     def test_other_target_native_tools_and_tampered_lock_are_rejected(self):
         for accelerator, native in [('cuda', self.native_hash), ('cpu', 'd' * 64)]:

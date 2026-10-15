@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { readdirSync } from 'node:fs'
 import { validateHardwarePolicy, assessHardwarePolicy, recoveryOptions } from '../hardware_policy.mjs'
 
 const lock = 'a'.repeat(64)
@@ -20,6 +21,32 @@ test('shipped policy makes no unsupported qualification claims', async () => {
   const shipped = JSON.parse(await readFile(new URL('../hardware-policy.json', import.meta.url)))
   assert.ok(validateHardwarePolicy(shipped).variants.every(v => v.status !== 'qualified'))
   assert.equal(assessHardwarePolicy({ policy: shipped }).selectedVariantId, null)
+})
+test('shipped variants bind evidence, lock trust and catalogs consistently with their status', async () => {
+  const json = async path => JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'))
+  const shipped = validateHardwarePolicy(await json('../hardware-policy.json'))
+  const locks = await json('../processing-locks.json')
+  const privateOnly = new Set(locks.privateTestLockSha256 ?? [])
+  const directory = new URL('../processing-catalogs/', import.meta.url)
+  const catalogs = await Promise.all(readdirSync(directory).filter(name => name.endsWith('.json'))
+    .map(name => json(new URL(name, directory).href)))
+  assert.ok(shipped.variants.length > 0)
+  for (const v of shipped.variants) {
+    if (v.status !== 'qualified') assert.equal(v.evidence, undefined, `${v.id} carries evidence without measured qualification`)
+    if (v.status === 'unqualified') continue
+    const lock = (v.admission || v.evidence).runtimeLockSha256
+    assert.ok(locks.lockSha256.includes(lock), `${v.id} lock is not pinned`)
+    if (v.status === 'candidate') {
+      assert.ok(privateOnly.has(lock), `${v.id} candidate lock must be private-test only`)
+      continue
+    }
+    assert.equal(privateOnly.has(lock), false, `${v.id} ${v.status} lock must be trusted on every channel`)
+    if (v.status === 'accepted') {
+      assert.ok(catalogs.some(catalog => catalog.runtime.provenance.lockSha256 === lock && catalog.qualification.runtimeLockSha256 === lock
+        && catalog.qualification.passed === true && ['accepted', 'full'].includes(catalog.qualification.scope)
+        && ['platform', 'arch', 'accelerator'].every(key => catalog.runtime[key] === v[key])), `${v.id} has no accepted or full catalog for its lock`)
+    }
+  }
 })
 test('qualified selection exposes measured headroom and does not authorize downloads', () => {
   const o = options(), a = assessHardwarePolicy(o)
@@ -237,4 +264,75 @@ test('optional physical RAM floor must be safe, positive and at least the availa
   assert.equal(result(o).status, 'insufficient')
   const qualified = options()
   assert.equal(Object.hasOwn(result(qualified).requirements, 'totalRamBytes'), false)
+})
+
+const acceptedOptions = () => {
+  const o = candidateOptions()
+  o.policy.variants[0].status = 'accepted'
+  o.policy.variants[0].admission.reference = 'operator-acceptance-fixture'
+  delete o.releaseChannel
+  return o
+}
+
+test('accepted budgets are admitted on every release channel without pending-acceptance claims', () => {
+  for (const releaseChannel of [undefined, 'public', 'stable', 'beta', 'private-test']) {
+    for (const phase of ['setup', 'execution']) {
+      const o = acceptedOptions(); o.releaseChannel = releaseChannel
+      const a = assessHardwarePolicy({ ...o, phase })
+      assert.equal(a.selectedVariantId, 'standard-cuda', String(releaseChannel))
+      assert.equal(a.downloadAuthorized, false)
+      const { requirements } = a.variants[0]
+      assert.equal(requirements.ramBytes, 125)
+      assert.equal(requirements.vramBytes, 125)
+      assert.equal(requirements.headroomFraction, null)
+      assert.equal(requirements.workload, null)
+      assert.equal(requirements.accepted, true)
+      assert.equal(Object.hasOwn(requirements, 'acceptancePending'), false)
+      assert.equal(requirements.evidenceReference, 'operator-acceptance-fixture')
+      assert.deepEqual(requirements.basisReferences, ['original-resource-budget'])
+      assert.equal(a.reason, "Observed resources meet this release's processing requirements.")
+      assert.doesNotMatch(a.reason, /pending|acceptance/i)
+      assert.equal(assessHardwarePolicy({ ...o, phase, variantId: 'standard-cuda' }).selectedVariantId, 'standard-cuda')
+    }
+  }
+})
+
+test('accepted retains identity, resource, storage, model and physical memory checks', () => {
+  const mutations = [o => { o.runtimeLockSha256 = 'b'.repeat(64) },
+    o => { o.hardware.platform = 'win32' }, o => { o.hardware.arch = 'arm64' },
+    o => { o.accelerator = 'cpu' }, o => { o.policy.variants[0].settings = { precision: 'int8' } },
+    o => { o.hardware.totalMemoryBytes = 124 }, o => { o.hardware.availableMemoryBytes = 124 },
+    o => { o.hardware.availableMemoryBytes = null }, o => { o.hardware.cudaDevices = [] },
+    o => { o.hardware.cudaDevices[0].dedicatedMemoryBytes = 124 }, o => { o.hardware.unifiedMemory = true },
+    o => { o.phase = 'execution'; o.hardware.cudaDevices[0].availableMemoryBytes = 124 },
+    o => { o.diskFreeBytes = 9 }, o => { o.phase = 'execution'; o.installedModelIds = [] }]
+  for (const mutate of mutations) {
+    const o = acceptedOptions(); mutate(o)
+    assert.equal(assessHardwarePolicy(o).selectedVariantId, null)
+  }
+  const gib = 1024 ** 3
+  const o = acceptedOptions(), v = o.policy.variants[0]
+  Object.assign(v, { platform: 'darwin', arch: 'arm64', accelerator: 'metal' })
+  Object.assign(v.admission, { ramBytes: 4 * gib, totalRamBytes: 16 * gib, vramBytes: null, unifiedMemory: true })
+  Object.assign(o.hardware, { platform: 'darwin', arch: 'arm64', unifiedMemory: true,
+    totalMemoryBytes: 16 * gib, availableMemoryBytes: 5 * gib, cudaDevices: [] })
+  assert.equal(result(o).supported, true)
+  assert.equal(result(o).requirements.totalRamBytes, 16 * gib)
+  o.hardware.totalMemoryBytes = 8 * gib
+  assert.equal(result(o).status, 'insufficient')
+})
+
+test('accepted admission uses the candidate validation and never carries measured evidence', () => {
+  const mutations = [v => { delete v.admission }, v => { v.evidence = {} },
+    v => { v.admission.basisReferences = [] }, v => { v.admission.reference = '' },
+    v => { v.admission.runtimeLockSha256 = 'stale' }, v => { v.admission.extra = true },
+    v => { delete v.admission.downloadBytes }, v => { v.admission.ramBytes = 0 },
+    v => { v.admission.vramBytes = null }, v => { v.admission.unifiedMemory = true },
+    v => { v.admission.totalRamBytes = 124 }, v => { v.status = 'Accepted' }]
+  for (const mutate of mutations) {
+    const o = acceptedOptions(); mutate(o.policy.variants[0])
+    assert.throws(() => validateHardwarePolicy(o.policy), /Invalid hardware policy/)
+  }
+  const o = acceptedOptions(); o.policy.variants[0].admission.ramBytes = 0
+  assert.throws(() => validateHardwarePolicy(o.policy), /accepted ramBytes/)
 })

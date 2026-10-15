@@ -55,7 +55,8 @@ export async function prepare({ bundle, profile, accelerator, consent = false, c
   if (recipe.accelerator !== accelerator) throw new Error('Selected accelerator does not match this bundle')
   const provenance = await json(join(native, 'provenance.json'))
   const trust = await json(join(native, 'processing-locks.json'))
-  if (!trust.privateTestLockSha256?.includes(recipe.provenance.lockSha256)) throw new Error('Recipe lacks an independently pinned private-test trust entry')
+  // Private-test bundles trust every committed lock: candidates and accepted recipes alike.
+  if (!channelTrustedLocks(trust, 'private-test').includes(recipe.provenance.lockSha256)) throw new Error('Recipe lacks an independently pinned processing trust entry')
   const modelPolicy = await json(join(native, 'models.json')), models = modelManifest(modelPolicy)
   const paths = managedStoreDirectories(profile)
   let last = 0

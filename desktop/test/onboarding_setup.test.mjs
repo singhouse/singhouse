@@ -1101,7 +1101,7 @@ test('CUDA estimates require an admitted, recognized single CUDA device with eno
   assert.equal((await unmeasured.setup.preflight()).available, true)
 })
 
-test('Release candidate CUDA profiles use shipped admission policies and preserve pending qualification', async () => {
+test('Accepted CUDA profiles use shipped admission policies on every channel without measured-qualification claims', async () => {
   const json = async path => JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8'))
   const hardwarePolicy = await json('../hardware-policy.json')
   const modelPolicy = await json('../models.json')
@@ -1113,48 +1113,59 @@ test('Release candidate CUDA profiles use shipped admission policies and preserv
   const lyricsyncVersion = lyricsyncSource.match(/^version\s*=\s*"([^"]+)"/m)[1]
   const nativeLockSha256 = createHash('sha256').update(await readFile(new URL('../locks/native.json', import.meta.url))).digest('hex')
   for (const platform of ['linux', 'win32']) {
-    const source = await json(`../processing-catalogs/${platform}-x64.json`)
-    const identity = { appVersion: app.version, backendVersion, lyricsyncVersion, platform, arch: 'x64' }
-    const trustedLocks = channelTrustedLocks(lockPolicy, 'private-test')
-    const catalog = validateSetupCatalog(source, { identity, trustedLocks, modelPolicy, releaseChannel: 'private-test' })
-    // Native lock bytes are identical on every target; hash the source directly.
-    validateProcessingRecipe(catalog.runtime, identity, trustedLocks, { nativeLockSha256 })
-    assert.equal(catalog.runtime.schema, 2)
-    assert.equal(catalog.runtime.accelerator, 'cuda')
-    const hardware = cudaHost('NVIDIA GeForce RTX 3090', 24, { platform,
-      unifiedMemory: false, availableMemoryBytes: 24 * GiB })
-    const { setup } = fixture({ catalog, hardwarePolicy, policy: modelPolicy, releaseChannel: 'private-test',
-      hardware: async () => hardware, diskFree: async () => 100 * GiB })
-    const plan = await setup.preflight()
-    assert.equal(plan.available, true, `${platform}: ${plan.reason}`)
-    assert.deepEqual(plan.processingEstimate.minutes, [1, 3], platform)
-    assert.equal(plan.processingEstimate.evidence, 'extrapolated')
-    assert.equal(plan.qualificationScope, 'hardware-test')
-    assert.equal(plan.memoryQualification.status, 'unknown')
-    assert.equal(plan.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).requirements.acceptancePending, true)
-    assert.equal(catalog.qualification.passed, false)
-    // Missing legacy measured-memory evidence is honest; the separately bound
-    // candidate resource envelope still controls admission and advisory estimates.
-    hardware.availableMemoryBytes = null
-    let denied = await setup.preflight()
-    assert.equal(denied.available, false)
-    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'unknown')
-    assert.equal(denied.processingEstimate.minutes, null)
-    hardware.availableMemoryBytes = 1
-    denied = await setup.preflight()
-    assert.equal(denied.available, false)
-    assert.equal(denied.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId).status, 'insufficient')
-    hardware.availableMemoryBytes = 24 * GiB
-    setup.releaseChannel = 'stable'
-    denied = await setup.preflight()
-    assert.equal(denied.available, false)
-    assert.equal(denied.processingEstimate.minutes, null)
-    setup.releaseChannel = 'private-test'
-    setup.diskFree = async () => 0
-    denied = await setup.preflight()
-    assert.equal(denied.available, false)
-    assert.equal(denied.processingEstimate.minutes, null)
-    assert.equal(catalog.qualification.passed, false)
+    for (const releaseChannel of ['stable', 'private-test']) {
+      const source = await json(`../processing-catalogs/${platform}-x64.json`)
+      const identity = { appVersion: app.version, backendVersion, lyricsyncVersion, platform, arch: 'x64' }
+      const trustedLocks = channelTrustedLocks(lockPolicy, releaseChannel)
+      const catalog = validateSetupCatalog(source, { identity, trustedLocks, modelPolicy, releaseChannel })
+      // Native lock bytes are identical on every target; hash the source directly.
+      validateProcessingRecipe(catalog.runtime, identity, trustedLocks, { nativeLockSha256 })
+      assert.equal(catalog.runtime.schema, 2)
+      assert.equal(catalog.runtime.accelerator, 'cuda')
+      assert.equal(catalog.qualification.passed, true)
+      // Shipped catalogs offered on every channel carry a passed public scope.
+      assert.ok(['accepted', 'full'].includes(catalog.qualification.scope))
+      const hardware = cudaHost('NVIDIA GeForce RTX 3090', 24, { platform,
+        unifiedMemory: false, availableMemoryBytes: 24 * GiB })
+      const { setup } = fixture({ catalog, hardwarePolicy, policy: modelPolicy, releaseChannel,
+        hardware: async () => hardware, diskFree: async () => 100 * GiB })
+      const plan = await setup.preflight()
+      const label = `${platform} ${releaseChannel}`
+      assert.equal(plan.available, true, `${label}: ${plan.reason}`)
+      assert.deepEqual(plan.processingEstimate.minutes, [1, 3], label)
+      assert.equal(plan.processingEstimate.evidence, 'extrapolated')
+      assert.equal(plan.qualificationScope, catalog.qualification.scope)
+      // No measured-memory evidence is invented; the release-owned admission
+      // budget controls admission and advisory estimates.
+      assert.equal(plan.memoryQualification.status, 'unknown')
+      const selected = plan.hardwareAssessment.variants.find(v => v.id === plan.hardwareAssessment.selectedVariantId)
+      const definition = hardwarePolicy.variants.find(v => v.id === selected.id)
+      assert.ok(['accepted', 'qualified'].includes(definition.status), `${label}: ${definition.status}`)
+      assert.equal(selected.requirements.accepted === true, definition.status === 'accepted')
+      assert.equal(Object.hasOwn(selected.requirements, 'acceptancePending'), false)
+      assert.equal(selected.requirements.evidenceReference, (definition.admission || definition.evidence).reference)
+      hardware.availableMemoryBytes = null
+      let denied = await setup.preflight()
+      assert.equal(denied.available, false)
+      assert.equal(denied.hardwareAssessment.variants.find(v => v.id === selected.id).status, 'unknown')
+      assert.equal(denied.processingEstimate.minutes, null)
+      hardware.availableMemoryBytes = 1
+      denied = await setup.preflight()
+      assert.equal(denied.available, false)
+      assert.equal(denied.hardwareAssessment.variants.find(v => v.id === selected.id).status, 'insufficient')
+      hardware.availableMemoryBytes = 24 * GiB
+      setup.diskFree = async () => 0
+      denied = await setup.preflight()
+      assert.equal(denied.available, false)
+      assert.equal(denied.processingEstimate.minutes, null)
+      setup.diskFree = async () => 100 * GiB
+      assert.equal((await setup.preflight()).available, true)
+      // An unaccepted candidate of the same recipe is still private-test only.
+      Object.assign(setup.catalog.qualification, { passed: false, scope: 'hardware-test' })
+      denied = await setup.preflight()
+      assert.equal(denied.available, releaseChannel === 'private-test', label)
+      if (!denied.available) assert.equal(denied.processingEstimate.minutes, null)
+    }
   }
 })
 
@@ -1263,6 +1274,28 @@ test('hardware-test requires private channel and false status, and cannot skip f
   const misleading = fixture({ releaseChannel: 'private-test' })
   misleading.setup.catalog.qualification.scope = 'hardware-test'
   assert.equal((await misleading.setup.preflight()).available, false)
+})
+
+test('accepted requires passed status on every channel and cannot skip functional verification', async () => {
+  for (const releaseChannel of ['private-test', 'stable', 'beta', undefined]) {
+    const accepted = fixture({ releaseChannel })
+    accepted.setup.catalog.qualification.scope = 'accepted'
+    const plan = await accepted.setup.preflight()
+    assert.equal(plan.available, true, String(releaseChannel))
+    assert.equal(plan.qualificationScope, 'accepted')
+    accepted.runtime.probe = async () => { throw new Error('CUDA device unavailable') }
+    assert.equal((await start(accepted.setup, plan.planId)).state, 'error')
+    assert.equal((await accepted.setup.preflight()).ready, false)
+  }
+  for (const releaseChannel of ['private-test', 'stable']) {
+    const misleading = fixture({ releaseChannel })
+    Object.assign(misleading.setup.catalog.qualification, { scope: 'accepted', passed: false })
+    const plan = await misleading.setup.preflight()
+    assert.equal(plan.available, false)
+    assert.equal(plan.processingEstimate.minutes, null)
+    assert.equal((await start(misleading.setup, plan.planId)).state, 'error')
+    assert.deepEqual(misleading.calls, [])
+  }
 })
 
 test('navigation reuses launch verification while consent still requires full verification', async () => {
@@ -1521,6 +1554,36 @@ test('pending normal wizard fails closed outside private-test or after resources
   const { setup, runtime } = candidateWizardFixture()
   runtime.probe = async () => ({ capabilitiesReady: false })
   assert.equal((await start(setup, (await setup.preflight()).planId)).state, 'error')
+})
+
+test('accepted variants use the normal recipe wizard on public channels with functional verification', async () => {
+  for (const releaseChannel of ['stable', undefined]) {
+    const { setup, runtime, cache, calls } = candidateWizardFixture(releaseChannel)
+    Object.assign(setup.catalog.qualification, { passed: true, scope: 'accepted' })
+    Object.assign(setup.hardwarePolicy.variants[0], { id: 'cpu-accepted', status: 'accepted' })
+    setup.hardwarePolicy.variants[0].admission.reference = 'operator-acceptance'
+    const plan = await setup.preflight()
+    assert.equal(plan.available, true, plan.reason)
+    assert.equal(plan.qualificationScope, 'accepted')
+    assert.equal(plan.hardwareAssessment.selectedVariantId, 'cpu-accepted')
+    const { requirements } = plan.hardwareAssessment.variants[0]
+    assert.equal(requirements.accepted, true)
+    assert.equal(Object.hasOwn(requirements, 'acceptancePending'), false)
+    assert.deepEqual(calls, [])
+    assert.equal((await start(setup, plan.planId)).state, 'restart-required')
+    assert.deepEqual(calls, ['runtime', 'models'])
+    setup.loaded = { runtimeId: runtime.value.id, modelsId: cache.value.id, hardwareSelection: setup.hardwareSelection }
+    assert.equal((await setup.preflight()).ready, true)
+    assert.equal(setup.catalog.qualification.passed, true)
+  }
+  // The same fixture with a candidate variant is still refused outside private-test.
+  const { setup, calls } = candidateWizardFixture('stable')
+  Object.assign(setup.catalog.qualification, { passed: true, scope: 'accepted' })
+  const plan = await setup.preflight()
+  assert.equal(plan.available, false)
+  assert.equal(plan.hardwareAssessment.selectedVariantId, null)
+  await start(setup, plan.planId)
+  assert.deepEqual(calls, [])
 })
 
 function unifiedWizardFixture(hardwareChanges = {}) {

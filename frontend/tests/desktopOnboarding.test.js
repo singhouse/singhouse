@@ -443,7 +443,7 @@ describe('desktop setup screens', () => {
   })
   it('states a private-smoke qualification before consent and nothing extra otherwise', async () => {
     const notice = 'Private test build: local processing in this build passed a single-song smoke test only.'
-    for (const [qualificationScope, shown] of [['private-smoke', true], ['full', false], [null, false], [undefined, false]]) {
+    for (const [qualificationScope, shown] of [['private-smoke', true], ['full', false], ['accepted', false], [null, false], [undefined, false]]) {
       const desktop = bridge({
         getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
         preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: `scope-${qualificationScope}`, qualificationScope,
@@ -495,8 +495,49 @@ describe('desktop setup screens', () => {
       wrapper.unmount()
     }
   })
+  it('shows no release-candidate or acceptance-test notice for an accepted pack', async () => {
+    for (const accelerator of ['cuda', 'cpu', 'metal', undefined]) {
+      const desktop = bridge({
+        getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+        preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'accepted', qualificationScope: 'accepted', accelerator,
+          components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
+      })
+      globalThis.window.karaokeDesktop = desktop
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      expect(wrapper.text()).toContain('Install the processing tools and models')
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      for (const absent of ['Release candidate', 'acceptance test', 'Experimental', 'Private test build', 'pending']) {
+        expect(wrapper.text(), `${accelerator} ${absent}`).not.toContain(absent)
+      }
+      // The NVIDIA hint stays neutral information, only for CUDA runtimes.
+      expect(wrapper.text().includes('Requires an NVIDIA GPU and a current driver.'), String(accelerator)).toBe(accelerator === 'cuda')
+      expect(desktop.startSetup).not.toHaveBeenCalled()
+      await wrapper.find('.primary').trigger('click')
+      await flushPromises()
+      expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'accepted' })
+      wrapper.unmount()
+    }
+  })
+  it('states the NVIDIA requirement as neutral information for accepted and full CUDA plans only', async () => {
+    for (const [qualificationScope, accelerator, shown] of [['accepted', 'cuda', true], ['full', 'cuda', true], ['accepted', 'cpu', false],
+      ['full', 'cpu', false], ['full', 'metal', false], ['private-smoke', 'cuda', false], [null, 'cuda', false], [undefined, 'cuda', false]]) {
+      const desktop = bridge({
+        getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+        preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: 'scoped', qualificationScope, accelerator,
+          components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }),
+      })
+      globalThis.window.karaokeDesktop = desktop
+      const wrapper = mount(DesktopOnboarding)
+      await flushPromises()
+      const label = `${qualificationScope} ${accelerator}`
+      expect(wrapper.text().includes('Requires an NVIDIA GPU and a current driver.'), label).toBe(shown)
+      expect(wrapper.find('[role="alert"]').exists(), label).toBe(false)
+      wrapper.unmount()
+    }
+  })
   it('labels an available hardware-test pack Release candidate instead of Recommended', async () => {
-    for (const [qualificationScope, label, absent] of [['hardware-test', 'Release candidate', 'Recommended'], ['full', 'Recommended', 'Release candidate']]) {
+    for (const [qualificationScope, label, absent] of [['hardware-test', 'Release candidate', 'Recommended'], ['full', 'Recommended', 'Release candidate'], ['accepted', 'Recommended', 'Release candidate']]) {
       const desktop = bridge({ preflightSetup: vi.fn().mockResolvedValue({ available: true, planId: qualificationScope, qualificationScope,
         components: [{ label: 'Runtime', bytes: 1024, sources: ['https://example.test/runtime'] }] }) })
       globalThis.window.karaokeDesktop = desktop
@@ -1321,10 +1362,13 @@ it.each(['ready', 'restart', 'progress'])('retains availability when %s restores
 })
 
 it.each([
-  [true, 16 * 1024 ** 3],
-  [true, undefined],
-  [false, undefined],
-])('shows candidate memory floors or qualified headroom (pending: %s, total: %s)', async (acceptancePending, totalRamBytes) => {
+  ['pending', 16 * 1024 ** 3],
+  ['pending', undefined],
+  ['accepted', 16 * 1024 ** 3],
+  ['accepted', undefined],
+  ['qualified', undefined],
+])('shows admission memory floors or qualified headroom (%s, total: %s)', async (kind, totalRamBytes) => {
+  const budgeted = kind !== 'qualified'
   const desktop = bridge({
     getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose', choice: 'local' }),
     preflightSetup: vi.fn().mockResolvedValue({
@@ -1335,7 +1379,9 @@ it.each([
         variants: [{
           id: 'memory-variant', label: 'Local processing', supported: true,
           requirements: {
-            acceptancePending, headroomFraction: acceptancePending ? null : 0.25,
+            ...(kind === 'pending' ? { acceptancePending: true } : {}),
+            ...(kind === 'accepted' ? { accepted: true } : {}),
+            headroomFraction: budgeted ? null : 0.25,
             ramBytes: 4 * 1024 ** 3, totalRamBytes,
             vramBytes: 2 * 1024 ** 3, transferBytes: 1024 ** 3, installedBytes: 3 * 1024 ** 3,
           },
@@ -1348,7 +1394,9 @@ it.each([
   const wrapper = mount(DesktopOnboarding)
   await flushPromises()
   const details = wrapper.find('details').text()
-  if (acceptancePending) {
+  expect(details).not.toContain('NaN')
+  expect(details).not.toMatch(/\s\./)
+  if (budgeted) {
     expect(details).toContain('Available memory needed: 4.0 GiB')
     expect(details).not.toContain('% headroom')
     expect(details.includes('System memory needed: 16.0 GiB')).toBe(Boolean(totalRamBytes))
@@ -1359,6 +1407,28 @@ it.each([
   expect(details).toContain('Dedicated graphics memory: 2.0 GiB')
   expect(details).toContain('Model transfer: 1.0 GiB · Installed: 3.0 GiB')
   expect(desktop.startSetup).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
+
+it.each([
+  [{ accepted: true, headroomFraction: null }, 'Available memory needed: 4.0 GiB. Model transfer: 1.0 GiB · Installed: 3.0 GiB.'],
+  [{ accepted: true, headroomFraction: null, totalRamBytes: 16 * 1024 ** 3 }, 'Available memory needed: 4.0 GiB · System memory needed: 16.0 GiB. Model transfer'],
+  [{ headroomFraction: 0.25 }, 'Memory with 25% headroom: 4.0 GiB. Model transfer'],
+])('ends the memory sentence without a stray space when no graphics memory is needed (%o)', async (requirements, expected) => {
+  const desktop = bridge({
+    getOnboardingState: vi.fn().mockResolvedValue({ step: 'choose', choice: 'local' }),
+    preflightSetup: vi.fn().mockResolvedValue({
+      available: true, planId: 'cpu-plan', components: [],
+      hardwareAssessment: { reason: 'Processing requirements', variants: [{ id: 'cpu', label: 'CPU', supported: true,
+        requirements: { ramBytes: 4 * 1024 ** 3, vramBytes: null, transferBytes: 1024 ** 3, installedBytes: 3 * 1024 ** 3, ...requirements } }] },
+    }),
+  })
+  globalThis.window.karaokeDesktop = desktop
+  const wrapper = mount(DesktopOnboarding)
+  await flushPromises()
+  const details = wrapper.find('details').text().replace(/\s+/g, ' ')
+  expect(details).toContain(expected)
+  expect(details).not.toContain('Dedicated graphics memory')
   wrapper.unmount()
 })
 

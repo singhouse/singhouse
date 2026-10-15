@@ -150,7 +150,7 @@ python3 desktop/build/build_processing.py \
 
 ### Generating a Setup Catalog (`setup_catalog.mjs`)
 
-Binds a processing runtime manifest, qualification evidence (`full`, `private-smoke`, or `hardware-test`), model terms, and optional memory policy into canonical JSON:
+Binds a processing runtime manifest, qualification evidence (`full`, `accepted`, `private-smoke`, or `hardware-test`), model terms, and optional memory policy into canonical JSON:
 
 ```sh
 node desktop/build/setup_catalog.mjs \

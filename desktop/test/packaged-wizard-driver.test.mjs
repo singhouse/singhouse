@@ -13,7 +13,7 @@ import { LOCAL_MODEL_IDS, RUNTIME_COMPONENT_LABEL, WIZARD_LIMITATIONS, normalize
   assertWizardPlan, assertConsentText, createStatusTracker, shouldInterrupt, classifyRetry, partialRuntimeBytes, installedRuntimeIdentity,
   installedModelsIdentity, assertPostRestart, stagedArchivePartBytes, resolveRetryTarget, UNPROVEN_RESUME, isPrivateTestOrigin, catalogLimitations, modelsManifestFromPolicy, derivePlanId, assertPlanIdentity,
   parsePackServerLog, runtimeFileUrlPath, runtimeFileForUrlPath, judgePostRestart, observePostRestart, waitForIdle, acceptConsent,
-  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, HARDWARE_TEST_WARNING, NVIDIA_REQUIREMENT, pauseFromUi, resumeFromUi, clickRestart } from './packaged-wizard-driver.mjs'
+  chooseLocalAndContinue, retryFromUi, setupStarted, waitForSetupStart, uiSnapshot, HARDWARE_TEST_WARNING, PRIVATE_SMOKE_NOTICE, NVIDIA_REQUIREMENT, pauseFromUi, resumeFromUi, clickRestart } from './packaged-wizard-driver.mjs'
 
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const LOCK = 'a'.repeat(64)
@@ -970,7 +970,7 @@ test('a hardware-test catalog requires its scope on the plan and its warning on 
   const sizes = offered.components.map(component => `${component.label}\n (${component.bytes.toLocaleString('en-US')} bytes)`).join('\n') + '\nInstall tools and models'
   const text = `${HARDWARE_TEST_WARNING} Processing may fail.\n${sizes}`
   assertConsentText(text, offered, formatted, summary)
-  assert.throws(() => assertConsentText(sizes, offered, formatted, summary), /omits the hardware-test warning/)
+  assert.throws(() => assertConsentText(sizes, offered, formatted, summary), /omits the hardware-test notice/)
   assert.throws(() => assertConsentText(text, { ...offered, qualificationScope: null }, formatted, summary), /hardware-test scope/)
   assert.throws(() => assertConsentText(text, { ...offered, accelerator: 'cuda' }, formatted, summary), /accelerator differs/)
   // The NVIDIA requirement appears exactly when the plan's runtime is CUDA.
@@ -983,6 +983,39 @@ test('a hardware-test catalog requires its scope on the plan and its warning on 
   const cuda = { ...summary, target: { ...summary.target, accelerator: 'cuda' } }
   assertConsentText(withNvidia, { ...offered, accelerator: 'cuda' }, formatted, cuda)
   assert.throws(() => assertConsentText(text, { ...offered, accelerator: 'cuda' }, formatted, cuda), /NVIDIA GPU requirement/)
-  // Other scopes are unaffected by the warning check.
+  // A full catalog shows no scope notice.
   assertConsentText(sizes, plan(), formatted, summarizeCatalog(bytesOf(catalog())))
+  assert.throws(() => assertConsentText(text, plan(), formatted, summarizeCatalog(bytesOf(catalog()))), /shows the hardware-test notice/)
+})
+
+test('an accepted catalog shows no qualification notice and states the NVIDIA requirement only for CUDA', () => {
+  const value = catalog()
+  Object.assign(value.qualification, { scope: 'accepted', passed: true })
+  const summary = summarizeCatalog(bytesOf(value))
+  assertCatalogLock(summary, LOCK, host, undefined)
+  assertCatalogLock(summary, LOCK, host, 'stable')
+  assert.throws(() => assertCatalogLock({ ...summary, qualification: { ...summary.qualification, passed: false } }, LOCK, host, 'stable'), /not marked passed/)
+  assert.match(catalogLimitations(summary)[1], /passed operator acceptance.*measured full release qualification has not been recorded/)
+  const offered = { ...plan(), qualificationScope: 'accepted', accelerator: 'cpu' }, formatted = offered.components.map(component => component.bytes.toLocaleString('en-US'))
+  const sizes = offered.components.map(component => `${component.label}\n (${component.bytes.toLocaleString('en-US')} bytes)`).join('\n') + '\nInstall tools and models'
+  assertConsentText(sizes, offered, formatted, summary)
+  assert.throws(() => assertConsentText(sizes, { ...offered, qualificationScope: null }, formatted, summary), /accepted scope/)
+  for (const notice of [HARDWARE_TEST_WARNING, PRIVATE_SMOKE_NOTICE]) {
+    assert.throws(() => assertConsentText(`${notice}\n${sizes}`, offered, formatted, summary), /notice for a accepted catalog/)
+  }
+  const cuda = { ...summary, target: { ...summary.target, accelerator: 'cuda' } }
+  const withNvidia = `${NVIDIA_REQUIREMENT}\n${sizes}`
+  assertConsentText(withNvidia, { ...offered, accelerator: 'cuda' }, formatted, cuda)
+  assert.throws(() => assertConsentText(sizes, { ...offered, accelerator: 'cuda' }, formatted, cuda), /NVIDIA GPU requirement/)
+  assert.throws(() => assertConsentText(withNvidia, offered, formatted, summary), /non-CUDA runtime/)
+})
+
+test('a private-smoke catalog requires its own notice', () => {
+  const value = catalog()
+  value.qualification.scope = 'private-smoke'
+  const summary = summarizeCatalog(bytesOf(value))
+  const offered = { ...plan(), qualificationScope: 'private-smoke' }, formatted = offered.components.map(component => component.bytes.toLocaleString('en-US'))
+  const sizes = offered.components.map(component => `${component.label}\n (${component.bytes.toLocaleString('en-US')} bytes)`).join('\n') + '\nInstall tools and models'
+  assertConsentText(`${PRIVATE_SMOKE_NOTICE}\n${sizes}`, offered, formatted, summary)
+  assert.throws(() => assertConsentText(sizes, offered, formatted, summary), /omits the private-smoke notice/)
 })

@@ -21,12 +21,12 @@
       "arch": "x64",
       "accelerator": "cpu",
       "priority": 10,
-      "status": "candidate",
+      "status": "accepted",
       "settings": {},
-      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "qualityTradeoff": "Standard model set and settings.",
       "admission": {
         "runtimeLockSha256": "647235dc2d101accf5326421f1ee6cc89cca5430d4b19bc304184ddf793267a8",
-        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "reference": "v0.1.1-operator-acceptance-2026-10-14",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
           "https://github.com/singhouse/singhouse/issues/117",
@@ -48,12 +48,12 @@
       "arch": "x64",
       "accelerator": "cuda",
       "priority": 100,
-      "status": "candidate",
+      "status": "accepted",
       "settings": {},
-      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "qualityTradeoff": "Standard model set and settings.",
       "admission": {
         "runtimeLockSha256": "6fe8d6ceb88c7c17ecc47dccbf37ddb4e36d745387be6290d1802258f3523c52",
-        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "reference": "v0.1.1-operator-acceptance-2026-10-14",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
           "https://github.com/singhouse/singhouse/issues/117",
@@ -75,12 +75,12 @@
       "arch": "arm64",
       "accelerator": "metal",
       "priority": 100,
-      "status": "candidate",
+      "status": "accepted",
       "settings": {},
-      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "qualityTradeoff": "Standard model set and settings.",
       "admission": {
         "runtimeLockSha256": "3a639910342376f34ef5b0847bb34c1ef3f3bf1f8c56f30faa6b93e0896c9ef6",
-        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "reference": "v0.1.1-operator-acceptance-2026-10-14",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/116#issuecomment-6115411344",
           "Prior Apple M2 16 GiB song acceptance. Physical capacity is retained separately from the provisional available-memory launch floor; neither is a new measured pipeline peak."
@@ -102,12 +102,12 @@
       "arch": "x64",
       "accelerator": "cpu",
       "priority": 10,
-      "status": "candidate",
+      "status": "accepted",
       "settings": {},
-      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "qualityTradeoff": "Standard model set and settings.",
       "admission": {
         "runtimeLockSha256": "2a5229022f65b22fcd66ca234bba9ef204bf03a52812134bcd6e7a1d76ec65fe",
-        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "reference": "v0.1.1-operator-acceptance-2026-10-14",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
           "https://github.com/singhouse/singhouse/issues/117",
@@ -129,12 +129,12 @@
       "arch": "x64",
       "accelerator": "cuda",
       "priority": 100,
-      "status": "candidate",
+      "status": "accepted",
       "settings": {},
-      "qualityTradeoff": "Standard model set and settings; final platform acceptance pending.",
+      "qualityTradeoff": "Standard model set and settings.",
       "admission": {
         "runtimeLockSha256": "b1749fbfb17993c1762db51ddd7b9b016538cbff92a563de0935d6a6de73e280",
-        "reference": "rc-0.1.1-final-platform-acceptance-pending",
+        "reference": "v0.1.1-operator-acceptance-2026-10-14",
         "basisReferences": [
           "https://github.com/singhouse/singhouse/pull/72",
           "https://github.com/singhouse/singhouse/issues/117",

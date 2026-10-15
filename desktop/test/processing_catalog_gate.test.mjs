@@ -610,7 +610,7 @@ test('processing-ready accepts only the generator\'s exact canonical bytes', asy
 
   // The real generator's output file passes unchanged, byte for byte.
   const root = await mkdtemp(join(tmpdir(), 'catalog-generator-')); t.after(() => rm(root, { recursive: true, force: true }))
-  for (const scope of ['full', 'private-smoke']) {
+  for (const scope of ['full', 'accepted', 'private-smoke']) {
     const f = fixture({ scope })
     const entries = { runtime: f.input.runtime, qualification: f.input.qualification, terms: f.input.models, identity: f.target,
       locks: f.locks, models: f.modelPolicy }
@@ -643,4 +643,27 @@ test('hardware-test packaging is private-only and records unqualified scope with
     /private-test locks must also be listed/)
   f.catalog.qualification.passed = true
   assert.throws(() => assertProcessingCatalog({ ...args, catalogBytes: bytes(f.catalog), releaseChannel: 'private-test' }), /qualification evidence/)
+})
+
+test('accepted packaging is admitted on every channel, requires passed status, and keeps channel-scoped lock trust', () => {
+  const f = fixture({ scope: 'accepted' })
+  assert.equal(f.catalog.qualification.passed, true)
+  const args = { mode: 'processing-ready', catalogBytes: bytes(f.catalog), identity: f.identity,
+    locks: f.locks, modelPolicy: f.modelPolicy }
+  for (const releaseChannel of ['private-test', 'stable', 'beta', undefined]) {
+    assert.deepEqual(assertProcessingCatalog({ ...args, releaseChannel }), { mode: 'processing-ready', catalogSha256: sha(args.catalogBytes),
+      runtimeLockSha256: f.catalog.runtime.provenance.lockSha256, qualificationScope: 'accepted' }, String(releaseChannel))
+  }
+  // Acceptance does not override the application's lock trust: a lock still
+  // listed as private-test only is refused by other channels.
+  const lock = f.catalog.runtime.provenance.lockSha256
+  const scoped = { ...args, locks: { ...f.locks, privateTestLockSha256: [lock] } }
+  assert.equal(assertProcessingCatalog({ ...scoped, releaseChannel: 'private-test' }).qualificationScope, 'accepted')
+  assert.throws(() => assertProcessingCatalog({ ...scoped, releaseChannel: 'stable' }), /not trusted/)
+  for (const passed of [false, undefined, 'true']) {
+    const mismatch = structuredClone(f.catalog); mismatch.qualification.passed = passed
+    for (const releaseChannel of ['private-test', 'stable']) {
+      assert.throws(() => assertProcessingCatalog({ ...args, catalogBytes: bytes(mismatch), releaseChannel }), /passed qualification/, `${passed} ${releaseChannel}`)
+    }
+  }
 })
