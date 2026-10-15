@@ -121,10 +121,12 @@ import Modal from '@/components/ui/Modal.vue'
 import { useQueueStore } from '@/stores/queue'
 import { useSongsStore } from '@/stores/songs'
 import { useHistoryStore } from '@/stores/history'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const queue = useQueueStore()
 const songs = useSongsStore()
 const history = useHistoryStore()
+const { guard } = usePlayGuard()
 
 // This panel owns its own poll lifecycle: the shell mounts whichever queue
 // panel the assembly ships and knows nothing about either one's endpoints.
@@ -156,14 +158,17 @@ async function onPick(text, songId) {
 }
 
 function onSing(entry) {
-  // Dequeue-on-play: load the deck, then the row is gone (delete is the
-  // model's "played" signal — there is no status column).
-  songs.loadSong({ id: entry.song_id })
-  // Record the play from the entry's snapshot singer name. Fire-and-
-  // forget: recordPlay never throws, so a history-write blip cannot block the
-  // load or the dequeue below.
-  history.recordPlay(entry.song_id, entry.singer_name || null)
-  queue.remove(entry.id)
+  // Loading over a playing song asks first; a cancel leaves the entry queued.
+  return guard(() => {
+    // Dequeue-on-play: load the deck, then the row is gone (delete is the
+    // model's "played" signal — there is no status column).
+    songs.loadSong({ id: entry.song_id })
+    // Record the play from the entry's snapshot singer name. Fire-and-
+    // forget: recordPlay never throws, so a history-write blip cannot block the
+    // load or the dequeue below.
+    history.recordPlay(entry.song_id, entry.singer_name || null)
+    queue.remove(entry.id)
+  }, { kind: 'load', title: entry.title || '' })
 }
 
 function onClear() {

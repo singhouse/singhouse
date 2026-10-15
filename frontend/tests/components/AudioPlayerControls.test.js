@@ -45,6 +45,8 @@ vi.mock('@/stores/features', () => ({
 }))
 
 import AudioPlayer from '@/components/AudioPlayer.vue'
+import { usePlayerStore } from '@/stores/player'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const WITH_VOCALS = {
   id: 1,
@@ -104,6 +106,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  usePlayGuard().cancel()
   wrapper?.unmount()
   wrapper = null
   document.body.innerHTML = ''
@@ -166,6 +169,56 @@ describe('Space shortcut', () => {
     const ev = pressSpace(document.body, { [mod]: true })
     expect(engine.stub.play).not.toHaveBeenCalled()
     expect(ev.defaultPrevented).toBe(false)
+  })
+})
+
+describe('Space while a song is playing', () => {
+  async function mountPlaying() {
+    const w = await mountPlayer()
+    engine.stub.playerState.value = 'playing'
+    usePlayerStore().setPlayState('playing')
+    return w
+  }
+
+  it('asks before pausing', async () => {
+    wrapper = await mountPlaying()
+    const ev = pressSpace(document.body)
+    expect(ev.defaultPrevented).toBe(true)
+    expect(usePlayGuard().pending.value).toMatchObject({ kind: 'pause' })
+    expect(engine.stub.pause).not.toHaveBeenCalled()
+  })
+
+  it('keeps playing when the confirmation is cancelled', async () => {
+    wrapper = await mountPlaying()
+    pressSpace(document.body)
+    usePlayGuard().cancel()
+    await settle(wrapper)
+    expect(engine.stub.pause).not.toHaveBeenCalled()
+    expect(engine.stub.stop).not.toHaveBeenCalled()
+  })
+
+  it('pauses once confirmed', async () => {
+    wrapper = await mountPlaying()
+    pressSpace(document.body)
+    usePlayGuard().confirm()
+    await settle(wrapper)
+    expect(engine.stub.pause).toHaveBeenCalledTimes(1)
+  })
+
+  it('resumes from pause without asking', async () => {
+    wrapper = await mountPlayer()
+    engine.stub.playerState.value = 'paused'
+    usePlayerStore().setPlayState('paused')
+    pressSpace(document.body)
+    expect(usePlayGuard().pending.value).toBe(null)
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the play/pause button unguarded', async () => {
+    wrapper = await mountPlaying()
+    await wrapper.find('.ctrl-btn--play').trigger('click')
+    expect(usePlayGuard().pending.value).toBe(null)
+    expect(engine.stub.pause).toHaveBeenCalledTimes(1)
   })
 })
 
