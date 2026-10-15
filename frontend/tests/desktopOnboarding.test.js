@@ -251,6 +251,45 @@ describe('desktop setup screens', () => {
     expect(desktop.startSetup).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it('shows the install location with its free space and changes it through the fixed desktop action', async () => {
+    const first = { available: true, planId: 'plan-a', installLocation: '/data/karaoke', freeBytes: 20 * 1024 ** 3,
+      diskRequiredBytes: 10 * 1024 ** 3, diskFreeBytes: 20 * 1024 ** 3, components: [] }
+    const second = { ...first, planId: 'plan-b', installLocation: '/mnt/media/karaoke-tools', freeBytes: 300 * 1024 ** 3, diskFreeBytes: 300 * 1024 ** 3 }
+    const desktop = bridge({
+      getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }),
+      preflightSetup: vi.fn().mockResolvedValue(first),
+      chooseInstallLocation: vi.fn().mockResolvedValue(second),
+    })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    const row = wrapper.find('[data-testid=onboarding-install-location]')
+    expect(row.text()).toContain('Install to')
+    expect(row.find('strong').text()).toBe('/data/karaoke')
+    const facts = () => Object.fromEntries(wrapper.findAll('.facts > div').map(item => [item.find('dt').text(), item.find('dd').text()]))
+    expect(facts().Available).toBe('20.0 GiB')
+    const change = row.find('button')
+    expect(change.text()).toBe('Change…')
+    await change.trigger('click')
+    await flushPromises()
+    expect(desktop.chooseInstallLocation).toHaveBeenCalledTimes(1)
+    expect(desktop.chooseInstallLocation).toHaveBeenCalledWith()
+    expect(wrapper.find('[data-testid=onboarding-install-location] strong').text()).toBe('/mnt/media/karaoke-tools')
+    expect(facts().Available).toBe('300.0 GiB')
+    expect(desktop.startSetup).not.toHaveBeenCalled()
+    await wrapper.find('.primary').trigger('click')
+    await flushPromises()
+    expect(desktop.startSetup).toHaveBeenCalledWith({ consent: true, planId: 'plan-b' })
+    wrapper.unmount()
+  })
+  it('omits the install location row when the plan does not report one', async () => {
+    const desktop = bridge({ getOnboardingState: vi.fn().mockResolvedValue({ step: 'consent', choice: 'local' }) })
+    globalThis.window.karaokeDesktop = desktop
+    const wrapper = mount(DesktopOnboarding)
+    await flushPromises()
+    expect(wrapper.find('[data-testid=onboarding-install-location]').exists()).toBe(false)
+    wrapper.unmount()
+  })
   it('states a private-smoke qualification before consent and nothing extra otherwise', async () => {
     const notice = 'Private test build: local processing in this build passed a single-song smoke test only.'
     for (const [qualificationScope, shown] of [['private-smoke', true], ['full', false], [null, false], [undefined, false]]) {

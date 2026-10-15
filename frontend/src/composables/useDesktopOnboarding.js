@@ -251,10 +251,17 @@ export function useDesktopOnboarding(bridge = globalThis.window?.karaokeDesktop)
       await persist()
     })
   }
+  async function chooseInstallLocation() {
+    return guarded(async () => {
+      if (!bridge.chooseInstallLocation) throw new Error('Install location settings are unavailable. Update the desktop application and try again.')
+      applyPlan(await bridge.chooseInstallLocation())
+      await persist()
+    })
+  }
   async function openHelp(topic) { return guarded(() => bridge.openSetupHelp(topic)) }
   async function restart() { return guarded(() => bridge.restartApp()) }
   async function skip() { return guarded(() => persist(true)) }
   async function complete() { return guarded(() => persist(false)) }
   return { step, choice, plan, status, busy, planning, error, localAvailable, canStart,
-    lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, pause, resume, stop, restart, skip, complete, openHelp, chooseModelSource }
+    lyricsEnabled, welcome, chooseLyrics, saveLyrics, initialize, refresh, chooseProcessing, continueChoice, start, pause, resume, stop, restart, skip, complete, openHelp, chooseModelSource, chooseInstallLocation }
 }

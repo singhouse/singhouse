@@ -185,6 +185,12 @@ function processingEstimate(runtime, hardware = {}, { cudaEstimateAllowed = fals
   return { level, label, minutes: [...tier.minutes], basis: tier.basis, evidence: tier.evidence }
 }
 
+// A run that finished and verified its installation, whether it is already
+// loaded or needs reopening.
+export function setupCompleted(status) {
+  return status?.phase === 'complete' && ['ready', 'restart-required'].includes(status.state)
+}
+
 // Catalog, policy, and qualification are release-owned inputs. Never populate
 // these from renderer messages, persisted progress, or an unsigned remote feed.
 export class OnboardingSetup {
@@ -201,8 +207,8 @@ export class OnboardingSetup {
   // releaseChannel is the validated release policy's channel; it decides
   // whether private-smoke qualification evidence is acceptable.
   constructor({ runtime, cache, policy, catalog = null, catalogError = null, releaseChannel, hardware = async () => ({}), diskFree,
-    loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
-    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, loaded, load, save, notify })
+    installLocation = null, loaded = {}, load = async () => null, save = async () => {}, notify = () => {} }) {
+    Object.assign(this, { runtime, cache, policy, catalogError, releaseChannel, hardware, diskFree, installLocation, loaded, load, save, notify })
     this.catalog = catalog && structuredClone(catalog)
     this.state = initial()
     this.operation = null
@@ -211,6 +217,15 @@ export class OnboardingSetup {
     this.consentedPlanId = null
     this.restoring = null
     this.check = null
+  }
+
+  // A running or paused attempt keeps its stores until it finishes or stops.
+  storesLocked() { return Boolean(this.operation) || this.state.state === 'paused' }
+
+  // Later installs and repairs use these stores; existing files stay where they are.
+  useStores({ runtime, cache, installLocation }) {
+    if (this.storesLocked()) throw new Error('Wait for the current setup operation before changing the install location.')
+    Object.assign(this, { runtime, cache, installLocation })
   }
 
   async getStatus() {
@@ -371,8 +386,13 @@ export class OnboardingSetup {
     const { blocked: memoryBlocked, ...memoryFields } = memory
     const estimateOptions = { cudaEstimateAllowed: qualificationStatusMatches(this.catalog?.qualification)
       && !qualificationScopeError(this.catalog?.qualification?.scope, this.releaseChannel) }
+    let freeBytes = null
+    try { freeBytes = this.diskFree ? await this.diskFree() : null } catch { /* reported as unknown */ }
+    signal?.throwIfAborted()
+    if (!Number.isSafeInteger(freeBytes)) freeBytes = null
     const base = { ...memoryFields, available: false, ready: installed.ready, restartRequired: installed.restartRequired, hardware,
-      processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null }
+      processingEstimate: processingEstimate(null), qualificationScope: this.qualificationScope(), modelSource, runtimeTransferRequired: false, components: [], diskRequiredBytes: 0, diskFreeBytes: null,
+      installLocation: this.installLocation ?? null, freeBytes }
     if (installed.installed) return { ...base, processingEstimate: memoryBlocked || !this.catalog?.runtime
       || hash(installed.runtime.manifest) !== hash(this.catalog.runtime) ? base.processingEstimate : processingEstimate(installed.runtime.manifest, hardware, estimateOptions), available: true, planId: hash([installed.runtime.id, installed.models.id, modelSource, offlineDirectory]), components: [] }
     try {
@@ -395,8 +415,7 @@ export class OnboardingSetup {
       // still need space.
       const runtimeReserve = !runtimeNeeded ? 0 : runtimeParts ? runtimeBytes + runtimeInstalledBytes : runtimeInstalledBytes * 2
       const diskRequiredBytes = runtimeReserve + modelBytes * 2 + (Number(runtimeNeeded) + Number(modelsNeeded)) * 64 * 1024 * 1024
-      const diskFreeBytes = this.diskFree ? await this.diskFree() : null
-      signal?.throwIfAborted()
+      const diskFreeBytes = freeBytes
       const runtimeSources = runtimeParts ? runtimeParts.map(part => part.url) : selected.runtime.files.map(file => file.url)
       const components = [
         ...(runtimeNeeded ? [{ label: 'Local processing runtime', bytes: runtimeBytes, installedBytes: runtimeInstalledBytes, sourceMode: 'catalog',

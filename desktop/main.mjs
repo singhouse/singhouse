@@ -2,7 +2,7 @@
 import { app, BrowserWindow, session, dialog, Menu, powerSaveBlocker, ipcMain, shell, safeStorage } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { statfs } from 'node:fs/promises'
+import { realpath, statfs } from 'node:fs/promises'
 import { collectHardware } from './hardware_inventory.mjs'
 import { validateShippedCatalog } from './setup_catalog.mjs'
 import { ModalCredentials } from './modal_credentials.mjs'
@@ -12,12 +12,12 @@ import { createRequire } from 'node:module'
 import { isAbsolute, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseLaunch, ownURL, allowedRequest, allowSpeaker, childEnvironment, sameIdentity, validateManifest, CSP } from './policy.mjs'
-import { projectorBlocker, createRuntime, persistentRuntime, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
-import { RuntimeManager, ModelCache, launchSelection, processingAttestation } from './runtime_manager.mjs'
+import { projectorBlocker, createRuntime, persistentRuntime, processingLaunchArguments, stopRuntime, watchOwnedGroup, forceChild } from './lifecycle.mjs'
+import { RuntimeManager, ModelCache, launchSelection, managedStoreDirectories, processingAttestation } from './runtime_manager.mjs'
 import { authorizedHeartCaller } from './heart_setup.mjs'
 import { LyricsLookupPreference } from './lyrics_lookup.mjs'
-import { OnboardingSetup } from './onboarding_setup.mjs'
-import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
+import { OnboardingSetup, setupCompleted } from './onboarding_setup.mjs'
+import { OnboardingState, chosenInstallRoot, onboardingPreferences, resolveInstallRoot, restartForSetup, settleInstallLocation } from './onboarding_state.mjs'
 import { relaunchForSetup } from './setup_relaunch.mjs'
 import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
@@ -47,6 +47,8 @@ const runtime = ownsInstance ? (packaged ? persistentRuntime(app.getPath('userDa
 if (!packaged) app.setPath('userData', runtime.electron)
 let expectedIdentity
 let processingManager, modelCache, activeProcessing, activeModels, processingError, processingStatus
+// Where processing tools and models install; every install, repair and update opens its stores here.
+let installRoot, savedInstallLocation = null, openManagedStores
 let processingProbe
 let installation
 let processingOperation
@@ -228,9 +230,7 @@ async function launchBackend() {
   if (!python || !isAbsolute(python)) throw new Error('Set KARAOKE_DESKTOP_PYTHON to an absolute executable path in a dedicated core-only environment.')
   const args = ['-I', '-B', packaged ? resolve(nativeDir, 'backend.py') : resolve(desktopDir, 'backend.py'), ...(packaged ? ['--native', nativeDir] : ['--root', root]), '--runtime', runtime.backend]
   // Directory names may be shortened; the backend checks each manifest against the full identity.
-  if (activeProcessing) args.push('--processing', activeProcessing.directory, '--processing-id', activeProcessing.id)
-  if (processingProbe) args.push('--processing-probe', JSON.stringify(processingProbe))
-  if (activeModels) args.push('--models', activeModels.directory, '--models-id', activeModels.id)
+  args.push(...processingLaunchArguments({ installRoot: packaged ? installRoot : null, processing: activeProcessing, probe: processingProbe, models: activeModels }))
   let privateModal = null
   if (packaged) {
     args.push('--desktop-config-stdin')
@@ -441,10 +441,17 @@ function installMenu() {
   ]))
 }
 
+// A completed install settles which root later launches use.
+async function installCompleted() {
+  try { savedInstallLocation = await settleInstallLocation(onboardingState, { saved: savedInstallLocation, used: installRoot }) }
+  catch { console.error('Could not update the saved install location.') }
+}
+
 async function installProcessing() {
   if (installation || heartSetup?.operation) return
   const choice = await dialog.showOpenDialog(host, { title: 'Select a processing or upstream model manifest', properties: ['openFile'], filters: [{ name: 'Manifest', extensions: ['json'] }] })
   if (choice.canceled || !choice.filePaths.length) return
+  let owned = false
   try {
     const manifest = JSON.parse(readFileSync(choice.filePaths[0], 'utf8'))
     const manager = manifest.kind === 'models' ? modelCache : processingManager
@@ -454,12 +461,19 @@ async function installProcessing() {
       message: manifest.kind === 'models' ? 'Install model files directly from declared upstream sources?' : 'Install this selected processing runtime?',
       detail: `${Math.ceil(bytes / 1024 / 1024)} MiB. ${manifest.kind === 'models' ? 'Model files are cached on this computer.' : 'Processing tools and models contain executable code. Select only a manifest whose source you trust.'} Changes take effect after reopening the app. Existing library files are preserved.` })
     if (consent.response !== 1 || quitting) return
+    // The install location may have changed while the dialogs were open; use
+    // the current store, and stay out of a running setup or location change.
+    if (operationGate.active || processingOperation || installation || heartSetup?.operation) throw new Error('Another installation or release operation is running.')
+    const current = manifest.kind === 'models' ? modelCache : processingManager
+    current.validate(manifest)
     installation = new AbortController()
-    await manager.install(manifest, { signal: installation.signal })
+    owned = true
+    await current.install(manifest, { signal: installation.signal })
+    await installCompleted()
     if (!quitting) await dialog.showMessageBox(host, { message: 'Installation verified. Reopen the app to use it.' })
   } catch (error) {
     if (!quitting) dialog.showErrorBox('Installation did not complete', error.message)
-  } finally { installation = null; host?.setProgressBar(-1) }
+  } finally { if (owned) installation = null; host?.setProgressBar(-1) }
 }
 
 async function start() {
@@ -539,8 +553,16 @@ async function start() {
     app.setName(names.BRAND_INSTALLED_NAME)
     const processingPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'processing-locks.json'), 'utf8'))
     if (processingPolicy.schema !== 1 || !Array.isArray(processingPolicy.lockSha256)) throw new Error('Invalid application processing lock policy')
-    processingManager = new RuntimeManager(resolve(runtime.root, 'processing'), expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks: processingPolicy.lockSha256 })
-    modelCache = new ModelCache(resolve(runtime.root, 'model-cache'), JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8')), { progress, lockPython, durabilityHelper })
+    const modelPolicy = JSON.parse(readFileSync(resolve(desktopDir, 'models.json'), 'utf8'))
+    openManagedStores = storeRoot => {
+      const directories = managedStoreDirectories(storeRoot)
+      return { processing: new RuntimeManager(directories.processing, expectedIdentity, { progress, lockPython, durabilityHelper, nativeBin: resolve(nativeDir, 'ffmpeg/bin'), nativeRuntimeId: expectedIdentity.runtimeId, trustedLocks: processingPolicy.lockSha256 }),
+        models: new ModelCache(directories.models, modelPolicy, { progress, lockPython, durabilityHelper }) }
+    }
+    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
+    savedInstallLocation = (await onboardingState.read())?.installLocation ?? null
+    installRoot = await resolveInstallRoot(runtime.root, savedInstallLocation)
+    ;({ processing: processingManager, models: modelCache } = openManagedStores(installRoot))
     // Launch uses the structural pack checks and the self-test result recorded
     // for this exact pack; payload hashes and a fresh self-test belong to
     // installation, repair and activation. The two stores are independent, so
@@ -558,7 +580,6 @@ async function start() {
   await startupSurface.update('Starting your library…')
   if (quitting) return
   if (packaged) {
-    onboardingState = new OnboardingState(resolve(runtime.root, 'onboarding.json'))
     modalCredentials = new ModalCredentials({ path: resolve(runtime.root, 'modal-config.enc'), safeStorage })
   }
   const launch = await launchBackend()
@@ -622,7 +643,8 @@ async function start() {
     onboardingSetup = new OnboardingSetup({ runtime: processingManager, cache: modelCache,
       policy: modelCache.policy, catalog, catalogError, releaseChannel: releasePolicy.channel, loaded: { runtimeId: activeProcessing?.id, modelsId: activeModels?.id },
       hardware: () => collectHardware({ getGPUInfo: () => app.getGPUInfo('basic') }),
-      diskFree: async () => { const disk = await statfs(runtime.root); return disk.bavail * disk.bsize },
+      installLocation: installRoot,
+      diskFree: async () => { const disk = await statfs(installRoot); return disk.bavail * disk.bsize },
       load: async () => (await onboardingState.read())?.setup,
       save: state => onboardingState.save('setup', state) })
   }
@@ -649,6 +671,41 @@ async function start() {
         title: 'Choose a complete model folder', properties: ['openDirectory'],
       })
       if (!selected.canceled && selected.filePaths.length === 1) onboardingSetup.setOfflineModelsDirectory(selected.filePaths[0])
+    }
+    return onboardingSetup.preflight()
+  })
+  const installBusy = () => processingOperation || operationGate.active || onboardingSetup.storesLocked()
+    || installationBoundaryBusy({ installation, processingManager, modelCache, heartSetup, processingOperation })
+  setupHandler('setup:install-location', async () => {
+    // A restored paused checkpoint must be read before the busy check.
+    await onboardingSetup.getStatus()
+    if (installBusy()) throw new Error('Wait for the current installation to finish or cancel it.')
+    const selected = await dialog.showOpenDialog(host, {
+      title: 'Choose where to install processing tools and models', defaultPath: installRoot, properties: ['openDirectory', 'createDirectory'],
+    })
+    if (!selected.canceled && selected.filePaths.length === 1) {
+      const real = await chosenInstallRoot(selected.filePaths[0])
+      const saved = real === await realpath(runtime.root) ? null : real
+      const chosen = saved ?? resolve(runtime.root)
+      if (installBusy()) throw new Error('Wait for the current installation to finish or cancel it.')
+      // The gate keeps setup from starting until the choice is saved. Files
+      // already installed elsewhere are left in place; the next install or
+      // repair uses this folder.
+      await operationGate.run('install location change', async () => {
+        const previous = { processing: processingManager, models: modelCache, root: installRoot }
+        const stores = openManagedStores(chosen)
+        onboardingSetup.useStores({ runtime: stores.processing, cache: stores.models, installLocation: chosen })
+        ;({ processing: processingManager, models: modelCache } = stores)
+        installRoot = chosen
+        try {
+          await onboardingState.save('installLocation', saved)
+          savedInstallLocation = saved
+        } catch (error) {
+          onboardingSetup.useStores({ runtime: previous.processing, cache: previous.models, installLocation: previous.root })
+          ;({ processing: processingManager, models: modelCache, root: installRoot } = previous)
+          throw error
+        }
+      })
     }
     return onboardingSetup.preflight()
   })
@@ -704,6 +761,7 @@ async function start() {
       try {
         accept(await onboardingSetup.start({ consent: request?.consent === true, planId: request?.planId }))
         await onboardingSetup.operation
+        if (setupCompleted(await onboardingSetup.getStatus())) await installCompleted()
       } catch (error) { reject(error) }
     }).finally(() => { processingOperation = null; host?.setProgressBar(-1) })
     return accepted

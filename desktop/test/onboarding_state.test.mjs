@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, rm, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, realpath, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { onboardingPreferences, OnboardingState, restartForSetup } from '../onboarding_state.mjs'
+import { chosenInstallRoot, onboardingPreferences, OnboardingState, resolveInstallRoot, restartForSetup, settleInstallLocation } from '../onboarding_state.mjs'
 
 const defaults = { step: 'welcome', choice: null, skipped: false }
 const idle = { projectorOpen: false, audible: false, installing: false, backendReady: true, activeJobs: 0 }
@@ -158,4 +158,76 @@ test('setup restart rechecks deferral after quiescing', async () => {
   })
   await assert.rejects(restartForSetup(callbacks), /library is busy/)
   assert.deepEqual(calls, ['resume'])
+})
+
+test('install root uses a saved folder only while it is a directory, else the default', async t => {
+  const { directory } = await fixture(t)
+  const fallback = join(directory, 'default')
+  const custom = join(directory, 'custom')
+  await mkdir(custom)
+  assert.equal(await resolveInstallRoot(fallback, undefined), fallback)
+  assert.equal(await resolveInstallRoot(fallback, null), fallback)
+  assert.equal(await resolveInstallRoot(fallback, 'relative/folder'), fallback)
+  assert.equal(await resolveInstallRoot(fallback, custom), custom)
+  const file = join(directory, 'not-a-folder')
+  await writeFile(file, 'x')
+  assert.equal(await resolveInstallRoot(fallback, file), fallback)
+  await rm(custom, { recursive: true })
+  assert.equal(await resolveInstallRoot(fallback, custom), fallback)
+})
+
+test('the saved install location round-trips beside the other preferences', async t => {
+  const { directory, path } = await fixture(t)
+  const state = new OnboardingState(path)
+  await state.save('preferences', onboardingPreferences({ step: 'consent', choice: 'local' }))
+  await state.save('installLocation', directory)
+  const saved = await state.read()
+  assert.equal(saved.installLocation, directory)
+  assert.equal(saved.preferences.step, 'consent')
+  assert.equal(await resolveInstallRoot(join(directory, 'default'), saved.installLocation), directory)
+})
+
+test('a saved folder missing at launch is forgotten once an install completes in the default root', async t => {
+  const { directory, path } = await fixture(t)
+  const fallback = join(directory, 'default')
+  const custom = join(directory, 'external-drive')
+  const state = new OnboardingState(path)
+  await state.save('installLocation', custom)
+  const saved = (await state.read()).installLocation
+  const used = await resolveInstallRoot(fallback, saved)
+  assert.equal(used, fallback)
+  // Until an install completes the preference is kept for this session.
+  assert.equal((await state.read()).installLocation, custom)
+  assert.equal(await settleInstallLocation(state, { saved, used }), null)
+  assert.equal((await state.read()).installLocation, null)
+  // With the drive back, the next launch keeps the default that holds the install.
+  await mkdir(custom)
+  assert.equal(await resolveInstallRoot(fallback, (await state.read()).installLocation), fallback)
+})
+
+test('a saved folder that was used is kept when an install completes', async t => {
+  const { directory, path } = await fixture(t)
+  const state = new OnboardingState(path)
+  await state.save('installLocation', directory)
+  const used = await resolveInstallRoot(join(directory, 'default'), directory)
+  assert.equal(await settleInstallLocation(state, { saved: directory, used }), directory)
+  assert.equal((await state.read()).installLocation, directory)
+  assert.equal(await settleInstallLocation(state, { saved: null, used }), null)
+})
+
+test('a picked folder is read by its real path and a vanished folder is an error', async t => {
+  const { directory } = await fixture(t)
+  const real = await realpath(directory)
+  const target = join(real, 'target')
+  await mkdir(target)
+  assert.equal(await chosenInstallRoot(target), target)
+  if (process.platform !== 'win32') {
+    const alias = join(real, 'alias')
+    await symlink(target, alias)
+    assert.equal(await chosenInstallRoot(alias), target)
+  }
+  await assert.rejects(chosenInstallRoot(join(real, 'gone')), /no longer available/)
+  await writeFile(join(real, 'file'), 'x')
+  await assert.rejects(chosenInstallRoot(join(real, 'file')), /no longer available/)
+  await assert.rejects(chosenInstallRoot('relative'), /desktop picker/)
 })

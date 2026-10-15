@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
-import { OnboardingSetup, LOCAL_MODEL_IDS } from '../onboarding_setup.mjs'
+import { OnboardingSetup, LOCAL_MODEL_IDS, setupCompleted } from '../onboarding_setup.mjs'
 import { RuntimeManager } from '../runtime_manager.mjs'
 import { collectHardware } from '../hardware_inventory.mjs'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -71,6 +71,70 @@ test('CUDA device presence alone does not establish dedicated VRAM or override u
     assert.equal(plan.available, false)
     assert.equal(plan.memoryQualification.status, 'unknown')
   }
+})
+test('preflight reports the install location and the free space of its volume', async () => {
+  const { setup } = fixture({ installLocation: '/data/karaoke-tools', diskFree: async () => 5e10 })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/karaoke-tools')
+  assert.equal(plan.freeBytes, 5e10)
+  assert.equal(plan.diskFreeBytes, 5e10)
+  const unknown = fixture({ diskFree: async () => { throw new Error('statfs failed') } })
+  const blocked = await unknown.setup.preflight()
+  assert.equal(blocked.installLocation, null)
+  assert.equal(blocked.freeBytes, null)
+  assert.equal(blocked.available, false)
+  assert.match(blocked.reason, /could not be checked/)
+})
+test('a changed install location sends the next install to the new stores and is refused while setup runs', async () => {
+  const { setup, runtime, cache, calls } = fixture({ installLocation: '/data/first' })
+  const moved = fixture()
+  setup.useStores({ runtime: moved.runtime, cache: moved.cache, installLocation: '/data/second' })
+  const plan = await setup.preflight()
+  assert.equal(plan.installLocation, '/data/second')
+  assert.equal((await setup.start({ consent: true, planId: plan.planId })).state, 'running')
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  await setup.operation
+  assert.deepEqual(calls, [])
+  assert.deepEqual(moved.calls, ['runtime', 'models'])
+  assert.equal(runtime.value, undefined)
+  assert.equal(cache.value, undefined)
+  assert.ok(moved.runtime.value && moved.cache.value)
+  assert.equal(setup.storesLocked(), false)
+  setup.state = { ...setup.state, state: 'paused' }
+  assert.equal(setup.storesLocked(), true)
+  assert.throws(() => setup.useStores({ runtime, cache, installLocation: '/data/first' }), /install location/)
+  assert.equal(setup.installLocation, '/data/second')
+})
+test('a finished run counts as completed whether it is already loaded or needs reopening', async () => {
+  const first = fixture()
+  const reopen = await start(first.setup, (await first.setup.preflight()).planId)
+  assert.equal(reopen.state, 'restart-required')
+  assert.equal(setupCompleted(reopen), true)
+  // A run whose installed identities equal the loaded ones ends ready.
+  const second = fixture()
+  const plan = await second.setup.preflight()
+  const loaded = fixture()
+  await start(loaded.setup, (await loaded.setup.preflight()).planId)
+  second.setup.loaded = { runtimeId: loaded.runtime.value.id, modelsId: loaded.cache.value.id }
+  const ready = await start(second.setup, plan.planId)
+  assert.equal(ready.state, 'ready')
+  assert.equal(ready.phase, 'complete')
+  assert.equal(setupCompleted(ready), true)
+  for (const status of [{ state: 'ready', phase: 'preflight' }, { state: 'error', phase: 'complete' }, { state: 'paused', phase: 'retrieve' }, null]) {
+    assert.equal(setupCompleted(status), false)
+  }
+})
+test('the desktop host settles the install location on any completed run and re-reads the store after menu consent', async () => {
+  const main = await readFile(new URL('../main.mjs', import.meta.url), 'utf8')
+  assert.match(main, /if \(setupCompleted\(await onboardingSetup\.getStatus\(\)\)\) await installCompleted\(\)/)
+  const menu = main.slice(main.indexOf('async function installProcessing()'), main.indexOf('async function start()'))
+  const consent = menu.indexOf('if (consent.response !== 1 || quitting) return')
+  assert.ok(consent > 0)
+  const after = menu.slice(consent)
+  assert.match(after, /operationGate\.active \|\| processingOperation/)
+  assert.match(after, /const current = manifest\.kind === 'models' \? modelCache : processingManager/)
+  assert.match(after, /await current\.install\(manifest/)
+  assert.doesNotMatch(after, /await manager\.install/)
 })
 test('low disk and missing weight terms block the complete setup', async () => {
   const { setup } = fixture({ diskFree: async () => 1 })

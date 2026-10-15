@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   setOnboardingState: state => ipcRenderer.invoke('setup:save-preferences', state),
   preflightSetup: () => ipcRenderer.invoke('setup:preflight'),
   chooseModelSource: mode => ipcRenderer.invoke('setup:model-source', mode),
+  chooseInstallLocation: () => ipcRenderer.invoke('setup:install-location'),
   getModalStatus: () => ipcRenderer.invoke('setup:modal-status'),
   saveModalConfig: config => ipcRenderer.invoke('setup:modal-save', config),
   checkModalConnection: () => ipcRenderer.invoke('setup:modal-check'),
