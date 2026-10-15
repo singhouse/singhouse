@@ -9,7 +9,7 @@
 // that never updates (or a timer that outlives the show).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 const queueList = vi.fn()
@@ -36,6 +36,8 @@ vi.mock('@/stores/songs', () => ({
 
 import QueuePanel from '@/components/QueuePanel.vue'
 import { useQueueStore } from '@/stores/queue'
+import { usePlayerStore } from '@/stores/player'
+import { usePlayGuard } from '@/composables/usePlayGuard'
 
 let wrapper = null
 
@@ -61,6 +63,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  usePlayGuard().cancel()
   wrapper?.unmount()
   wrapper = null
 })
@@ -167,5 +170,45 @@ describe('play history entry point', () => {
 
     await btn.trigger('click')
     expect(wrapper.find('.history-stub').exists()).toBe(true)
+  })
+})
+
+// Sing over a playing song asks first; the confirmation itself is the shell's.
+describe('Sing while a song is playing', () => {
+  it('asks before loading, and a cancel keeps the entry queued', async () => {
+    await mountWithEntries([entry(1, 0, 'Alice', 'Synthetic Tune')])
+    usePlayerStore().setPlayState('playing')
+    const guard = usePlayGuard()
+
+    await wrapper.find('.queue-entry__btn--sing').trigger('click')
+    expect(guard.pending.value).toMatchObject({ kind: 'load', title: 'Synthetic Tune' })
+    expect(loadSong).not.toHaveBeenCalled()
+
+    guard.cancel()
+    await flushPromises()
+    expect(loadSong).not.toHaveBeenCalled()
+    expect(queueRemove).not.toHaveBeenCalled()
+  })
+
+  it('loads and dequeues once confirmed', async () => {
+    await mountWithEntries([entry(1, 0, 'Alice', 'Synthetic Tune')])
+    usePlayerStore().setPlayState('playing')
+    const guard = usePlayGuard()
+
+    await wrapper.find('.queue-entry__btn--sing').trigger('click')
+    guard.confirm()
+    await flushPromises()
+    expect(loadSong).toHaveBeenCalledWith({ id: 101 })
+    expect(queueRemove).toHaveBeenCalledWith(1)
+  })
+
+  it.each(['paused', 'stopped'])('loads straight away while %s', async (state) => {
+    await mountWithEntries([entry(1, 0, 'Alice', 'Synthetic Tune')])
+    usePlayerStore().setPlayState(state)
+
+    await wrapper.find('.queue-entry__btn--sing').trigger('click')
+    expect(usePlayGuard().pending.value).toBe(null)
+    expect(loadSong).toHaveBeenCalledWith({ id: 101 })
+    expect(queueRemove).toHaveBeenCalledWith(1)
   })
 })
