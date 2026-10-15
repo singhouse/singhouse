@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Build a processing pack exclusively from exact, hash-locked artifacts.
+"""Build a processing runtime recipe exclusively from exact, hash-locked artifacts.
 
 Run on the target runner for native source wheels. This builds infrastructure;
 model weights are never included and hardware/model qualification is separate.
@@ -30,7 +30,6 @@ from packaging.version import Version
 
 from assemble import (ROOT, LOCKS, PLATFORMS, digest, fetch, host_target,
                       python_path, site_packages, run, metadata, source_provenance, unpack_uv)
-from assemble_processing import DEFAULT_PART_SIZE, assemble, delivery, relative
 from processing_recipe import generate as generate_recipe, wheel_records, install_baseline, validate_publication
 
 MODULES = {
@@ -46,6 +45,15 @@ EXCLUDED_PACKAGES = {
 
 def normalized(name):
     return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def relative(value):
+    return isinstance(value, str) and len(value) < 512 and all(
+        re.fullmatch(r"[A-Za-z0-9._+() -]+", part)
+        and part == part.strip() and not part.endswith('.')
+        and part not in {".", ".."}
+        and not re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", part)
+        for part in value.split("/"))
 
 
 def materialize_links(root):
@@ -349,30 +357,18 @@ def build_wheel(source, destination, host_python, env, toolchain=None):
     return wheels[0]
 
 
-DELIVERY_OPTIONS = ('base_url', 'blobs', 'archive_base_url', 'archive_part_size', 'archive_name')
-
-
-def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None, *, delivery_options=None, legacy_pack=False, artifact_base_url=None, artifact_layout='directory'):
-    # Pack delivery options pass through to the assembler unchanged. Validate
-    # them before any build work so a bad option fails fast, exactly as there.
+def build(requirements, target, accelerator, output, cache, build_requirements=None, native_toolchain=None, *, artifact_base_url=None, artifact_layout='directory'):
+    # Validate publication options before any build work so a bad option fails fast.
     validate_publication(artifact_base_url, artifact_layout)
-    if legacy_pack and artifact_layout != 'directory':
-        raise ValueError('Recipe artifact layout is unavailable for legacy packs')
-    delivery_options = dict(delivery_options or {})
-    if set(delivery_options) - set(DELIVERY_OPTIONS):
-        raise ValueError('Unknown pack delivery option')
-    delivery(**delivery_options)
-    if delivery_options and any(value is not None for value in delivery_options.values()) and not legacy_pack:
-        raise ValueError('Archive/blob delivery options require explicit --legacy-pack')
     lock = json.loads(requirements.read_text())
     validate_requirements(lock, target, accelerator)
     toolchain = validate_native_toolchain(native_toolchain)
     native = json.loads((LOCKS / 'native.json').read_text())
     if subprocess.check_output(['uv', '--version'], text=True).split()[1] != native['uvVersion']:
         raise ValueError(f"Build requires uv {native['uvVersion']}")
-    if not legacy_pack and target != host_target():
+    if target != host_target():
         raise ValueError('Recipe installation inventory must be built on the target runner')
-    if not legacy_pack and 'uv' not in native['targets'][target]:
+    if 'uv' not in native['targets'][target]:
         raise ValueError('Recipe requires a pinned bundled uv artifact for the target')
     source = source_provenance()
     if source['sourceDirty']:
@@ -460,14 +456,12 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
             packages.append(dict(name=record['name'], version=record['version'], license=license_name,
                                  sourceUrl=record['url'], sha256=record['sha256'], wheelSha256=digest(wheel),
                                  notices=retain_notices(wheel, record, payload, cache)))
-        recipe_wheels = None if legacy_pack else wheel_records(records, packages, payload, output / 'recipe', artifact_base_url, artifact_layout)
-        recipe_files = None
-        if not legacy_pack:
-            uv = work / ('uv.exe' if target.startswith('win32-') else 'uv')
-            uv_input = native['targets'][target]['uv']
-            unpack_uv(fetch(uv_input, cache), uv_input, uv)
-            recipe_files = install_baseline(output / 'qualification-runtime', fetch(python_record, cache),
-                                            uv, records, payload, work, env, target)
+        recipe_wheels = wheel_records(records, packages, payload, output / 'recipe', artifact_base_url, artifact_layout)
+        uv = work / ('uv.exe' if target.startswith('win32-') else 'uv')
+        uv_input = native['targets'][target]['uv']
+        unpack_uv(fetch(uv_input, cache), uv_input, uv)
+        recipe_files = install_baseline(output / 'qualification-runtime', fetch(python_record, cache),
+                                        uv, records, payload, work, env, target)
     # CPython's upstream license is included in its locked standalone archive.
     python_notices = sorted(p.relative_to(payload).as_posix() for p in (payload / 'python').rglob('*')
                             if p.is_file() and p.name.startswith(('LICENSE', 'COPYING')))
@@ -519,13 +513,9 @@ def build(requirements, target, accelerator, output, cache, build_requirements=N
                       files=inventory(payload, target))
     lock_path = output / 'processing-input.json'
     lock_path.write_text(json.dumps(input_lock, indent=2, sort_keys=True) + '\n')
-    if legacy_pack:
-        manifest = assemble(payload, lock_path, output / 'pack', **delivery_options)
-        manifest_path = output / 'pack/manifest.json'
-    else:
-        manifest = generate_recipe(input_lock, recipe_wheels, python_record, fetch(python_record, cache),
-                                   native['targets'][target]['uv'], native['uvVersion'], output / 'recipe', recipe_files)
-        manifest_path = output / 'recipe/manifest.json'
+    manifest = generate_recipe(input_lock, recipe_wheels, python_record, fetch(python_record, cache),
+                               native['targets'][target]['uv'], native['uvVersion'], output / 'recipe', recipe_files)
+    manifest_path = output / 'recipe/manifest.json'
     print(json.dumps(dict(manifest=str(manifest_path), lockSha256=manifest['provenance']['lockSha256'],
                           packages=len(packages)), indent=2))
     return manifest
@@ -540,26 +530,12 @@ def main(argv=None):
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--build-requirements', type=Path, help='Additional exact hash-locked host build wheels (no dependency resolution)')
     parser.add_argument('--native-toolchain', type=Path, help='Exact host compiler executable/version and supporting input identity lock')
-    parser.add_argument('--legacy-pack', action='store_true', help='Migration only: emit the old preassembled processing pack')
     parser.add_argument('--artifact-base-url', help='HTTPS publication directory for built wheels and notices, ending in /; upstream wheel URLs remain unchanged')
     parser.add_argument('--artifact-layout', choices=['directory', 'flat'], default='directory',
                         help='Recipe artifact export: directory uses SHA256/filename; flat uses SHA256-filename for release assets')
-    # Pack delivery, passed through to assemble_processing (same names, same validation).
-    parser.add_argument('--blobs', action='store_true', help='Write the per-file blob form instead of an archive')
-    parser.add_argument('--base-url', help='Blob form: explicit blob publication directory URL (implies --blobs)')
-    parser.add_argument('--archive-base-url', help="Archive part publication directory URL ending in '/'; omission produces local file URLs")
-    parser.add_argument('--archive-part-size', type=int, help=f'Maximum bytes per archive part (default {DEFAULT_PART_SIZE})')
-    parser.add_argument('--archive-name', help='Archive part file name stem; parts are <name>.001, <name>.002, ...')
     args = parser.parse_args(argv)
-    options = dict(base_url=args.base_url, blobs=args.blobs or None, archive_base_url=args.archive_base_url,
-                   archive_part_size=args.archive_part_size, archive_name=args.archive_name)
-    try:
-        delivery(**options)
-    except ValueError as error:
-        parser.error(str(error))
     build(args.requirements, args.target, args.accelerator, args.output, args.cache, args.build_requirements, args.native_toolchain,
-          delivery_options=options, legacy_pack=args.legacy_pack, artifact_base_url=args.artifact_base_url,
-          artifact_layout=args.artifact_layout)
+          artifact_base_url=args.artifact_base_url, artifact_layout=args.artifact_layout)
 
 
 if __name__ == '__main__':

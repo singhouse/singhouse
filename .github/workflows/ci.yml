@@ -43,7 +43,6 @@ jobs:
         run: node --test desktop/test/*.test.mjs
       - name: Locked processing pack fixtures
         run: |
-          python -m unittest discover -s desktop/test -p test_processing_pack.py
           python -m unittest discover -s desktop/test -p test_processing_recipe.py
           python -m unittest discover -s desktop/test -p test_uv_backend.py
           python -m unittest discover -s desktop/test -p test_notices.py
