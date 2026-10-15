@@ -10,6 +10,7 @@ import { RecoveryStore, UpdateStore } from './update_manager.mjs'
 import { canonicalJson } from './release.mjs'
 import { exactComponentLayout, readRecoveryAnchor, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
 import { checkedFile } from './runtime_manager.mjs'
+import { verifyInstalledMacCodesign } from './macos_signing.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -366,12 +367,10 @@ async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
   // Callers must inject trust established by the native/detached verifier; a
   // digest recorded by an untrusted first launch is only integrity evidence.
   if (anchor.platform === 'linux') return false
-  const command = anchor.platform === 'darwin' ? '/usr/bin/codesign' : 'powershell.exe'
-  const args = anchor.platform === 'darwin'
-    ? ['--verify', '--deep', anchor.executablePath]
-    : ['-NoProfile', '-NonInteractive', '-Command', `(Get-AuthenticodeSignature -LiteralPath '${anchor.executablePath.replaceAll("'", "''")}').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }`]
+  if (anchor.platform === 'darwin') return verifyInstalledMacCodesign(anchor.executablePath, { spawnImpl })
+  const args = ['-NoProfile', '-NonInteractive', '-Command', `(Get-AuthenticodeSignature -LiteralPath '${anchor.executablePath.replaceAll("'", "''")}').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }`]
   return new Promise(resolveTrust => {
-    const child = spawnImpl(command, args, { stdio: 'ignore', windowsHide: true })
+    const child = spawnImpl('powershell.exe', args, { stdio: 'ignore', windowsHide: true })
     child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
   })
 }
@@ -505,10 +504,7 @@ async function main(args) {
     if (!policy?.enabled) return false
     if (process.platform === 'darwin') {
       const app = manifest.entrypoint.split('/').slice(0, manifest.entrypoint.split('/').findIndex(part => part.endsWith('.app')) + 1)
-      return new Promise(resolveTrust => {
-        const child = spawn('/usr/bin/codesign', ['--verify', '--deep', join(root, ...app)], { stdio: 'ignore' })
-        child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
-      })
+      return verifyInstalledMacCodesign(join(root, ...app))
     }
     // Windows Authenticode verification is supplied by the signed release's
     // native helper in the qualification step; absent that exact hook, close.

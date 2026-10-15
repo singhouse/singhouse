@@ -31,7 +31,7 @@ import { ensureRecoveryAnchor, installRecoveryKit, readOnlyAppImageMount, readRe
 import { assertNativeInventoryDeclared, declaredApplicationDigest, physicalApplicationRecords, physicalFileHash, readLaunchInventory, readOnlyApplicationRoot, writeLaunchInventory } from './application_inventory.mjs'
 import { observeReceiptApplicationOffThread } from './application_inventory_worker.mjs'
 import { verifyWindowsAuthenticode } from './windows_signing.mjs'
-import { inspectInstalledLaunchBoundary } from './macos_signing.mjs'
+import { inspectInstalledLaunchBoundary, verifyInstalledMacCodesign } from './macos_signing.mjs'
 
 const physicalFs = createRequire(import.meta.url)('original-fs')
 
@@ -199,10 +199,7 @@ async function platformTrust({ root: applicationRoot, manifest }) {
   if (process.platform === 'darwin') {
     const parts = manifest.entrypoint.split('/'), end = parts.findIndex(part => part.endsWith('.app'))
     if (end < 0) return false
-    return new Promise(resolveTrust => {
-      const check = spawn('/usr/bin/codesign', ['--verify', '--deep', resolve(applicationRoot, ...parts.slice(0, end + 1))], { stdio: 'ignore' })
-      check.once('error', () => resolveTrust(false)); check.once('exit', code => resolveTrust(code === 0))
-    })
+    return verifyInstalledMacCodesign(resolve(applicationRoot, ...parts.slice(0, end + 1)))
   }
   if (process.platform === 'win32') {
     const entrypoint = resolve(applicationRoot, ...manifest.entrypoint.split('/'))
@@ -222,10 +219,7 @@ async function verifiedFirstInstallerPlatformTrust() {
     catch { return { verified: false, appImage: null } }
   }
   if (!releasePolicy.platformTrust?.[process.platform]?.enabled) return { verified: false }
-  if (process.platform === 'darwin') return new Promise(resolveTrust => {
-    const check = spawn('/usr/bin/codesign', ['--verify', '--deep', resolve(process.resourcesPath, '../..')], { stdio: 'ignore' })
-    check.once('error', () => resolveTrust({ verified: false })); check.once('exit', code => resolveTrust({ verified: code === 0 }))
-  })
+  if (process.platform === 'darwin') return { verified: await verifyInstalledMacCodesign(resolve(process.resourcesPath, '../..')) }
   // The installed application can be verified above, but Windows does not
   // retain the outer NSIS installer as a durable first-install anchor. Keep
   // first-installer recovery admission closed until that evidence is modeled.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { execFile as callback } from 'node:child_process'
+import { execFile as callback, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { lstat, open, readdir } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
@@ -53,6 +53,25 @@ export function inspectSignedMacMarker(raw) {
   return { ...marker, identity: `Developer ID Application: ${marker.publisher} (${marker.teamId})` }
 }
 
+// Shown when the installed bundle fails its launch signature check. The
+// codesign detail goes to the console log only.
+export const INSTALLED_MAC_SIGNATURE_FAILURE = 'This copy of singhouse failed its code signature check. Delete it, open the singhouse disk image again (download it again if needed), and drag the app into the Applications folder.'
+
+// Installed-machine trust hooks (managed-slot admission, first-installer
+// recovery admission, and the bootstrap and recovery-anchor checks) use the
+// same non-strict codesign policy as launch verification; see
+// verifyDeveloperId. Packaging and release verification stay strict.
+export function installedMacCodesignArguments(bundle) {
+  return ['--verify', '--deep', bundle]
+}
+
+export function verifyInstalledMacCodesign(bundle, { spawnImpl = spawn } = {}) {
+  return new Promise(resolveTrust => {
+    const child = spawnImpl('/usr/bin/codesign', installedMacCodesignArguments(bundle), { stdio: 'ignore' })
+    child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
+  })
+}
+
 // The managed-slot descriptor is adjacent to the bundle. Authenticate a
 // signed bundle before even reading that descriptor so adding portable.json
 // cannot turn a first installer into an unchecked managed slot.
@@ -65,7 +84,7 @@ export async function inspectInstalledLaunchBoundary({ platform, resourcesPath, 
     marker = inspectSignedMacMarker(read(markerPath, 'utf8'))
     try { await verify(resolve(resourcesPath, '../..'), marker, { strict: false }) } catch (error) {
       console.error(`macOS launch signature verification failed: ${error?.message ?? error}`)
-      throw new Error('This copy of the application failed its code signature check. Delete it, download the application again, and move the new copy into your Applications folder.', { cause: error })
+      throw new Error(INSTALLED_MAC_SIGNATURE_FAILURE, { cause: error })
     }
   }
   const portablePath = resolve(applicationRoot, 'portable.json')

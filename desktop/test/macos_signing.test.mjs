@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
+import { chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { canonicalJson } from '../release.mjs'
-import { developerIdRequirement, inspectInstalledLaunchBoundary, inspectSignedMacMarker, isMachO, MAC_RELEASE_CERT_SHA1, macSigningSelection, signedMacMarker, verifyDeveloperId, verifySignedMacApplication, verifySigningCertificate } from '../macos_signing.mjs'
+import { developerIdRequirement, inspectInstalledLaunchBoundary, INSTALLED_MAC_SIGNATURE_FAILURE, installedMacCodesignArguments, verifyInstalledMacCodesign, inspectSignedMacMarker, isMachO, MAC_RELEASE_CERT_SHA1, macSigningSelection, signedMacMarker, verifyDeveloperId, verifySignedMacApplication, verifySigningCertificate } from '../macos_signing.mjs'
 import { assertPackagingMode, sha256File } from '../build/package.mjs'
-import { appRelativeInventory, macExecutableModes, nativeInventoryMemberNames, notarizeAndStaple, verifyMacExecutableModes } from '../build/sign_macos.mjs'
+import { appRelativeInventory, macExecutableModes, nativeInventoryMemberNames, notarizeAndStaple, verifyMacDiskImageApplication, verifyMacExecutableModes } from '../build/sign_macos.mjs'
+import { inspectApplicationInventory } from '../build/release_receipt.mjs'
 
 const environment = {
   SINGHOUSE_MAC_TEAM_ID: '25Y7U443K6',
@@ -147,7 +149,8 @@ test('launch-boundary verification failure is actionable and keeps the detail as
     verify: async (_path, _marker, checkedOptions) => { options = checkedOptions; throw original } }).then(() => null, value => value)
   assert.ok(error instanceof Error)
   assert.deepEqual(options, { strict: false })
-  assert.equal(error.message, 'This copy of the application failed its code signature check. Delete it, download the application again, and move the new copy into your Applications folder.')
+  assert.equal(error.message, 'This copy of singhouse failed its code signature check. Delete it, open the singhouse disk image again (download it again if needed), and drag the app into the Applications folder.')
+  assert.equal(error.message, INSTALLED_MAC_SIGNATURE_FAILURE)
   assert.doesNotMatch(error.message, /codesign|--verify|anchor apple|\/Applications|\/tmp/)
   assert.equal(error.cause, original)
   assert.ok(logged.some(line => line.includes(original.message)))
@@ -329,6 +332,72 @@ test('default launch verifier runs non-strict codesign against the real bundle p
     assert.deepEqual(calls, [
       ['/usr/bin/codesign', ['--verify', '--deep', '--verbose=2', '-R', requirement, bundle]],
       ['/usr/bin/codesign', ['--display', '--verbose=4', bundle]],
+    ])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('installed-machine codesign trust hook runs exact non-strict arguments', async () => {
+  assert.deepEqual(installedMacCodesignArguments('/Applications/Singhouse.app'), ['--verify', '--deep', '/Applications/Singhouse.app'])
+  for (const [outcome, expected] of [[{ exit: 0 }, true], [{ exit: 1 }, false], [{ error: new Error('ENOENT') }, false]]) {
+    const calls = []
+    const spawnImpl = (command, args, options) => {
+      calls.push([command, args, options])
+      const child = new EventEmitter()
+      queueMicrotask(() => outcome.error ? child.emit('error', outcome.error) : child.emit('exit', outcome.exit))
+      return child
+    }
+    assert.equal(await verifyInstalledMacCodesign('/Applications/Singhouse.app', { spawnImpl }), expected)
+    assert.deepEqual(calls, [['/usr/bin/codesign', ['--verify', '--deep', '/Applications/Singhouse.app'], { stdio: 'ignore' }]])
+  }
+})
+
+test('every installed-machine codesign call routes through the shared non-strict helper', async () => {
+  const desktop = fileURLToPath(new URL('..', import.meta.url))
+  const sources = (await readdir(desktop)).filter(name => name.endsWith('.mjs'))
+  const runtimeHelper = 'verifyInstalledMacCodesign'
+  for (const name of sources) {
+    const text = await readFile(resolve(desktop, name), 'utf8')
+    if (name === 'macos_signing.mjs') continue
+    assert.doesNotMatch(text, /\/usr\/bin\/codesign|--strict/, `${name} must use the shared macOS signing helpers`)
+  }
+  for (const name of ['main.mjs', 'bootstrap.mjs']) {
+    const text = await readFile(resolve(desktop, name), 'utf8')
+    assert.match(text, new RegExp(`import \\{[^}]*\\b${runtimeHelper}\\b[^}]*\\} from './macos_signing.mjs'`), name)
+  }
+})
+
+test('release DMG verification stays strict and ignores the disk image background', async () => {
+  const selected = macSigningSelection(environment)
+  const root = await mkdtemp(resolve(tmpdir(), 'mac-dmg-verify-'))
+  try {
+    const source = resolve(root, 'source'), app = resolve(source, 'Singhouse.app')
+    await mkdir(resolve(app, 'Contents', 'MacOS'), { recursive: true })
+    await writeFile(resolve(app, 'Contents', 'MacOS', 'Singhouse'), Buffer.from('cffaedfe', 'hex'))
+    await chmod(resolve(app, 'Contents', 'MacOS', 'Singhouse'), 0o755)
+    await writeFile(resolve(app, 'Contents', 'Info.plist'), 'plist')
+    const inventory = await inspectApplicationInventory(source)
+    const modes = await macExecutableModes(app, appRelativeInventory(inventory.files))
+    const calls = []
+    let mount
+    const run = async (command, args) => {
+      calls.push([command, args])
+      if (command === '/usr/bin/hdiutil' && args[0] === 'attach') {
+        // The mounted image carries the Finder layout next to the app.
+        mount = args[args.indexOf('-mountpoint') + 1]
+        await cp(app, resolve(mount, 'Singhouse.app'), { recursive: true })
+        await mkdir(resolve(mount, '.background'))
+        await writeFile(resolve(mount, '.background', 'dmg-background.tiff'), 'background')
+        await writeFile(resolve(mount, '.DS_Store'), 'layout')
+        await symlink('/Applications', resolve(mount, 'Applications'))
+      }
+      return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
+    }
+    await verifyMacDiskImageApplication(resolve(root, 'Singhouse.dmg'), inventory, modes, selected, run)
+    const requirement = `=${developerIdRequirement(selected.teamId)}`, mounted = resolve(mount, 'Singhouse.app')
+    assert.deepEqual(calls.filter(([command]) => command === '/usr/bin/codesign').map(([, args]) => args), [
+      ['--verify', '--deep', '--strict', '--verbose=2', '-R', requirement, mounted],
+      ['--display', '--verbose=4', mounted],
+      ['--verify', '--strict', '-R', requirement, resolve(mounted, 'Contents', 'MacOS', 'Singhouse')],
     ])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
