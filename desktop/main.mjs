@@ -18,7 +18,7 @@ import { authorizedHeartCaller } from './heart_setup.mjs'
 import { LyricsLookupPreference } from './lyrics_lookup.mjs'
 import { OnboardingSetup } from './onboarding_setup.mjs'
 import { OnboardingState, onboardingPreferences, restartForSetup } from './onboarding_state.mjs'
-import { ExportPreferences, defaultExportFolder, writeExport } from './export_files.mjs'
+import { ExportPreferences, defaultExportFolder, writeExport, writeVideoExport } from './export_files.mjs'
 import { relaunchForSetup } from './setup_relaunch.mjs'
 import { createStartupSurface } from './startup.mjs'
 import { assertReleaseIdentity, assertReleasePolicy, canonicalJson, deriveReleaseIdentity } from './release.mjs'
@@ -740,6 +740,9 @@ async function start() {
   exportHandler('export:write', async request => writeExport({
     fetch: (path, init) => ses.fetch(`${launch.origin}${path}`, { ...init, redirect: 'error' }),
     folder: (await exportPreferences.get()).folder, request, signal: AbortSignal.timeout(300000) }))
+  exportHandler('export:write-video', async request => writeVideoExport({
+    fetch: (path, init) => ses.fetch(`${launch.origin}${path}`, { ...init, redirect: 'error' }),
+    folder: (await exportPreferences.get()).folder, request, signal: AbortSignal.timeout(600000) }))
   host.webContents.on('did-create-window', child => {
     projector = child
     popupReserved = false

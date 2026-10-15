@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
   chooseExportFolder: () => ipcRenderer.invoke('export:choose-folder'),
   saveExportDefaults: defaults => ipcRenderer.invoke('export:save-defaults', defaults),
   exportSong: request => ipcRenderer.invoke('export:write', request),
+  writeVideoExport: request => ipcRenderer.invoke('export:write-video', request),
   onOpenSetup: callback => {
     const listener = () => callback()
     ipcRenderer.on('setup:open', listener)

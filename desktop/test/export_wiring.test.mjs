@@ -14,6 +14,7 @@ test('preload exposes the fixed export channels without path arguments', () => {
   assert.match(preload, /chooseExportFolder: \(\) => ipcRenderer\.invoke\('export:choose-folder'\),/)
   assert.match(preload, /saveExportDefaults: defaults => ipcRenderer\.invoke\('export:save-defaults', defaults\),/)
   assert.match(preload, /exportSong: request => ipcRenderer\.invoke\('export:write', request\),/)
+  assert.match(preload, /writeVideoExport: request => ipcRenderer\.invoke\('export:write-video', request\),/)
 })
 
 test('main.mjs registers export channels behind the host-window check', () => {
@@ -21,7 +22,7 @@ test('main.mjs registers export channels behind the host-window check', () => {
   assert.ok(start > 0, 'export handler present')
   const handler = main.slice(start, main.indexOf('})', start))
   assert.match(handler, /authorizedHeartCaller\(event, host, launch\.origin\) \|\| quitting \|\| handingOff/)
-  for (const channel of ['export:defaults', 'export:choose-folder', 'export:save-defaults', 'export:write']) {
+  for (const channel of ['export:defaults', 'export:choose-folder', 'export:save-defaults', 'export:write', 'export:write-video']) {
     assert.equal((main.match(new RegExp(`exportHandler\\('${channel}'`, 'g')) ?? []).length, 1, channel)
     assert.doesNotMatch(main, new RegExp(`ipcMain\\.handle\\('${channel}'`))
   }
@@ -36,5 +37,14 @@ test('the export write uses the session fetch and the persisted folder', () => {
   assert.match(block, /folder: \(await exportPreferences\.get\(\)\)\.folder, request,/)
   assert.match(main, /new OnboardingState\(resolve\(runtime\.root, 'export\.json'\)\)/)
   assert.match(main, /home: app\.getPath\('home'\) \}\)/)
-  assert.match(main, /^import \{ ExportPreferences, defaultExportFolder, writeExport \} from '\.\/export_files\.mjs'$/m)
+  assert.match(main, /^import \{ ExportPreferences, defaultExportFolder, writeExport, writeVideoExport \} from '\.\/export_files\.mjs'$/m)
+})
+
+test('the video write uses the session fetch and the persisted folder', () => {
+  const start = main.indexOf("exportHandler('export:write-video'")
+  assert.ok(start > 0, 'video write handler present')
+  const block = main.slice(start, main.indexOf('}))', start))
+  assert.match(block, /writeVideoExport\(\{/)
+  assert.match(block, /fetch: \(path, init\) => ses\.fetch\(`\$\{launch\.origin\}\$\{path\}`, \{ \.\.\.init, redirect: 'error' \}\)/)
+  assert.match(block, /folder: \(await exportPreferences\.get\(\)\)\.folder, request,/)
 })

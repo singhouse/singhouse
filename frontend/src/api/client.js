@@ -500,6 +500,52 @@ export const exportApi = {
       timeout: 300000, // 5 min, matching the other long-running calls
     })
   },
+
+  /** POST /api/export/songs/:id/video — open a video export session.
+   *  `{ session, mode: 'frames', duration, frames_expected }` when the client
+   *  renders the picture, `{ session, mode: 'remux', ready }` when the song's
+   *  own prepared video is used. */
+  openVideo(songId, { audio, lyricsSet } = {}) {
+    const body = { audio, fps: 30, width: 1280, height: 720 }
+    if (lyricsSet != null) body.lyrics_set = lyricsSet
+    return client.post(`/export/songs/${songId}/video`, body, { timeout: 120000 })
+  },
+
+  /** PUT /api/export/video/:session/frames — one in-order batch of JPEG
+   *  frames starting at frame `index`. */
+  putVideoFrames(session, index, frames, { signal } = {}) {
+    const form = new FormData()
+    form.append('index', String(index))
+    frames.forEach((blob, i) => form.append('frames', blob, `${index + i}.jpg`))
+    return client.put(`/export/video/${encodeURIComponent(session)}/frames`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+      signal,
+    })
+  },
+
+  /** POST /api/export/video/:session/finish — `{ ready, filename, bytes }` */
+  finishVideo(session) {
+    return client.post(`/export/video/${encodeURIComponent(session)}/finish`, null, { timeout: 600000 })
+  },
+
+  /** GET /api/export/video/:session — `{ state, received, frames_expected, filename? }` */
+  videoStatus(session) {
+    return client.get(`/export/video/${encodeURIComponent(session)}`)
+  },
+
+  /** GET /api/export/video/:session/file — the finished video as a blob. */
+  videoFile(session) {
+    return client.get(`/export/video/${encodeURIComponent(session)}/file`, {
+      responseType: 'blob',
+      timeout: 600000,
+    })
+  },
+
+  /** DELETE /api/export/video/:session — cancel and remove the session's files. */
+  cancelVideo(session) {
+    return client.delete(`/export/video/${encodeURIComponent(session)}`)
+  },
 }
 
 // ─── Session API (core single-host gate) ────────────────────────────────────

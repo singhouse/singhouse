@@ -19,7 +19,25 @@
     </div>
 
     <div
-      v-if="savedPath"
+      v-if="running"
+      class="modal__body"
+    >
+      <div class="export-progress">
+        <span class="export-progress__line">{{ progressLine }}</span>
+        <div
+          class="export-progress__bar"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="progressPercent"
+        >
+          <span :style="{ width: `${progressPercent}%` }" />
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-else-if="savedPath"
       class="modal__body"
     >
       <span
@@ -108,7 +126,16 @@
     </div>
 
     <div class="modal__footer">
-      <template v-if="savedPath">
+      <template v-if="running">
+        <Button
+          variant="ghost"
+          class="export-cancel"
+          @click="cancelRun"
+        >
+          Cancel
+        </Button>
+      </template>
+      <template v-else-if="savedPath">
         <Button
           variant="primary"
           @click="onClose"
@@ -135,8 +162,7 @@
         <Button
           variant="primary"
           class="export-confirm"
-          :disabled="busy || !formatAvailable"
-          :title="formatAvailable ? undefined : 'Video export is not available yet'"
+          :disabled="busy"
           @click="doExport"
         >
           {{ busy ? 'Exporting…' : 'Export' }}
@@ -147,10 +173,14 @@
 </template>
 
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
-import { exportApi } from '@/api/client'
+import { exportApi, songApi } from '@/api/client'
+import { normalizeWordSync } from '@/stage/adapter.mjs'
+import { applyVoiceLayout } from '@/utils/voiceLayout.js'
+import { useHostSettings } from '@/stores/hostSettings'
+import { renderVideo } from '@/export/videoRender.js'
 
 const props = defineProps({
   song: { type: Object, default: null },
@@ -158,11 +188,9 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
-// `available` is false until the format's renderer exists; the card stays
-// selectable so the remembered choice survives.
 const FORMATS = [
-  { value: 'video', label: 'Video', detail: '720p MP4', available: false },
-  { value: 'mp3g', label: 'MP3+G (.zip)', detail: 'For traditional karaoke software', available: true },
+  { value: 'video', label: 'Video', detail: '720p MP4' },
+  { value: 'mp3g', label: 'MP3+G (.zip)', detail: 'For traditional karaoke software' },
 ]
 const AUDIO = [
   { value: 'karaoke', label: 'Karaoke mix', detail: 'Instrumental and backing vocals' },
@@ -170,6 +198,7 @@ const AUDIO = [
 ]
 const DEFAULTS_KEY = 'karaoke:exportDefaults'
 const BROWSER_FOLDER = "Where your browser saves files"
+const REMUX_POLL_MS = 1000
 
 const bridge = globalThis.window?.karaokeDesktop
 const desktop = bridge?.isDesktop === true && typeof bridge.exportSong === 'function' ? bridge : null
@@ -181,12 +210,23 @@ const saveDefaults = ref(false)
 const busy = ref(false)
 const error = ref('')
 const savedPath = ref('')
+// Video export in progress: 'frames' while rendering, 'remux' while the
+// song's own video is prepared; '' otherwise.
+const running = ref('')
+const progress = ref(0)
 let openGeneration = 0
+let runController = null
+let runSession = null
+
+const hostSettings = useHostSettings()
 
 const songLabel = computed(() =>
   props.song ? (props.song.title || props.song.filename || 'Untitled') : ''
 )
-const formatAvailable = computed(() => FORMATS.find(f => f.value === format.value)?.available === true)
+const progressPercent = computed(() => Math.round(Math.min(1, Math.max(0, progress.value)) * 100))
+const progressLine = computed(() =>
+  running.value === 'remux' ? 'Preparing video…' : `Rendering video… ${progressPercent.value}%`
+)
 // The host sends both the folder and its display form; neither is ever sent
 // back.
 const folderLabel = computed(() => (desktop ? folder.value.label : BROWSER_FOLDER))
@@ -293,8 +333,10 @@ async function saveInBrowser(song) {
     audio: audio.value,
     card: true,
   })
+  saveBlob(res, `export-song-${song.id}.zip`)
+}
 
-  const fallback = `export-song-${song.id}.zip`
+function saveBlob(res, fallback) {
   const disposition = typeof res.headers?.get === 'function'
     ? res.headers.get('content-disposition')
     : res.headers?.['content-disposition']
@@ -313,15 +355,140 @@ async function saveInBrowser(song) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
+function isAbort(e) {
+  return e?.name === 'AbortError' || e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED'
+}
+
+function abortable(signal) {
+  if (signal.aborted) throw new DOMException('Export cancelled', 'AbortError')
+}
+
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms)
+    function done() {
+      signal.removeEventListener('abort', stop)
+      resolve()
+    }
+    function stop() {
+      clearTimeout(timer)
+      reject(new DOMException('Export cancelled', 'AbortError'))
+    }
+    signal.addEventListener('abort', stop, { once: true })
+  })
+}
+
+function stageModelFor(detail) {
+  const data = detail?.word_sync
+  if (!data || !(data.lines || data.segments)) return null
+  try {
+    return applyVoiceLayout(normalizeWordSync(data), data)
+  } catch {
+    return null
+  }
+}
+
+async function waitForRemux(session, signal) {
+  for (;;) {
+    abortable(signal)
+    const { data } = await exportApi.videoStatus(session)
+    if (data?.state === 'ready') return
+    if (data?.state === 'failed' || data?.state === 'cancelled') throw new Error('Video export failed')
+    await wait(REMUX_POLL_MS, signal)
+  }
+}
+
+async function exportVideo(song) {
+  const controller = new AbortController()
+  const signal = controller.signal
+  runController = controller
+  progress.value = 0
+  const choice = audio.value
+  const { data: opened } = await exportApi.openVideo(song.id, { audio: choice })
+  runSession = opened.session
+  running.value = opened.mode === 'remux' ? 'remux' : 'frames'
+  abortable(signal)
+  if (opened.mode === 'remux') {
+    if (!opened.ready) await waitForRemux(runSession, signal)
+  } else {
+    const { data: detail } = await songApi.get(song.id)
+    abortable(signal)
+    await renderVideo({
+      session: runSession,
+      frameCount: opened.frames_expected,
+      model: stageModelFor(detail),
+      backdrop: hostSettings.backdrop,
+      audioUrl: detail?.stems?.[choice] || null,
+      api: {
+        putFrames: (session, index, frames, options) => exportApi.putVideoFrames(session, index, frames, options),
+        cancel: session => exportApi.cancelVideo(session),
+      },
+      onProgress: fraction => { progress.value = fraction },
+      signal,
+    })
+    abortable(signal)
+    await exportApi.finishVideo(runSession)
+  }
+  abortable(signal)
+  let path = ''
+  if (desktop) {
+    const result = await desktop.writeVideoExport({ session: runSession })
+    abortable(signal)
+    path = result?.path || folderTitle.value
+  } else {
+    const res = await exportApi.videoFile(runSession)
+    abortable(signal)
+    saveBlob(res, `export-song-${song.id}.mp4`)
+  }
+  return path
+}
+
+// Remove the server-side session; failures are left to its own cleanup.
+function dropSession() {
+  const session = runSession
+  runSession = null
+  if (session) exportApi.cancelVideo(session).catch(() => {})
+}
+
+function cancelRun() {
+  if (!running.value || !runController) return
+  runController.abort()
+  // Deleting the session also stops a finish or file fetch already under way.
+  dropSession()
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && running.value) {
+    event.preventDefault()
+    cancelRun()
+  }
+}
+
+watch(running, (value) => {
+  if (value) window.addEventListener('keydown', onKeydown)
+  else window.removeEventListener('keydown', onKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  if (running.value) cancelRun()
+})
+
 async function doExport() {
-  if (busy.value || !props.song || !formatAvailable.value) return
+  if (busy.value || !props.song) return
   const song = props.song
   busy.value = true
   error.value = ''
   const choice = { format: format.value, audio: audio.value }
   const remember = saveDefaults.value
   try {
-    if (desktop) {
+    if (choice.format === 'video') {
+      const path = await exportVideo(song)
+      dropSession()
+      if (remember) await persistDefaults(choice)
+      if (desktop) savedPath.value = path
+      else emit('close')
+    } else if (desktop) {
       const result = await desktop.exportSong({ songId: song.id, ...choice })
       if (remember) await persistDefaults(choice)
       savedPath.value = result?.path || folderTitle.value
@@ -331,7 +498,11 @@ async function doExport() {
       emit('close')
     }
   } catch (e) {
-    if (desktop) {
+    if (choice.format === 'video') {
+      const cancelled = runController?.signal.aborted || isAbort(e)
+      dropSession()
+      if (!cancelled) error.value = await videoFailure(e)
+    } else if (desktop) {
       const message = bridgeMessage(e)
       error.value = message || 'Export failed'
     } else {
@@ -346,7 +517,18 @@ async function doExport() {
     }
   } finally {
     busy.value = false
+    running.value = ''
+    runController = null
   }
+}
+
+async function videoFailure(e) {
+  const bridged = bridgeMessage(e)
+  if (desktop && bridged && !e?.status && !e?.response) return bridged
+  const { status, message } = await describeFailure(e)
+  return status && message
+    ? message
+    : (message ? `Export failed: ${message}` : 'Export failed')
 }
 
 function onClose() {
@@ -502,6 +684,28 @@ function onClose() {
 .toggle-opt input { accent-color: var(--c-primary, #e23e57); cursor: inherit; margin: 0; }
 .toggle-opt input:disabled { cursor: default; }
 .export-defaults { margin-right: auto; }
+.export-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.export-progress__line {
+  font-size: 0.85rem;
+  color: var(--text-primary, #fff);
+  font-variant-numeric: tabular-nums;
+}
+.export-progress__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.export-progress__bar span {
+  display: block;
+  height: 100%;
+  background: var(--c-primary, #e23e57);
+  transition: width 0.2s ease;
+}
 .export-error {
   font-size: 0.75rem;
   color: var(--c-error, #fb7f5c);

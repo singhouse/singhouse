@@ -9,8 +9,9 @@ import { pipeline } from 'node:stream/promises'
 
 export const EXPORT_FORMATS = ['video', 'mp3g']
 export const EXPORT_AUDIO = ['karaoke', 'instrumental']
-// Formats the backend can produce today; video arrives with its renderer.
+// Formats written through a single request; video goes through a session.
 const WRITABLE_FORMATS = new Set(['mp3g'])
+const SESSION_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 const STATE_KEY = 'export'
 
 export function defaultExportFolder({ getPath, home, brand = 'singhouse' }) {
@@ -89,7 +90,6 @@ export class ExportPreferences {
 export function exportRequestPath(request) {
   const { songId, format, audio, lyricsSet } = plain(request)
   if (!Number.isSafeInteger(songId) || songId <= 0) throw new Error('Choose a song to export')
-  if (format === 'video') throw new Error('Video export is not available yet')
   if (!WRITABLE_FORMATS.has(format)) throw new Error('Unknown export format')
   const params = new URLSearchParams({ format })
   if (audio != null) {
@@ -154,16 +154,31 @@ async function failureMessage(response) {
   return `Export failed: the server answered ${response.status}`
 }
 
+export function videoFilePath(request) {
+  const { session } = plain(request)
+  if (typeof session !== 'string' || !SESSION_PATTERN.test(session)) throw new Error('Unknown video export')
+  return `/api/export/video/${session}/file`
+}
+
 // `fetch(path, init)` is the authenticated application-session fetch.
 export async function writeExport({ fetch, folder, request, signal }) {
   const path = exportRequestPath(request)
+  return saveResponse({ fetch, folder, path, fallback: `export-song-${request.songId}.zip`, signal })
+}
+
+// The finished file of a video export session, written like any export.
+export async function writeVideoExport({ fetch, folder, request, signal }) {
+  const path = videoFilePath(request)
+  return saveResponse({ fetch, folder, path, fallback: 'export-video.mp4', signal })
+}
+
+async function saveResponse({ fetch, folder, path, fallback, signal }) {
   if (typeof folder !== 'string' || !isAbsolute(folder)) throw new Error('Choose a folder to save the export to')
   let response
   try { response = await fetch(path, { signal }) }
   catch (error) { throw new Error(`Export failed: ${error?.message || 'the request did not complete'}`) }
   if (!response.ok) throw new Error(await failureMessage(response))
 
-  const fallback = `export-song-${request.songId}.zip`
   const name = safeFilename(filenameFromDisposition(response.headers.get('content-disposition'), fallback), fallback)
   try { await mkdir(folder, { recursive: true }) }
   catch (error) { throw new Error(`Could not create the export folder: ${error.message}`) }
