@@ -65,6 +65,7 @@ const startupVerification = new AbortController()
 const operationGate = new OperationGate()
 let popupReserved = false
 const blocker = projectorBlocker(powerSaveBlocker)
+const closeGuard = createCloseGuard()
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 function digestRecords(entries) { return hash(canonicalJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))))) }
@@ -253,6 +254,7 @@ async function launchBackend() {
   backend.stderr.on('data', data => process.stderr.write(data))
   backend.once('exit', (code, signal) => {
     if (!quitting && !handingOff && host) {
+      closeGuard.release()
       dialog.showErrorBox(`${brand} backend stopped`, `The backend exited (${signal || code}). Your library is preserved. Quit and reopen ${brand} to recover.`)
       app.quit()
     }
@@ -426,6 +428,72 @@ async function showUpdateRecovery() {
     process.platform === 'win32' ? 'recover.cmd' : 'recover.sh')
   await dialog.showMessageBox(host, { type: 'info', message: 'Authenticated update recovery is available.',
     detail: `Recovery point ${point.id}. Use the standalone paired recovery launcher at ${launcher}. This action does not modify the application or database.` })
+}
+
+// The host renderer can hold unsaved edits. While it has armed this guard,
+// closing the host window or quitting asks the renderer first; it shows its
+// own prompt and answers over a fixed channel. Unarmed, close proceeds at once.
+function createCloseGuard() {
+  let armed = false, pending = null
+  const settle = proceed => {
+    const current = pending
+    pending = null
+    current?.resolve(proceed)
+  }
+  return {
+    get armed() { return armed },
+    arm(value) {
+      armed = value === true
+      if (!armed) settle(true)
+    },
+    // Resolves true to proceed with closing, false to keep the window open.
+    request(contents) {
+      if (!armed || !contents || contents.isDestroyed()) return Promise.resolve(true)
+      if (!pending) {
+        let resolveDecision
+        pending = { promise: new Promise(resolveRequest => { resolveDecision = resolveRequest }), resolve: resolveDecision }
+        contents.send('window:close-requested')
+      }
+      return pending.promise
+    },
+    decide(decision) {
+      if (!pending) return false
+      if (decision === 'proceed') armed = false
+      settle(decision === 'proceed')
+      return true
+    },
+    // The renderer is gone or cannot answer; nothing is left to ask.
+    release() {
+      armed = false
+      settle(true)
+    },
+    // The renderer was replaced: its edits and any open prompt are gone, so a
+    // pending request is cancelled rather than approved.
+    reset() {
+      armed = false
+      settle(false)
+    },
+  }
+}
+
+function watchCloseGuardRenderer(win, guard) {
+  // A full page load replaces the renderer that armed the guard.
+  win.webContents.on('did-navigate', () => guard.reset())
+  // A hung renderer cannot answer; closing must still complete.
+  win.on('unresponsive', () => guard.release())
+}
+
+function gateHostClose(win, guard) {
+  let approved = false
+  win.on('close', event => {
+    if (approved || !guard.armed) return
+    event.preventDefault()
+    void guard.request(win.webContents).then(proceed => {
+      if (!proceed || win.isDestroyed()) return
+      approved = true
+      win.close()
+    })
+  })
 }
 
 function installMenu() {
@@ -711,6 +779,17 @@ async function start() {
     activity: boundaryState, quiesce: quiesceBackend, resume: resumeBackend,
     restart: () => relaunchForSetup(app),
   })))
+  const authorizeHost = event => {
+    if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Only available in the host window')
+  }
+  const hostHandler = (channel, action) => ipcMain.handle(channel, (event, ...args) => { authorizeHost(event); return action(...args) })
+  hostHandler('editor:close-guard', armed => { closeGuard.arm(armed === true) })
+  hostHandler('editor:close-decision', decision => {
+    if (decision !== 'proceed' && decision !== 'cancel') throw new Error('Unknown close decision')
+    return closeGuard.decide(decision)
+  })
+  watchCloseGuardRenderer(host, closeGuard)
+  gateHostClose(host, closeGuard)
   ipcMain.handle('heart:prepare', async event => {
     if (!authorizedHeartCaller(event, host, launch.origin) || quitting || handingOff) throw new Error('Heart setup is only available in the host window')
     // Development mode retains its explicitly configured backend environment.
@@ -735,6 +814,7 @@ async function start() {
   let presenting = packaged, rejectPresentation
   const presentationFailure = packaged ? new Promise((_, reject) => { rejectPresentation = reject }) : null
   host.webContents.on('render-process-gone', () => {
+    closeGuard.release()
     projector?.destroy()
     if (presenting) rejectPresentation(new Error('Renderer exited before the application finished presenting'))
     else app.quit()
@@ -772,6 +852,11 @@ app.on('before-quit', event => {
     void updateOperation.finally(() => app.quit())
     return
   }
+  // Unsaved edits in the host renderer: it answers before the host goes away.
+  if (closeGuard.armed && host && !handingOff) {
+    void closeGuard.request(host.webContents).then(proceed => { if (proceed) { closeGuard.release(); app.quit() } })
+    return
+  }
   quitting = true
   startupVerification.abort()
   installation?.abort()
@@ -787,7 +872,7 @@ app.on('before-quit', event => {
   }).finally(() => { shutdownComplete = true; app.quit() })
 })
 app.on('window-all-closed', () => app.quit())
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => app.quit())
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { closeGuard.release(); app.quit() })
 process.on('exit', () => {
   if (backend?.pid && backend.exitCode === null && backend.signalCode === null) {
     try { forceChild(backend) }

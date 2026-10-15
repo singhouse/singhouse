@@ -29,7 +29,7 @@
         </button>
         <button class="wb-btn" :disabled="!canUndo" title="Ctrl+Z" @click="undo">⟲ Undo</button>
         <button class="wb-btn" :disabled="!canRedo" title="Ctrl+Shift+Z" @click="redo">⟳ Redo</button>
-        <span class="font-mono text-xs text-gray-500">{{ opCount }} ops</span>
+        <span class="sv" :class="`sv--${saveStatus}`" aria-live="polite">{{ saveStatusText }}</span>
 
         <!-- validation badge -->
         <button
@@ -49,15 +49,31 @@
           v-if="canSave"
           class="wb-btn !border-primary !text-primary disabled:!border-gray-600 disabled:!text-gray-500"
           :disabled="!dirty || validation.errors.length > 0 || saving"
-          :title="validation.errors.length ? 'Fix validation errors first' : 'Save as a new lyrics set (original untouched)'"
+          :title="validation.errors.length ? 'Fix validation errors first' : `Creates a new lyrics set from your edits and makes it the lyrics used for performances. Set #${setId} is kept unchanged.`"
           @click="save"
         >
-          {{ saving ? 'Saving…' : 'Save as new set' }}
+          {{ saving ? 'Saving…' : 'Save as new set and make active' }}
         </button>
       </template>
     </header>
 
-    <p v-if="notice" class="mb-2 rounded bg-dark-600 px-3 py-2 text-sm" :class="noticeIsError ? 'text-red-300' : 'text-emerald-300'">
+    <div v-if="saveFailed" class="wb-failbox" role="alert">
+      <div>
+        <b>Save failed — nothing was changed.</b>
+        {{ activeSetId ? `The active set is still #${activeSetId}, and your` : 'Your' }}
+        {{ changesText(opCount) }} {{ opCount === 1 ? 'is' : 'are' }} still open here.
+      </div>
+      <div class="wb-failbox__why">Reason: {{ saveError }}.</div>
+      <div class="wb-failbox__acts">
+        <button
+          class="wb-btn !border-primary !text-primary"
+          :disabled="validation.errors.length > 0 || saving"
+          @click="save"
+        >Retry save</button>
+        <button class="wb-btn" @click="saveSessionFile">Export session file (backup)</button>
+      </div>
+    </div>
+    <p v-else-if="notice" class="mb-2 rounded bg-dark-600 px-3 py-2 text-sm" :class="noticeIsError ? 'text-red-300' : 'text-emerald-300'">
       {{ notice }}
     </p>
 
@@ -173,14 +189,16 @@ const props = defineProps({
   setId: { type: Number, default: null },
   /** Human label of the source set, used in the saved set's label. */
   setLabel: { type: String, default: '' },
+  /** The song's currently active set, named when a save fails. */
+  activeSetId: { type: Number, default: null },
 })
 
 const emit = defineEmits(['saved'])
 
 // ─── session ────────────────────────────────────────────────────────────────
 const {
-  load, apply, undo, redo, exportSession,
-  doc, canUndo, canRedo, dirty, opCount, validation, lastError,
+  load, apply, undo, redo, exportSession, trackSave,
+  doc, canUndo, canRedo, dirty, opCount, validation, lastError, saveState, saveError,
 } = useEditorSession()
 
 const notice = ref('')
@@ -474,12 +492,28 @@ function saveSessionFile() {
   URL.revokeObjectURL(a.href)
 }
 
-const saving = ref(false)
+const saving = computed(() => saveState.value === 'saving')
+const saveFailed = computed(() => saveState.value === 'failed' && dirty.value)
 
+const changesText = (n) => (n === 1 ? '1 change' : `${n} changes`)
+
+const saveStatus = computed(() => {
+  if (saving.value) return 'saving'
+  if (saveFailed.value) return 'failed'
+  return dirty.value ? 'dirty' : 'clean'
+})
+const saveStatusText = computed(() => ({
+  saving: 'Saving…',
+  failed: 'Unsaved — last save failed',
+  dirty: `Unsaved changes · ${changesText(opCount.value)}`,
+  clean: 'No unsaved changes',
+})[saveStatus.value])
+
+/** Save the edits as a new active set. Resolves to the new set, or null when
+ *  nothing was saved (the edits stay open). */
 async function save() {
-  if (!canSave.value || !doc.value) return
-  saving.value = true
-  try {
+  if (!canSave.value || !doc.value || saving.value) return null
+  const created = await trackSave(async () => {
     const wordSync = serializeDoc(doc.value)
     wordSync.metadata = {
       ...wordSync.metadata,
@@ -496,14 +530,15 @@ async function save() {
       metadata_json: wordSync.metadata,
       activate: true,
     })
-    flash(`Saved as new active set #${res.data.id} ("${res.data.label}"). Original set untouched.`)
-    emit('saved', res.data)
-  } catch (err) {
-    flash(`Save failed: ${err.response?.data?.detail ?? err.message}`, true)
-  } finally {
-    saving.value = false
-  }
+    return res.data
+  })
+  if (!created) return null
+  flash(`Saved as new active set #${created.id} ("${created.label}"). Original set untouched.`)
+  emit('saved', created)
+  return created
 }
+
+defineExpose({ dirty, opCount, saveState, saveError, validation, save, saveSessionFile })
 
 function fmt(sec) {
   if (!Number.isFinite(sec)) return '–'
@@ -536,6 +571,68 @@ function fmt(sec) {
 }
 .wb-btn:disabled {
   opacity: 0.4;
+}
+.sv {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.sv--clean {
+  color: #9ca3af;
+  border-color: #2a3040;
+}
+.sv--dirty {
+  color: #fcd34d;
+  background: rgba(120, 53, 15, 0.45);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.sv--failed {
+  color: #fca5a5;
+  background: rgba(127, 29, 29, 0.45);
+  border-color: rgba(252, 165, 165, 0.45);
+}
+.sv--saving {
+  color: #93c5fd;
+  border-color: rgba(67, 133, 228, 0.5);
+}
+.sv--dirty::before,
+.sv--failed::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fbbf24;
+}
+.sv--failed::before {
+  background: #f87171;
+}
+.wb-failbox {
+  margin-bottom: 0.5rem;
+  border-radius: 0.375rem;
+  border: 1px solid rgba(252, 165, 165, 0.35);
+  background: rgba(127, 29, 29, 0.25);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #fecaca;
+}
+.wb-failbox__why {
+  margin-top: 0.125rem;
+  font-size: 0.75rem;
+  color: #fca5a5;
+  opacity: 0.8;
+}
+.wb-failbox__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
 }
 .ll-row {
   display: flex;

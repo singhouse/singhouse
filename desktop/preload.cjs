@@ -26,4 +26,13 @@ contextBridge.exposeInMainWorld('karaokeDesktop', Object.freeze({
     ipcRenderer.on('setup:open', listener)
     return () => ipcRenderer.removeListener('setup:open', listener)
   },
+  // Unsaved-edits close guard: the renderer arms it, answers each close
+  // request with 'proceed' or 'cancel'.
+  setCloseGuard: armed => ipcRenderer.invoke('editor:close-guard', armed === true),
+  answerCloseRequest: decision => ipcRenderer.invoke('editor:close-decision', decision),
+  onCloseRequested: callback => {
+    const listener = () => callback()
+    ipcRenderer.on('window:close-requested', listener)
+    return () => ipcRenderer.removeListener('window:close-requested', listener)
+  },
 }))

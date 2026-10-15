@@ -2,6 +2,8 @@
 // Vue reactivity wrapper around the framework-free editor session
 // (src/editor/session.js). The session object mutates internally; we bump a
 // version counter on every change so computeds depending on it re-evaluate.
+// Unsaved state is derived from the session's op log, so undoing back to zero
+// edits is clean again.
 
 import { computed, ref, shallowRef } from 'vue'
 
@@ -11,11 +13,16 @@ export function useEditorSession() {
   const session = shallowRef(null)
   const version = ref(0)
   const lastError = ref(null)
+  // idle | saving | failed — the outcome of the last save of this session.
+  const saveState = ref('idle')
+  const saveError = ref('')
 
   function load(rawDoc) {
     session.value = createSession(rawDoc)
     version.value++
     lastError.value = null
+    saveState.value = 'idle'
+    saveError.value = ''
   }
 
   function close() {
@@ -38,6 +45,10 @@ export function useEditorSession() {
   function undo() {
     session.value?.undo()
     version.value++
+    if (saveState.value === 'failed') {
+      saveState.value = 'idle'
+      saveError.value = ''
+    }
   }
 
   function redo() {
@@ -74,6 +85,22 @@ export function useEditorSession() {
     return session.value?.exportSession() ?? null
   }
 
+  /** Run a save task, tracking its state. Resolves to the task's result, or
+   *  null when it failed (the edits stay in the session). */
+  async function trackSave(task) {
+    saveState.value = 'saving'
+    saveError.value = ''
+    try {
+      const result = await task()
+      saveState.value = 'idle'
+      return result
+    } catch (err) {
+      saveState.value = 'failed'
+      saveError.value = String(err?.response?.data?.detail ?? err?.message ?? err)
+      return null
+    }
+  }
+
   return {
     load,
     close,
@@ -81,6 +108,7 @@ export function useEditorSession() {
     undo,
     redo,
     exportSession,
+    trackSave,
     doc,
     canUndo,
     canRedo,
@@ -88,5 +116,7 @@ export function useEditorSession() {
     opCount,
     validation,
     lastError,
+    saveState,
+    saveError,
   }
 }
