@@ -41,9 +41,12 @@ Run checks for the affected area:
 | Repository root | `bash tools/check_core_neutrality.sh .` and `bash tools/check_spdx_headers.sh .` |
 
 Use focused tests while iterating and relevant broader checks before finishing.
-Report actual results and pre-existing failures. Fixture tests do not establish
-native installer, hardware, or audio-quality qualification. Follow desktop
-instructions before assembling installers or downloading processing models.
+Report actual results and pre-existing failures. Routine code, documentation,
+and patch/minor releases are validated by the automated test suites and CI
+smoke checks above. Manual hardware, 20-song corpus, and physical-show
+qualification procedures in `docs/release-qualification.md` are milestone
+benchmarks run only when qualifying a new platform, runtime lock, or model
+set—not per-commit release blockers.
 Do not run deployment scripts against an existing installation as a test.
 
 ## Product boundaries

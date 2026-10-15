@@ -1,38 +1,10 @@
-# Native release qualification
+# Desktop Release Qualification Harness
 
-This directory records repeatable evidence for a singhouse desktop release.
-It does not turn an automated smoke test, virtual machine, or remote desktop
-session into physical audio, display, GPU, or clean-machine evidence.
+This directory holds the tooling and schemas for recording repeatable release qualification evidence across target machines.
 
-Start a candidate by copying `matrix.template.json` to an evidence directory
-outside the source checkout. Keep evidence with the immutable candidate
-artifacts and receipts:
+## 1. Evidence Directory & Matrix Validation
 
-```sh
-python3 desktop/qualification/qualify.py inventory \
-  --candidate-revision "$(git rev-parse HEAD)" \
-  --output evidence/machine.json
-python3 desktop/qualification/qualify.py validate \
-  desktop/qualification/matrix.template.json
-```
-
-The matrix uses four result values:
-
-- `passed`: the named check ran on the named candidate and its evidence is
-  attached.
-- `failed`: the check ran and did not meet its acceptance condition.
-- `untested`: no qualifying run exists.
-- `blocked`: a run was attempted but a concrete external prerequisite was
-  unavailable. The blocker must be recorded.
-
-Never mark a row passed from source inspection alone when the row requires an
-installer, inference, audible comparison, physical output, or interruption.
-Synthetic media is useful for deterministic plumbing tests and must be labeled
-as synthetic evidence.
-
-## Candidate evidence layout
-
-Use one directory per exact source revision and artifact set:
+Create one evidence directory outside the source checkout per candidate commit and artifact set:
 
 ```text
 evidence/
@@ -43,14 +15,24 @@ evidence/
   logs/<matrix-row-id>.log
 ```
 
-Each result should identify the source revision, artifact SHA-256, machine
-inventory, command or manual procedure, start/end time, result, and evidence
-files. Do not include model weights, user media, lyrics, secrets, tokens, or
-private application data.
+Record machine inventory and validate your qualification matrix (`passed`, `failed`, `untested`, or `blocked`):
 
-## Automated commands
+```sh
+python3 desktop/qualification/qualify.py inventory \
+  --candidate-revision "$(git rev-parse HEAD)" \
+  --output evidence/machine.json
 
-Run the repository suites before native tests:
+python3 desktop/qualification/qualify.py validate \
+  desktop/qualification/matrix.template.json
+```
+
+(Never include model weights, user audio, lyrics, secrets, or session tokens in evidence files.)
+
+---
+
+## 2. Automated Repository & Packaged Smoke Suites
+
+Run the unit and integration suites before native packaging tests:
 
 ```sh
 npm --prefix desktop test
@@ -60,49 +42,77 @@ npm --prefix frontend test -- --run
 npm --prefix frontend run build
 ```
 
-On Linux, exercise the source shell with an available display or Xvfb:
+Run the synthetic packaged-media smoke harness against the unpacked or installed candidate executable:
 
 ```sh
-xvfb-run -a node desktop/test/smoke.mjs
-```
-
-For a real packaged Linux executable, use an empty isolated application-data
-root through the existing packaged smoke runner:
-
-```sh
+# Linux (use xvfb-run on headless machines)
 xvfb-run -a node desktop/test/packaged-smoke.mjs \
-  --executable /absolute/path/to/the/candidate/executable
+  --executable desktop/artifacts/linux-unpacked/Singhouse
+
+# macOS
+node desktop/test/packaged-smoke.mjs \
+  --executable /Applications/Singhouse.app/Contents/MacOS/Singhouse
+
+# Windows
+node desktop/test/packaged-smoke.mjs \
+  --executable "C:\path\to\Singhouse.exe"
 ```
 
-That packaged smoke uses generated media. It proves neither audible output nor
-external-display behavior. Real processing qualification additionally needs
-the fixed private evaluation corpus, locally available model files, and the
-exact candidate runtime pack. Do not fetch new weights merely to run this
-harness.
+---
 
-The release matrix and operator procedures are described in
-`docs/release-qualification.md`.
+## 3. Real Packaged Processing Smoke (`packaged-processing-smoke.mjs`)
 
-## Real packaged local processing smoke
+Unlike `packaged-smoke.mjs` (which tests synthetic video playback), `desktop/test/packaged-processing-smoke.mjs` launches a packaged candidate, runs **real local Demucs + RoFormer separation and Heart transcription** on a short licensed vocal excerpt (≤ 120s, ≤ 64 MiB), verifies decoded stem alignment and word timings, and audits process-tree shutdown.
 
-`desktop/test/packaged-processing-smoke.mjs` runs the actual packaged Windows
-executable in a new isolated profile. Unlike the synthetic prepared
-video smoke, this **runs real local separation and Heart transcription** on an
-operator-supplied licensed vocal excerpt (at most 120 seconds and 64 MiB).
-It uses the existing advanced Processing menu to install an explicitly supplied
-trusted runtime manifest and all three model sets from the packaged model
-policy, then restarts and submits the audio through the normal ingest API.
-The application performs its normal lock, hash, probe and activation checks.
-No processing catalog qualification is created or bypassed.
+* **Path rules:** Pass physical paths with no symlinks or junctions (on macOS, use `/private/tmp` instead of `/tmp`). `--output` must point to a non-existent directory whose parent exists.
+* **Linux display & sandbox:** Requires `DISPLAY` (or `WAYLAND_DISPLAY` + `XDG_SESSION_TYPE`), or `xvfb-run -a`. Electron's sandbox remains strictly enabled.
 
-Run only when the runtime installation, upstream model retrieval and local
-inference are authorized. The existing advanced route retrieves models from
-upstream; `--download-models` is mandatory and explicitly consents to this
-multi-gigabyte transfer. It does not enable Modal or external paging.
-A combined offline folder picker is not exposed by that application route;
-`--model-folder` is rejected rather than copying cache activation pointers.
+### Mode A: First-Launch Wizard Mode (`--wizard`)
 
-From the checkout with desktop test dependencies installed, on Windows:
+Drives the real first-launch onboarding UI on a fresh profile (`data-testid="onboarding-dialog"`), verifies the embedded `processing-catalog.json` plan and model terms against `--expected-runtime-lock-sha256`, accepts download consent, waits for runtime/model installation and `python-functional-v1` self-test, triggers the restart control, confirms post-restart verification settles on `ready`, and processes the test audio:
+
+```sh
+xvfb-run -a node desktop/test/packaged-processing-smoke.mjs \
+  --executable desktop/artifacts/linux-unpacked/Singhouse \
+  --wizard \
+  --expected-runtime-lock-sha256 <FULL_64_HEX_RUNTIME_LOCK> \
+  --audio /path/to/licensed-excerpt.wav \
+  --output /path/to/new-wizard-evidence \
+  --timeout-seconds 3600
+```
+
+#### Optional Retrieval Interruption & Retry Checks (Wizard Mode)
+
+Pair Wizard Mode with `desktop/test/local-pack-server.mjs` (which serves local pack files over `https://127.0.0.1` with HTTP `Range` support and JSON request logging) and `--extra-ca-cert /absolute/ca.pem`:
+
+```sh
+node desktop/test/local-pack-server.mjs \
+  --directory /verified-pack/files --port 8443 \
+  --cert /keys/server.pem --key /keys/server-key.pem \
+  --throttle-bytes-per-second 1048576 > /path/to/pack-server.log
+```
+
+* **`--interrupt-runtime-retrieval --pack-server-log <log>`:** Pauses download via the wizard UI once ≥ 5% has transferred, verifies partial `.partial` bytes on disk, resumes, and verifies `206 Partial Content` range continuation in the server log.
+* **`--expect-retrieval-failure-then-retry --pack-server-log <log>`:** Pairs with `--fail-after-bytes N` on `local-pack-server.mjs` to force a mid-stream transfer failure, verifies the wizard error state, clicks retry, and confirms HTTP range resumption.
+
+### Mode B: Retained-Profile Mode (`--retained-profile`)
+
+Submits a new audio excerpt against an existing isolated qualification profile (up to 500 songs, empty WAL, zero non-terminal jobs) without re-downloading runtimes or models, auditing SQLite row hashes before and after to verify existing songs are untouched:
+
+```powershell
+node desktop/test/packaged-processing-smoke.mjs `
+  --executable "C:\candidate\Singhouse.exe" `
+  --runtime-manifest "C:\verified-pack\manifest.json" `
+  --audio "C:\licensed-excerpt.wav" `
+  --output "C:\new-attempt-evidence" `
+  --retained-profile "C:\prior-qualification\profile" `
+  --expected-source-commit <FULL_40_HEX_SOURCE_COMMIT> `
+  --timeout-seconds 7200
+```
+
+### Mode C: Advanced Menu Install & Reboot Resume (`--download-models` / `--resume`)
+
+Installs an explicit `--runtime-manifest` and upstream models via the Processing menu. If interrupted by a host reboot before inference starts, re-run with `--resume` (and optionally `--upgrade-from-executable-sha256 <hash>` when qualifying an application upgrade over a retained profile):
 
 ```powershell
 node desktop/test/packaged-processing-smoke.mjs `
@@ -113,89 +123,18 @@ node desktop/test/packaged-processing-smoke.mjs `
   --download-models --timeout-seconds 3600
 ```
 
-For an installation interrupted by a host or VM reboot, rerun the same command
-with `--resume` and the original output directory. Resume verifies the exact
-executable, input and runtime-manifest hashes and the original physical isolated
-profile path. It supports interrupted installation only, before any inference
-submission; the profile must still have an empty library. Close the previous
-application first; the packaged application's single-instance ownership is
-required. The original `evidence.json` is preserved unchanged; a unique
-`resume-<UUID>` subdirectory contains the new evidence, model manifest and
-outputs, and links the original evidence and all earlier resume attempts by SHA-256.
-Every prior attempt is checked; malformed evidence or any attempted inference
-blocks resume, even if the library was later emptied. An inference-start marker
-is flushed to disk before submission so an interrupted response cannot be
-silently retried. A prior `running` status
-means no outcome was recorded, never a pass. Runtime reuse requires the current
-backend to admit the exact runtime; otherwise the advanced install route runs
-again. Model installation always runs through the real route, which verifies
-and reuses already downloaded cache files. Restart, readiness, real inference
-and all output assertions still run in full. Retain all attempt directories.
+---
 
-To qualify an explicit application upgrade using that retained setup, add
-`--upgrade-from-executable-sha256 <64-hex-original-executable-hash>` with
-`--resume` and the new executable. The hash must match the original evidence
-and differ from the current executable. Earlier attempts must belong to the
-original or explicitly recorded current candidate; other candidates are
-rejected. Each new attempt records both executable hashes and identifies the
-run as upgrade qualification with retained setup, not clean-install proof.
-All input, runtime, profile, model verification and inference guards still
-apply. Ordinary `--resume` continues to require the exact original executable.
+## 4. Private Local Acceptance Supervisor (`local_acceptance.py`)
 
-Without `--resume`, the output directory must not exist; its parent must exist. It retains the
-isolated application profile, four playback WAVs, the model manifest and
-`evidence.json`. Keep this directory private: the profile contains normal
-application session state and machine-generated lyrics. The evidence JSON
-records exact input/executable/runtime/model-manifest and packaged model-policy
-file hashes, installation and processing wall
-times, job phase transitions, readiness, output hashes/format/decode checks,
-and transcription count/timing checks without copying transcript text. The
-harness strips inherited service configuration, requires external lyric lookup
-to be off, verifies Modal is unselected, and requests external paging off. The ingest API selects Heart internally; output metadata must
-confirm Heart. No cloud deployment or cloud inference is performed.
-
-The default overall deadline is one hour, configurable from 60 to 14,400
-seconds. Individual startup, API, media checks and shutdown also have bounds.
-On failure, the harness requests installation cancellation and closes its own
-application; Windows forced shutdown targets only that application process
-tree. Retained failure evidence does not constitute a pass.
-
-A pass demonstrates the selected packaged application's real local pipeline on
-that excerpt and machine. It does **not** establish the 20-song accuracy
-criteria, listening quality, representative RAM/VRAM minimums, clean-machine
-compatibility, physical audio/display behavior or complete release
-qualification. Record those separately; never turn this smoke result into an
-unsupported catalog attestation.
-
-## Private local acceptance supervisor
-
-`local_acceptance.py` supervises an explicitly prepared native **private-test**
-candidate and durable test profile. It does not install dependencies or models.
-Supply the selected processing/model directories and full identities, plus the
-actual successful processing attestation JSON produced by the parent probe:
+Supervises an unpacked `private-test` native build against an existing durable profile and opens an authenticated browser session via a one-time loopback cookie handoff:
 
 ```sh
 python desktop/qualification/local_acceptance.py \
-  --native /path/to/candidate/native --profile /path/to/private-test-profile \
-  --processing /path/to/selected-processing --processing-id FULL_PROCESSING_ID \
+  --native /path/to/candidate/native \
+  --profile /path/to/private-test-profile \
+  --processing /path/to/selected-processing --processing-id <FULL_PROCESSING_ID> \
   --processing-probe /path/to/actual-attestation.json \
-  --models /path/to/selected-models --models-id FULL_MODEL_ID \
+  --models /path/to/selected-models --models-id <FULL_MODEL_ID> \
   --evidence /path/to/private-evidence.json --open-browser
 ```
-
-The supervisor retains the backend stdin ownership pipe, verifies readiness
-identity and the unqualified measurement marker, and authenticates through
-`POST /api/auth/gate`. A one-use loopback browser handoff transfers the resulting
-HttpOnly session cookie and redirects to the backend. Without `--open-browser`,
-the private handoff URL is shown only on an interactive terminal; do not share
-or record it. Launch passwords, control tokens, cookies, backend output, media
-names, and paths are excluded from evidence. Backend output is intentionally
-not logged. Ctrl-C closes the owned backend; the durable profile remains.
-
-Evidence contains candidate hashes/identities, timestamped aggregate job counts,
-and free profile disk bytes. It is always marked **unqualified private local
-measurement**. It does not establish per-job success, process/GPU peak memory,
-audio quality, clean-machine suitability, or release resource recommendations.
-Retain separate explicitly consented observations for those checks. Use a
-separate browser profile for the private test; loopback cookies are host scoped
-and can replace another local application's cookie with the same name.

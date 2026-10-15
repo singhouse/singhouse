@@ -1,188 +1,93 @@
-# Frontend
+# Singhouse Frontend
 
-A polished Vue 3 web player for karaoke tracks with vocal/instrumental mixing and synced lyrics.
+Vue 3 single-page application for the Singhouse host interface, Web Audio stem mixer, word-timing lyrics editor, and canvas projector stage.
 
-## Quick Start
+## Requirements & Quick Start
+
+Requires **Node.js 22+** (matching package metadata) and a running backend API on `http://localhost:8000` (see [`backend/README.md`](../backend/README.md)).
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5173** in your browser. The Vite dev server proxies `/api` requests to `localhost:8000` automatically.
 
-## Requirements
-
-- Node.js ≥ 18
-- Backend API running on `localhost:8000` (see `backend/`)
-
-## npm Scripts
+## Scripts
 
 | Command | Description |
-|---------|-------------|
-| `npm run dev` | Start dev server (hot reload) on port 5173 |
-| `npm run build` | Production build → `dist/` |
-| `npm run deploy` | Build a named, sourcemap-free assembly and publish it to the backend's `static/` |
-| `npm run preview` | Preview the production build |
+| --- | --- |
+| `npm run dev` | Start Vite dev server with hot reload on port 5173 |
+| `npm test` | Run Vitest unit tests (`happy-dom`) and pure-function stage renderer tests |
+| `npm run lint` | Run linter checks |
+| `npm run build` | Standard Vite production build → `dist/` |
+| `npm run deploy` | Build a named, sourcemap-free assembly and mirror it to `../backend/static/` |
+| `npm run preview` | Preview the production build locally |
 
 ## Project Structure
 
 ```
-src/
-├── App.vue              # Root layout: sidebar + lyrics area
-├── main.js              # App bootstrap (Vue + Pinia)
-├── assets/
-│   └── styles.css       # Global styles + Tailwind
+frontend/src/
+├── main.js                  # App bootstrap (Vue 3, Pinia, Vue Router)
 ├── api/
-│   └── client.js        # Axios instance + all API calls
-├── stores/
-│   └── songs.js         # Pinia store (songs, uploads, player state)
-└── components/
-    ├── UploadZone.vue   # Drag-drop upload with progress
-    ├── SongList.vue     # Library with filter tabs
-    ├── AudioPlayer.vue  # Player with Web Audio API mixer
-    ├── ScreenStage.vue  # Projector/preview stage (canvas lyrics + overlays)
-    └── ProgressBar.vue  # Seekable progress bar
+│   └── client.js            # Axios client + namespaced API modules (songApi, lyricsSetsApi,
+│                            #   queueApi, historyApi, featuresApi, sessionApi)
+├── auth/
+│   └── gate.js              # Route guard for the optional shared host password
+├── router/
+│   └── index.js             # Routes: / (HostShell), /songs/:songId/lyrics-editor/:setId?,
+│                            #   /unlock, and dev-only /lab/editor
+├── stores/                  # Pinia stores
+│   ├── songs.js             # Library state, upload/import submission, job polling
+│   ├── player.js            # Playback transport, per-stem mixer levels, key-shift offset
+│   ├── queue.js             # Host queue (append, drag-reorder, remove, clear, dequeue-on-play)
+│   ├── history.js           # Play history list + retention settings
+│   ├── features.js          # Operator capability flags from GET /api/features
+│   ├── hostSettings.js      # Host UI and stage display preferences
+│   └── session.js           # Auth/gate session status
+├── composables/
+│   ├── useAudioEngine.js    # Web Audio API gain graph + Signalsmith Stretch pitch-shift worklet
+│   └── useLyricsWindow.js   # Popout projector window manager + BroadcastChannel heartbeat
+├── stage/                   # Clean-room 2D canvas stage renderer
+│   ├── adapter.mjs          # Normalizes v1/v2 backend word_sync JSON into stage models
+│   ├── frame.mjs            # Pure function `describeFrame(model, time, viewport)` (640x360 space)
+│   ├── layout.mjs           # Line layout, syllable geometry, and font sizing
+│   ├── draw.mjs             # Paints frame descriptors onto a 2D canvas context
+│   ├── visualizers/         # Ambient background canvas visualizers
+│   └── KaraokeStage.vue     # Vue wrapper binding player time to the canvas renderer
+├── editor/                  # Word-timing editor state and timeline internals
+├── components/              # UI components (AudioPlayer, MixerPopover, QueuePanel,
+│                            #   HistoryModal, LyricsEditor, SongList, UploadZone, ScreenStage, …)
+└── views/
+    ├── HostShell.vue        # Primary host workspace (library, queue, player, inline stage)
+    ├── LyricsEditorView.vue # Full-page word-timing and lyric set editor
+    ├── UnlockView.vue       # Shared-password unlock screen
+    └── EditorLab.vue        # Dev-only editor playground (excluded from production builds)
 ```
 
-## Features
+## Key Subsystems
 
-### Upload Zone
-- Drag and drop or click to browse
-- Accepts MP3, FLAC, WAV, M4A, OGG (up to 500MB)
-- Live upload progress bar
-- Real-time job status polling until stems are ready
+### Web Audio Mixer & Pitch Shift (`useAudioEngine.js`)
 
-### Song Library
-- Filter by status: All / Ready / Processing / Failed
-- One-click load into player
-- Delete with confirmation dialog
+Each stem (`instrumental`, `lead_vocals`, `backing_vocals`, plus any dynamic `vocal_<id>` per-voice lanes) is loaded as a synchronized `<audio>` element routed through a Web Audio gain graph.
 
-### Audio Player
-- **Web Audio API** for zero-latency mixing
-- Play / Pause / Stop controls
-- Seekable progress bar with drag support
-- **Mixer sliders** for:
-  - 🎤 Lead Vocals (default: 100%)
-  - 🎶 Backing Vocals (default: 70%)
-  - 🎸 Instrumental (default: 100%)
-- Mute toggle per track (click the emoji)
-- Smooth 50ms gain ramp on volume changes
-- Lyrics timing offset control (±ms)
+* When key shift is `0`, audio routes directly through the gain nodes.
+* When key shift is non-zero (**±12 semitones**), a **Signalsmith Stretch** WebAssembly `AudioWorkletNode` is dynamically inserted per stem to transpose pitch at constant tempo, with reported worklet latency compensated automatically.
 
-### Lyrics Display
-Three display modes based on what's available:
+### Canvas Stage & Popout Projector (`stage/`, `useLyricsWindow.js`)
 
-1. **Word-level sync** (Whisper JSON) — word-by-word karaoke fill animation
-2. **LRC sync** (line-level) — highlight + scroll current line
-3. **Plain text** — static lyrics display
-4. **None** — graceful fallback
+The stage display uses a pure functional core tested against golden frame fixtures (`tests/stage-harness/`).
 
-### Keyboard Shortcuts
+* The projector is **not** a separate SPA route—it is a same-origin `window.open` popup driven directly from the host context.
+* A `BroadcastChannel` heartbeat and an injected watchdog script ensure that if the host window reloads or closes, any orphaned popout window closes automatically.
 
-| Key | Action |
-|-----|--------|
-| `Space` | Play / Pause |
-| `←` | Seek back 5s |
-| `→` | Seek forward 5s |
-| `Shift+←` | Seek back 30s |
-| `Shift+→` | Seek forward 30s |
-| `Home` | Stop / Reset |
+## Production Deployment (`npm run deploy`)
 
-## API Integration
-
-The frontend proxies all `/api` requests to the backend (configured in `vite.config.js`).
-
-### Expected Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/songs` | GET | List all songs |
-| `/api/songs/:id` | DELETE | Delete a song |
-| `/api/separate` | POST | Upload + start separation |
-| `/api/jobs/:id` | GET | Poll job status |
-| `/api/lyrics` | GET | Fetch lyrics (`?artist=X&title=Y`) |
-| `/api/health` | GET | Health check |
-
-### Song Object Shape
-
-```json
-{
-  "id": "uuid",
-  "title": "Example Song",
-  "artist": "Example Artist",
-  "duration": 244.5,
-  "status": "ready",
-  "vocals_url": "/stems/example-song/lead_vocals.wav",
-  "backing_url": "/stems/example-song/backing_vocals.wav",
-  "instrumental_url": "/stems/example-song/karaoke.wav"
-}
-```
-
-### Lyrics Object Shape
-
-```json
-{
-  "synced": "[00:12.34] Line one text\n[00:15.00] Line two text",
-  "plain": "Line one text\nLine two text"
-}
-```
-
-Or a Whisper JSON with `segments[].words[]`:
-```json
-{
-  "segments": [
-    {
-      "words": [
-        { "word": "Hello", "start": 1.2, "end": 1.6 },
-        { "word": "world", "start": 1.7, "end": 2.1 }
-      ]
-    }
-  ]
-}
-```
-
-## Styling
-
-- **Dark theme** inspired by the original test-player
-- **Glassmorphism** sidebar with blur
-- **Tailwind CSS** utility classes throughout
-- Custom range inputs with cobalt glow thumb
-- Smooth CSS transitions for all state changes
-
-## Development Notes
-
-### Offline / No Backend
-
-The app works without a backend — it shows the welcome screen and silently swallows API errors. You can test the player by temporarily hardcoding a `currentSong` in `App.vue` pointing to local stem files.
-
-### CORS
-
-The Vite dev server proxies `/api` → `localhost:8000`, so no CORS config needed during development.
-
-### Production Build
+When serving the frontend directly from the FastAPI backend, run:
 
 ```bash
 npm run deploy
 ```
 
-The backend serves the built app itself, so `npm run deploy` is the whole
-procedure. It builds into a **named assembly** under
-`deploy/<UTC-timestamp>-g<commit>[-dirty]-<mode>/` — a dated, identifiable
-artifact, so `dist/` keeps its plain `npm run build` meaning — then publishes
-that assembly into `../backend/static/` with `rsync --delete`, which removes
-files the new build no longer contains instead of leaving them to pile up.
-**Sourcemaps are never published**: they reconstruct the original source, so
-they are stripped from the assembly and the publish is refused if any survive.
-The three newest assemblies are kept on disk for a quick roll-back.
-
-Two environment variables adjust it: `KARAOKE_DEPLOY_TARGET` for the publish
-destination, and `KARAOKE_DEPLOY_MODE` (`core` or `multi`) for the build
-variant — unset, the mode is derived from what the checkout contains. Because
-the publish mirrors, the target is validated first and the script refuses
-anything that does not already look like a published frontend.
-
-If you would rather serve the build yourself, `npm run build` still produces a
-plain `dist/` you can hand to any static file server — Vite emits a
-single-page app with content-hashed asset names.
+`scripts/deploy.sh` builds a named assembly under `frontend/deploy/<UTC-timestamp>-g<sha>[-dirty]-<mode>/`, strips all sourcemaps, verifies the destination path (`KARAOKE_DEPLOY_TARGET`, default `../backend/static`), and syncs the build with `rsync --delete`. Build provenance is recorded in `backend/deploy-manifest.json` alongside (never inside) the public `static/` directory, and the three most recent assemblies are kept for rollback.

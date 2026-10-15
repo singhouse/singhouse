@@ -1,16 +1,21 @@
-# Windows acceptance build
+# Windows Portable Acceptance Build
 
-This is an unsigned private test build, not a qualified public release. Windows 11 x64 is the documented target. CUDA additionally requires a supported NVIDIA GPU and driver; the GPU check runs on your computer during setup.
+This archive is an unsigned private test build targeting **Windows 11 x64**. It uses isolated test profiles under `%LOCALAPPDATA%\sh-test` and will not modify an existing Singhouse installation.
 
-1. Extract the **entire** artifact to a folder on a local drive. Keep its files together.
-2. Double-click **Start-CPU.cmd** or **Start-CUDA.cmd**, whichever is included in this download. Use this launcher each time, rather than opening the executable inside `app`.
-3. The first run shows the download size, upstream model links and consent prompt. Type `YES` to install. Keep the setup window open while it downloads and verifies processing tools and models. No separate Python, Node or CUDA toolkit installation is needed.
-4. The app opens after setup and a real processing check pass. Import your own song and try a generation. Later launches reuse that setup and open the app directly.
+## Running the Test Build
 
-Windows may warn because this test build is unsigned. Verify you obtained the artifact from the expected project workflow before running it.
+1. **Extract All:** Extract the entire `.zip` archive to a folder on a local drive, keeping all files together.
+2. **Launch via Script:** Double-click **`Start-CPU.cmd`** or **`Start-CUDA.cmd`** (do not launch the inner `.exe` inside `app/` directly).
+3. **Consent & Setup:** On first run, the launcher displays the free disk space check, model download sizes, and upstream links. Type **`YES`** to download and verify the processing runtime and models (no system Python, Node, or CUDA toolkit install is required).
+4. **Test Import & Generation:** Once setup and the functional self-test pass, the Singhouse UI opens. Import a song from your library and verify stem separation, word timing, and playback. Subsequent launches via `Start-CPU.cmd` / `Start-CUDA.cmd` reuse the verified environment and open the app immediately.
 
-CPU and CUDA use separate test libraries under `%LOCALAPPDATA%\sh-test`. They do not change an existing installed library. Leave substantial disk space for both model caches, processing tools, your songs and generated stems. The launcher shows the exact model download size and free disk space before consent. Keep these profile folders in place after setup.
+## Troubleshooting & Repair
 
-If setup fails, the window stays open with the error. Keep `setup.log` from the profile folder printed by the launcher, plus the artifact's build evidence and checksums, when reporting the failure. To explicitly recheck and repair using the bundled files, close singhouse, open a terminal in the extracted folder, and run `Start-CPU.cmd -Repair` or `Start-CUDA.cmd -Repair`. This keeps the test library and reruns full tool/model verification with download consent. A setup check passing does not establish generation quality, resource limits, offline recovery, or physical audio/projector qualification.
+* **Logs:** If setup fails, the console window stays open. Save `setup.log` from the `%LOCALAPPDATA%\sh-test` profile path printed in the console along with the build checksums.
+* **Repairing in Place:** To force a full re-verification and repair of the test environment without losing your test library, close Singhouse and run:
 
-These builds exercise the current HEART processing path. They do not yet include Qwen3-ASR or the combined aligner model delivery.
+  ```cmd
+  Start-CPU.cmd -Repair
+  :: or
+  Start-CUDA.cmd -Repair
+  ```

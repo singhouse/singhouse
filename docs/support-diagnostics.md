@@ -1,27 +1,12 @@
-# Support diagnostics
+# Support Diagnostics
 
-Start by recording the singhouse version, artifact filename and SHA-256, exact
-operating-system version, CPU architecture, and whether the problem occurred
-before or after an upgrade. For display or audio problems, include the desktop
-session, connected displays, output device, and the action that triggered the
-problem.
+When reporting a bug or startup failure, include your Singhouse version, installer filename (and SHA-256 hash), OS version, CPU/GPU architecture, and the action that triggered the issue.
 
-Useful platform commands include:
+## 1. Gather System Information
 
-```sh
-# Linux
-uname -a
-cat /etc/os-release
-getconf PAGESIZE
-printf 'desktop=%s session=%s\n' "$XDG_CURRENT_DESKTOP" "$XDG_SESSION_TYPE"
+Run the commands for your platform to record your OS, display session, GPU, and audio devices:
 
-# macOS
-sw_vers
-uname -m
-system_profiler SPHardwareDataType SPDisplaysDataType SPAudioDataType
-```
-
-On Windows, run `winver`, then use PowerShell:
+**Windows (run `winver`, then PowerShell):**
 
 ```powershell
 Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber,OsArchitecture,CsTotalPhysicalMemory
@@ -29,47 +14,52 @@ Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,Adapter
 Get-CimInstance Win32_SoundDevice | Select-Object Name,Status
 ```
 
-For a release candidate, also preserve:
-
-- the release receipt and published checksum file;
-- the result of hashing the downloaded installer;
-- the exact warning or failure message;
-- application logs covering one reproduction;
-- whether the network was connected, whether a model/runtime was already
-  installed, and whether prepared media still played;
-- the recovery-point identifier shown by the application after an interrupted
-  update.
-
-singhouse does not write a separate persistent application log in this
-candidate. To capture one reproduction, close singhouse and start the installed
-executable from a terminal with output redirected to a new file:
+**macOS:**
 
 ```sh
-# Linux AppImage
-./Singhouse-*.AppImage >singhouse-reproduction.log 2>&1
-
-# macOS installed application
-/Applications/Singhouse.app/Contents/MacOS/Singhouse >singhouse-reproduction.log 2>&1
+sw_vers
+uname -m
+system_profiler SPHardwareDataType SPDisplaysDataType SPAudioDataType
 ```
 
-On Windows, replace the example path if you selected a different installation
-directory:
+**Linux:**
+
+```sh
+uname -a
+cat /etc/os-release
+getconf PAGESIZE
+printf 'desktop=%s session=%s\n' "$XDG_CURRENT_DESKTOP" "$XDG_SESSION_TYPE"
+```
+
+## 2. Capture a Reproduction Log
+
+Singhouse Desktop does not write a persistent background log file by default. To capture a log of a crash or bug, close Singhouse completely, then launch it from a terminal with output redirected to a file:
+
+**Windows (PowerShell):**
 
 ```powershell
+# Adjust the path if you chose a custom installation folder
 & "$env:LOCALAPPDATA\Programs\Singhouse\Singhouse.exe" *> .\singhouse-reproduction.log
 ```
 
-Reproduce the problem once, close singhouse, then review the captured file
-before sharing it. These commands do not change operating-system security
-settings.
+**macOS:**
 
-Do not share media, stems, lyrics, model weights, the application database,
-`settings.json`, session secrets, API keys, update signing keys, access tokens,
-or full environment dumps. Review logs for local paths, usernames, song names,
-and endpoint credentials before attaching them. Preserve the original private
-evidence locally if redaction is needed.
+```sh
+/Applications/Singhouse.app/Contents/MacOS/Singhouse >singhouse-reproduction.log 2>&1
+```
 
-If an update fails, keep the installed application, staged target, prior
-managed slot, recovery point, and recovery kit together until the failure is
-understood. Reinstalling application files should not require deleting the
-library. Never delete lock or recovery files merely to force startup.
+**Linux (AppImage):**
+
+```sh
+./Singhouse-*.AppImage >singhouse-reproduction.log 2>&1
+```
+
+Reproduce the issue once, close Singhouse, and inspect `singhouse-reproduction.log` before sharing it.
+
+## 3. What to Redact Before Sharing
+
+Before attaching logs to a public GitHub issue, strip out any personal or sensitive information:
+
+* **Never attach:** audio files, separated stems, lyric texts, model weights, `karaoke.db`, `settings.json`, `.session_secret`, `.plex_token`, API keys, or full environment variable dumps.
+* **Scrub from logs:** local usernames, personal folder paths, song titles/artists, and remote endpoint URLs.
+* **Update failures:** If an application update fails, note the recovery-point identifier displayed in the UI and keep your application-data directory intact until the issue is diagnosed. Do not delete `.lock` files or recovery directories to force a startup.

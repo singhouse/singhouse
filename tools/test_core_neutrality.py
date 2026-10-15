@@ -3,23 +3,21 @@
 """Regression checks for narrowly permitted public-document literals."""
 
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import unittest
 
 
 GATE = Path(__file__).with_name("check_core_neutrality.sh")
-PRODUCT = re.search(r"BRAND_PATTERN=.*join_pattern '([^']+)'", GATE.read_text())[1]
-CONTRIBUTOR_DOCS = ("CONTRIBUTING.md",)
-PUBLIC_BRAND_DOCS = (
-    "docs/install-desktop.md",
-    "docs/modal.md",
-    "docs/release-notes-draft.md",
-    "docs/release-qualification.md",
-    "docs/support-diagnostics.md",
-    "docs/asahi-local-test.md",
-    "docs/release-checklist.md",
+PRODUCT = "singhouse"
+NAMING_FILES = (
+    "README.md",
+    "CONTRIBUTING.md",
+    "backend/README.md",
+    "docs/another-guide.md",
+    "desktop/main.mjs",
+    "frontend/src/example.js",
+    "lyricsync/README.md",
 )
 LOOKUP = "https://api.github.com/" + "users/YOUR_LOGIN"
 HOME_SAMPLE = "/" + "home/fixture_account/media"
@@ -61,63 +59,30 @@ class PublicDocumentLiteralTests(unittest.TestCase):
         self.assertEqual(code, expected, output)
         return output
 
-    def test_contributor_doc_names_allowed_with_and_without_supplement(self):
-        for filename in CONTRIBUTOR_DOCS:
+    def test_public_product_name_allowed_in_any_file(self):
+        for filename in NAMING_FILES:
             for supplement in (None, PRIVATE_BRAND):
                 with self.subTest(filename=filename, supplement=supplement):
                     self.assert_gate(filename, PRODUCT.title(), 0, private_brand=supplement)
 
-    def test_private_brand_still_rejected_in_contributor_docs(self):
-        for filename in CONTRIBUTOR_DOCS:
+    def test_retired_brand_rejected_in_any_file(self):
+        for filename in NAMING_FILES + ("docs/brand|fixture.md",):
             for private in (PRIVATE_BRAND, PRODUCT + "_private_fixture"):
                 with self.subTest(filename=filename, private=private):
                     output = self.assert_gate(
                         filename, PRODUCT + " " + private.upper(), 1, private_brand=private,
                     )
                     self.assertIn(filename + ":1:", output)
-                    self.assertIn("FAIL: brand literals", output)
+                    self.assertIn("FAIL: retired brand names", output)
+                    self.assertNotIn("sed:", output)
 
-    def test_ordinary_files_still_require_brand_indirection(self):
-        for filename in ("docs/contributor.md", "docs/CONTRIBUTING.md", "frontend/src/example.js"):
-            with self.subTest(filename=filename):
-                self.assert_gate(filename, PRODUCT, 1)
+    def test_retired_brand_check_reports_off_without_supplement(self):
+        output = self.assert_gate("docs/guide.md", PRIVATE_BRAND, 0)
+        self.assertIn("OK: retired-brand check off", output)
 
-    def test_desktop_delivery_may_name_public_product_but_not_private_brands(self):
-        for filename in ("desktop/main.mjs", "desktop/build/package.mjs", "desktop/README.md"):
-            with self.subTest(filename=filename):
-                self.assert_gate(filename, PRODUCT.title(), 0)
-                output = self.assert_gate(
-                    filename, PRODUCT.title() + " " + PRIVATE_BRAND, 1,
-                    private_brand=PRIVATE_BRAND,
-                )
-                self.assertIn("FAIL: brand literals", output)
-
-    def test_desktop_brand_exception_does_not_disable_other_gates(self):
-        output = self.assert_gate(
-            "desktop/main.mjs", VENDOR_SAMPLE, 1, private_vendor=VENDOR_SAMPLE,
-        )
-        self.assertIn("FAIL: vendor literals", output)
-        output = self.assert_gate("desktop/main.mjs", HOME_SAMPLE, 1)
-        self.assertIn("FAIL: private-infra literals", output)
-
-    def test_named_public_docs_may_name_product_but_not_private_brands(self):
-        for filename in PUBLIC_BRAND_DOCS:
-            with self.subTest(filename=filename, kind="public-product"):
-                self.assert_gate(filename, PRODUCT.title(), 0)
-            with self.subTest(filename=filename, kind="private-brand"):
-                output = self.assert_gate(
-                    filename, PRODUCT.title() + " " + PRIVATE_BRAND, 1,
-                    private_brand=PRIVATE_BRAND,
-                )
-                self.assertIn(filename + ":1:", output)
-                self.assertIn("FAIL: brand literals", output)
-
-    def test_unlisted_public_doc_still_requires_brand_indirection(self):
-        self.assert_gate("docs/another-guide.md", PRODUCT.title(), 1)
-
-    def test_named_public_docs_remain_in_vendor_and_infra_checks(self):
+    def test_naming_files_remain_in_vendor_and_infra_checks(self):
         content = PRODUCT.title() + " " + VENDOR_SAMPLE + " " + HOME_SAMPLE
-        for filename in PUBLIC_BRAND_DOCS:
+        for filename in NAMING_FILES:
             with self.subTest(filename=filename):
                 output = self.assert_gate(
                     filename, content, 1, private_vendor=VENDOR_SAMPLE,
@@ -151,7 +116,7 @@ class PublicDocumentLiteralTests(unittest.TestCase):
     def test_private_brand_starting_with_dash_is_rejected(self):
         private = "-private_fixture"
         output = self.assert_gate("CONTRIBUTING.md", private, 1, private_brand=private)
-        self.assertIn("FAIL: brand literals", output)
+        self.assertIn("FAIL: retired brand names", output)
         self.assertNotIn("invalid option", output)
 
     def test_lookup_account_suffix_is_not_exempt(self):
