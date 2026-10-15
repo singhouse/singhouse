@@ -86,62 +86,140 @@
       </div>
       <slot name="notice" />
 
-      <div class="search-row">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="7"/>
-          <path d="M21 21l-4.35-4.35"/>
-        </svg>
-        <input
-          v-model="searchInput"
-          class="search-input"
-          type="search"
-          placeholder="Search title, artist, or filename…"
-          aria-label="Search library"
-        />
+      <!-- Browse the library by song or by artist. -->
+      <div class="lib-modes" role="group" aria-label="Browse by">
         <button
-          v-if="searchInput"
-          class="search-clear"
-          aria-label="Clear search"
-          @click="clearSearch"
-        >×</button>
+          type="button"
+          class="lib-mode"
+          :aria-pressed="browseMode === 'songs' ? 'true' : 'false'"
+          @click="setBrowseMode('songs')"
+        >Songs</button>
+        <button
+          type="button"
+          class="lib-mode"
+          :aria-pressed="browseMode === 'artists' ? 'true' : 'false'"
+          @click="setBrowseMode('artists')"
+        >Artists</button>
       </div>
 
-      <div class="filter-tabs">
-        <button
-          v-for="f in filters"
-          :key="f.value"
-          class="filter-tab"
-          :class="{ 'filter-tab--active': store.statusFilter === f.value }"
-          @click="store.statusFilter = f.value"
-        >
-          {{ f.label }}
-          <span v-if="f.count !== undefined" class="filter-count">{{ f.count }}</span>
-        </button>
-      </div>
-      <!-- Compact rows have no column headers, so the sort lives here. -->
-      <div v-if="compact && !store.loading && store.filteredSongs.length" class="sort-row">
-        <span>{{ sortedSongs.length }} {{ sortedSongs.length === 1 ? 'song' : 'songs' }}</span>
-        <label>Sort
-          <select
-            class="sort-select"
-            aria-label="Sort library"
-            :value="sortKey"
-            @change="setSort($event.target.value)"
-          >
-            <option v-for="opt in SORT_OPTIONS" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
-          </select>
-        </label>
+      <div class="search-row">
+        <div class="search-field">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M21 21l-4.35-4.35"/>
+          </svg>
+          <input
+            v-model="searchModel"
+            class="search-input"
+            type="search"
+            :placeholder="searchPlaceholder"
+            :aria-label="searchLabel"
+          />
+          <button
+            v-if="searchModel"
+            class="search-clear"
+            aria-label="Clear search"
+            @click="clearSearch"
+          >×</button>
+        </div>
+
+        <!-- Status filter and sort. The button shows an active state while a
+             status other than All is chosen. -->
+        <PopoverMenu align="end" label="Filter">
+          <template #trigger="{ toggle, attrs, open }">
+            <button
+              type="button"
+              class="filter-btn"
+              :class="{ 'filter-btn--set': store.statusFilter !== 'all', 'filter-btn--open': open }"
+              title="Filter"
+              aria-label="Filter"
+              v-bind="attrs"
+              @click="toggle"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+              </svg>
+            </button>
+          </template>
+          <div class="filter-menu" role="radiogroup" aria-label="Status" @keydown="onFilterKeydown">
+            <button
+              v-for="f in filters"
+              :key="f.value"
+              type="button"
+              role="radio"
+              class="ui-menu__item filter-menu__item"
+              :data-filter="f.value"
+              :aria-checked="store.statusFilter === f.value ? 'true' : 'false'"
+              :tabindex="store.statusFilter === f.value ? 0 : -1"
+              @click="store.statusFilter = f.value"
+            >
+              <span class="filter-menu__radio" aria-hidden="true" />
+              <span class="filter-menu__label">{{ f.label }}</span>
+              <span class="filter-menu__count">{{ f.count }}</span>
+            </button>
+          </div>
+          <hr class="ui-menu__sep" />
+          <label class="filter-menu__sort">
+            <span>Sort</span>
+            <select
+              class="sort-select"
+              aria-label="Sort library"
+              :value="sortKey"
+              @change="setSort($event.target.value)"
+            >
+              <option v-for="opt in SORT_OPTIONS" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
+            </select>
+          </label>
+        </PopoverMenu>
       </div>
     </div>
 
+    <!-- Artists: the artist index, one button per artist. -->
+    <div v-if="browseMode === 'artists' && selectedArtist === null" class="song-list__body">
+      <div v-if="store.loading && !store.songs.length">
+        <div v-for="i in 3" :key="i" class="song-skeleton shimmer" />
+      </div>
+      <div v-else-if="!artistIndex.length" class="song-list__empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="1.5">
+          <path d="M9 18V5l12-2v13"/>
+          <circle cx="6" cy="18" r="3"/>
+          <circle cx="18" cy="16" r="3"/>
+        </svg>
+        <p>{{ !store.songs.length && !store.uploads.length ? 'Add files to get started' : 'No matching artists' }}</p>
+      </div>
+      <ul v-else class="artist-list" aria-label="Artists">
+        <li v-for="a in artistIndex" :key="a.artist">
+          <button
+            type="button"
+            class="artist-row"
+            :data-artist="a.artist"
+            @click="openArtist(a.artist)"
+          >
+            <span class="artist-row__name">{{ a.artist || 'Unknown Artist' }}</span>
+            <span class="artist-row__count">{{ a.count }} {{ a.count === 1 ? 'song' : 'songs' }}</span>
+            <svg class="artist-row__chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <template v-else>
+    <!-- Drilled into one artist: the way back, then that artist's songs. -->
+    <div v-if="inArtist" class="artist-crumb">
+      <button ref="artistBackEl" type="button" class="artist-crumb__back" @click="backToArtists">← All artists</button>
+      <span class="artist-crumb__name">{{ selectedArtist || 'Unknown Artist' }}</span>
+    </div>
+
     <!-- Loading skeleton -->
-    <div v-if="store.loading" class="song-list__body">
+    <div v-if="tableLoading" class="song-list__body">
       <div v-for="i in 3" :key="i" class="song-skeleton shimmer" />
     </div>
 
     <!-- Empty state — only when local list is empty -->
     <div
-      v-else-if="!store.filteredSongs.length && !store.uploads.length"
+      v-else-if="!tableRows.length && (inArtist || !store.uploads.length)"
       class="song-list__empty"
     >
       <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="1.5">
@@ -149,7 +227,7 @@
         <circle cx="6" cy="18" r="3"/>
         <circle cx="18" cy="16" r="3"/>
       </svg>
-      <p>{{ store.songs.length === 0 ? 'Upload songs to get started' : 'No songs match this filter' }}</p>
+      <p>{{ !inArtist && store.songs.length === 0 ? 'Add files to get started' : 'No songs match this filter' }}</p>
     </div>
 
     <!-- Song table. The list never scrolls sideways: when the panel is
@@ -393,13 +471,14 @@
         </TransitionGroup>
       </div>
     </div>
+    </template>
 
     <!-- Extension mount: an installed package may register a panel component
          under the 'library-panel' slot to render beneath the local list.
          Core registers none, so this renders nothing in a stock build. -->
     <component
       :is="libraryPanel"
-      v-if="libraryPanel"
+      v-if="libraryPanel && browseMode === 'songs'"
       :query="searchInput"
       @library-changed="store.fetchSongs({ search: searchInput || '' })"
     />
@@ -480,6 +559,8 @@ let searchTimer = null
 watch(searchInput, (val) => {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
+    // The Songs search narrows the library only while Songs view is showing.
+    if (browseMode.value !== 'songs') return
     if ((val || '') !== (store.searchQuery || '')) {
       store.fetchSongs({ search: val || '' })
     }
@@ -487,8 +568,123 @@ watch(searchInput, (val) => {
 })
 onUnmounted(() => { if (searchTimer) clearTimeout(searchTimer) })
 
+// ─── Songs | Artists ────────────────────────────────────────────────────────
+// 'songs' is the full library table. 'artists' is the artist index, and
+// picking an artist drills into the same table for that artist's songs. Each
+// view keeps its own search text.
+const browseMode = ref('songs')
+const selectedArtist = ref(null)      // null = the artist index
+const artistQuery = ref('')
+const drillQuery = ref('')
+const artistBackEl = ref(null)
+const inArtist = computed(() => browseMode.value === 'artists' && selectedArtist.value !== null)
+
+const searchModel = computed({
+  get() {
+    if (browseMode.value === 'songs') return searchInput.value
+    return selectedArtist.value === null ? artistQuery.value : drillQuery.value
+  },
+  set(v) {
+    if (browseMode.value === 'songs') searchInput.value = v
+    else if (selectedArtist.value === null) artistQuery.value = v
+    else drillQuery.value = v
+  },
+})
+const searchPlaceholder = computed(() => {
+  if (browseMode.value === 'songs') return 'Search title, artist, or filename…'
+  return selectedArtist.value === null ? 'Search artists' : 'Search this artist’s songs'
+})
+const searchLabel = computed(() =>
+  browseMode.value === 'songs' ? 'Search library' : searchPlaceholder.value,
+)
+
+// The artist views read the whole library, so the Songs search text stays in
+// its box but is lifted from the library while they show, and put back on
+// return.
+function setBrowseMode(mode) {
+  if (browseMode.value === mode) return
+  browseMode.value = mode
+  selectedArtist.value = null
+  drillQuery.value = ''
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+  const wanted = mode === 'songs' ? (searchInput.value || '') : ''
+  if (wanted !== (store.searchQuery || '')) store.fetchSongs({ search: wanted })
+}
+
+async function openArtist(artist) {
+  selectedArtist.value = artist
+  drillQuery.value = ''
+  activeRowId.value = null
+  // The artist's button is gone; keep focus in the panel.
+  await nextTick()
+  artistBackEl.value?.focus()
+}
+
+async function backToArtists() {
+  const artist = selectedArtist.value
+  selectedArtist.value = null
+  drillQuery.value = ''
+  await nextTick()
+  const rows = rootEl.value?.querySelectorAll('.artist-row') || []
+  const back = [...rows].find(el => el.dataset.artist === artist)
+  ;(back || rows[0])?.focus()
+}
+
+// Search in the artist views runs over the loaded library: case, accents and
+// punctuation are ignored and the words may come in any order.
+function fold(text) {
+  return (text || '').normalize('NFKD').toLowerCase()
+    .replace(/\p{M}/gu, '').replace(/\p{P}/gu, '')
+}
+function matchesQuery(query, ...fields) {
+  const words = fold(query).split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const folded = fields.map(f => fold(f).replace(/\s+/g, ''))
+  return words.every(w => folded.some(f => f.includes(w)))
+}
+
+// The artist index, built from the library itself: every status counts, the
+// active status filter applies, and an empty artist name is its own entry
+// (shown as Unknown Artist, listed last).
+const artistIndex = computed(() => {
+  const counts = new Map()
+  for (const song of store.filteredSongs) {
+    const name = song.artist || ''
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  return [...counts]
+    .filter(([name]) => matchesQuery(artistQuery.value, name || 'Unknown Artist'))
+    .sort(([a], [b]) => (!a) - (!b) || a.localeCompare(b, undefined, { sensitivity: 'base' }) || a.localeCompare(b))
+    .map(([artist, count]) => ({ artist, count }))
+})
+
 function clearSearch() {
-  searchInput.value = ''
+  searchModel.value = ''
+}
+
+// The rows the table shows: the library, or one artist's songs. Both read
+// the library list, so deletes and processing updates reach either view.
+const tableRows = computed(() => {
+  if (!inArtist.value) return store.filteredSongs
+  return store.filteredSongs.filter(s =>
+    (s.artist || '') === selectedArtist.value
+    && matchesQuery(drillQuery.value, s.title, s.filename),
+  )
+})
+const tableLoading = computed(() => store.loading)
+
+// Status radios inside the filter popover: one Tab stop, the arrow keys move
+// and choose, as native radios do.
+function onFilterKeydown(e) {
+  const keys = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }
+  if (!(e.key in keys)) return
+  e.preventDefault()
+  const group = e.currentTarget
+  const list = filters.value.map(f => f.value)
+  const i = list.indexOf(store.statusFilter)
+  const next = list[(i + keys[e.key] + list.length) % list.length]
+  store.statusFilter = next
+  nextTick(() => group?.querySelector(`[data-filter="${next}"]`)?.focus())
 }
 
 const filters = computed(() => [
@@ -767,9 +963,9 @@ function toggleSort(key) {
   }
 }
 
-// Compact rows have no column headers, so a select carries the sort there.
+// The sort choice in the filter popover; column headers also sort.
 const SORT_OPTIONS = [
-  { key: 'added',    label: 'Recently added' },
+  { key: 'added',    label: 'Date added' },
   { key: 'title',    label: 'Title' },
   { key: 'artist',   label: 'Artist' },
   { key: 'duration', label: 'Time' },
@@ -823,7 +1019,7 @@ function compare(a, b, key) {
 }
 
 const sortedSongs = computed(() => {
-  const rows = [...store.filteredSongs]
+  const rows = [...tableRows.value]
   rows.sort((a, b) => {
     const primary = compare(a, b, sortKey.value)
     if (primary !== 0) return primary
@@ -1088,12 +1284,27 @@ function onDragStart(ev, song) {
 .col-menu__item input { accent-color: var(--c-primary); cursor: inherit; }
 .col-menu__lock { margin-left: auto; font-size: 0.65rem; color: var(--text-muted); }
 
-.search-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  margin-bottom: 0.4rem;
+/* ── Songs | Artists ────────────────────────────────────────────────────── */
+.lib-modes {
+  display: flex; gap: 2px; padding: 2px; margin-bottom: 0.4rem;
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 0.4rem;
 }
+.lib-mode {
+  flex: 1; height: 24px; border: 1px solid transparent; border-radius: 0.3rem;
+  background: none; color: rgba(255,255,255,0.45);
+  font-family: inherit; font-size: 0.75rem; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+}
+.lib-mode:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.05); }
+.lib-mode[aria-pressed="true"] {
+  color: var(--c-primary); background: var(--c-primary-bg);
+  border-color: var(--c-primary-border); font-weight: 600;
+}
+.lib-mode:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+
+.search-row { display: flex; align-items: center; gap: 0.35rem; }
+.search-field { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
 .search-icon {
   position: absolute;
   left: 0.6rem;
@@ -1131,17 +1342,72 @@ function onDragStart(ev, song) {
 }
 .search-clear:hover { color: white; background: rgba(255,255,255,0.08); }
 
-.filter-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-.filter-tab {
-  display: flex; align-items: center; gap: 0.3rem;
-  padding: 0.25rem 0.55rem; border-radius: 0.4rem;
-  font-size: 0.75rem; font-weight: 500; color: rgba(255,255,255,0.45);
-  background: transparent; border: 1px solid transparent;
+/* ── Filter popover ─────────────────────────────────────────────────────── */
+.filter-btn {
+  position: relative; flex: none;
+  width: 31px; height: 31px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 0.4rem; color: var(--text-secondary);
   cursor: pointer; transition: all 0.15s;
 }
-.filter-tab:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.05); }
-.filter-tab--active { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
-.filter-count { font-size: 0.7rem; opacity: 0.7; }
+.filter-btn:hover { background: var(--bg-glass-hover); color: white; }
+.filter-btn--open,
+.filter-btn--set { color: var(--c-primary); background: var(--c-primary-bg); border-color: var(--c-primary-border); }
+.filter-btn--set::after {
+  content: ""; position: absolute; top: 4px; right: 4px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--c-primary);
+}
+.filter-btn:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+.filter-menu__radio {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 1px solid rgba(255,255,255,0.3);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.filter-menu__item[aria-checked="true"] .filter-menu__radio { border-color: var(--c-primary); }
+.filter-menu__item[aria-checked="true"] .filter-menu__radio::after {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--c-primary);
+}
+.filter-menu__item[aria-checked="true"] .filter-menu__label { color: white; }
+.filter-menu__count {
+  margin-left: auto; padding-left: 1rem;
+  font-size: 0.72rem; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.filter-menu__sort {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  padding: 0.3rem 0.6rem; font-size: 0.78rem; color: var(--text-secondary);
+}
+
+/* ── Artists ────────────────────────────────────────────────────────────── */
+.artist-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.artist-row {
+  width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto 12px;
+  align-items: center; gap: 0.5rem; padding: 0.5rem 0.6rem;
+  background: rgba(255,255,255,0.03); border: 1px solid transparent; border-radius: 0.5rem;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+  transition: background 0.18s, border-color 0.18s;
+}
+.artist-row:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); }
+.artist-row:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+.artist-row__name {
+  font-size: 0.82rem; font-weight: 600; color: var(--text-primary); letter-spacing: -0.015em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.artist-row__count { font-size: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.artist-row__chev { color: var(--text-muted); }
+.artist-crumb { flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin: 0 0 0.35rem; }
+.artist-crumb__back {
+  flex: none; padding: 0.2rem 0.5rem; border-radius: 0.4rem;
+  font-family: inherit; font-size: 0.72rem; font-weight: 500;
+  color: rgba(255,255,255,0.55); background: transparent;
+  border: 1px solid rgba(255,255,255,0.1); cursor: pointer;
+}
+.artist-crumb__back:hover { color: white; background: rgba(255,255,255,0.05); }
+.artist-crumb__back:focus-visible { outline: 2px solid var(--brand-cream, #f7e7c8); outline-offset: 1px; }
+.artist-crumb__name {
+  min-width: 0; font-size: 0.8rem; font-weight: 600; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* Never sideways: the layout switches to compact rows rather than letting
    the chosen columns out-run the panel. */
@@ -1249,11 +1515,6 @@ function onDragStart(ev, song) {
 /* The time drops out before the title is squeezed. */
 @container lib (max-width: 250px) { .song-item__meta--time { display: none; } }
 
-.sort-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-  margin: 0.4rem 0 0; font-size: 0.72rem; color: var(--text-muted);
-}
-.sort-row label { display: inline-flex; align-items: center; gap: 0.3rem; }
 .sort-select {
   font: inherit; font-size: 0.72rem; color: var(--text-secondary);
   background: rgba(255,255,255,0.04); border: 1px solid var(--border-subtle);
