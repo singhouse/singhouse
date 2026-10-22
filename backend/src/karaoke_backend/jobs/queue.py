@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from karaoke_backend.models.song import Job, JobPhase, JobStatus, Song
@@ -102,8 +102,39 @@ def _env_float(name: str, default: float, *, minimum: float) -> float:
 
 
 def concurrency() -> int:
-    """How many jobs one worker runs at once. 1 is also the GPU-OOM guard."""
+    """How many PROCESSING-lane jobs one worker runs at once.
+
+    1 is also the GPU-OOM guard. The name predates lanes and is kept: it is
+    the knob operators already set, and its meaning — the cap on concurrent
+    separation/transcription work — is unchanged. Fast-lane jobs are budgeted
+    separately by ``fast_concurrency`` and never count against it.
+    """
     return _env_int("KARAOKE_JOB_CONCURRENCY", 1)
+
+
+def fast_concurrency() -> int:
+    """How many FAST-lane jobs one worker runs at once, beside the above.
+
+    Defaults to 2, not 1. The OOM argument that pins the processing lane to
+    one does not apply here — these jobs touch no GPU — and a fast lane of
+    one would let a single slow provider download or a long CD+G render hold
+    up every other request queued behind it, which is the head-of-line wait
+    this lane exists to remove. Two keeps that from happening without
+    turning a burst of imports into a burst of concurrent ffmpeg processes
+    and SQLite writers competing with the request path.
+    """
+    return _env_int("KARAOKE_FAST_JOB_CONCURRENCY", 2)
+
+
+def lane_concurrency(lane: str) -> int:
+    """The budget for one lane, read at call time like every other knob."""
+    from karaoke_backend.jobs.registry import LANE_FAST, LANE_PROCESSING
+
+    if lane == LANE_FAST:
+        return fast_concurrency()
+    if lane == LANE_PROCESSING:
+        return concurrency()
+    raise ValueError(f"unknown job lane {lane!r}")
 
 
 def lease_seconds() -> float:
@@ -188,21 +219,47 @@ def payload_of(job: Job) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def claim_next(worker_id: str) -> Optional[Job]:
+async def claim_next(worker_id: str, lane: Optional[str] = None) -> Optional[Job]:
     """Atomically claim the oldest queued job, or return None.
 
     ONE statement does the whole claim. The inner SELECT picks the candidate
     and the outer WHERE re-asserts `status='queued'`, so a second claimer that
     chose the same row updates zero rows and is told so by the RETURNING
     clause — no read-then-write window exists for it to win in.
+
+    ``lane`` narrows the candidates to one lane's kinds, oldest first within
+    that lane; ``None`` claims across both in plain FIFO order (the one-shot
+    drain does this). The lane is only a filter on the inner SELECT, so the
+    claim stays the same single guarded statement. The processing lane is
+    "every kind not in the fast lane" rather than an explicit list, which
+    keeps a kind with no spec claimable there and failed by the worker as it
+    always has been. Deferred kinds are excluded in every lane.
     """
+    from karaoke_backend.jobs.registry import (
+        LANE_FAST,
+        LANE_PROCESSING,
+        fast_lane_kinds,
+        lane_of,
+    )
     from karaoke_backend.workers.managed_processing import deferred_job_kinds
 
     deferred = deferred_job_kinds()
     now = _now()
+    candidates = [Job.status == JobStatus.QUEUED.value, Job.kind.notin_(deferred)]
+    if lane == LANE_FAST:
+        candidates.append(Job.kind.in_(fast_lane_kinds()))
+    elif lane == LANE_PROCESSING:
+        # IS NULL spelled out: SQL's NOT IN is NULL, not true, for a NULL
+        # kind, and a legacy kind-less row must stay exactly as claimable as
+        # it was before lanes (boot's `sweep_legacy` normally reaps it first).
+        candidates.append(
+            or_(Job.kind.is_(None), Job.kind.notin_(fast_lane_kinds()))
+        )
+    elif lane is not None:
+        raise ValueError(f"unknown job lane {lane!r}")
     oldest = (
         select(Job.id)
-        .where(Job.status == JobStatus.QUEUED.value, Job.kind.notin_(deferred))
+        .where(*candidates)
         .order_by(Job.created_at, Job.id)
         .limit(1)
         .scalar_subquery()
@@ -236,8 +293,8 @@ async def claim_next(worker_id: str) -> Optional[Job]:
 
     if job is not None:
         logger.info(
-            "Worker %s claimed job %s (kind=%s attempt=%s)",
-            worker_id, job.id, job.kind, job.attempts,
+            "Worker %s claimed job %s (kind=%s lane=%s attempt=%s)",
+            worker_id, job.id, job.kind, lane_of(job.kind), job.attempts,
         )
     return job
 

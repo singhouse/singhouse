@@ -161,6 +161,17 @@ class CatalogProvider(Protocol):
         triggered the import; rows the provider creates (LyricsSet etc.) must
         inherit it.
 
+        **Fast-lane contract (durable queue).** Catalog imports run in the
+        queue's fast lane, which has its own concurrency budget beside the
+        GPU-sized processing lane so that a quick import is never queued
+        behind generations. ``run_import`` must therefore not run stem
+        separation, transcription or alignment inline: doing so would run
+        that work outside ``KARAOKE_JOB_CONCURRENCY``, alongside whatever the
+        processing lane is already running. An item that needs any of it
+        should be handed to the processing lane by enqueueing a job of a
+        processing kind (an ``ingest``, for example) and letting that job do
+        the work.
+
         **Job-row ownership (durable queue).** From the moment this is
         called until it returns, the provider owns the `jobs` row. It may
         write `phase`, `message` and `progress` freely, and it MAY write a

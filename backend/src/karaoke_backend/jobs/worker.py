@@ -11,6 +11,14 @@ own task at LEASE/3 and does not consult job progress, so a job that is alive
 but silent for twenty minutes (a long separation reports nothing between
 callbacks) keeps its lease. That is what makes expiry-based requeue safe: a
 lease only lapses when the process holding it is genuinely gone.
+
+The loop fills two lanes, each against its own budget (see ``registry`` for
+what a lane is). A job is charged to the lane it was CLAIMED from, held in
+that lane's running set until its task ends, so a saturated processing lane
+cannot stop a fast-lane claim and a burst of fast jobs cannot borrow a
+processing slot. Everything below the claim — heartbeat, lease, finish, the
+shutdown that writes nothing — is identical for both lanes; the lane decides
+only when a job may start.
 """
 
 from __future__ import annotations
@@ -26,6 +34,17 @@ from karaoke_backend.jobs import queue, registry
 from karaoke_backend.jobs.base import JobContext, JobFailure, LeaseLost
 
 logger = logging.getLogger(__name__)
+
+
+# How long `stop` lets an in-flight sweep or claim pass finish before it falls
+# back to cancelling it. A pass is a handful of indexed statements that
+# normally finish in milliseconds. Kept below the desktop shell's 5s SIGTERM to
+# SIGKILL escalation so a graceful stop is not itself killed mid-shutdown.
+# That puts it under SQLite's 5s busy_timeout as well: a statement still waiting
+# on another writer's lock at the deadline is cancelled rather than waited out.
+# This is the pre-lane behaviour, and the guarded claim keeps it safe — at
+# worst the row is left claimed for the lease to settle.
+_STOP_GRACE_SECONDS = 2.0
 
 
 def make_worker_id() -> str:
@@ -149,11 +168,19 @@ class JobWorker:
     def __init__(self, worker_id: Optional[str] = None) -> None:
         self.worker_id = worker_id or make_worker_id()
         self._loop_task: Optional[asyncio.Task] = None
+        self._stopping = asyncio.Event()
+        # Every live job task, whatever its lane — what `stop` cancels.
         self._running: set[asyncio.Task] = set()
+        # The same tasks partitioned by the lane they were claimed from;
+        # these, not `_running`, are what the budgets are counted against.
+        self._running_by_lane: dict[str, set[asyncio.Task]] = {
+            lane: set() for lane in registry.LANES
+        }
 
     async def start(self) -> None:
         if self._loop_task is not None:
             return
+        self._stopping.clear()
         self._loop_task = asyncio.create_task(self._loop(), name="job-worker")
         logger.info("Job worker %s started", self.worker_id)
 
@@ -165,13 +192,33 @@ class JobWorker:
         — from this worker's own next boot or a sibling's sweep — puts it back
         on the queue. Trying to record a state during shutdown is how you get
         a half-written terminal row when the shutdown is itself interrupted.
+
+        The claim loop is asked to stop rather than cancelled outright. With
+        two lanes the loop keeps polling whichever lane has room while the
+        other runs, so a shutdown is far more likely than it used to be to
+        land in the middle of a claim or a sweep; cancelling a coroutine
+        inside a database statement is how a connection gets dropped half
+        way through a write. The loop finishes its current pass, claims
+        nothing further, and exits — and is cancelled only if that pass has
+        not ended within ``_STOP_GRACE_SECONDS``.
         """
         if self._loop_task is not None:
-            self._loop_task.cancel()
+            self._stopping.set()
+            done, _ = await asyncio.wait(
+                {self._loop_task}, timeout=_STOP_GRACE_SECONDS
+            )
+            if not done:
+                logger.warning(
+                    "Job worker %s claim loop did not stop in %ss — cancelling it",
+                    self.worker_id, _STOP_GRACE_SECONDS,
+                )
+                self._loop_task.cancel()
             try:
                 await self._loop_task
             except asyncio.CancelledError:
                 pass
+            except Exception:  # noqa: BLE001
+                logger.warning("Job worker loop raised during shutdown", exc_info=True)
             self._loop_task = None
 
         for task in list(self._running):
@@ -184,12 +231,14 @@ class JobWorker:
             except Exception:  # noqa: BLE001
                 logger.warning("Job task raised during shutdown", exc_info=True)
         self._running.clear()
+        for lane_tasks in self._running_by_lane.values():
+            lane_tasks.clear()
         logger.info("Job worker %s stopped", self.worker_id)
 
     async def _loop(self) -> None:
         loop = asyncio.get_running_loop()
         next_sweep = 0.0
-        while True:
+        while not self._stopping.is_set():
             now = loop.time()
             if now >= next_sweep:
                 try:
@@ -204,25 +253,66 @@ class JobWorker:
                 # indexed query and bounds the delay at LEASE + LEASE/3.
                 next_sweep = now + queue.lease_seconds() / 3.0
 
+            if self._stopping.is_set():
+                return
             claimed = await self._claim_up_to_concurrency()
             if not claimed:
-                await asyncio.sleep(queue.poll_seconds())
+                # The idle wait doubles as the stop signal's wake-up, so a
+                # shutdown never waits out a long poll interval.
+                try:
+                    await asyncio.wait_for(
+                        self._stopping.wait(), timeout=queue.poll_seconds()
+                    )
+                except TimeoutError:
+                    pass
 
     async def _claim_up_to_concurrency(self) -> int:
+        """Top up every lane to its own budget; return how many were claimed.
+
+        The lanes are filled one after the other but independently: a lane
+        that is full, empty, or whose claim raised is simply done for this
+        pass, and the next lane still gets its turn. That independence is the
+        whole feature — a full processing lane must not keep a queued
+        catalog import waiting.
+        """
         claimed = 0
-        while len(self._running) < queue.concurrency():
+        for lane in registry.LANES:
+            claimed += await self._claim_lane(lane)
+        return claimed
+
+    async def _claim_lane(self, lane: str) -> int:
+        claimed = 0
+        lane_tasks = self._running_by_lane[lane]
+        while len(lane_tasks) < queue.lane_concurrency(lane):
+            # Once shutdown has begun nothing new is claimed: a job started
+            # now would only be cancelled the moment it began.
+            if self._stopping.is_set():
+                return claimed
             try:
-                job = await queue.claim_next(self.worker_id)
+                job = await queue.claim_next(self.worker_id, lane=lane)
             except Exception:  # noqa: BLE001
-                logger.warning("Claim failed", exc_info=True)
+                logger.warning("Claim failed (lane=%s)", lane, exc_info=True)
                 return claimed
             if job is None:
                 break
+            if self._stopping.is_set():
+                # The stop arrived while this claim was in flight, and the row
+                # is already ours. Run nothing and write nothing: like every
+                # job that `stop` leaves behind, it stays `running` under this
+                # worker's claim until the lease lapses and the next
+                # `requeue_expired` puts it back on the queue.
+                logger.info(
+                    "Job %s claimed as worker %s stopped — leaving it to its lease",
+                    job.id, self.worker_id,
+                )
+                return claimed
             task = asyncio.create_task(
                 _run_with_heartbeat(job, self.worker_id), name=f"job-{job.id}"
             )
             self._running.add(task)
+            lane_tasks.add(task)
             task.add_done_callback(self._running.discard)
+            task.add_done_callback(lane_tasks.discard)
             claimed += 1
         return claimed
 
