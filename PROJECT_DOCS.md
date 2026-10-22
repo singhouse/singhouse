@@ -118,6 +118,8 @@ See [`backend/README.md`](backend/README.md) for the complete REST API payload r
 
 The `jobs` table *is* the queue. Workers claim jobs with an atomic SQLite `UPDATE`, hold a time-boxed lease (`KARAOKE_JOB_LEASE_SECONDS`, default 180s) renewed via heartbeat, and guard every progress update with `claimed_by` so a stale worker raises `LeaseLost` rather than overwriting another worker's state. Concurrency defaults to `1` (`KARAOKE_JOB_CONCURRENCY=1`) to prevent GPU OOMs.
 
+Each job kind declares a lane on its `JobSpec`, and the worker fills each lane up to its own budget, FIFO within the lane. The **processing** lane (separation, transcription, alignment, LLM re-paging) is capped by `KARAOKE_JOB_CONCURRENCY`. The **fast** lane (`catalog_import`, `video_import`, `cdg_import` — work that only adopts media that already exists) is capped by `KARAOKE_FAST_JOB_CONCURRENCY` (default `2`), so a quick catalog import is never queued behind generations. Kinds default to the processing lane, including extension kinds registered with `register_job_kind`; an extension opts a kind in with `lane="fast"`. Kinds held for desktop setup stay unclaimable in both lanes.
+
 Job kinds dispatched via `jobs/registry.py`:
 
 * `ingest` — Full pipeline (`separating` → `fetching_lyrics` → `transcribing` → `aligning`).
@@ -141,7 +143,8 @@ Job kinds dispatched via `jobs/registry.py`:
 | `KARAOKE_GATE_PASSWORD` / `_HASH` | unset | Optional shared host password (hash takes precedence; unset = open LAN access) |
 | `KARAOKE_LRCLIB` | `off` | Opt-in (`1`) lrclib.net lyrics lookup |
 | `KARAOKE_PLEX_URL` / `_TOKEN` / `_PATH_MAP` / `_LYRICS` | unset / `off` | Plex integration settings (see [`docs/plex.md`](docs/plex.md)) |
-| `KARAOKE_JOB_CONCURRENCY` | `1` | Simultaneous worker jobs (GPU OOM guard) |
+| `KARAOKE_JOB_CONCURRENCY` | `1` | Simultaneous processing-lane jobs (GPU OOM guard) |
+| `KARAOKE_FAST_JOB_CONCURRENCY` | `2` | Simultaneous fast-lane jobs (imports that adopt existing media), budgeted separately |
 | `KARAOKE_JOB_LEASE_SECONDS` | `180` | Worker lease timeout before a stalled job is re-claimed |
 | `KARAOKE_SEPARATOR` | unset | Optional separator plugin name |
 | `KARAOKE_MODAL` / `KARAOKE_MODAL_APP` | `off` / `karaoke-gpu` | Offload GPU work to your own Modal account (see [`docs/modal.md`](docs/modal.md)) |

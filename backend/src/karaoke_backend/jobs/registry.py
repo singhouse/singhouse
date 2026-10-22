@@ -10,6 +10,19 @@ time, and from then on its kind flows through the same ``get_spec`` /
 difference, which is the point: the queue, the leases, and the job API are
 core's; only the handler behind the kind is not.
 
+**Lanes.** Every kind also declares which concurrency budget it draws from.
+The ``processing`` lane is for work that separates, transcribes or aligns —
+GPU-bound, minutes per job, and capped by ``KARAOKE_JOB_CONCURRENCY`` because
+two of them at once is how a card runs out of VRAM. The ``fast`` lane is for
+work that only moves or repackages media that already exists: a catalog
+provider downloading a finished karaoke track, a video or CD+G file being
+adopted. It has its own budget (``KARAOKE_FAST_JOB_CONCURRENCY``) so that a
+singer's request at a live show is never stuck behind an evening's worth of
+queued generations. ``processing`` is the default for every kind, extension
+kinds included, because the failure modes are lopsided: a fast job wrongly in
+the processing lane only waits, while a heavy job wrongly in the fast lane
+runs beside another heavy job and can take the GPU down with both.
+
 Composition time means DURING plugin/extension import — before the lifespan
 starts the worker — never in a lifespan startup hook. The queue is durable:
 a row of the extension's kind can be sitting in ``jobs`` from the previous
@@ -28,6 +41,16 @@ from karaoke_backend.models.song import Job, JobKind
 
 JobHandler = Callable[[JobContext], Awaitable[Optional[str]]]
 
+# The two concurrency budgets a kind can draw from. See the module docstring.
+LANE_PROCESSING = "processing"
+LANE_FAST = "fast"
+LANES: tuple[str, ...] = (LANE_PROCESSING, LANE_FAST)
+
+
+def _check_lane(lane: object) -> None:
+    if lane not in LANES:
+        raise ValueError(f"job lane must be one of {LANES!r}, not {lane!r}")
+
 
 @dataclass(frozen=True)
 class JobSpec:
@@ -43,6 +66,14 @@ class JobSpec:
     # existing song must not knock it out of the library, and catalog imports
     # mirror from inside the provider, as they always have.
     mirrors_song_status: bool = False
+    # Which concurrency budget the worker charges this kind against. Only a
+    # kind whose handler provably never separates, transcribes or aligns —
+    # and never calls into anything that does — belongs in ``fast``; a job
+    # that needs that work enqueues a processing-lane job for it instead.
+    lane: str = LANE_PROCESSING
+
+    def __post_init__(self) -> None:
+        _check_lane(self.lane)
 
     @property
     def handler(self) -> JobHandler:
@@ -63,21 +94,37 @@ _SPECS: dict[str, JobSpec] = {
     # alone, and a re-split that fails leaves the existing stems byte for byte
     # as they were — flipping the song to `failed` would take a working song
     # out of the library over a refinement that did not land.
+    #
+    # Both stay in the processing lane. A re-split is a separation. A re-page
+    # runs no aligner, but it holds a slot for an LLM round trip of up to
+    # ``KARAOKE_LLM_TIMEOUT`` against an operator-configured endpoint that may
+    # be a local model on the same GPU — neither fast nor safe to run beside
+    # a separation.
     JobKind.PAGE.value: JobSpec("karaoke_backend.jobs.transcribe:run_page"),
     JobKind.RESPLIT.value: JobSpec("karaoke_backend.jobs.resplit:run_resplit"),
+    # Fast: the handler only resolves the provider and calls its
+    # ``run_import``, whose protocol contract is to retrieve an item the user
+    # already has and ADOPT its finished stems. A provider that wanted
+    # generation would have to enqueue a processing-lane job of its own.
     JobKind.CATALOG_IMPORT.value: JobSpec(
-        "karaoke_backend.jobs.catalog_import:run_catalog_import"
+        "karaoke_backend.jobs.catalog_import:run_catalog_import",
+        lane=LANE_FAST,
     ),
     # Mirrors for the same reason ingest does: this job IS the song's
     # creation. A failed video import leaves a row with no stems and no video,
-    # and nothing else will ever fix it.
+    # and nothing else will ever fix it. Fast: an ffmpeg audio extraction and
+    # a file copy — nothing is separated, transcribed or aligned.
     JobKind.VIDEO_IMPORT.value: JobSpec(
         "karaoke_backend.jobs.video_import:run_video_import",
         mirrors_song_status=True,
+        lane=LANE_FAST,
     ),
+    # Fast for the same reason: a CPU decode of the CD+G packet stream piped
+    # into ffmpeg, bounded by its own media timeout, plus an audio transcode.
     JobKind.CDG_IMPORT.value: JobSpec(
         "karaoke_backend.jobs.cdg_import:run_cdg_import",
         mirrors_song_status=True,
+        lane=LANE_FAST,
     ),
     # Mirrors for the same reason the two above do: the job IS the song's
     # creation. It materialises the audio and then delegates to run_ingest, so
@@ -109,8 +156,29 @@ def known_kinds() -> frozenset[str]:
     return frozenset(_SPECS)
 
 
+def fast_lane_kinds() -> frozenset[str]:
+    """The kinds the fast lane may claim. Read fresh on every claim.
+
+    The processing lane is defined as its complement rather than as its own
+    list, which is what keeps an UNKNOWN kind on today's path: a row whose
+    kind has no spec is claimable by the processing lane and terminally
+    failed there by the worker, exactly as before lanes existed.
+    """
+    return frozenset(kind for kind, spec in _SPECS.items() if spec.lane == LANE_FAST)
+
+
+def lane_of(kind: Optional[str]) -> str:
+    """The lane a kind draws from; ``processing`` for an unknown kind."""
+    spec = get_spec(kind)
+    return spec.lane if spec is not None else LANE_PROCESSING
+
+
 def register_job_kind(
-    kind: str, target: str, *, mirrors_song_status: bool = False
+    kind: str,
+    target: str,
+    *,
+    mirrors_song_status: bool = False,
+    lane: str = LANE_PROCESSING,
 ) -> None:
     """Add a kind whose handler lives outside this package.
 
@@ -121,7 +189,13 @@ def register_job_kind(
     is durable: rows of that kind may already be sitting in ``jobs``, and
     silently swapping the spec would change what those rows DO on their next
     claim.
+
+    ``lane`` defaults to ``processing``, the safe side; an extension opts a
+    kind into ``fast`` only when its handler never runs heavy processing
+    itself. An unrecognised lane is refused here, before any row of the kind
+    can be queued under a budget that does not exist.
     """
+    _check_lane(lane)
     if not isinstance(kind, str) or not kind:
         raise ValueError("job kind must be a non-empty string")
     if len(kind) > _KIND_MAX_LENGTH:
@@ -142,7 +216,9 @@ def register_job_kind(
         raise ValueError(
             f"job target {target!r} is not an absolute 'module:attribute' path"
         )
-    _SPECS[kind] = JobSpec(target, mirrors_song_status=mirrors_song_status)
+    _SPECS[kind] = JobSpec(
+        target, mirrors_song_status=mirrors_song_status, lane=lane
+    )
 
 
 def unregister_job_kind(kind: str) -> None:
