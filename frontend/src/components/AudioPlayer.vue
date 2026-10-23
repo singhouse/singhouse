@@ -275,12 +275,14 @@ onMounted(() => {
   features.load()   // cached after the first call; decides the lyrics fallback
   loadSong()
   window.addEventListener('keydown', handleKeyboard)
+  window.addEventListener('keyup', handleKeyup, true)
   document.addEventListener('mousedown', onDocClick)
 })
 
 onUnmounted(() => {
   engine.output?.stop()
   window.removeEventListener('keydown', handleKeyboard)
+  window.removeEventListener('keyup', handleKeyup, true)
   document.removeEventListener('mousedown', onDocClick)
   engine.cleanup()
   loadState.value = 'idle'
@@ -481,23 +483,52 @@ const ACTIVATABLE = [
   '[role="menuitemradio"]', '[role="option"]', '[role="switch"]', '[role="tab"]',
 ].join(', ')
 const SHORTCUT_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
+// Space is play/pause everywhere except where it types or a dialog or menu
+// owns it. A button keeps focus after a click, so leaving Space to it would
+// press that button again (a stray Advance mid-show).
+const TEXT_ENTRY = [
+  'input:not([type="button"]):not([type="submit"]):not([type="reset"])'
+    + ':not([type="checkbox"]):not([type="radio"]):not([type="range"])'
+    + ':not([type="color"]):not([type="file"]):not([type="image"])',
+  'textarea', 'select', '[contenteditable]:not([contenteditable="false"])',
+  '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]',
+].join(', ')
 
-function shortcutBelongsElsewhere(e) {
+function focusInside(e, selector) {
   for (const el of [e.target, document.activeElement]) {
     if (!el || typeof el.closest !== 'function') continue
-    if (el.closest(ACTIVATABLE) || el.closest(SHORTCUT_OWNERS)) return true
+    if (el.closest(selector)) return true
   }
   return false
+}
+
+function shortcutBelongsElsewhere(e) {
+  return focusInside(e, ACTIVATABLE) || focusInside(e, SHORTCUT_OWNERS)
+}
+
+function spaceBelongsElsewhere(e) {
+  return focusInside(e, TEXT_ENTRY) || focusInside(e, SHORTCUT_OWNERS)
+}
+
+// Browsers press a focused button on Space's keyup, so the keyup of a Space
+// taken as play/pause is swallowed too.
+let swallowSpaceUp = false
+function handleKeyup(e) {
+  if (e.code !== 'Space' || !swallowSpaceUp) return
+  swallowSpaceUp = false
+  e.preventDefault()
 }
 
 // Keyboard shortcuts
 function handleKeyboard(e) {
   if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return
-  if (shortcutBelongsElsewhere(e)) return
+  if (e.code === 'Space' ? spaceBelongsElsewhere(e) : shortcutBelongsElsewhere(e)) return
   switch (e.code) {
     case 'Space':
       if (e.shiftKey) return
       e.preventDefault()
+      swallowSpaceUp = true
+      if (e.repeat) return
       // A stray Space must not stop the song mid-show: pausing asks first,
       // resuming does not. The transport button stays unguarded.
       if (engine.playerState.value === 'playing') {

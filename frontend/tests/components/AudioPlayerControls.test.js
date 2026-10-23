@@ -133,13 +133,43 @@ describe('Space shortcut', () => {
     expect(engine.stub.pause).toHaveBeenCalledTimes(1)
   })
 
-  it('leaves a focused button to press itself', async () => {
+  it('toggles playback instead of pressing a focused button', async () => {
     wrapper = await mountPlayer()
-    const btn = wrapper.find('button[aria-label="Stop"]').element
+    const btn = document.createElement('button')
+    const pressed = vi.fn()
+    btn.addEventListener('click', pressed)
+    document.body.appendChild(btn)
     btn.focus()
     const ev = pressSpace(btn)
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    expect(ev.defaultPrevented).toBe(true)
+    const up = new window.KeyboardEvent('keyup', {
+      code: 'Space', key: ' ', bubbles: true, cancelable: true,
+    })
+    btn.dispatchEvent(up)
+    expect(up.defaultPrevented).toBe(true)
+    expect(pressed).not.toHaveBeenCalled()
+  })
+
+  it('ignores auto-repeat while Space is held', async () => {
+    wrapper = await mountPlayer()
+    pressSpace(document.body)
+    const ev = pressSpace(document.body, { repeat: true })
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    expect(ev.defaultPrevented).toBe(true)
+  })
+
+  it.each([
+    ['a text field', () => document.createElement('input')],
+    ['a search field', () => Object.assign(document.createElement('input'), { type: 'search' })],
+    ['a text area', () => document.createElement('textarea')],
+  ])('leaves %s to type the space', async (_, make) => {
+    wrapper = await mountPlayer()
+    const field = make()
+    document.body.appendChild(field)
+    field.focus()
+    const ev = pressSpace(field)
     expect(engine.stub.play).not.toHaveBeenCalled()
-    expect(engine.stub.pause).not.toHaveBeenCalled()
     expect(ev.defaultPrevented).toBe(false)
   })
 
