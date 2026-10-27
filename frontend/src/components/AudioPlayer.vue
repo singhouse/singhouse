@@ -553,8 +553,8 @@ function toggleMute(track) {
 
 // Which keys the deck leaves to whatever has focus.
 //
-// Space is play/pause everywhere except where it types, inside an open menu
-// (Space activates its items) and while a modal dialog is up. A button keeps
+// Space is play/pause everywhere except where it types and while a modal
+// dialog is up. A button keeps
 // focus after a click, so leaving Space to it would press that button again
 // (a stray Advance mid-show).
 //
@@ -581,7 +581,6 @@ const MODAL = '[aria-modal="true"], [role="alertdialog"]'
 // A Modal dialog closing (still in the DOM for its leave transition, no
 // longer open) owns nothing.
 const OPEN_MODAL = 'dialog[open][aria-modal="true"], [role="alertdialog"]:not(dialog)'
-const SPACE_OWNERS = '[role="menu"], [role="menubar"]'
 const SLIDERS = 'input[type="range"], [role="slider"], [role="spinbutton"]'
 // Home means something here too (first tab, first option, first item).
 const HOME_WIDGETS = [
@@ -614,7 +613,7 @@ function modalOpen(e) {
 }
 
 function spaceBelongsElsewhere(e) {
-  return modalOpen(e) || focusInside(e, TEXT_ENTRY) || focusInside(e, SPACE_OWNERS)
+  return modalOpen(e) || focusInside(e, TEXT_ENTRY)
 }
 
 function navBelongsElsewhere(e) {

@@ -248,7 +248,7 @@ describe('Space shortcut', () => {
     expect(engine.stub.stop).not.toHaveBeenCalled()
   })
 
-  it('does nothing inside a menu', async () => {
+  it('toggles playback inside an open menu', async () => {
     wrapper = await mountPlayer()
     const menu = document.createElement('div')
     menu.setAttribute('role', 'menu')
@@ -256,8 +256,9 @@ describe('Space shortcut', () => {
     document.body.appendChild(menu)
     menu.focus()
     const ev = pressSpace(menu)
-    expect(engine.stub.play).not.toHaveBeenCalled()
-    expect(ev.defaultPrevented).toBe(false)
+    expect(engine.stub.play).toHaveBeenCalled()
+    expect(ev.defaultPrevented).toBe(true)
+    menu.remove()
   })
 
   it.each(['ctrlKey', 'altKey', 'metaKey', 'shiftKey'])('does nothing with %s held', async (mod) => {
