@@ -21,6 +21,12 @@ export const usePlayerStore = defineStore('player', () => {
 
   const currentSong = ref(null)
 
+  // A queue advance is in flight: the provider's useAdvancing() as the shell
+  // reads it, held until the shell has seen where the advance landed. While
+  // it is set, the deck holds the OUTGOING song and Space must not replay
+  // it. Owned by HostShell; not reset by clear(), which runs on every load.
+  const advancePending = ref(false)
+
   const adjustedTime = computed(() => currentTime.value + (offset.value / 1000))
 
   function setLyrics(data) {
@@ -43,6 +49,7 @@ export const usePlayerStore = defineStore('player', () => {
   function setKey(s) { key.value = s }
   function setPlayState(s) { playState.value = s }
   function setLyricsState(s) { lyricsState.value = s }
+  function setAdvancePending(on) { advancePending.value = !!on }
 
   function clear() {
     lyrics.value = null
@@ -56,7 +63,8 @@ export const usePlayerStore = defineStore('player', () => {
 
   return {
     lyrics, lyricsState, stageModel, currentTime, offset, key, playState, currentSong,
+    advancePending,
     adjustedTime,
-    setLyrics, setTime, setOffset, setKey, setPlayState, setLyricsState, clear,
+    setLyrics, setTime, setOffset, setKey, setPlayState, setLyricsState, setAdvancePending, clear,
   }
 })

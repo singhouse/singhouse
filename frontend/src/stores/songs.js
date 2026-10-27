@@ -267,13 +267,24 @@ export const useSongsStore = defineStore('songs', () => {
     uploads.value = uploads.value.filter(u => u.id !== id)
   }
 
+  // The song whose details are being fetched on their way to the deck, null
+  // when none. Lets the player treat that fetch as part of loading (Space
+  // pressed in it plays the incoming song once ready, not the outgoing one).
+  // A refresh of the song already in the deck is not one.
+  const incomingSongId = ref(null)
+
   async function loadSong(song) {
+    const id = song?.id ?? null
+    const incoming = id != null && id !== currentSong.value?.id
+    if (incoming) incomingSongId.value = id
     try {
       const res = await songApi.get(song.id)
       currentSong.value = res.data
     } catch (e) {
       console.error('Failed to load song details:', e)
       currentSong.value = song
+    } finally {
+      if (incoming && incomingSongId.value === id) incomingSongId.value = null
     }
   }
 
@@ -595,7 +606,7 @@ export const useSongsStore = defineStore('songs', () => {
   }
 
   return {
-    songs, currentSong, uploads, statusFilter, searchQuery, loading, error,
+    songs, currentSong, incomingSongId, uploads, statusFilter, searchQuery, loading, error,
     filteredSongs, readySongs, processingCount,
     jobLastChangeAt,
     fetchSongs, uploadSong, importVideoSong, importCdgSong, loadSong, deleteSong,

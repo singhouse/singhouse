@@ -747,6 +747,46 @@ watch(
   },
 )
 
+// The advance-in-flight flag the deck reads (player.advancePending). Song
+// ends, host clicks Advance, host presses Space: in that window the deck
+// still holds the OUTGOING song, and Space must arm play-when-ready for the
+// incoming one rather than replay it. The flag is the provider's own
+// useAdvancing(), held a little past it so the deck sees where the advance
+// landed: once the current pick has changed (the pick watcher above has then
+// already started any load, which carries the deck's arm with it), or after
+// a grace period when it never does (a failed advance). A new singer with no
+// linked song, or the queue running out, starts no load, so the deck drops
+// its arm when the flag clears.
+//
+// Created after the pick watcher on purpose: when the provider flips both in
+// one tick, the load starts before the flag is released.
+const ADVANCE_SETTLE_MS = 1500
+let advanceKey = null
+let advanceSettleTimer = null
+function releaseAdvance() {
+  clearTimeout(advanceSettleTimer)
+  advanceSettleTimer = null
+  advanceKey = null
+  // After this flush, so a pick watcher queued in the same tick runs first.
+  nextTick(() => { if (!advancing?.value) player.setAdvancePending(false) })
+}
+watch(() => !!advancing?.value, (on) => {
+  if (on) {
+    clearTimeout(advanceSettleTimer)
+    advanceSettleTimer = null
+    advanceKey = pickKey()
+    player.setAdvancePending(true)
+    return
+  }
+  if (!player.advancePending) return
+  if (pickKey() !== advanceKey) { releaseAdvance(); return }
+  advanceSettleTimer = setTimeout(releaseAdvance, ADVANCE_SETTLE_MS)
+})
+// The provider may report the new current pick just after dropping its flag.
+watch(pickKey, () => {
+  if (advanceSettleTimer && !advancing?.value) releaseAdvance()
+})
+
 // Whether the CURRENT entry has already had a performance announced. Gates
 // the walk-up fallback below: one play per turn, attributed at first play.
 // Reset when a different entry becomes current, so a singer's next round is
@@ -1136,6 +1176,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(advanceSettleTimer)
+  player.setAdvancePending(false)
   clearInterval(healthInterval)
   window.removeEventListener('mousemove', onResizeMove)
   window.removeEventListener('mouseup', stopResize)

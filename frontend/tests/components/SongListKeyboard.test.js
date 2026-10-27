@@ -2,9 +2,10 @@
 // @vitest-environment happy-dom
 //
 // The library list as a keyboard grid: one roving Tab stop among the rows,
-// the arrow, Home and End keys move it, Enter or Space loads a ready song, Delete opens the
-// existing confirm on Cancel, and → reaches the row's ⋯ button, which is
-// never hidden.
+// the arrow, Home and End keys move it, Enter loads a ready song (Space is
+// always the deck's), Delete opens the existing confirm on Cancel, and →
+// reaches the row's ⋯ button, which is never hidden. A row focused by a
+// pointer click leaves Home and → to the deck.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -165,7 +166,7 @@ describe('arrow keys', () => {
 })
 
 describe('loading', () => {
-  it('Enter and Space on a ready row load it', async () => {
+  it('Enter on a ready row loads it; Space never does', async () => {
     await mountList()
     row('Alpha').focus()
     const enter = await press('Enter')
@@ -175,9 +176,8 @@ describe('loading', () => {
 
     row('Gamma').focus()
     const space = await press(' ')
-    expect(space.defaultPrevented).toBe(true)
-    expect(loadSpy).toHaveBeenCalledTimes(2)
-    expect(loadSpy.mock.calls[1][0].id).toBe(3)
+    expect(space.defaultPrevented).toBe(false)
+    expect(loadSpy).toHaveBeenCalledTimes(1)
   })
 
   it('a not-ready row ignores Enter', async () => {
@@ -298,5 +298,127 @@ describe('row actions on focus', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const css = readFileSync(resolve(here, '../../src/components/SongList.vue'), 'utf8').split('<style')[1]
     expect(css).not.toMatch(/(more-btn|lib-cell--more)[^{]*\{[^}]*(opacity:\s*0[;\s}]|visibility:\s*hidden|display:\s*none)/)
+  })
+})
+
+describe('a row focused by a pointer click', () => {
+  async function clickRow(el) {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }))
+    el.focus()
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }))
+    el.click()
+    await flushPromises()
+  }
+
+  it('is marked, and leaves Home, → and Space to the deck', async () => {
+    await mountList()
+    await clickRow(row('Gamma'))
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(row('Gamma'))
+    expect(row('Gamma').hasAttribute('data-pointer-focus')).toBe(true)
+    for (const k of ['Home', 'ArrowRight', 'ArrowLeft', ' ']) {
+      expect((await press(k)).defaultPrevented).toBe(false)
+    }
+    expect(document.activeElement).toBe(row('Gamma'))
+  })
+
+  it('still moves with ↑/↓, after which the keyboard owns the row again', async () => {
+    await mountList()
+    await clickRow(row('Gamma'))
+    await press('ArrowUp')
+    expect(document.activeElement).toBe(row('Beta'))
+    expect(row('Beta').hasAttribute('data-pointer-focus')).toBe(false)
+    expect(row('Gamma').hasAttribute('data-pointer-focus')).toBe(false)
+    const home = await press('Home')
+    expect(home.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(row('Alpha'))
+  })
+
+  it('a click on an already keyboard-focused row hands the keys to the deck', async () => {
+    await mountList()
+    row('Alpha').focus()
+    await flushPromises()
+    expect(row('Alpha').hasAttribute('data-pointer-focus')).toBe(false)
+    await clickRow(row('Alpha'))
+    expect(row('Alpha').hasAttribute('data-pointer-focus')).toBe(true)
+  })
+
+  it('Enter still loads it', async () => {
+    await mountList()
+    await clickRow(row('Alpha'))
+    loadSpy.mockClear()
+    const enter = await press('Enter')
+    expect(enter.defaultPrevented).toBe(true)
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a keyboard Tab-style focus is not marked', async () => {
+    await mountList()
+    row('Alpha').focus()
+    await flushPromises()
+    expect(row('Alpha').hasAttribute('data-pointer-focus')).toBe(false)
+    expect((await press('ArrowRight')).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(row('Alpha').querySelector('.more-btn'))
+  })
+})
+
+describe('how a clicked row keeps or loses its pointer focus', () => {
+  async function clickRow(el) {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }))
+    el.focus()
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }))
+    el.click()
+    await flushPromises()
+  }
+
+  it('keeps it when a confirm dialog hands focus back', async () => {
+    await mountList()
+    await clickRow(row('Beta'))
+    await press('Delete')
+    expect(document.activeElement.textContent).toBe('Cancel')
+    await press('Escape')
+    expect(document.activeElement).toBe(row('Beta'))
+    expect(row('Beta').hasAttribute('data-pointer-focus')).toBe(true)
+    expect((await press('Home')).defaultPrevented).toBe(false)   // still the deck's
+  })
+
+  it('loses it when Tab brings focus back to the row', async () => {
+    await mountList()
+    await clickRow(row('Alpha'))
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    await flushPromises()
+    elsewhere.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    row('Alpha').focus()
+    row('Alpha').dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', shiftKey: true, bubbles: true }))
+    await flushPromises()
+    expect(row('Alpha').hasAttribute('data-pointer-focus')).toBe(false)
+    expect((await press('End')).defaultPrevented).toBe(true)
+    expect((await press('Home')).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(row('Alpha'))
+  })
+
+  it('a click right after Tab is still a click', async () => {
+    await mountList()
+    row('Alpha').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    await clickRow(row('Gamma'))
+    expect(row('Gamma').hasAttribute('data-pointer-focus')).toBe(true)
+  })
+})
+
+describe('the row ⋯ button reached by keyboard', () => {
+  it('Home and End move to the first and last rows', async () => {
+    await mountList()
+    row('Beta').focus()
+    await press('ArrowRight')
+    expect(document.activeElement).toBe(row('Beta').querySelector('.more-btn'))
+    const end = await press('End')
+    expect(end.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(row('Gamma'))
+    await press('ArrowRight')
+    const home = await press('Home')
+    expect(home.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(row('Alpha'))
   })
 })

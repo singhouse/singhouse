@@ -280,6 +280,7 @@
             role="row"
             :data-song-id="song.id"
             :tabindex="song.id === rovingId ? 0 : -1"
+            :data-pointer-focus="pointerFocusId === song.id ? '' : null"
             :style="compact ? null : gridStyle"
             :class="{
               'song-item--compact': compact,
@@ -290,7 +291,8 @@
             :draggable="song.status === 'ready'"
             @dragstart="onDragStart($event, song)"
             @click="song.status === 'ready' && usePlayGuard().guard(() => store.loadSong(song), { kind: 'load', title: song.title || song.filename })"
-            @focusin="activeRowId = song.id"
+            @mousedown="onRowMousedown($event, song)"
+            @focusin="onRowFocusin($event, song)"
             @keydown="onRowKeydown($event, song)"
           >
             <div class="lib-cell lib-cell--dot" role="gridcell">
@@ -1152,6 +1154,7 @@ function rowEl(id) {
 
 async function focusRow(id) {
   activeRowId.value = id
+  pointerFocusId.value = null
   await nextTick()
   const el = rowEl(id)
   if (!el) return
@@ -1169,30 +1172,87 @@ function moveRow(song, to) {
   focusRow(rows[next].id)
 }
 
+// A row a pointer press focused is not one the keyboard is walking. Clicking
+// a row to load it is the most common thing a host does right before
+// pressing Space, ← / → or Home for the deck, so such a row leaves those keys
+// to the deck (and says so with data-pointer-focus, which the deck reads):
+// ↑/↓/End/Enter/Delete still work from it, and the first row the arrows move
+// to is keyboard-focused again. Focus coming back to the same row without a
+// key moving it (a confirm handing focus back) keeps how the row was focused.
+// Rows never take Space; Enter loads.
+//
+// mousedown, not pointerdown: it is the event focus moves on, for touch as
+// well (whose compatibility mousedown comes after pointerup).
+//
+// Tab reaching a row is the keyboard arriving, so focus that lands while Tab
+// is down always walks the grid, even on the row last clicked.
+const pointerFocusId = ref(null)
+let pointerPressId = null
+let tabDown = false
+function clearPointerPress() { pointerPressId = null }
+function onTabKey(e) { if (e.key === 'Tab') tabDown = e.type === 'keydown' }
+function onWindowBlurTab() { tabDown = false }
+onMounted(() => {
+  window.addEventListener('keydown', onTabKey, true)
+  window.addEventListener('keyup', onTabKey, true)
+  window.addEventListener('blur', onWindowBlurTab)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onTabKey, true)
+  window.removeEventListener('keyup', onTabKey, true)
+  window.removeEventListener('blur', onWindowBlurTab)
+  window.removeEventListener('mouseup', clearPointerPress, true)
+})
+function onRowMousedown(e, song) {
+  tabDown = false
+  if (document.activeElement === e.currentTarget) {
+    pointerFocusId.value = song.id       // already focused: no focusin follows
+    return
+  }
+  pointerPressId = song.id
+  // The same listener registers once, however many presses there are.
+  window.addEventListener('mouseup', clearPointerPress, { once: true, capture: true })
+}
+function onRowFocusin(e, song) {
+  activeRowId.value = song.id
+  if (e.target !== e.currentTarget) return   // the row's ⋯ button
+  if (pointerPressId === song.id && !tabDown) pointerFocusId.value = song.id
+  else if (tabDown || pointerFocusId.value !== song.id) pointerFocusId.value = null
+  pointerPressId = null
+}
+
 function onRowKeydown(e, song) {
   const row = e.currentTarget
   if (e.target === row) {
+    const byPointer = pointerFocusId.value === song.id
     switch (e.key) {
       case 'ArrowDown': e.preventDefault(); moveRow(song, 1); break
       case 'ArrowUp': e.preventDefault(); moveRow(song, -1); break
-      case 'Home': e.preventDefault(); moveRow(song, 'first'); break
+      case 'Home':
+        if (byPointer) return   // the deck's Stop
+        e.preventDefault(); moveRow(song, 'first'); break
       case 'End': e.preventDefault(); moveRow(song, 'last'); break
       case 'Enter':
-      case ' ':
         e.preventDefault()
         if (song.status === 'ready') usePlayGuard().guard(() => store.loadSong(song), { kind: 'load', title: song.title || song.filename })
         break
       case 'Delete': e.preventDefault(); deleteTarget.value = song; break
-      case 'ArrowRight': e.preventDefault(); row.querySelector('.more-btn')?.focus(); break
+      case 'ArrowRight':
+        if (byPointer) return   // the deck's seek
+        e.preventDefault(); row.querySelector('.more-btn')?.focus(); break
     }
     return
   }
-  // From the row's ⋯ button: ← back to the row, ↑/↓ on to the next rows.
+  // From the row's ⋯ button: ← back to the row, ↑/↓ on to the next rows,
+  // Home/End to the first/last row (never the deck's Stop from inside the
+  // grid).
   if (!e.target.classList?.contains('more-btn')) return
   switch (e.key) {
-    case 'ArrowLeft': e.preventDefault(); row.focus(); break
+    case 'ArrowLeft': e.preventDefault(); pointerFocusId.value = null; row.focus(); break
     case 'ArrowDown': e.preventDefault(); moveRow(song, 1); break
     case 'ArrowUp': e.preventDefault(); moveRow(song, -1); break
+    case 'Home': e.preventDefault(); moveRow(song, 'first'); break
+    case 'End': e.preventDefault(); moveRow(song, 'last'); break
   }
 }
 
