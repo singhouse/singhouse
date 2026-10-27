@@ -132,6 +132,9 @@ import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
 import { usePlayerStore } from '@/stores/player'
 import { usePlayGuard } from '@/composables/usePlayGuard'
+import {
+  TEXT_ENTRY, focusedElements, focusInside, modalOpen, spaceBelongsElsewhere,
+} from '@/utils/deckKeys'
 
 const props = defineProps({
   song: { type: Object, required: true }
@@ -211,6 +214,19 @@ const fetchingIncoming = computed(() =>
 )
 const deckLoading = computed(() => loadState.value === 'loading' || fetchingIncoming.value)
 function disarmPlayWhenReady() { playWhenReady.value = null }
+
+// Space pressed before this player existed (nothing was loaded yet, the first
+// song's details still on their way): the shell recorded it in the player
+// store. It is this song's arm now, unless it named another song.
+{
+  const handed = player.pendingPlay
+  if (handed) {
+    player.setPendingPlay(null)
+    if (handed.advance || handed.songId === (props.song?.id ?? null)) {
+      playWhenReady.value = { songId: props.song?.id ?? null }
+    }
+  }
+}
 
 watch([() => store.incomingSongId, () => player.advancePending], ([incoming, pending]) => {
   const armed = playWhenReady.value
@@ -551,12 +567,12 @@ function toggleMute(track) {
   engine.setVolume(track.key, track.volume)
 }
 
-// Which keys the deck leaves to whatever has focus.
+// Which keys the deck leaves to whatever has focus (shared rules in
+// utils/deckKeys).
 //
 // Space is play/pause everywhere except where it types and while a modal
-// dialog is up. A button keeps
-// focus after a click, so leaving Space to it would press that button again
-// (a stray Advance mid-show).
+// dialog is up. A button keeps focus after a click, so leaving Space to it
+// would press that button again (a stray Advance mid-show).
 //
 // ←/→ seek and Home stops everywhere except text entry, widgets that move
 // with those keys themselves (sliders, tabs, radios, listboxes, menus), a
@@ -570,17 +586,6 @@ function toggleMute(track) {
 // dialog, any [aria-modal="true"] surface, an alertdialog — owns them all,
 // which is what leaves the play guard's own prompt in charge of its Space
 // and Enter.
-const TEXT_ENTRY = [
-  'input:not([type="button"]):not([type="submit"]):not([type="reset"])'
-    + ':not([type="checkbox"]):not([type="radio"]):not([type="range"])'
-    + ':not([type="color"]):not([type="file"]):not([type="image"])',
-  'textarea', 'select', '[contenteditable]:not([contenteditable="false"])',
-  '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]',
-].join(', ')
-const MODAL = '[aria-modal="true"], [role="alertdialog"]'
-// A Modal dialog closing (still in the DOM for its leave transition, no
-// longer open) owns nothing.
-const OPEN_MODAL = 'dialog[open][aria-modal="true"], [role="alertdialog"]:not(dialog)'
 const SLIDERS = 'input[type="range"], [role="slider"], [role="spinbutton"]'
 // Home means something here too (first tab, first option, first item).
 const HOME_WIDGETS = [
@@ -599,22 +604,6 @@ const KEYBOARD_ROW = '[role="grid"] [role="row"]:not([data-pointer-focus]), '
   + '[role="treegrid"] [role="row"]:not([data-pointer-focus])'
 
 const progressEl = ref(null)
-
-function focusedElements(e) {
-  return [e.target, document.activeElement].filter(el => el && typeof el.closest === 'function')
-}
-
-function focusInside(e, selector) {
-  return focusedElements(e).some(el => el.closest(selector))
-}
-
-function modalOpen(e) {
-  return focusInside(e, MODAL) || !!document.querySelector(OPEN_MODAL)
-}
-
-function spaceBelongsElsewhere(e) {
-  return modalOpen(e) || focusInside(e, TEXT_ENTRY)
-}
 
 function navBelongsElsewhere(e) {
   if (modalOpen(e) || focusInside(e, TEXT_ENTRY)) return true

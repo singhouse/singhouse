@@ -68,6 +68,7 @@ vi.mock('@/plugins/slots', () => ({
 }))
 
 import HostShell from '@/views/HostShell.vue'
+import { songApi } from '@/api/client'
 import { usePlayGuard } from '@/composables/usePlayGuard'
 
 const pick = ref(null)
@@ -275,5 +276,184 @@ describe('Space while a queue advance is in flight', () => {
     expect(usePlayGuard().pending.value).toMatchObject({ kind: 'pause' })
     expect(pill()).toBe(null)
     expect(engine.stub.pause).not.toHaveBeenCalled()
+  })
+})
+
+// Nothing loaded yet (a fresh page): the player is not mounted while the first
+// song's details are fetched, so the shell takes Space for it.
+describe('Space before any song has reached the deck', () => {
+  function heldFetch() {
+    let release
+    songApi.get.mockImplementationOnce((id) => new Promise((r) => {
+      release = () => r({ data: { ...SONGS[id] } })
+    }))
+    return () => release()
+  }
+  function heldStems() {
+    let release
+    engine.stub.loadStems.mockImplementationOnce(() => new Promise((r) => { release = () => r({ durations: [180] }) }))
+    return () => release()
+  }
+  async function freshShell() {
+    wrapper = mountShell()
+    await flushPromises()
+    expect(document.querySelector('.player-bar')).toBe(null)
+    vi.clearAllMocks()
+  }
+
+  it('the first library song plays once ready when Space comes before the player exists', async () => {
+    await freshShell()
+    const finishFetch = heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })          // what a row click does
+    expect(pressSpace().defaultPrevented).toBe(true)
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: 2 })
+
+    const finishStems = heldStems()
+    finishFetch()
+    await flushPromises()
+    expect(document.querySelector('.player-bar')).not.toBe(null)
+    expect(wrapper.vm.player.pendingPlay).toBe(null)   // adopted
+    expect(pill()?.textContent).toContain('Plays when loaded')
+    expect(engine.stub.play).not.toHaveBeenCalled()
+
+    finishStems()
+    await flushPromises()
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    expect(wrapper.vm.store.currentSong.id).toBe(2)
+    expect(pill()).toBe(null)
+  })
+
+  it('a second Space before the player exists cancels it', async () => {
+    await freshShell()
+    const finishFetch = heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: 2 })
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+    finishFetch()
+    await flushPromises()
+    expect(pill()).toBe(null)
+    expect(engine.stub.play).not.toHaveBeenCalled()
+  })
+
+  it('a different song on its way clears it', async () => {
+    await freshShell()
+    const finishFirst = heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: 2 })
+    const finishSecond = heldFetch()
+    wrapper.vm.store.loadSong({ id: 1 })
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+    finishFirst()
+    finishSecond()
+    await flushPromises()
+    expect(engine.stub.play).not.toHaveBeenCalled()
+  })
+
+  it('the first singer\'s advance plays their song once ready', async () => {
+    await freshShell()
+    advancing.value = true
+    await flushPromises()
+    expect(pressSpace().defaultPrevented).toBe(true)
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: null, advance: true })
+
+    const finishFetch = heldFetch()
+    pick.value = { key: 'e1', songId: 2 }
+    advancing.value = false
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: 2 })
+    const finishStems = heldStems()
+    finishFetch()
+    await flushPromises()
+    expect(pill()).not.toBe(null)
+    finishStems()
+    await flushPromises()
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    expect(wrapper.vm.store.currentSong.id).toBe(2)
+  })
+
+  it('a songless first singer clears the first-singer request', async () => {
+    await freshShell()
+    advancing.value = true
+    await flushPromises()
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: null, advance: true })
+    pick.value = { key: 'e1', songId: null }
+    advancing.value = false
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+  })
+
+  // The queue was empty and still is: nothing changed, so this reads as a
+  // failed advance and clears after the grace period.
+  it('an advance that leaves the queue empty clears it after the grace period', async () => {
+    await freshShell()
+    advancing.value = true
+    await flushPromises()
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: null, advance: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    advancing.value = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.player.pendingPlay).not.toBe(null)
+    vi.advanceTimersByTime(2000)
+    vi.useRealTimers()
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+  })
+
+  it('a failed first advance clears it', async () => {
+    await freshShell()
+    advancing.value = true
+    await flushPromises()
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: null, advance: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    advancing.value = false
+    await wrapper.vm.$nextTick()
+    vi.advanceTimersByTime(2000)
+    vi.useRealTimers()
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+  })
+
+  it('leaves Space alone with nothing on its way, and in a text field', async () => {
+    await freshShell()
+    expect(pressSpace().defaultPrevented).toBe(false)
+    wrapper.vm.store.loadSong({ id: 2 })
+    const field = document.createElement('input')
+    document.body.appendChild(field)
+    field.focus()
+    const ev = new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true, cancelable: true })
+    field.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(false)
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+    await flushPromises()
+  })
+
+  it('swallows the keyup so a focused Advance button is not pressed again', async () => {
+    await freshShell()
+    advancing.value = true
+    await flushPromises()
+    const btn = document.createElement('button')
+    document.body.appendChild(btn)
+    btn.focus()
+    const down = new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true, cancelable: true })
+    btn.dispatchEvent(down)
+    const up = new KeyboardEvent('keyup', { code: 'Space', key: ' ', bubbles: true, cancelable: true })
+    btn.dispatchEvent(up)
+    expect(down.defaultPrevented).toBe(true)
+    expect(up.defaultPrevented).toBe(true)
+  })
+
+  it('once the player is mounted, one Space is handled once', async () => {
+    await outgoingSongEnded()
+    const ev = pressSpace()
+    expect(ev.defaultPrevented).toBe(true)
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
   })
 })

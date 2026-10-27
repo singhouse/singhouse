@@ -27,6 +27,13 @@ export const usePlayerStore = defineStore('player', () => {
   // it. Owned by HostShell; not reset by clear(), which runs on every load.
   const advancePending = ref(false)
 
+  // Space pressed while no player is mounted yet but a song is on its way
+  // (the session's first song, or the first singer's advance): { songId } of
+  // that song, or { songId: null, advance: true } while the advance has not
+  // named one. The player adopts it as its play-when-ready when it mounts.
+  // Owned by HostShell until then; not reset by clear().
+  const pendingPlay = ref(null)
+
   const adjustedTime = computed(() => currentTime.value + (offset.value / 1000))
 
   function setLyrics(data) {
@@ -50,6 +57,7 @@ export const usePlayerStore = defineStore('player', () => {
   function setPlayState(s) { playState.value = s }
   function setLyricsState(s) { lyricsState.value = s }
   function setAdvancePending(on) { advancePending.value = !!on }
+  function setPendingPlay(req) { pendingPlay.value = req || null }
 
   function clear() {
     lyrics.value = null
@@ -63,8 +71,8 @@ export const usePlayerStore = defineStore('player', () => {
 
   return {
     lyrics, lyricsState, stageModel, currentTime, offset, key, playState, currentSong,
-    advancePending,
+    advancePending, pendingPlay,
     adjustedTime,
-    setLyrics, setTime, setOffset, setKey, setPlayState, setLyricsState, setAdvancePending, clear,
+    setLyrics, setTime, setOffset, setKey, setPlayState, setLyricsState, setAdvancePending, setPendingPlay, clear,
   }
 })
