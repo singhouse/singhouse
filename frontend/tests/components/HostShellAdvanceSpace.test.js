@@ -387,25 +387,9 @@ describe('Space before any song has reached the deck', () => {
     expect(wrapper.vm.player.pendingPlay).toBe(null)
   })
 
-  // The queue was empty and still is: nothing changed, so this reads as a
-  // failed advance and clears after the grace period.
-  it('an advance that leaves the queue empty clears it after the grace period', async () => {
-    await freshShell()
-    advancing.value = true
-    await flushPromises()
-    pressSpace()
-    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: null, advance: true })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    advancing.value = false
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.player.pendingPlay).not.toBe(null)
-    vi.advanceTimersByTime(2000)
-    vi.useRealTimers()
-    await flushPromises()
-    expect(wrapper.vm.player.pendingPlay).toBe(null)
-  })
-
-  it('a failed first advance clears it', async () => {
+  // An advance that leaves an empty queue empty changes nothing either, so it
+  // reads the same as this one.
+  it('a failed first advance clears it after the grace period', async () => {
     await freshShell()
     advancing.value = true
     await flushPromises()
@@ -420,9 +404,22 @@ describe('Space before any song has reached the deck', () => {
     expect(wrapper.vm.player.pendingPlay).toBe(null)
   })
 
-  it('leaves Space alone with nothing on its way, and in a text field', async () => {
+  it('with nothing on its way still takes Space from a focused button, recording nothing', async () => {
     await freshShell()
-    expect(pressSpace().defaultPrevented).toBe(false)
+    const btn = document.createElement('button')
+    document.body.appendChild(btn)
+    btn.focus()
+    const down = new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true, cancelable: true })
+    btn.dispatchEvent(down)
+    const up = new KeyboardEvent('keyup', { code: 'Space', key: ' ', bubbles: true, cancelable: true })
+    btn.dispatchEvent(up)
+    expect(down.defaultPrevented).toBe(true)
+    expect(up.defaultPrevented).toBe(true)        // the button is not pressed
+    expect(wrapper.vm.player.pendingPlay).toBe(null)
+  })
+
+  it('leaves Space to a text field', async () => {
+    await freshShell()
     wrapper.vm.store.loadSong({ id: 2 })
     const field = document.createElement('input')
     document.body.appendChild(field)
@@ -449,11 +446,92 @@ describe('Space before any song has reached the deck', () => {
     expect(up.defaultPrevented).toBe(true)
   })
 
-  it('once the player is mounted, one Space is handled once', async () => {
+  it('once the player is mounted, the shell leaves Space to it even with a song on its way', async () => {
     await outgoingSongEnded()
-    const ev = pressSpace()
-    expect(ev.defaultPrevented).toBe(true)
-    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    const finishFetch = heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })      // incoming, with a deck mounted
+    expect(pressSpace().defaultPrevented).toBe(true)
+    await flushPromises()
+    expect(wrapper.vm.player.pendingPlay).toBe(null)   // the shell recorded nothing
+    expect(pill()).not.toBe(null)                      // the player armed
+    pressSpace()                                       // handled once: cancels
+    await flushPromises()
+    expect(pill()).toBe(null)
     expect(wrapper.vm.player.pendingPlay).toBe(null)
+    finishFetch()
+    await flushPromises()
+    expect(engine.stub.play).not.toHaveBeenCalled()
+  })
+
+  it('with song 1 in the deck: click song 2, click song 1 back, Space plays song 1 now', async () => {
+    await outgoingSongEnded()
+    pick.value = null
+    await flushPromises()
+    const late = heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })
+    const back = heldFetch()
+    wrapper.vm.store.loadSong({ id: 1 })
+    await flushPromises()
+    pressSpace()
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+    back()
+    await flushPromises()
+    late()
+    await flushPromises()
+    expect(wrapper.vm.store.currentSong.id).toBe(1)
+    expect(engine.stub.play).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a recorded request when the shell unmounts', async () => {
+    await freshShell()
+    heldFetch()
+    wrapper.vm.store.loadSong({ id: 2 })
+    pressSpace()
+    const player = wrapper.vm.player
+    expect(player.pendingPlay).toEqual({ songId: 2 })
+    wrapper.unmount()
+    wrapper = null
+    expect(player.pendingPlay).toBe(null)
+  })
+
+  it.each([
+    ['the earlier answer arrives first', ['first', 'second']],
+    ['the earlier answer arrives last', ['second', 'first']],
+  ])('click song 2, click song 1, Space: song 1 plays (%s)', async (_, order) => {
+    await freshShell()
+    const answers = { first: heldFetch() }
+    wrapper.vm.store.loadSong({ id: 2 })
+    answers.second = heldFetch()
+    wrapper.vm.store.loadSong({ id: 1 })
+    pressSpace()
+    expect(wrapper.vm.player.pendingPlay).toEqual({ songId: 1 })
+    const played = []
+    engine.stub.play.mockImplementation(() => { played.push(wrapper.vm.store.currentSong?.id) })
+    for (const k of order) { answers[k](); await flushPromises() }
+    expect(wrapper.vm.store.currentSong.id).toBe(1)
+    expect(played).toEqual([1])
+  })
+
+  it.each([
+    ['the earlier answer arrives first', ['first', 'second']],
+    ['the earlier answer arrives last', ['second', 'first']],
+  ])('with a deck: click song 2, click song 3, Space: song 3 plays (%s)', async (_, order) => {
+    await outgoingSongEnded()                   // song 1 is in the deck, stopped
+    pick.value = null
+    await flushPromises()
+    const answers = { first: heldFetch() }
+    wrapper.vm.store.loadSong({ id: 2 })
+    answers.second = heldFetch()
+    SONGS[3] = { id: 3, title: 'Third Tune', artist: 'C', status: 'ready', stems: { instrumental: '/3.mp3' } }
+    wrapper.vm.store.loadSong({ id: 3 })
+    pressSpace()
+    await flushPromises()
+    expect(pill()).not.toBe(null)
+    const played = []
+    engine.stub.play.mockImplementation(() => { played.push(wrapper.vm.store.currentSong?.id) })
+    for (const k of order) { answers[k](); await flushPromises() }
+    expect(wrapper.vm.store.currentSong.id).toBe(3)
+    expect(played).toEqual([3])
+    delete SONGS[3]
   })
 })

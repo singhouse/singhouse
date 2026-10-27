@@ -270,21 +270,31 @@ export const useSongsStore = defineStore('songs', () => {
   // The song whose details are being fetched on their way to the deck, null
   // when none. Lets the player treat that fetch as part of loading (Space
   // pressed in it plays the incoming song once ready, not the outgoing one).
-  // A refresh of the song already in the deck is not one.
+  // The player ignores it when it names the song already loaded.
   const incomingSongId = ref(null)
 
-  async function loadSong(song) {
+  // Every load that puts a song on the deck (a library click, a queue pick)
+  // takes a ticket, and only the newest one's response is applied: click
+  // song 2, then song 1, and song 1 is what lands, whichever answer arrives
+  // last. `refresh` re-reads the song already loaded (new lyrics, a verify,
+  // a re-split): it takes no ticket, so it never cancels a newer deck load,
+  // and it is dropped if a deck load started after it or the deck moved on.
+  let deckLoadSeq = 0
+  async function loadSong(song, { refresh = false } = {}) {
     const id = song?.id ?? null
-    const incoming = id != null && id !== currentSong.value?.id
-    if (incoming) incomingSongId.value = id
+    const seq = refresh ? deckLoadSeq : ++deckLoadSeq
+    if (!refresh) incomingSongId.value = id
+    const stale = () => seq !== deckLoadSeq || (refresh && currentSong.value?.id !== id)
     try {
       const res = await songApi.get(song.id)
+      if (stale()) return
       currentSong.value = res.data
     } catch (e) {
+      if (stale()) return
       console.error('Failed to load song details:', e)
       currentSong.value = song
     } finally {
-      if (incoming && incomingSongId.value === id) incomingSongId.value = null
+      if (!refresh && seq === deckLoadSeq) incomingSongId.value = null
     }
   }
 
@@ -329,20 +339,20 @@ export const useSongsStore = defineStore('songs', () => {
     const res = await lyricsSetsApi.activate(songId, lid)
     if (currentSong.value?.id === songId) {
       // Refresh detail so word_sync + lyrics_sets reflect the change.
-      await loadSong({ id: songId })
+      await loadSong({ id: songId }, { refresh: true })
     }
     return res.data
   }
 
   async function verifyLyricsSet(songId, lid) {
     const res = await lyricsSetsApi.verify(songId, lid)
-    if (currentSong.value?.id === songId) await loadSong({ id: songId })
+    if (currentSong.value?.id === songId) await loadSong({ id: songId }, { refresh: true })
     return res.data
   }
 
   async function deleteLyricsSet(songId, lid) {
     await lyricsSetsApi.remove(songId, lid)
-    if (currentSong.value?.id === songId) await loadSong({ id: songId })
+    if (currentSong.value?.id === songId) await loadSong({ id: songId }, { refresh: true })
   }
 
   async function createManualLyricsSet(songId, { plainLyrics, syncedLyrics, label, activate = true } = {}) {
@@ -355,7 +365,7 @@ export const useSongsStore = defineStore('songs', () => {
       activate,
     }
     const res = await lyricsSetsApi.create(songId, body)
-    if (currentSong.value?.id === songId) await loadSong({ id: songId })
+    if (currentSong.value?.id === songId) await loadSong({ id: songId }, { refresh: true })
     return res.data
   }
 
@@ -522,7 +532,7 @@ export const useSongsStore = defineStore('songs', () => {
   // The song detail carries word_sync and the set list, so any lyrics job that
   // lands has to be reflected on the deck if that song is the one loaded.
   async function _refreshSongDetail(songId) {
-    if (currentSong.value?.id === songId) await loadSong({ id: songId })
+    if (currentSong.value?.id === songId) await loadSong({ id: songId }, { refresh: true })
   }
 
   function startRealign(songId, body = {}) {

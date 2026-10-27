@@ -235,8 +235,8 @@
          two-line layout (title over artist) with the same actions button. -->
     <div v-else class="song-list__body">
       <!-- A grid with one roving Tab stop: the arrow keys move between rows,
-           Enter or Space loads a ready song, Delete asks to remove it, and →
-           steps into the row's ⋯ button. -->
+           Enter loads a ready song (Space is always the deck's), Delete asks
+           to remove it, and → steps into the row's ⋯ button. -->
       <div class="lib-table" role="grid" :aria-labelledby="titleTextId">
         <!-- Sortable header; separators between columns drag their widths. -->
         <div v-if="!compact" ref="headEl" class="lib-head" role="row" :style="gridStyle">

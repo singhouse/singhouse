@@ -804,13 +804,15 @@ function onNoDeckSpace(e) {
   if (deckRef.value) return
   if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return
   if (spaceBelongsElsewhere(e)) return
+  // Space is the deck's even before there is one: never handed to a focused
+  // button (a clicked Advance must not be pressed again), whether or not
+  // anything is on its way to play.
+  e.preventDefault()
+  swallowNoDeckSpaceUp = true
+  if (e.repeat) return
   const incoming = store.incomingSongId
   const pending = player.pendingPlay
-  // Nothing on its way and nothing asked for: Space has nothing to do.
-  if (!pending && incoming == null && !player.advancePending) return
-  e.preventDefault()
-  swallowNoDeckSpaceUp = true   // a focused button (Advance) must not be pressed
-  if (e.repeat) return
+  if (!pending && incoming == null && !player.advancePending) return   // nothing to play
   if (pending) player.setPendingPlay(null)
   else player.setPendingPlay(incoming != null ? { songId: incoming } : { songId: null, advance: true })
 }

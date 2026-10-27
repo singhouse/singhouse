@@ -464,7 +464,7 @@ watch(
     // on a song whose re-split finished an hour ago must not reload the deck.
     if (status !== 'done' || !previous || previous === 'done') return
     stemCacheBust.value = Date.now()
-    await store.loadSong({ id: songId })
+    await store.loadSong({ id: songId }, { refresh: true })
     await nextTick()          // let the refreshed song detail reach this prop
     if (props.song?.id !== songId) return
     engine.cleanup()
