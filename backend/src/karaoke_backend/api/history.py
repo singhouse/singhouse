@@ -254,15 +254,36 @@ async def list_history(
 @router.delete("/{history_id}", summary="Remove one history entry")
 async def delete_history(
     history_id: int,
+    if_incomplete: bool = Query(
+        False,
+        description="Only delete a row that was never completed (the host's "
+        "undo of a ▶ Sing); a completed row is kept and reported deleted=false.",
+    ),
+    song_id: Optional[int] = Query(
+        None,
+        description="Only delete the row if it still points at this song; "
+        "otherwise it is kept and reported deleted=false, exactly like a "
+        "completed row under if_incomplete.",
+    ),
     db: AsyncSession = Depends(get_db),
     user: Identity = Depends(require_user),
 ) -> dict:
-    row = await db.get(PlayHistory, history_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="history entry not found")
-    await db.delete(row)
+    # One conditional DELETE rather than read-then-delete, so a /complete that
+    # lands in between cannot be lost: the WHERE clause is the check.
+    conditional = if_incomplete or song_id is not None
+    stmt = sa_delete(PlayHistory).where(PlayHistory.id == history_id)
+    if if_incomplete:
+        stmt = stmt.where(PlayHistory.completed.is_(False))
+    if song_id is not None:
+        stmt = stmt.where(PlayHistory.song_id == song_id)
+    result = await db.execute(stmt)
     await db.commit()
-    return {"ok": True}
+    if result.rowcount:
+        return {"ok": True, "deleted": True} if conditional else {"ok": True}
+    # Nothing deleted: either the row is gone (404) or a condition kept it.
+    if await db.get(PlayHistory, history_id) is None:
+        raise HTTPException(status_code=404, detail="history entry not found")
+    return {"ok": True, "deleted": False}
 
 
 @router.delete("", summary="Clear the whole play history")
