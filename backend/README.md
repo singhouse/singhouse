@@ -244,10 +244,11 @@ Always use the exact URLs returned by `GET /api/songs/{song_id}`.
 | `POST /api/songs/{id}/lyrics/transcribe` | session | Queue a fresh transcription job (`202`; requires `ready` song) |
 | `POST /api/songs/{id}/lyrics/realign` | session | Queue an align-only job using cached transcription (`202`) |
 | `POST /api/songs/{id}/lyrics/{lid}/page` | session | Queue LLM page grouping over an existing set (`202`) |
-| `GET` / `POST` / `DELETE /api/queue` | session | List, append (`song_id`, `singer_name`), or clear the host queue |
+| `GET` / `POST` / `DELETE /api/queue` | session | List, append (`song_id`, `singer_name`), or clear the host queue; `POST` with `"front": true` inserts at the top instead and shifts the rest down (undo of a ▶ Sing) |
 | `PUT /api/queue/order` | session | Reorder the host queue |
 | `DELETE /api/queue/{entry_id}` | session | Remove one queue entry (dequeue-on-play) |
 | `GET` / `POST` / `DELETE /api/history` | session | List, record (`201`), or clear play history |
+| `DELETE /api/history/{id}` | session | Remove one history row (`{"ok": true}`, `404` if missing). Conditional form for undoing a ▶ Sing: `?if_incomplete=true` keeps a completed row and `&song_id=N` keeps a row that points at another song; then the answer is `{"ok": true, "deleted": true\|false}` |
 | `POST /api/history/{id}/complete` | session | Mark a history row completed when playback finishes |
 | `GET` / `PUT /api/history/settings` | session | Read or update `retention_days` (default `30`, `0` = forever) |
 | `POST /api/import/cdg` | session | Import a `.cdg` or same-basename MP3+G `.zip` (max 550 MB / 30 min) |

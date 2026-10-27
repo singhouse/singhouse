@@ -55,10 +55,35 @@ export const useHistoryStore = defineStore('history', () => {
     try {
       await historyApi.complete(currentHistoryId.value)
     } catch (e) {
-      error.value = e.message
+      // 404: the row is gone (undone from another tab of the host view);
+      // there is nothing left to complete and nothing to report.
+      if (e?.status !== 404) error.value = e.message
     }
     currentHistoryId.value = null
     currentPlaySongId.value = null
+  }
+
+  // Undo of a ▶ Sing. Rewind the pending-completion pointer first (and
+  // synchronously, before any await) when it still points at the undone row,
+  // so a later `ended` can never complete it; `previous` is the pointer as it
+  // stood before that Sing, which puts the reloaded song's own row back in
+  // line. `rewind: false` leaves the pointer alone (a tab that did not make
+  // the Sing has its own deck). Then delete the row only if it never
+  // completed and, given `songId`, still points at that song — the server
+  // decides, so a play that really finished stays in the log. Never throws;
+  // a missing id (the record had failed) is a no-op, and a row already gone
+  // is fine.
+  async function undoPlay(historyId, previous = null, { rewind = true, songId = null } = {}) {
+    if (historyId == null) return
+    if (rewind && currentHistoryId.value === historyId) {
+      currentHistoryId.value = previous?.historyId ?? null
+      currentPlaySongId.value = previous?.historyId != null ? previous.songId ?? null : null
+    }
+    try {
+      await historyApi.remove(historyId, songId != null ? { ifIncomplete: true, songId } : { ifIncomplete: true })
+    } catch (e) {
+      if (e?.status !== 404) error.value = e.message
+    }
   }
 
   async function fetchList() {
@@ -121,7 +146,7 @@ export const useHistoryStore = defineStore('history', () => {
     currentHistoryId, currentPlaySongId,
     entries, total, loading, error, search, retentionDays, fetchedOnce,
     // actions
-    recordPlay, completeIfPending,
+    recordPlay, completeIfPending, undoPlay,
     fetchList, remove, clear, fetchSettings, setRetention,
   }
 })

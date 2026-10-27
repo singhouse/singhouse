@@ -191,3 +191,63 @@ async def test_locked_gate_fails_closed(client: AsyncClient, monkeypatch):
     unlock = await client.post("/api/auth/gate", json={"password": GATE_PW})
     assert unlock.status_code == 200
     assert (await client.get("/api/queue")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_add_front_inserts_on_top_and_shifts_the_rest(client: AsyncClient):
+    """``front: true`` is the undo of a ▶ Sing: the row goes back on top."""
+    song_id = await _seed_song(title="Heroes", artist="Bowie")
+    first = await _add(client, song_id, "Alice")
+    second = await _add(client, song_id, "Bob")
+
+    resp = await client.post(
+        "/api/queue",
+        json={"song_id": song_id, "singer_name": " Sam ", "front": True},
+    )
+    assert resp.status_code == 201, resp.text
+    top = resp.json()
+    assert top["position"] == 0
+    assert top["singer_name"] == "Sam"
+
+    rows = await _entries(client)
+    assert [(r["id"], r["position"]) for r in rows] == [
+        (top["id"], 0),
+        (first["id"], 1),
+        (second["id"], 2),
+    ]
+
+    # A later plain append still lands past the max.
+    last = await _add(client, song_id)
+    assert last["position"] == 3
+
+
+@pytest.mark.asyncio
+async def test_add_front_on_empty_queue_lands_at_zero(client: AsyncClient):
+    song_id = await _seed_song()
+    resp = await client.post("/api/queue", json={"song_id": song_id, "front": True})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["position"] == 0
+
+
+@pytest.mark.asyncio
+async def test_add_front_unknown_song_is_404_and_shifts_nothing(client: AsyncClient):
+    song_id = await _seed_song()
+    first = await _add(client, song_id)
+    resp = await client.post("/api/queue", json={"song_id": 999999, "front": True})
+    assert resp.status_code == 404
+    rows = await _entries(client)
+    assert [(r["id"], r["position"]) for r in rows] == [(first["id"], 0)]
+
+
+@pytest.mark.asyncio
+async def test_add_front_requires_the_host(client: AsyncClient, monkeypatch):
+    """A locked gate refuses the front insert and shifts nothing."""
+    song_id = await _seed_song()
+    first = await _add(client, song_id)
+    monkeypatch.setenv("KARAOKE_GATE_PASSWORD", GATE_PW)
+
+    resp = await client.post("/api/queue", json={"song_id": song_id, "front": True})
+    assert resp.status_code == 401
+    monkeypatch.delenv("KARAOKE_GATE_PASSWORD")
+    rows = await _entries(client)
+    assert [(r["id"], r["position"]) for r in rows] == [(first["id"], 0)]
