@@ -2,13 +2,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { chmod, cp, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { canonicalJson } from '../release.mjs'
-import { developerIdRequirement, inspectInstalledLaunchBoundary, INSTALLED_MAC_SIGNATURE_FAILURE, installedMacCodesignArguments, verifyInstalledMacCodesign, inspectSignedMacMarker, isMachO, MAC_RELEASE_CERT_SHA1, macSigningSelection, signedMacMarker, verifyDeveloperId, verifySignedMacApplication, verifySigningCertificate } from '../macos_signing.mjs'
+import { developerIdRequirement, inspectInstalledLaunchBoundary, INSTALLED_MAC_SIGNATURE_FAILURE, installedMacBundleForEntrypoint, installedMacCodesignArguments, verifyInstalledMacCodesign, verifyInstalledMacEntrypoint, verifyRunningMacApplication, inspectSignedMacMarker, isMachO, MAC_RELEASE_CERT_SHA1, macSigningSelection, signedMacMarker, verifyDeveloperId, verifySignedMacApplication, verifySigningCertificate } from '../macos_signing.mjs'
 import { assertPackagingMode, sha256File } from '../build/package.mjs'
+import { defaultAnchorPlatformTrust } from '../bootstrap.mjs'
 import { appRelativeInventory, macExecutableModes, nativeInventoryMemberNames, notarizeAndStaple, verifyMacDiskImageApplication, verifyMacExecutableModes } from '../build/sign_macos.mjs'
 import { inspectApplicationInventory } from '../build/release_receipt.mjs'
 
@@ -322,6 +323,9 @@ test('default launch verifier runs non-strict codesign against the real bundle p
     await mkdir(resourcesPath, { recursive: true })
     const marker = `${canonicalJson(signedMacMarker(selected))}\n`
     await writeFile(resolve(resourcesPath, 'signed-release.json'), marker)
+    const nested = resolve(bundle, 'Contents', 'Frameworks', 'helper.dylib')
+    await mkdir(resolve(nested, '..'), { recursive: true })
+    await writeFile(nested, Buffer.from('cffaedfe', 'hex'))
     const run = async (command, args) => {
       calls.push([command, args])
       return args.includes('--display') ? { stderr: `TeamIdentifier=${selected.teamId}\nAuthority=${selected.identity}\nTimestamp=Sep 29, 2026\n` } : { stdout: '' }
@@ -332,6 +336,7 @@ test('default launch verifier runs non-strict codesign against the real bundle p
     assert.deepEqual(calls, [
       ['/usr/bin/codesign', ['--verify', '--deep', '--verbose=2', '-R', requirement, bundle]],
       ['/usr/bin/codesign', ['--display', '--verbose=4', bundle]],
+      ['/usr/bin/codesign', ['--verify', '-R', requirement, nested]],
     ])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
@@ -351,19 +356,111 @@ test('installed-machine codesign trust hook runs exact non-strict arguments', as
   }
 })
 
-test('every installed-machine codesign call routes through the shared non-strict helper', async () => {
-  const desktop = fileURLToPath(new URL('..', import.meta.url))
-  const sources = (await readdir(desktop)).filter(name => name.endsWith('.mjs'))
-  const runtimeHelper = 'verifyInstalledMacCodesign'
-  for (const name of sources) {
-    const text = await readFile(resolve(desktop, name), 'utf8')
+function fakeCodesignSpawn(outcome) {
+  const calls = []
+  const spawnImpl = (command, args, options) => {
+    calls.push([command, args, options])
+    const child = new EventEmitter()
+    queueMicrotask(() => outcome.error ? child.emit('error', outcome.error) : child.emit('exit', outcome.exit))
+    return child
+  }
+  return { calls, spawnImpl }
+}
+
+const codesignOutcomes = [[{ exit: 0 }, true], [{ exit: 1 }, false], [{ error: new Error('ENOENT') }, false]]
+
+test('managed-slot macOS trust verifies the entrypoint bundle with exact non-strict codesign', async () => {
+  const root = '/state/slots/a'
+  const bundle = resolve(root, 'Singhouse.app')
+  assert.equal(installedMacBundleForEntrypoint(root, 'Singhouse.app/Contents/MacOS/Singhouse'), bundle)
+  for (const [outcome, expected] of codesignOutcomes) {
+    const { calls, spawnImpl } = fakeCodesignSpawn(outcome)
+    assert.equal(await verifyInstalledMacEntrypoint(root, 'Singhouse.app/Contents/MacOS/Singhouse', { spawnImpl }), expected)
+    assert.deepEqual(calls, [['/usr/bin/codesign', ['--verify', '--deep', bundle], { stdio: 'ignore' }]])
+  }
+})
+
+test('managed-slot macOS trust rejects an entrypoint outside any .app bundle without running codesign', async () => {
+  for (const entrypoint of ['Singhouse', 'bin/Singhouse', 'Singhouse.application/Singhouse']) {
+    assert.equal(installedMacBundleForEntrypoint('/slots/a', entrypoint), null)
+    const { calls, spawnImpl } = fakeCodesignSpawn({ exit: 0 })
+    assert.equal(await verifyInstalledMacEntrypoint('/slots/a', entrypoint, { spawnImpl }), false)
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('first-installer macOS trust verifies the running bundle with exact non-strict codesign', async () => {
+  for (const [outcome, expected] of codesignOutcomes) {
+    const { calls, spawnImpl } = fakeCodesignSpawn(outcome)
+    assert.equal(await verifyRunningMacApplication('/Applications/Singhouse.app/Contents/Resources', { spawnImpl }), expected)
+    assert.deepEqual(calls, [['/usr/bin/codesign', ['--verify', '--deep', '/Applications/Singhouse.app'], { stdio: 'ignore' }]])
+  }
+})
+
+test('recovery-anchor platform trust uses exact non-strict codesign on macOS and keeps other platforms', async () => {
+  const executablePath = '/Applications/Singhouse.app'
+  for (const [outcome, expected] of codesignOutcomes) {
+    const { calls, spawnImpl } = fakeCodesignSpawn(outcome)
+    assert.equal(await defaultAnchorPlatformTrust({ platform: 'darwin', executablePath }, { spawnImpl }), expected)
+    assert.deepEqual(calls, [['/usr/bin/codesign', ['--verify', '--deep', executablePath], { stdio: 'ignore' }]])
+  }
+  const linux = fakeCodesignSpawn({ exit: 0 })
+  assert.equal(await defaultAnchorPlatformTrust({ platform: 'linux', executablePath: '/opt/singhouse.AppImage' }, { spawnImpl: linux.spawnImpl }), false)
+  assert.deepEqual(linux.calls, [])
+  const windows = fakeCodesignSpawn({ exit: 0 })
+  assert.equal(await defaultAnchorPlatformTrust({ platform: 'win32', executablePath: "C:\\Program Files\\o'singhouse\\singhouse.exe" }, { spawnImpl: windows.spawnImpl }), true)
+  assert.deepEqual(windows.calls, [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "(Get-AuthenticodeSignature -LiteralPath 'C:\\Program Files\\o''singhouse\\singhouse.exe').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }"],
+    { stdio: 'ignore', windowsHide: true }]])
+})
+
+// Static import and re-export specifiers of an ES module, with the names each
+// binds from its source. Namespace and dynamic imports are reported as '*'.
+function moduleImports(text) {
+  const found = []
+  for (const match of text.matchAll(/(?:^|[;\n])\s*(?:import|export)\s+([^'";]*?)\s+from\s+['"]([^'"]+)['"]/g)) {
+    const clause = match[1], names = []
+    if (/\*/.test(clause)) names.push('*')
+    const braces = clause.match(/\{([^}]*)\}/)
+    if (braces) for (const part of braces[1].split(',')) { const name = part.trim().split(/\s+as\s+/)[0].trim(); if (name) names.push(name) }
+    found.push({ source: match[2], names })
+  }
+  for (const match of text.matchAll(/\bimport\s*\(\s*([^)]*)\)/g)) found.push({ source: match[1].trim().replace(/^['"`]|['"`]$/g, ''), names: ['*'] })
+  return found
+}
+
+test('no packaged runtime module other than the signing module imports the strict verifiers', async () => {
+  const desktop = fileURLToPath(new URL('../', import.meta.url))
+  const native = await mkdtemp(resolve(tmpdir(), 'mac-runtime-modules-'))
+  const previous = process.env.KARAOKE_NATIVE_PAYLOAD
+  process.env.KARAOKE_NATIVE_PAYLOAD = native
+  let modules
+  try {
+    const pkg = JSON.parse(await readFile(resolve(desktop, 'package.json'), 'utf8'))
+    await writeFile(resolve(native, 'manifest.json'), JSON.stringify({ appVersion: pkg.version }))
+    await writeFile(resolve(native, 'files.json'), '{}\n')
+    await writeFile(resolve(native, 'assembly.json'), JSON.stringify({ schema: 1, kind: 'singhouse-assembly', edition: 'core', payloadDigest: 'a'.repeat(64) }))
+    await writeFile(resolve(native, 'backend.py'), '# fixture\n')
+    for (const name of ['models.json', 'processing-locks.json', 'hardware-policy.json']) await writeFile(resolve(native, name), await readFile(resolve(desktop, name)))
+    const config = (await import(`../build/installer.mjs?runtime-modules=${Date.now()}`)).default
+    modules = config.files.filter(name => typeof name === 'string' && name.endsWith('.mjs'))
+  } finally {
+    if (previous === undefined) delete process.env.KARAOKE_NATIVE_PAYLOAD
+    else process.env.KARAOKE_NATIVE_PAYLOAD = previous
+    await rm(native, { recursive: true, force: true })
+  }
+  assert.ok(modules.includes('main.mjs') && modules.includes('bootstrap.mjs') && modules.includes('macos_signing.mjs'))
+  const strict = new Set(['verifyDeveloperId', 'verifySignedMacApplication'])
+  for (const name of modules) {
     if (name === 'macos_signing.mjs') continue
-    assert.doesNotMatch(text, /\/usr\/bin\/codesign|--strict/, `${name} must use the shared macOS signing helpers`)
+    const imports = moduleImports(await readFile(resolve(desktop, name), 'utf8'))
+    for (const { source, names } of imports.filter(entry => /(?:^|\/)macos_signing\.mjs(?:\?.*)?$/.test(entry.source))) {
+      assert.ok(!names.includes('*'), `${name} must import named runtime helpers from ${source}`)
+      for (const binding of names) assert.ok(!strict.has(binding), `${name} imports strict verifier ${binding}; use the installed-machine helpers`)
+    }
   }
-  for (const name of ['main.mjs', 'bootstrap.mjs']) {
-    const text = await readFile(resolve(desktop, name), 'utf8')
-    assert.match(text, new RegExp(`import \\{[^}]*\\b${runtimeHelper}\\b[^}]*\\} from './macos_signing.mjs'`), name)
-  }
+  assert.deepEqual(moduleImports("import { verifyInstalledMacEntrypoint, verifySignedMacApplication as v } from './macos_signing.mjs'"),
+    [{ source: './macos_signing.mjs', names: ['verifyInstalledMacEntrypoint', 'verifySignedMacApplication'] }])
 })
 
 test('release DMG verification stays strict and ignores the disk image background', async () => {

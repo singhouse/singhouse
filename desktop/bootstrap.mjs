@@ -10,7 +10,7 @@ import { RecoveryStore, UpdateStore } from './update_manager.mjs'
 import { canonicalJson } from './release.mjs'
 import { exactComponentLayout, readRecoveryAnchor, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
 import { checkedFile } from './runtime_manager.mjs'
-import { verifyInstalledMacCodesign } from './macos_signing.mjs'
+import { verifyInstalledMacCodesign, verifyInstalledMacEntrypoint } from './macos_signing.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -362,7 +362,7 @@ export async function runStableBootstrap({ stateRoot, parentPid, contract, platf
   } finally { await held.release() }
 }
 
-async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
+export async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
   // This fallback cannot authenticate the outer AppImage bytes on Linux.
   // Callers must inject trust established by the native/detached verifier; a
   // digest recorded by an untrusted first launch is only integrity evidence.
@@ -502,10 +502,7 @@ async function main(args) {
     if (process.platform === 'linux') return true
     const policy = contract.platformTrust?.[process.platform]
     if (!policy?.enabled) return false
-    if (process.platform === 'darwin') {
-      const app = manifest.entrypoint.split('/').slice(0, manifest.entrypoint.split('/').findIndex(part => part.endsWith('.app')) + 1)
-      return verifyInstalledMacCodesign(join(root, ...app))
-    }
+    if (process.platform === 'darwin') return verifyInstalledMacEntrypoint(root, manifest.entrypoint)
     // Windows Authenticode verification is supplied by the signed release's
     // native helper in the qualification step; absent that exact hook, close.
     return false

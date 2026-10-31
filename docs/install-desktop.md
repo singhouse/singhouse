@@ -45,6 +45,8 @@ sha256sum /path/to/download
 
 *(Note: Intel Macs are not supported.)*
 
+**If macOS shows "singhouse could not start":** When the message reads "This copy of singhouse failed its code signature check…", delete that copy, open the singhouse disk image again (download it again if needed), drag **Singhouse** into your `Applications` folder, and open it from there. Copies kept on the Desktop or in cloud-synced folders, or moved through sync tools, can pick up file metadata that makes this check fail.
+
 ### Linux (x64 and ARM64)
 
 Make the AppImage executable and run it directly:
