@@ -26,6 +26,15 @@ test('desktop icon assets contain the platform-required image sizes', async () =
     assert.equal(pngSize(await readFile(resolve(icons, 'linux', `${size}x${size}.png`))), size)
   }
 
+  const pngDimensions = data => {
+    assert.equal(data.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+    return [data.readUInt32BE(16), data.readUInt32BE(20)]
+  }
+  // The @2x file must be exactly twice the base image: electron-builder joins
+  // them into one multi-resolution TIFF for Finder.
+  assert.deepEqual(pngDimensions(await readFile(resolve(icons, 'dmg-background.png'))), [540, 380])
+  assert.deepEqual(pngDimensions(await readFile(resolve(icons, 'dmg-background@2x.png'))), [1080, 760])
+
   const ico = await readFile(resolve(icons, 'singhouse.ico'))
   assert.equal(ico.readUInt16LE(0), 0)
   assert.equal(ico.readUInt16LE(2), 1)
@@ -148,6 +157,16 @@ test('installer rejects stale native admission policy instead of overlaying it',
     assert.deepEqual(valid.linux.extraFiles, [{ from: resolve(desktop, 'build/apprun.sh'), to: 'AppRun' }])
     assert.equal(valid.mac.icon, resolve(icons, 'singhouse.icns'))
     assert.equal(valid.dmg.icon, valid.mac.icon)
+    assert.equal(valid.dmg.background, resolve(icons, 'dmg-background.png'))
+    assert.deepEqual(valid.dmg.contents, [{ x: 140, y: 190, type: 'file' }, { x: 400, y: 190, type: 'link', path: '/Applications' }])
+    // The Finder window takes its size from the background image, so every
+    // icon centre must leave room for the icon inside that image.
+    const background = await readFile(valid.dmg.background)
+    const [width, height] = [background.readUInt32BE(16), background.readUInt32BE(20)]
+    for (const item of valid.dmg.contents) {
+      assert.ok(item.x > valid.dmg.iconSize / 2 && item.x < width - valid.dmg.iconSize / 2)
+      assert.ok(item.y > valid.dmg.iconSize / 2 && item.y < height - valid.dmg.iconSize / 2)
+    }
     assert.equal(valid.win.icon, resolve(icons, 'singhouse.ico'))
     assert.equal(valid.nsis.installerIcon, valid.win.icon)
     assert.equal(Object.hasOwn(valid.nsis, 'uninstallerIcon'), false,

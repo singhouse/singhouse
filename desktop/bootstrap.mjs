@@ -10,6 +10,7 @@ import { RecoveryStore, UpdateStore } from './update_manager.mjs'
 import { canonicalJson } from './release.mjs'
 import { exactComponentLayout, readRecoveryAnchor, stableFirstInstallerExecutable } from './recovery_launcher.mjs'
 import { checkedFile } from './runtime_manager.mjs'
+import { verifyInstalledMacCodesign, verifyInstalledMacEntrypoint } from './macos_signing.mjs'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -361,17 +362,15 @@ export async function runStableBootstrap({ stateRoot, parentPid, contract, platf
   } finally { await held.release() }
 }
 
-async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
+export async function defaultAnchorPlatformTrust(anchor, { spawnImpl = spawn } = {}) {
   // This fallback cannot authenticate the outer AppImage bytes on Linux.
   // Callers must inject trust established by the native/detached verifier; a
   // digest recorded by an untrusted first launch is only integrity evidence.
   if (anchor.platform === 'linux') return false
-  const command = anchor.platform === 'darwin' ? '/usr/bin/codesign' : 'powershell.exe'
-  const args = anchor.platform === 'darwin'
-    ? ['--verify', '--deep', '--strict', anchor.executablePath]
-    : ['-NoProfile', '-NonInteractive', '-Command', `(Get-AuthenticodeSignature -LiteralPath '${anchor.executablePath.replaceAll("'", "''")}').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }`]
+  if (anchor.platform === 'darwin') return verifyInstalledMacCodesign(anchor.executablePath, { spawnImpl })
+  const args = ['-NoProfile', '-NonInteractive', '-Command', `(Get-AuthenticodeSignature -LiteralPath '${anchor.executablePath.replaceAll("'", "''")}').Status -eq 'Valid' | ForEach-Object { if ($_){exit 0}else{exit 1} }`]
   return new Promise(resolveTrust => {
-    const child = spawnImpl(command, args, { stdio: 'ignore', windowsHide: true })
+    const child = spawnImpl('powershell.exe', args, { stdio: 'ignore', windowsHide: true })
     child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
   })
 }
@@ -503,13 +502,7 @@ async function main(args) {
     if (process.platform === 'linux') return true
     const policy = contract.platformTrust?.[process.platform]
     if (!policy?.enabled) return false
-    if (process.platform === 'darwin') {
-      const app = manifest.entrypoint.split('/').slice(0, manifest.entrypoint.split('/').findIndex(part => part.endsWith('.app')) + 1)
-      return new Promise(resolveTrust => {
-        const child = spawn('/usr/bin/codesign', ['--verify', '--deep', '--strict', join(root, ...app)], { stdio: 'ignore' })
-        child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
-      })
-    }
+    if (process.platform === 'darwin') return verifyInstalledMacEntrypoint(root, manifest.entrypoint)
     // Windows Authenticode verification is supplied by the signed release's
     // native helper in the qualification step; absent that exact hook, close.
     return false

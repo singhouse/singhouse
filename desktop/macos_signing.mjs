@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { execFile as callback } from 'node:child_process'
+import { execFile as callback, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { lstat, open, readdir } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
@@ -53,16 +53,59 @@ export function inspectSignedMacMarker(raw) {
   return { ...marker, identity: `Developer ID Application: ${marker.publisher} (${marker.teamId})` }
 }
 
+// Shown when the installed bundle fails its launch signature check. The
+// codesign detail goes to the console log only.
+export const INSTALLED_MAC_SIGNATURE_FAILURE = 'This copy of singhouse failed its code signature check. Delete it, open the singhouse disk image again (download it again if needed), and drag the app into the Applications folder.'
+
+// Installed-machine trust hooks (managed-slot admission, first-installer
+// recovery admission, and the bootstrap and recovery-anchor checks) omit
+// --strict like launch verification; see verifyDeveloperId for what that
+// tolerates and skips. They pin no requirement, so --deep and the seal are
+// their code coverage. Packaging and release verification stay strict.
+export function installedMacCodesignArguments(bundle) {
+  return ['--verify', '--deep', bundle]
+}
+
+export function verifyInstalledMacCodesign(bundle, { spawnImpl = spawn } = {}) {
+  return new Promise(resolveTrust => {
+    const child = spawnImpl('/usr/bin/codesign', installedMacCodesignArguments(bundle), { stdio: 'ignore' })
+    child.once('error', () => resolveTrust(false)); child.once('exit', code => resolveTrust(code === 0))
+  })
+}
+
+// The bundle that owns a slot's entrypoint, or null when no path segment is
+// an .app bundle.
+export function installedMacBundleForEntrypoint(root, entrypoint) {
+  const parts = entrypoint.split('/'), end = parts.findIndex(part => part.endsWith('.app'))
+  return end < 0 ? null : resolve(root, ...parts.slice(0, end + 1))
+}
+
+// Managed-slot trust: an entrypoint outside any .app bundle is untrusted.
+export async function verifyInstalledMacEntrypoint(root, entrypoint, { spawnImpl = spawn } = {}) {
+  const bundle = installedMacBundleForEntrypoint(root, entrypoint)
+  return bundle === null ? false : verifyInstalledMacCodesign(bundle, { spawnImpl })
+}
+
+// First-installer trust: the running bundle that owns Contents/Resources.
+export function verifyRunningMacApplication(resourcesPath, { spawnImpl = spawn } = {}) {
+  return verifyInstalledMacCodesign(resolve(resourcesPath, '../..'), { spawnImpl })
+}
+
 // The managed-slot descriptor is adjacent to the bundle. Authenticate a
 // signed bundle before even reading that descriptor so adding portable.json
 // cannot turn a first installer into an unchecked managed slot.
 export async function inspectInstalledLaunchBoundary({ platform, resourcesPath, applicationRoot,
-  exists = existsSync, read = readFileSync, verify = verifySignedMacApplication }) {
+  exists = existsSync, read = readFileSync, run = execFile,
+  verify = (bundle, marker, options) => verifySignedMacApplication(bundle, marker, run, options) }) {
   const markerPath = resolve(resourcesPath, 'signed-release.json')
   let marker = null
   if (platform === 'darwin' && exists(markerPath)) {
     marker = inspectSignedMacMarker(read(markerPath, 'utf8'))
-    await verify(resolve(resourcesPath, '../..'), marker)
+    // Non-strict by design; see verifyDeveloperId.
+    try { await verify(resolve(resourcesPath, '../..'), marker, { strict: false }) } catch (error) {
+      console.error(`macOS launch signature verification failed: ${error?.message ?? error}`)
+      throw new Error(INSTALLED_MAC_SIGNATURE_FAILURE, { cause: error })
+    }
   }
   const portablePath = resolve(applicationRoot, 'portable.json')
   const portableExists = exists(portablePath)
@@ -85,9 +128,18 @@ export async function isMachO(path) {
   } finally { await file.close() }
 }
 
-export async function verifyDeveloperId(path, selection, run = execFile, { deep = false } = {}) {
+// Packaging verifies strictly before publication. Launch verification passes
+// strict: false so sideband metadata (FinderInfo or resource-fork xattrs)
+// added by Finder or sync tools does not block a validly signed app;
+// Gatekeeper tolerates that metadata too. Dropping --strict also skips
+// codesign's structural checks (symlink destinations, unsealed content at
+// bundle or framework roots), which Gatekeeper may enforce, so the launch
+// check is laxer than Gatekeeper on structure. That is accepted: packaging
+// stays strict, the seal still flags added or modified sealed files, and
+// --deep plus the pinned requirement still cover code.
+export async function verifyDeveloperId(path, selection, run = execFile, { deep = false, strict = true } = {}) {
   const requirement = developerIdRequirement(selection.teamId)
-  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), '--strict', '--verbose=2', '-R', `=${requirement}`, path])
+  await run('/usr/bin/codesign', ['--verify', ...(deep ? ['--deep'] : []), ...(strict ? ['--strict'] : []), '--verbose=2', '-R', `=${requirement}`, path])
   const { stderr = '', stdout = '' } = await run('/usr/bin/codesign', ['--display', '--verbose=4', path])
   const details = `${stdout}\n${stderr}`
   if (!details.split('\n').includes(`TeamIdentifier=${selection.teamId}`) ||
@@ -100,8 +152,8 @@ export async function verifyDeveloperId(path, selection, run = execFile, { deep 
 
 const nestedCodeBundle = /\.(?:app|framework|xpc|appex|plugin|bundle)$/i
 
-export async function verifySignedMacApplication(bundle, selection, run = execFile) {
-  await verifyDeveloperId(bundle, selection, run, { deep: true })
+export async function verifySignedMacApplication(bundle, selection, run = execFile, { strict = true } = {}) {
+  await verifyDeveloperId(bundle, selection, run, { deep: true, strict })
   const nested = []
   async function walk(directory) {
     for (const name of await readdir(directory)) {
@@ -116,7 +168,7 @@ export async function verifySignedMacApplication(bundle, selection, run = execFi
   await walk(bundle)
   const requirement = developerIdRequirement(selection.teamId)
   for (const path of nested) {
-    await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${requirement}`, path])
+    await run('/usr/bin/codesign', ['--verify', ...(strict ? ['--strict'] : []), '-R', `=${requirement}`, path])
   }
   return true
 }
