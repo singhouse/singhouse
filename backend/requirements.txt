@@ -21,7 +21,7 @@ itsdangerous==2.2.0      # backs starlette.middleware.sessions (signed cookies)
 python-multipart==0.0.32
 
 # --- Authentication ---
-bcrypt==4.2.1
+bcrypt==5.0.0
 email-validator==2.3.0   # backs pydantic.EmailStr
 
 # --- Database ---
