@@ -118,7 +118,7 @@ jobs:
           if ($env:RECIPE_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:RECIPE_ARTIFACT_ID -notmatch '^[1-9][0-9]*$') {
             throw 'Package builds require exact numeric recipe run and artifact IDs'
           }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.recipe_run_id }}
@@ -141,7 +141,7 @@ jobs:
           retention-days: 14
           compression-level: 0
       - name: Download the delivered application artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ steps.acceptance-upload.outputs.artifact-id }}
           path: ${{ runner.temp }}/delivered-${{ matrix.accelerator }}
