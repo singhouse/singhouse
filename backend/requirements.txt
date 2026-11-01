@@ -27,7 +27,7 @@ email-validator==2.3.0   # backs pydantic.EmailStr
 # --- Database ---
 sqlalchemy==2.1.1
 aiosqlite==0.20.0        # async SQLite driver
-alembic==1.14.0          # schema migrations; sync engine, own version table
+alembic==1.20.1          # schema migrations; sync engine, own version table
 
 # --- HTTP ---
 httpx==0.28.0            # async HTTP client for lyrics worker + tests
