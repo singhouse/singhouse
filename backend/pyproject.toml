@@ -3,7 +3,7 @@
 # and `license-files` — is only understood from setuptools 77 onward. An
 # isolated PEP 517 build may resolve any setuptools satisfying this floor, so
 # a lower one could pull a backend that rejects the `license` line below.
-requires = ["setuptools>=77"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
