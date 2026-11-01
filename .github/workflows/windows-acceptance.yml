@@ -80,7 +80,7 @@ jobs:
           # No processing-pack release is created or published by this workflow.
           python @arguments
           if ($LASTEXITCODE -ne 0) { throw 'Recipe build failed' }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-recipe-${{ matrix.accelerator }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/acceptance-${{ matrix.accelerator }}/build/recipe/
@@ -131,7 +131,7 @@ jobs:
           --work "${{ runner.temp }}/application-${{ matrix.accelerator }}"
           --accelerator "${{ matrix.accelerator }}"
           --recipe "${{ runner.temp }}/selected-recipe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: acceptance-upload
         with:
           name: windows-acceptance-${{ matrix.accelerator }}-${{ github.sha }}

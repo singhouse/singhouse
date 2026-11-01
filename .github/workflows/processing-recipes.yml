@@ -65,7 +65,7 @@ jobs:
           UV_INSTALLER_TEST_ASSETS: ${{ runner.temp }}/processing-native-inputs
           UV_INSTALLER_TEST_EVIDENCE: ${{ runner.temp }}/native-installer-evidence.json
         run: python desktop/test/test_uv_installation.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-installer-${{ matrix.target }}
           path: ${{ runner.temp }}/native-installer-evidence.json
@@ -107,7 +107,7 @@ jobs:
           --work-root "${{ runner.temp }}/full-processing-runtime"
           --evidence "${{ runner.temp }}/full-runtime-evidence.json"
           --accelerator cpu
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: full-runtime-${{ matrix.target }}-cpu
           path: ${{ runner.temp }}/full-runtime-evidence.json

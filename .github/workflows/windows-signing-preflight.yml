@@ -247,7 +247,7 @@ jobs:
           'Signed probe verified: exact expected subject, valid Authenticode signature, timestamp present, SignTool /pa /all /v passed, bytes changed, expected output confirmed.' >> $env:GITHUB_STEP_SUMMARY
           'This signs only an original harmless console EXE. It does not qualify a release installer or establish SmartScreen reputation.' >> $env:GITHUB_STEP_SUMMARY
       - name: Retain verified probe and evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-signing-probe-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.PROBE_DIR }}
