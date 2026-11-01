@@ -39,7 +39,7 @@ dependencies = [
   "python-multipart==0.0.32", "bcrypt==4.2.1", "email-validator==2.3.0",
   "sqlalchemy==2.1.1", "aiosqlite==0.20.0", "httpx==0.28.0",
   "numpy>=1.24.0",
-  "alembic==1.14.0",
+  "alembic==1.20.1",
   # greenlet is required at runtime by SQLAlchemy's async engine, but
   # SQLAlchemy 2.0.36's conditional greenlet dependency marker does not fire
   # on Python 3.14, so it must be declared explicitly. Pinned to the exact
