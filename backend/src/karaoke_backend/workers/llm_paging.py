@@ -3,8 +3,9 @@
 
 Takes aligned word timings + plain reference lyrics and asks an
 OpenAI-compatible LLM to group lines into display pages (with section
-markers). Then applies the paged fade recipe (pre-roll, hold, uniform
-fades) to produce a v2 word_sync payload with ``pages`` and ``lead_ins``.
+markers). Then caps page size and applies the paged fade recipe (pre-roll,
+hold, fades — quicker where fast pages crowd) to produce a v2 word_sync
+payload with ``pages`` and ``lead_ins``.
 
 Every failure degrades gracefully: if the LLM is unreachable or returns
 garbage, the original word_sync is returned unchanged (no pages).
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 from typing import Optional
 
@@ -38,6 +40,28 @@ HOLD = 1.3
 FADE_DUR = 0.6
 LEAD_IN_MIN_GAP = 1.5
 
+# Crowded pages. Two pages may be on screen at once, so page i waits for page
+# i-2 to finish fading out — and with fast lyrics the fixed HOLD + FADE_DUR on
+# page i-2 pushed page i's fade-in past its own first word, so the singer met
+# a page still fading in. Hand-authored pagings handle the same squeeze by
+# cutting the older page's hold short and using quick fades, so that is what a
+# crowded pair gets: page i is fully shown MIN_LEAD before its first word, page
+# i-2 never leaves sooner than MIN_HOLD after its last one. Uncrowded pages
+# keep the recipe above unchanged.
+CROWDED_FADE = 0.25
+MIN_HOLD = 0.3
+MIN_LEAD = 0.4
+
+# Ceiling on a page, enforced after the pager whatever it returned. Generous
+# against what the prompt asks for (1-2 lines, about 10 words, about 6s): this
+# catches a model that ignored the rules, it does not second-guess one that
+# followed them. Keep MIN_HOLD above the CDG exporter's own 0.25s minimum hold
+# (`_MIN_HOLD` in cdg/timeline.py), or the two would disagree on when a page
+# blanks.
+MAX_PAGE_LINES = 2
+MAX_PAGE_WORDS = 12
+MAX_PAGE_SECS = 9.0
+
 # A silence at least this long between two sung lines is an instrumental break
 # and must never sit inside a page: the page would hold its text, motionless,
 # for the whole gap, and the stage only draws a countdown bar for a gap BETWEEN
@@ -50,17 +74,26 @@ INSTRUMENTAL_GAP_SEC = 5.0
 ANNOTATION_FENCE = "|>"
 
 # The pager runs with or without timing annotation on its input rows, and the
-# instrumental rule is the only part that differs — so the body is written once
-# and the rule spliced in. (Concatenation, not str.format: the tail contains
-# literal JSON braces.)
+# break / timing rule is the only part that differs — so the body is written
+# once and the rule spliced in. (Concatenation, not str.format: the tail
+# contains literal JSON braces.)
+#
+# The page-size rules are deliberately tight. The earlier "1-4 lines, 4-8 words
+# a line" wording produced pages much denser than hand-authored karaoke
+# pagination, and some stayed on screen for most of a minute. The size guard
+# in `apply_pages_to_word_sync` still enforces a ceiling whatever the model
+# does.
 _SYSTEM_HEAD = """\
 You are a karaoke display pager. Given song lyrics (one line per row),
-group them into display pages for a karaoke screen.
+group them into display pages for a karaoke screen. The singer reads a
+page while it is being sung, so pages must be SHORT.
 
 Rules:
-- Each page has 1-4 short display lines.
-- Aim for 4-8 words per display line. A singer should be able to
-  read each line in one glance.
+- Each page has 1 or 2 display lines. Use 2 lines when they are sung
+  back to back and belong together (a couplet, a call and response).
+  Use 1 line when a line is long or slow.
+- Aim for 3-6 words per display line and at most about 10 words per
+  page. A page should normally be sung in 6 seconds or less.
 - SPLIT long input lines at natural clause / comma / phrase boundaries
   into multiple display lines. For example:
     "Lanterns glow beyond the hill, quiet footsteps cross the sill"
@@ -68,7 +101,9 @@ Rules:
     "Lanterns glow beyond the hill"
     "quiet footsteps cross the sill"
 - Never split mid-phrase (e.g. don't separate an adjective from its
-  noun, or a preposition from its object).
+  noun, or a preposition from its object), and never leave a dangling
+  fragment of 1-2 words on a line of its own when it could join the
+  line it belongs to.
 - Mark new_section=true on the first page of each structural section
   (verse, chorus, bridge, outro, etc.). The very first page is always
   new_section=true.
@@ -87,11 +122,18 @@ _RULE_PLAIN = """\
 # annotated honored both on every run. The "never copy the annotation" rules
 # are load-bearing — a marker echoed into an output line fails `_validate_pages`
 # and costs the song its pages entirely.
+# Rows carry each line's end and duration, not only its start: from the start
+# alone the model cannot tell a slow line from a quick one, and a run of slow
+# lines with short gaps between them became one page held for most of a minute.
 _RULE_TIMED = """\
 - Each input row is: annotation, then "|>", then the lyric text. Everything
-  before the "|>" is ANNOTATION — the line number, the [time it is sung], and
-  any break marker. NEVER copy the annotation or the "|>" into an output line;
-  output only the lyric text that follows it, exactly as written.
+  before the "|>" is ANNOTATION — the line number, the [start-end, duration]
+  the line is sung, and any break marker. NEVER copy the annotation or the
+  "|>" into an output line; output only the lyric text that follows it,
+  exactly as written.
+- Use the durations: a line sung for 5 seconds or more gets a page of its
+  own, and two lines share a page only if together they are sung in about
+  6 seconds or less.
 - Annotation "Ns-INSTRUMENTAL-BREAK-AFTER-THIS-LINE" means a long instrumental
   follows that row. That line MUST be the last line of its page, and the next
   line MUST start a new page with new_section=true."""
@@ -153,8 +195,9 @@ def _build_user_prompt(
 
     Without ``spans`` this is a bare numbered list — all the model has ever had
     — and it cannot see an instrumental break at all. With them each row also
-    carries when it is sung, and a row followed by a long silence is marked, so
-    the break is a visible instruction rather than something to infer.
+    carries when it is sung and for how long, and a row followed by a long
+    silence is marked, so the break is a visible instruction rather than
+    something to infer.
     """
     lines = [l.strip() for l in plain_lyrics.strip().splitlines() if l.strip()]
     rows = []
@@ -175,7 +218,11 @@ def _build_user_prompt(
             if gap >= INSTRUMENTAL_GAP_SEC
             else ""
         )
-        rows.append(f"{i+1}. [{_mmss(spans[i][0])}]{mark} {ANNOTATION_FENCE} {l}")
+        start, end = spans[i]
+        rows.append(
+            f"{i+1}. [{_mmss(start)}-{_mmss(end)}, {end - start:.1f}s]{mark}"
+            f" {ANNOTATION_FENCE} {l}"
+        )
     return (
         f"Group these {len(lines)} lyric lines into karaoke display pages:\n\n"
         + "\n".join(rows)
@@ -341,6 +388,65 @@ def _split_pages_at_breaks(
     return out
 
 
+def _split_oversized_pages(
+    lines_v2: list[list[dict]],
+    pages_v2: list[dict],
+) -> list[dict]:
+    """Split any page over MAX_PAGE_LINES / _WORDS / _SECS at line boundaries.
+
+    The prompt asks for short pages; this is the guarantee that holds when the
+    model returns a long one anyway, the same way `_split_pages_at_breaks` backs
+    up the break marker. Greedy, in order: a line joins the current chunk unless
+    that would take the chunk over a limit. Lines are never cut here — a line
+    that alone exceeds a limit becomes a page of its own, because a split
+    mid-line would be a guess at a phrase boundary the pager is better placed
+    to make.
+
+    An untimed line never starts a chunk; it rides with the chunk before it,
+    and a chunk is only closed once it holds a timed line — so a leading
+    untimed line rides with the timed line after it. A chunk without a timed
+    word would abort the whole apply ("a page has no timed word") and cost the
+    song every page; the limits are soft for such lines, in the same spirit as
+    the break split's "no times, no evidence, don't split".
+
+    Greedy splitting can leave a short tail (11 words, then 2). That only
+    happens on a page the model already got wrong, and the guard is a ceiling,
+    not a stylist: it does not try to rebalance.
+    """
+    def timed(i: int) -> bool:
+        return _span(lines_v2[i]) is not None
+
+    def over(chunk: list[int]) -> bool:
+        if len(chunk) > MAX_PAGE_LINES:
+            return True
+        if sum(len(lines_v2[i]) for i in chunk) > MAX_PAGE_WORDS:
+            return True
+        span = _page_span(lines_v2, chunk)  # untimed: no evidence it is slow
+        return span is not None and span[1] - span[0] > MAX_PAGE_SECS
+
+    out: list[dict] = []
+    for page in pages_v2:
+        chunks: list[list[int]] = [[]]
+        for li in page["line_idx"]:
+            if (
+                timed(li)
+                and any(timed(c) for c in chunks[-1])
+                and over(chunks[-1] + [li])
+            ):
+                chunks.append([])
+            chunks[-1].append(li)
+        if len(chunks) > 1:
+            logger.info("LLM paging: split an oversized page into %d", len(chunks))
+        for c_i, chunk in enumerate(chunks):
+            # Unlike a break piece, a size piece is the same section carrying
+            # on — only the first keeps whatever the pager said.
+            out.append({
+                "line_idx": chunk,
+                "new_section": page["new_section"] if c_i == 0 else False,
+            })
+    return out
+
+
 def apply_pages_to_word_sync(
     word_data: dict,
     pages: list[dict],
@@ -378,6 +484,7 @@ def apply_pages_to_word_sync(
         return word_data
 
     pages_v2 = _split_pages_at_breaks(lines_v2, pages_v2)
+    pages_v2 = _split_oversized_pages(lines_v2, pages_v2)
 
     if not pages_v2:
         logger.warning("LLM paging: no page survived mapping — aborting")
@@ -393,13 +500,38 @@ def apply_pages_to_word_sync(
     for i, p in enumerate(pages_v2):
         s, e = sing[i]
         fin = max(0.0, s - PRE_ROLL)
-        if i >= 2:
-            fin = max(fin, pages_v2[i - 2]["fade_out_start"]
-                      + pages_v2[i - 2]["fade_out_dur"])
-        p["fade_in_start"] = round(fin, 3)
         p["fade_in_dur"] = FADE_DUR
+        if i >= 2:
+            # At most two pages on screen: page i waits for page i-2 to go.
+            q = pages_v2[i - 2]
+            q_gone = q["fade_out_start"] + q["fade_out_dur"]
+            if q_gone > s - MIN_LEAD - p["fade_in_dur"]:
+                # Crowded: waiting out q's full hold and fade would leave page
+                # i less than MIN_LEAD of full view before its first word.
+                # Shorten q's hold (never below MIN_HOLD past its last word)
+                # and make both fades quick. Moving q's fade-out only earlier
+                # cannot crowd anything q was already clear of. When even the
+                # shortest hold leaves no room, page i comes in late — the
+                # two-on-screen rule wins over the lead.
+                q["fade_out_dur"] = CROWDED_FADE
+                p["fade_in_dur"] = CROWDED_FADE
+                # The floor rounds UP: rounding it to nearest could land a
+                # fraction of a millisecond under MIN_HOLD on unrounded times.
+                # (The inner round only strips float noise, so 1.2 does not
+                # come out as 1.201.)
+                q["fade_out_start"] = max(
+                    math.ceil(round((sing[i - 2][1] + MIN_HOLD) * 1000, 6)) / 1000,
+                    round(min(q["fade_out_start"],
+                              s - MIN_LEAD - 2 * CROWDED_FADE), 3),
+                )
+                fin = max(fin, q["fade_out_start"] + CROWDED_FADE)
+            else:
+                fin = max(fin, q_gone)
+        p["fade_in_start"] = round(fin, 3)
         p["fade_out_start"] = round(e + HOLD, 3)
         p["fade_out_dur"] = FADE_DUR
+        # The lead-in starts with page i's own, now final, fade-in; a later
+        # crowded page only ever moves this page's fade-OUT.
         gap_in = s - sing[i - 1][1] if i else float("inf")
         if gap_in >= LEAD_IN_MIN_GAP:
             lead_ins.append({"line_idx": p["line_idx"][0], "start": p["fade_in_start"]})
@@ -410,7 +542,12 @@ def apply_pages_to_word_sync(
     word_data["lead_ins"] = lead_ins
     meta = word_data.setdefault("metadata", {})
     meta["pages_source"] = "llm"
-    meta["page_recipe"] = {"pre_roll": PRE_ROLL, "hold": HOLD, "fade": FADE_DUR}
+    meta["page_recipe"] = {
+        "pre_roll": PRE_ROLL, "hold": HOLD, "fade": FADE_DUR,
+        "crowded_fade": CROWDED_FADE, "min_hold": MIN_HOLD, "min_lead": MIN_LEAD,
+        "max_page_lines": MAX_PAGE_LINES, "max_page_words": MAX_PAGE_WORDS,
+        "max_page_secs": MAX_PAGE_SECS,
+    }
     meta.setdefault("format_version", 2)
     return word_data
 
