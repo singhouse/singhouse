@@ -52,6 +52,34 @@ export const useQueueStore = defineStore('queue', () => {
     return true
   }
 
+  // Undo of a ▶ Sing: put the dequeued entry back on top. Unlike add(), the
+  // caller needs to tell a vanished song (404 — the undo can never succeed)
+  // from a transient failure (keep the undo for a retry).
+  async function restoreToFront(songId, singerName = null) {
+    try {
+      await queueApi.add(songId, singerName, { front: true })
+    } catch (e) {
+      error.value = e.message
+      return { ok: false, status: e.status ?? null }
+    }
+    await fetch()
+    return { ok: true, status: 201 }
+  }
+
+  // ▶ Sing's dequeue. Like remove(), but the caller needs the status: a 404
+  // means the entry was already gone (another tab or a double click got it
+  // first), unlike a transient failure that leaves it queued.
+  async function dequeue(entryId) {
+    try {
+      await queueApi.remove(entryId)
+    } catch (e) {
+      error.value = e.message
+      return { ok: false, status: e.status ?? null }
+    }
+    await fetch()
+    return { ok: true, status: 200 }
+  }
+
   async function remove(entryId) {
     try {
       await queueApi.remove(entryId)
@@ -137,7 +165,7 @@ export const useQueueStore = defineStore('queue', () => {
     // computed
     upNext, count,
     // actions
-    fetch, add, remove, clear, reorder, moveUp, moveDown,
+    fetch, add, restoreToFront, dequeue, remove, clear, reorder, moveUp, moveDown,
     startPolling, stopPolling,
   }
 })

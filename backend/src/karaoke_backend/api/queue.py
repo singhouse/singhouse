@@ -10,7 +10,9 @@ Contract (pinned in models/queue.py):
 
 * ordering is ``ORDER BY position, id`` — ties are legal (no UNIQUE) and
   break by insertion order;
-* append lands at ``MAX(position) + 1``;
+* append lands at ``MAX(position) + 1``; ``front: true`` instead lands at 0
+  and shifts every existing row down by one (the host's undo of a ▶ Sing puts
+  the dequeued entry back on top in one atomic write);
 * reorder renumbers the whole list dense 0..n-1; delete does NOT renumber
   (gaps are harmless under the ordering rule and the append rule);
 * dequeue-on-play is just ``DELETE /api/queue/{entry_id}`` — no status or
@@ -29,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from karaoke_backend.api.auth import require_user
@@ -64,6 +67,8 @@ class QueueListResponse(BaseModel):
 class QueueAddRequest(BaseModel):
     song_id: int
     singer_name: Optional[str] = Field(None, max_length=80)
+    # Insert at the top instead of appending (undo of a ▶ Sing).
+    front: bool = False
 
 
 class QueueReorderRequest(BaseModel):
@@ -123,11 +128,20 @@ async def add_to_queue(
         raise HTTPException(status_code=404, detail="song not found")
 
     singer = (body.singer_name or "").strip() or None
-    max_pos = (await db.execute(select(func.max(QueueEntry.position)))).scalar()
+    if body.front:
+        # Shift in one UPDATE rather than renumbering: gaps stay legal and
+        # positions stay non-negative.
+        await db.execute(
+            sa_update(QueueEntry).values(position=QueueEntry.position + 1)
+        )
+        position = 0
+    else:
+        max_pos = (await db.execute(select(func.max(QueueEntry.position)))).scalar()
+        position = (max_pos if max_pos is not None else -1) + 1
     entry = QueueEntry(
         song_id=song.id,
         singer_name=singer,
-        position=(max_pos if max_pos is not None else -1) + 1,
+        position=position,
     )
     db.add(entry)
     await db.commit()

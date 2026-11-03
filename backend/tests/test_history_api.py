@@ -225,6 +225,129 @@ async def test_delete_unknown_entry_404(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_delete_if_incomplete_removes_an_incomplete_row(client: AsyncClient):
+    """The host's undo of a ▶ Sing: a play that never completed goes away."""
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+
+    resp = await client.delete(f"/api/history/{row['id']}", params={"if_incomplete": "true"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "deleted": True}
+    assert (await _list(client))["entries"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_if_incomplete_keeps_a_completed_row(client: AsyncClient):
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+    await client.post(f"/api/history/{row['id']}/complete")
+
+    resp = await client.delete(f"/api/history/{row['id']}", params={"if_incomplete": "true"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "deleted": False}
+    entries = (await _list(client))["entries"]
+    assert [(r["id"], r["completed"]) for r in entries] == [(row["id"], True)]
+
+
+@pytest.mark.asyncio
+async def test_delete_if_incomplete_unknown_entry_404(client: AsyncClient):
+    resp = await client.delete("/api/history/424242", params={"if_incomplete": "true"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_with_matching_song_id_removes_an_incomplete_row(client: AsyncClient):
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+
+    resp = await client.delete(
+        f"/api/history/{row['id']}",
+        params={"if_incomplete": "true", "song_id": song_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "deleted": True}
+    assert (await _list(client))["entries"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_with_other_song_id_keeps_the_row(client: AsyncClient):
+    """A row that no longer belongs to the undone Sing is never deleted."""
+    song_id = await _seed_song(title="One")
+    other_id = await _seed_song(title="Two")
+    row = await _record(client, song_id)
+
+    resp = await client.delete(
+        f"/api/history/{row['id']}",
+        params={"if_incomplete": "true", "song_id": other_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "deleted": False}
+    assert [r["id"] for r in (await _list(client))["entries"]] == [row["id"]]
+
+
+@pytest.mark.asyncio
+async def test_delete_with_song_id_keeps_a_row_whose_song_was_removed(client: AsyncClient):
+    """song_id goes NULL when the song is deleted: no match, row kept."""
+    from karaoke_backend.database import AsyncSessionLocal
+    from karaoke_backend.models.history import PlayHistory
+
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+    async with AsyncSessionLocal() as db:
+        db_row = await db.get(PlayHistory, row["id"])
+        db_row.song_id = None
+        await db.commit()
+
+    resp = await client.delete(
+        f"/api/history/{row['id']}",
+        params={"if_incomplete": "true", "song_id": song_id},
+    )
+    assert resp.json() == {"ok": True, "deleted": False}
+
+
+@pytest.mark.asyncio
+async def test_delete_completed_row_with_matching_song_id_is_kept(client: AsyncClient):
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+    await client.post(f"/api/history/{row['id']}/complete")
+
+    resp = await client.delete(
+        f"/api/history/{row['id']}",
+        params={"if_incomplete": "true", "song_id": song_id},
+    )
+    assert resp.json() == {"ok": True, "deleted": False}
+
+
+@pytest.mark.asyncio
+async def test_plain_delete_is_unchanged_and_ignores_completion(client: AsyncClient):
+    """Backward compatible: no query params deletes any row, answers {ok}."""
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+    await client.post(f"/api/history/{row['id']}/complete")
+
+    resp = await client.delete(f"/api/history/{row['id']}")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert (await _list(client))["entries"] == []
+
+
+@pytest.mark.asyncio
+async def test_conditional_delete_requires_the_host(client: AsyncClient, monkeypatch):
+    """The conditional delete sits behind require_user like every route."""
+    song_id = await _seed_song()
+    row = await _record(client, song_id)
+    monkeypatch.setenv("KARAOKE_GATE_PASSWORD", "history-test-pw")
+
+    resp = await client.delete(
+        f"/api/history/{row['id']}",
+        params={"if_incomplete": "true", "song_id": song_id},
+    )
+    assert resp.status_code == 401
+    monkeypatch.delenv("KARAOKE_GATE_PASSWORD")
+    assert [r["id"] for r in (await _list(client))["entries"]] == [row["id"]]
+
+
+@pytest.mark.asyncio
 async def test_clear_reports_count(client: AsyncClient):
     song_id = await _seed_song()
     await _record(client, song_id, "A")

@@ -410,9 +410,12 @@ export const queueApi = {
     return client.get('/queue')
   },
 
-  /** POST /api/queue — append a library song (optional singer name) */
-  add(songId, singerName = null) {
-    return client.post('/queue', { song_id: songId, singer_name: singerName })
+  /** POST /api/queue — append a library song (optional singer name);
+   *  `{ front: true }` inserts it on top instead (undo of a ▶ Sing) */
+  add(songId, singerName = null, { front = false } = {}) {
+    const body = { song_id: songId, singer_name: singerName }
+    if (front) body.front = true
+    return client.post('/queue', body)
   },
 
   /** DELETE /api/queue/:id — remove one entry (dequeue-on-play) */
@@ -455,9 +458,16 @@ export const historyApi = {
     return client.get('/history', { params: { search: search || undefined, limit, offset } })
   },
 
-  /** DELETE /api/history/:id — remove one row */
-  remove(id) {
-    return client.delete(`/history/${id}`)
+  /** DELETE /api/history/:id — remove one row. Conditions (undo of a
+   *  ▶ Sing): `ifIncomplete` keeps a completed row, `songId` keeps a row that
+   *  points at another song; a kept row answers `deleted: false` */
+  remove(id, { ifIncomplete = false, songId = null } = {}) {
+    const params = {}
+    if (ifIncomplete) params.if_incomplete = true
+    if (songId != null) params.song_id = songId
+    return Object.keys(params).length
+      ? client.delete(`/history/${id}`, { params })
+      : client.delete(`/history/${id}`)
   },
 
   /** DELETE /api/history — clear the whole log */
