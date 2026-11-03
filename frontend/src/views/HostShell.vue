@@ -170,6 +170,7 @@
       <Transition name="slide-up">
         <section v-if="store.currentSong" class="player-panel">
           <AudioPlayer
+            ref="deckRef"
             :song="store.currentSong"
             @lyrics-loaded="val => player.setLyrics(val)"
             @time-update="val => player.setTime(val)"
@@ -471,6 +472,7 @@ import PlexImportModal from '@/components/PlexImportModal.vue'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
 import { usePlayGuard } from '@/composables/usePlayGuard'
+import { spaceBelongsElsewhere } from '@/utils/deckKeys'
 import { useFeaturesStore } from '@/stores/features'
 import DesktopOnboarding from '@/components/DesktopOnboarding.vue'
 import { useHistoryStore } from '@/stores/history'
@@ -746,6 +748,98 @@ watch(
     }
   },
 )
+
+// The advance-in-flight flag the deck reads (player.advancePending). Song
+// ends, host clicks Advance, host presses Space: in that window the deck
+// still holds the OUTGOING song, and Space must arm play-when-ready for the
+// incoming one rather than replay it. The flag is the provider's own
+// useAdvancing(), held a little past it so the deck sees where the advance
+// landed: once the current pick has changed (the pick watcher above has then
+// already started any load, which carries the deck's arm with it), or after
+// a grace period when it never does (a failed advance). A new singer with no
+// linked song, or the queue running out, starts no load, so the deck drops
+// its arm when the flag clears.
+//
+// Created after the pick watcher on purpose: when the provider flips both in
+// one tick, the load starts before the flag is released.
+const ADVANCE_SETTLE_MS = 1500
+let advanceKey = null
+let advanceSettleTimer = null
+function releaseAdvance() {
+  clearTimeout(advanceSettleTimer)
+  advanceSettleTimer = null
+  advanceKey = null
+  // After this flush, so a pick watcher queued in the same tick runs first.
+  nextTick(() => { if (!advancing?.value) player.setAdvancePending(false) })
+}
+watch(() => !!advancing?.value, (on) => {
+  if (on) {
+    clearTimeout(advanceSettleTimer)
+    advanceSettleTimer = null
+    advanceKey = pickKey()
+    player.setAdvancePending(true)
+    return
+  }
+  if (!player.advancePending) return
+  if (pickKey() !== advanceKey) { releaseAdvance(); return }
+  advanceSettleTimer = setTimeout(releaseAdvance, ADVANCE_SETTLE_MS)
+})
+// The provider may report the new current pick just after dropping its flag.
+watch(pickKey, () => {
+  if (advanceSettleTimer && !advancing?.value) releaseAdvance()
+})
+
+// Space before there is a deck. The player only mounts once a song's details
+// have arrived, so the session's first song — a library click, or the first
+// singer's advance — has a window in which its own Space handler does not
+// exist yet. Space in that window (same ownership rules as the deck's) records
+// a play-when-ready request in the player store, which the player adopts
+// when it mounts; a second Space takes it back. Once a player is mounted it
+// handles Space itself and this stays out of the way.
+const deckRef = ref(null)
+let swallowNoDeckSpaceUp = false
+function onNoDeckSpace(e) {
+  if (e.code !== 'Space') return
+  if (!e.repeat) swallowNoDeckSpaceUp = false
+  if (deckRef.value) return
+  if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return
+  if (spaceBelongsElsewhere(e)) return
+  // Space is the deck's even before there is one: never handed to a focused
+  // button (a clicked Advance must not be pressed again), whether or not
+  // anything is on its way to play.
+  e.preventDefault()
+  swallowNoDeckSpaceUp = true
+  if (e.repeat) return
+  const incoming = store.incomingSongId
+  const pending = player.pendingPlay
+  if (!pending && incoming == null && !player.advancePending) return   // nothing to play
+  if (pending) player.setPendingPlay(null)
+  else player.setPendingPlay(incoming != null ? { songId: incoming } : { songId: null, advance: true })
+}
+function onNoDeckSpaceUp(e) {
+  if (e.code !== 'Space' || !swallowNoDeckSpaceUp) return
+  swallowNoDeckSpaceUp = false
+  e.preventDefault()
+}
+function onNoDeckBlur() { swallowNoDeckSpaceUp = false }
+// Until a player adopts it: the advance's request takes the first song that
+// heads for the deck; an advance that settles with none (failed, songless
+// singer, empty queue) drops it, and so does a different song being fetched.
+watch([() => store.incomingSongId, () => player.advancePending], ([incoming, pendingAdvance]) => {
+  const req = player.pendingPlay
+  if (!req || deckRef.value) return
+  if (incoming != null) {
+    if (req.advance) player.setPendingPlay({ songId: incoming })
+    else if (req.songId !== incoming) player.setPendingPlay(null)
+    return
+  }
+  if (req.advance && !pendingAdvance) player.setPendingPlay(null)
+})
+onMounted(() => {
+  window.addEventListener('keydown', onNoDeckSpace)
+  window.addEventListener('keyup', onNoDeckSpaceUp, true)
+  window.addEventListener('blur', onNoDeckBlur)
+})
 
 // Whether the CURRENT entry has already had a performance announced. Gates
 // the walk-up fallback below: one play per turn, attributed at first play.
@@ -1136,6 +1230,12 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(advanceSettleTimer)
+  player.setAdvancePending(false)
+  player.setPendingPlay(null)
+  window.removeEventListener('keydown', onNoDeckSpace)
+  window.removeEventListener('keyup', onNoDeckSpaceUp, true)
+  window.removeEventListener('blur', onNoDeckBlur)
   clearInterval(healthInterval)
   window.removeEventListener('mousemove', onResizeMove)
   window.removeEventListener('mouseup', stopResize)

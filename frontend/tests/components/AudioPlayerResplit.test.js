@@ -126,7 +126,7 @@ describe('AudioPlayer and a finished re-split', () => {
     jobIs(42, { kind: 'resplit', status: 'done' })
     await new Promise(r => setTimeout(r, 10))
 
-    expect(store.loadSong).toHaveBeenCalledWith({ id: 42 })
+    expect(store.loadSong).toHaveBeenCalledWith({ id: 42 }, { refresh: true })
     expect(wrapper.vm.$el.outerHTML).not.toContain('undefined')
     // The reload runs against stamped URLs.
     const stems = engine.stub.loadStems.mock.calls.at(-1)[0]
@@ -192,7 +192,7 @@ describe('AudioPlayer and a finished re-split', () => {
     jobs[42] = { kind: 'resplit', status: 'done' }
     await new Promise(r => setTimeout(r, 10))
 
-    expect(store.loadSong).toHaveBeenCalledWith({ id: 42 })
+    expect(store.loadSong).toHaveBeenCalledWith({ id: 42 }, { refresh: true })
   })
 
   it('ignores a finished job of another kind', async () => {

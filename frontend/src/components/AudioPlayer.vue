@@ -35,7 +35,7 @@
           :title="engine.playerState.value === 'playing' ? 'Pause' : 'Play'"
           :aria-label="engine.playerState.value === 'playing' ? 'Pause' : 'Play'"
           :disabled="!hasStems"
-          @click="togglePlayPause"
+          @click="onPlayButton"
         >
           <svg v-if="engine.playerState.value !== 'playing'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="5,3 19,12 5,21"/>
@@ -53,7 +53,7 @@
         </button>
       </div>
 
-      <div class="bar__progress">
+      <div ref="progressEl" class="bar__progress">
         <ProgressBar
           :currentTime="engine.currentTime.value"
           :duration="engine.duration.value"
@@ -62,6 +62,17 @@
         />
       </div>
     </template>
+
+    <!-- Space pressed while loading: the song starts as soon as it can. The
+         live region stays mounted so the change is announced. -->
+    <span class="bar__armed-live" role="status">
+      <span v-if="playWhenReady" class="bar__armed">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <polygon points="5,3 19,12 5,21"/>
+        </svg>
+        Plays when loaded
+      </span>
+    </span>
 
     <AudioOutputSelector v-if="engine.output?.enabled" :output="engine.output" />
 
@@ -121,6 +132,9 @@ import { useSongToolsStore } from '@/stores/songTools'
 import { useFeaturesStore } from '@/stores/features'
 import { usePlayerStore } from '@/stores/player'
 import { usePlayGuard } from '@/composables/usePlayGuard'
+import {
+  TEXT_ENTRY, focusedElements, focusInside, modalOpen, spaceBelongsElsewhere,
+} from '@/utils/deckKeys'
 
 const props = defineProps({
   song: { type: Object, required: true }
@@ -162,6 +176,7 @@ function endedInfo(reason) {
 // position 0. engine.stop() still runs either way; the idempotent reset is a
 // separate guarantee from the event.
 function stopPlayback() {
+  disarmPlayWhenReady()
   const wasLive = engine.playerState.value === 'playing' || engine.playerState.value === 'paused'
   const info = endedInfo('stopped')
   engine.stop()
@@ -179,6 +194,58 @@ const errorMessage = ref('')
 const lyricsState = ref('none')
 const lyricsOffset = ref(0)
 const mixerOpen = ref(false)
+
+// Space pressed while the deck is still loading arms this: { songId } of the
+// song it is waiting for, played the moment that song is ready. Loading is
+// this player's own stem load, and also the song-detail fetch that runs
+// before a new song reaches this player at all (a library click, a queue
+// advance), which the store reports as `incomingSongId`. A second Space,
+// Stop/Home, a failed load or any other song taking its place disarms it.
+//
+// A queue advance in flight (player.advancePending) arms it too, as
+// { songId: null, advance: true }: the incoming singer's song is not known
+// yet, and the deck still holds the outgoing one, which Space must not
+// replay. The first song to head for the deck after that is the advance's
+// and takes the arm; if the advance settles with none (it failed, the new
+// singer has no linked song, the queue ran out) the arm is dropped.
+const playWhenReady = ref(null)
+const fetchingIncoming = computed(() =>
+  store.incomingSongId != null && store.incomingSongId !== props.song?.id,
+)
+const deckLoading = computed(() => loadState.value === 'loading' || fetchingIncoming.value)
+function disarmPlayWhenReady() { playWhenReady.value = null }
+
+// Space pressed before this player existed (nothing was loaded yet, the first
+// song's details still on their way): the shell recorded it in the player
+// store. It is this song's arm now, unless it named another song.
+{
+  const handed = player.pendingPlay
+  if (handed) {
+    player.setPendingPlay(null)
+    if (handed.advance || handed.songId === (props.song?.id ?? null)) {
+      playWhenReady.value = { songId: props.song?.id ?? null }
+    }
+  }
+}
+
+watch([() => store.incomingSongId, () => player.advancePending], ([incoming, pending]) => {
+  const armed = playWhenReady.value
+  if (!armed) return
+  if (incoming != null) {
+    if (armed.advance) playWhenReady.value = { songId: incoming }
+    else if (armed.songId !== incoming) disarmPlayWhenReady()
+    return
+  }
+  if (armed.advance && !pending) disarmPlayWhenReady()
+})
+
+function playIfArmed() {
+  const armed = playWhenReady.value
+  if (!armed || loadState.value !== 'ready') return
+  if (armed.songId !== (props.song?.id ?? null) || deckLoading.value) return
+  disarmPlayWhenReady()
+  engine.play()
+}
 
 // The mixer's one way through to everything you can do TO this song. The
 // panel lives outside the player, so opening it neither unmounts the deck nor
@@ -275,18 +342,29 @@ onMounted(() => {
   features.load()   // cached after the first call; decides the lyrics fallback
   loadSong()
   window.addEventListener('keydown', handleKeyboard)
+  window.addEventListener('keyup', handleKeyup, true)
+  window.addEventListener('blur', onWindowBlur)
   document.addEventListener('mousedown', onDocClick)
 })
 
 onUnmounted(() => {
   engine.output?.stop()
   window.removeEventListener('keydown', handleKeyboard)
+  window.removeEventListener('keyup', handleKeyup, true)
+  window.removeEventListener('blur', onWindowBlur)
   document.removeEventListener('mousedown', onDocClick)
+  // An in-flight load that lands after this must not ready the torn-down
+  // deck, start its loop or play it.
+  loadSeq++
+  disarmPlayWhenReady()
   engine.cleanup()
   loadState.value = 'idle'
 })
 
-watch(() => props.song?.id, () => {
+watch(() => props.song?.id, (id) => {
+  const armed = playWhenReady.value
+  if (armed?.advance) playWhenReady.value = { songId: id ?? null }   // the advance's song
+  else if (armed && armed.songId !== (id ?? null)) disarmPlayWhenReady()
   mixerOpen.value = false   // avoid acting on a previous song's (stale) mixer state
   lyricsOffset.value = 0    // the player store's offset is cleared on song change too
   stemCacheBust.value = 0
@@ -301,8 +379,13 @@ watch(lyricsOffset, val => emit('lyrics-offset-change', val))
 // read it. Resets to 0 on song change (engine.cleanup zeroes keyOffset).
 watch(() => engine.keyOffset.value, val => player.setKey(val))
 
-// Audio loading
+// Audio loading. Each call takes a ticket; a call overtaken by a newer one
+// (the song changed, a re-split reload) stops touching the deck's state when
+// it resumes, so a late-finishing earlier load can neither mark the newer
+// load ready nor start an armed play-when-ready for the wrong song.
+let loadSeq = 0
 async function loadSong() {
+  const seq = ++loadSeq
   loadState.value = 'loading'
   loadMessage.value = 'Initialising audio...'
   engine.currentTime.value = 0
@@ -321,6 +404,7 @@ async function loadSong() {
       key: t.key, url: withCacheBust(t.url), kind: t.kind, volume: t.volume,
     }))
     const { durations, available } = await engine.loadStems(stemList)
+    if (seq !== loadSeq) return
     tracks.value.forEach((t) => { t.available = !!(available && available[t.key]) })
 
     if (!durations.length) throw new Error('No audio stems could be loaded')
@@ -328,6 +412,7 @@ async function loadSong() {
 
     loadMessage.value = 'Fetching lyrics...'
     await loadLyrics()
+    if (seq !== loadSeq) return
 
     loadState.value = 'ready'
     engine.startAnimationLoop(
@@ -338,8 +423,11 @@ async function loadSong() {
       // play — belongs to whoever mounted this player, not here.
       () => emit('ended', endedInfo('natural')),
     )
+    playIfArmed()
   } catch (err) {
+    if (seq !== loadSeq) return
     console.error('AudioPlayer load error:', err)
+    disarmPlayWhenReady()
     loadState.value = 'error'
     errorMessage.value = err.message || 'Failed to load audio'
   }
@@ -376,7 +464,7 @@ watch(
     // on a song whose re-split finished an hour ago must not reload the deck.
     if (status !== 'done' || !previous || previous === 'done') return
     stemCacheBust.value = Date.now()
-    await store.loadSong({ id: songId })
+    await store.loadSong({ id: songId }, { refresh: true })
     await nextTick()          // let the refreshed song detail reach this prop
     if (props.song?.id !== songId) return
     engine.cleanup()
@@ -445,6 +533,13 @@ async function loadLyrics() {
 }
 
 // Playback
+// The transport button is an explicit choice: it replaces a pending
+// play-when-ready rather than racing it.
+function onPlayButton() {
+  disarmPlayWhenReady()
+  togglePlayPause()
+}
+
 async function togglePlayPause() {
   if (engine.playerState.value === 'playing') {
     engine.pause()
@@ -472,32 +567,97 @@ function toggleMute(track) {
   engine.setVolume(track.key, track.volume)
 }
 
-// Global playback shortcuts leave focused controls, dialogs and menus to
-// handle their own keys. Handled library navigation must not reach the deck.
-const ACTIVATABLE = [
-  'button', 'a[href]', 'input', 'textarea', 'select',
-  '[contenteditable]:not([contenteditable="false"])',
-  '[role="button"]', '[role="menuitem"]', '[role="menuitemcheckbox"]',
-  '[role="menuitemradio"]', '[role="option"]', '[role="switch"]', '[role="tab"]',
+// Which keys the deck leaves to whatever has focus (shared rules in
+// utils/deckKeys).
+//
+// Space is play/pause everywhere except where it types and while a modal
+// dialog is up. A button keeps focus after a click, so leaving Space to it
+// would press that button again (a stray Advance mid-show).
+//
+// ←/→ seek and Home stops everywhere except text entry, widgets that move
+// with those keys themselves (sliders, tabs, radios, listboxes, menus), a
+// library row the keyboard is walking, and modal dialogs. A focused button,
+// link or menu trigger is no reason to give them up. The deck's own seek
+// slider is the exception among sliders: its arrows ARE the seek shortcut.
+//
+// Non-modal popovers (PopoverMenu's default role="dialog", e.g. Display) do
+// not own the deck keys; their text fields and arrow widgets still do, and
+// Escape is never a deck key. A modal dialog — Modal.vue's native showModal()
+// dialog, any [aria-modal="true"] surface, an alertdialog — owns them all,
+// which is what leaves the play guard's own prompt in charge of its Space
+// and Enter.
+const SLIDERS = 'input[type="range"], [role="slider"], [role="spinbutton"]'
+// Home means something here too (first tab, first option, first item).
+const HOME_WIDGETS = [
+  '[role="tablist"]', '[role="tab"]', '[role="listbox"]', '[role="option"]',
+  '[role="menu"]', '[role="menubar"]', '[role="menuitem"]',
+  '[role="menuitemcheckbox"]', '[role="menuitemradio"]',
 ].join(', ')
-const SHORTCUT_OWNERS = '[role="dialog"], [role="alertdialog"], dialog[open], [role="menu"]'
+// ...and the arrows additionally move a radio group's selection.
+const ARROW_WIDGETS = [
+  HOME_WIDGETS, '[role="radiogroup"]', '[role="radio"]', 'input[type="radio"]',
+].join(', ')
+// A grid row focused from the keyboard walks the grid. One focused by a
+// pointer press carries data-pointer-focus (SongList) and leaves the keys to
+// the deck. Matched on the focused row itself, not its contents.
+const KEYBOARD_ROW = '[role="grid"] [role="row"]:not([data-pointer-focus]), '
+  + '[role="treegrid"] [role="row"]:not([data-pointer-focus])'
 
-function shortcutBelongsElsewhere(e) {
-  for (const el of [e.target, document.activeElement]) {
-    if (!el || typeof el.closest !== 'function') continue
-    if (el.closest(ACTIVATABLE) || el.closest(SHORTCUT_OWNERS)) return true
-  }
-  return false
+const progressEl = ref(null)
+
+function navBelongsElsewhere(e) {
+  if (modalOpen(e) || focusInside(e, TEXT_ENTRY)) return true
+  const widgets = e.code === 'Home' ? HOME_WIDGETS : ARROW_WIDGETS
+  return focusedElements(e).some(el =>
+    el.closest(widgets)
+    || (el.closest(SLIDERS) && !progressEl.value?.contains(el))
+    || el.matches(KEYBOARD_ROW))
+}
+
+// Browsers press a focused button on Space's keyup, so the keyup of a Space
+// taken as play/pause is swallowed too.
+let swallowSpaceUp = false
+function onWindowBlur() { swallowSpaceUp = false }
+function handleKeyup(e) {
+  if (e.code !== 'Space' || !swallowSpaceUp) return
+  swallowSpaceUp = false
+  e.preventDefault()
 }
 
 // Keyboard shortcuts
 function handleKeyboard(e) {
+  // A fresh Space press starts clean: a swallow left over from a press whose
+  // keyup never arrived here must not eat this one's keyup.
+  if (e.code === 'Space' && !e.repeat) swallowSpaceUp = false
   if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return
-  if (shortcutBelongsElsewhere(e)) return
+  if (e.code === 'Space' ? spaceBelongsElsewhere(e) : navBelongsElsewhere(e)) return
   switch (e.code) {
     case 'Space':
       if (e.shiftKey) return
       e.preventDefault()
+      swallowSpaceUp = true
+      if (e.repeat) return
+      // A press while the song is still loading asks for it to start once it
+      // can; a second press takes that back. Nothing is playing yet, so there
+      // is nothing to guard.
+      if (playWhenReady.value) {
+        disarmPlayWhenReady()
+        break
+      }
+      if (deckLoading.value) {
+        playWhenReady.value = {
+          songId: fetchingIncoming.value ? store.incomingSongId : (props.song?.id ?? null),
+        }
+        break
+      }
+      // Mid-advance with the outgoing song stopped or paused: wait for the
+      // incoming one. If the outgoing song is still PLAYING, Space stays the
+      // guarded pause below — that is a live performance, and the shell
+      // never loads over a playing deck anyway.
+      if (player.advancePending && engine.playerState.value !== 'playing') {
+        playWhenReady.value = { songId: null, advance: true }
+        break
+      }
       // A stray Space must not stop the song mid-show: pausing asks first,
       // resuming does not. The transport button stays unguarded.
       if (engine.playerState.value === 'playing') {
@@ -572,6 +732,13 @@ function handleKeyboard(e) {
 .ctrl-btn--playing:hover { background: rgba(226,62,87,0.25); color: var(--c-primary); }
 
 .bar__progress { flex: 1; min-width: 180px; }
+
+.bar__armed {
+  display: inline-flex; align-items: center; gap: 0.3rem; flex-shrink: 0;
+  padding: 0.15rem 0.5rem; border-radius: 999px;
+  background: var(--c-primary-bg); border: 1px solid var(--c-primary-border);
+  color: var(--c-primary); font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+}
 .bar__mixer-toggle { flex-shrink: 0; }
 .bar__mixer-toggle--active {
   border-color: var(--c-primary-border); color: var(--c-primary); background: var(--c-primary-bg);
